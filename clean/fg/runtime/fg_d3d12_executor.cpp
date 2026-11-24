@@ -13,6 +13,7 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <unordered_map>
 
 #include "fg_frame_dump.h"
 
@@ -36,9 +37,14 @@ enum Kernel : uint32_t {
     kNet2Conv, kNet2Up2, kNet2Merge, kNet2Warp,
     kN2m1b1, kN2m1b2, kN2m2b1, kN2m2b2, kN2m2b4, kN2m1b4s, kN2m1b2s, kN2m1b1u, kN2m1b2u, kN2m2b4u, kN2m3b2u,
     kN2m3b4u, kNet2Upwarp,
+    kMConv2Narrow, kMConv1Late, kMPairBFirst, kMPairBSecond, kMPairD4First, kMPairD4Second,
+    kMPairD3Narrow, kMPairD2Narrow,
+    kDown2Srv, kDown4Srv, kMvecSrv, kIntermTiled, kPackPairs, kPullTiled, kPushTail, kDown2HudTile,
+    kMConv2Mid, kN2h3b1u, kNet2MergePixels,
     kKernelCount,
 };
 constexpr uint32_t kFirstFull = kFullBlend;
+constexpr uint32_t kFirstOptional = kMConv2Narrow;
 
 // The fast net2 convolution variants (clean/dx12/kernels/fg_net2_mconv.hlsl declarations, in the order
 // clean/fg/runner/fg_net2_mma.py VARIANTS lists them): output tiles per wave, 16-channel blocks per tap, upsample
@@ -55,7 +61,7 @@ constexpr uint32_t kSmallGrid = 16384;  // conv grids of at most this many pixel
 constexpr uint32_t kMTile = 16;
 
 bool KernelNeeded(uint32_t k, bool full, FgNet2Path path) {
-    if (k < kFirstFull) return true;
+    if (k < kFirstFull || k >= kFirstOptional) return true;
     if (!full) return false;
     if (k == kNet2Conv || k == kNet2Up2 || k == kNet2Warp) return path == FgNet2Path::Exact;
     if (k >= kN2m1b1 && k <= kNet2Upwarp) return path == FgNet2Path::Fast;
@@ -95,12 +101,19 @@ const char* const kKernelNames[kKernelCount] = {
     "fg_net2_mconv_m1b1", "fg_net2_mconv_m1b2", "fg_net2_mconv_m2b1", "fg_net2_mconv_m2b2", "fg_net2_mconv_m2b4",
     "fg_net2_mconv_m1b4s", "fg_net2_mconv_m1b2s", "fg_net2_mconv_m1b1u", "fg_net2_mconv_m1b2u", "fg_net2_mconv_m2b4u",
     "fg_net2_mconv_m3b2u", "fg_net2_mconv_m3b4u", "fg_net2_upwarp",
+    "fg_mconv2_narrow", "fg_mconv1_late", "fg_mpair_b_first", "fg_mpair_b_second",
+    "fg_mpair_d4_first", "fg_mpair_d4_second", "fg_mpair_d3_narrow", "fg_mpair_d2_narrow",
+    "fg_lite_downsample2_srv", "fg_lite_downsample4_srv", "fg_lite_mvec_srv", "fg_lite_interm_tiled", "fg_exec_pack_pairs",
+    "fg_lite_p2c_pull_tiled", "fg_lite_p2c_push_tail", "fg_lite_downsample2_srv_hud_tile",
+    "fg_mconv2_mid", "fg_net2_mconv_h3b1u", "fg_net2_merge_pixels",
 };
 
 constexpr uint32_t kRootConstants = 59;  // 2 runtime constants + up to 57 argument DWORDs
 constexpr uint32_t kMaxArgs = kRootConstants - 2;
 constexpr uint32_t kChannelSpace = 0x7FFF0ADE;
-constexpr uint32_t kPairs = 8;           // descriptor pairs (channel UAV, texture view) per allocator
+constexpr uint32_t kTables = 8;          // immutable descriptor tables per command recording
+constexpr uint32_t kInputSrvs = 4;
+constexpr uint32_t kTableSize = 1 + kInputSrvs;  // channel UAV followed by t0..t3
 constexpr uint32_t kNoClamp = 1u << 20;
 constexpr uint32_t kHalfOne = 0x3C00, kHalfTwo = 0x4000;
 
@@ -173,6 +186,18 @@ int pack_code(DXGI_FORMAT f, uint32_t* bpp) {
     }
     *bpp = 0;
     return -1;
+}
+
+DXGI_FORMAT linear_copy_format(DXGI_FORMAT f) {
+    switch (f) {
+        case DXGI_FORMAT_R8G8B8A8_TYPELESS: case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+            return DXGI_FORMAT_R8G8B8A8_UNORM;
+        case DXGI_FORMAT_B8G8R8A8_TYPELESS: case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+            return DXGI_FORMAT_B8G8R8A8_UNORM;
+        case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+            return DXGI_FORMAT_R10G10B10A2_UNORM;
+        default: return f;
+    }
 }
 
 // ---- weights -----------------------------------------------------------------------------------------------------
@@ -349,7 +374,7 @@ bool FgD3d12MotionFormatAccepted(uint32_t dxgi_format) {
 
 std::vector<std::string> FgD3d12ExecutorKernelNames(bool enable_full, FgNet2Path net2) {
     std::vector<std::string> names;
-    for (uint32_t k = 0; k < kKernelCount; ++k)
+    for (uint32_t k = 0; k < kFirstOptional; ++k)
         if (KernelNeeded(k, enable_full, net2)) names.emplace_back(kKernelNames[k]);
     return names;
 }
@@ -438,6 +463,16 @@ struct Entry {
     ComPtr<ID3D12GraphicsCommandList> list;
     uint64_t fence = 0;
     uint32_t desc_base = 0;
+    uint32_t query_base = 0, stage_count = 0;
+    FgExecStage stages[static_cast<uint32_t>(FgExecStage::Count)] = {};
+};
+
+constexpr uint32_t kTimingQueries = static_cast<uint32_t>(FgExecStage::Count) + 1;
+
+struct TimingQueries {
+    ComPtr<ID3D12QueryHeap> heap;
+    ComPtr<ID3D12Resource> readback;
+    uint64_t hz = 0;
 };
 
 struct InputTex {
@@ -453,6 +488,7 @@ struct InputTex {
 // The per-game-frame values the per-index stages read.
 struct FrameCtx {
     bool valid = false;
+    bool colour_captured = false;
     uint64_t token = 0;
     FgPreset preset = FgPreset::C;
     bool lite = true;
@@ -468,9 +504,15 @@ struct FrameCtx {
 struct Rec {
     Entry* e = nullptr;
     ID3D12GraphicsCommandList* cl = nullptr;
-    uint32_t pair = 0;
+    uint32_t table = 0;
     D3D12_RESOURCE_STATES arena = D3D12_RESOURCE_STATE_COMMON;
     bool dirty = false;  // a dispatch or copy wrote since the last UAV barrier
+    bool open = false, direct = false, uses_arena = true;
+    ID3D12Resource* written_slot = nullptr;
+
+    ~Rec() {
+        if (open) cl->Close();
+    }
 };
 
 struct Net2Buf {
@@ -489,6 +531,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
 
     ComPtr<ID3D12Device> device;
     ComPtr<ID3D12CommandQueue> queue;
+    ComPtr<ID3D12CommandQueue> compute_queue;
     D3D12_COMMAND_LIST_TYPE list_type = D3D12_COMMAND_LIST_TYPE_DIRECT;
     ComPtr<ID3D12RootSignature> root;
     ComPtr<ID3D12PipelineState> pso[kKernelCount];
@@ -497,13 +540,20 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
     ComPtr<ID3D12Fence> fence;
     HANDLE event = nullptr;
     uint64_t next_value = 0;
+    ComPtr<ID3D12Fence> handoff_fence;
+    uint64_t handoff_value = 0, joined_handoff = 0, arena_value = 0;
+    std::unordered_map<ID3D12Resource*, uint64_t> compute_slot_values;
     std::vector<Entry> entries;
+    std::vector<Entry> direct_entries;
     ComPtr<ID3D12DescriptorHeap> heap;
     uint32_t desc_inc = 0;
     ComPtr<ID3D12Resource> channel;
     ComPtr<ID3D12Resource> arena;
     uint64_t arena_bytes = 0;
     ComPtr<ID3D12Resource> menu_rb;
+    TimingQueries producer_queries, direct_queries;
+    FgExecTimings timings;
+    bool timing_failed = false;
 
     IFgSlotTarget* target = nullptr;
     uint32_t fence_id = 0;
@@ -525,9 +575,9 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
     uint32_t pack_off = 0, pack_pitch = 0;      // packed slot rows
     FgNet1Plan n1plan;
     FgArenaBinding n1arena;
-    uint32_t n1_cells = 0, n1_out = 0;
+    uint32_t n1_cells = 0, n1_out = 0, n1_pair_scratch = 0;
     // Full path
-    uint32_t x0 = 0, x1 = 0, xw = 0, ib = 0, ic = 0, ia = 0, fine = 0, sig = 0, lv[9] = {}, fd[8] = {};
+    uint32_t x0 = 0, x1 = 0, xw = 0, ib = 0, ic = 0, ia = 0, fine = 0, sig = 0, lv[9] = {};
     uint32_t n2w[kFgNet2Layers] = {}, n2b[kFgNet2Layers] = {};
     uint32_t n2fw[kFgNet2Layers] = {}, n2fb[kFgNet2Layers] = {};   // fast path: A fragments, padded biases
     std::vector<uint8_t> n2frag[kFgNet2Layers], n2fbias[kFgNet2Layers];
@@ -548,6 +598,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
     struct DumpRb {
         ComPtr<ID3D12Resource> buf;
         uint64_t fence_value = 0;  // 0 until the recording that copies it is submitted
+        bool direct = false;
         uint32_t w = 0, h = 0, pitch = 0, format = 0;
         std::string name;
     };
@@ -584,6 +635,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                     char kind, uint64_t token, uint32_t index) {
         if (!dump_armed || token != dump_token || (kind != 'g' && kind != 'r' && kind != 'm')) return;
         DumpRb d;
+        d.direct = r.direct;
         d.w = fp.Footprint.Width;
         d.h = fp.Footprint.Height;
         d.format = static_cast<uint32_t>(fp.Footprint.Format);
@@ -617,8 +669,9 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         try {
             for (size_t i = 0; i < dumps.size();) {
                 DumpRb& d = dumps[i];
-                if (d.fence_value == 0 || (fence->GetCompletedValue() < d.fence_value &&
-                                           !(wait && WaitValue(d.fence_value, desc.wait_ms)))) {
+                ID3D12Fence* completion = d.direct ? handoff_fence.Get() : fence.Get();
+                if (d.fence_value == 0 || (completion->GetCompletedValue() < d.fence_value &&
+                                           !(wait && WaitFence(completion, d.fence_value, desc.wait_ms)))) {
                     ++i;
                     continue;
                 }
@@ -668,7 +721,10 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
             if (!KernelNeeded(k, desc.enable_full, desc.net2)) continue;
             const std::string path = desc.dxil_dir + "\\" + kKernelNames[k] + ".dxil";
             std::vector<char> c;
-            if (!read_file(path, &c)) return Fail(FgExecRefusal::DxilMissing, std::string(kKernelNames[k]) + ".dxil");
+            if (!read_file(path, &c)) {
+                if (k >= kFirstOptional) continue;
+                return Fail(FgExecRefusal::DxilMissing, std::string(kKernelNames[k]) + ".dxil");
+            }
             if (c.size() < 32 || c.size() > 64u * 1024u * 1024u || std::memcmp(c.data(), "DXBC", 4) != 0)
                 return Fail(FgExecRefusal::DxilInvalid, std::string(kKernelNames[k]) + ".dxil is not a DXIL container");
             code[k] = std::move(c);
@@ -683,7 +739,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         ranges[0].RegisterSpace = kChannelSpace;
         ranges[0].OffsetInDescriptorsFromTableStart = 0;
         ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        ranges[1].NumDescriptors = 1;
+        ranges[1].NumDescriptors = kInputSrvs;
         ranges[1].OffsetInDescriptorsFromTableStart = 1;
         D3D12_ROOT_PARAMETER p[4] = {};
         p[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
@@ -703,7 +759,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                                                IID_PPV_ARGS(&root))))
             return Fail(FgExecRefusal::RootSignature, "root signature creation failed");
         for (uint32_t k = 0; k < kKernelCount; ++k) {
-            if (!KernelNeeded(k, desc.enable_full, desc.net2)) continue;
+            if (code[k].empty()) continue;
             D3D12_COMPUTE_PIPELINE_STATE_DESC pd = {};
             pd.pRootSignature = root.Get();
             pd.CS.pShaderBytecode = code[k].data();
@@ -758,6 +814,15 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         n1arena.region_base[2] = Alloc(n1plan.region_bytes[2]);
         n1_cells = static_cast<uint32_t>(n1arena.region_base[0] + n1plan.buffers[n1plan.Find("cells")].offset);
         n1_out = static_cast<uint32_t>(n1arena.region_base[2] + n1plan.buffers[n1plan.Find("out")].offset);
+        // The two coarse pairs run in sequence and can share the first convolution's output buffer.
+        const bool split_b = pso[kMPairBFirst] && pso[kMPairBSecond];
+        const bool split_d4 = pso[kMPairD4First] && pso[kMPairD4Second];
+        n1_pair_scratch = 0;
+        if (split_b || split_d4) {
+            const uint64_t b_bytes = split_b ? 2 * n1plan.buffers[n1plan.Find("p5")].bytes : 0;
+            const uint64_t d4_bytes = split_d4 ? n1plan.buffers[n1plan.Find("a4")].bytes : 0;
+            n1_pair_scratch = Alloc(std::max(b_bytes, d4_bytes));
+        }
         if (desc.enable_full) {
             const uint64_t fr = static_cast<uint64_t>(g.wo) * g.ho, n2 = static_cast<uint64_t>(g.W2) * g.H2;
             x0 = Alloc(fr * 8);
@@ -771,7 +836,6 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                 uint32_t w, h;
                 FgExecOutLevelSize(g, l, &w, &h);
                 lv[l] = Alloc(8ull * w * h);
-                if (l < 8) fd[l] = Alloc(8ull * w * h);
             }
             nb_x = N2(1, 10);
             nb_a1 = N2(2, 32);
@@ -883,14 +947,17 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         if (!fence) {
             if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(&fence))))
                 return Fail(FgExecRefusal::FenceFailed, "shared fence creation failed");
+        }
+        if (!event) {
             event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
             if (!event) return Fail(FgExecRefusal::FenceFailed, "event creation failed");
         }
-        if (entries.empty()) {
+        if (!heap) {
             const uint32_t n = std::max<uint32_t>(4, desc.allocators);
+            const uint32_t count = compute_queue ? 2 * n : n;
             D3D12_DESCRIPTOR_HEAP_DESC hd = {};
             hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-            hd.NumDescriptors = n * kPairs * 2;
+            hd.NumDescriptors = count * kTables * kTableSize;
             hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
             if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&heap))))
                 return Fail(FgExecRefusal::AllocationFailed, "descriptor heap");
@@ -902,7 +969,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
             for (uint32_t d = 0; d < hd.NumDescriptors; ++d) {
                 D3D12_CPU_DESCRIPTOR_HANDLE h = heap->GetCPUDescriptorHandleForHeapStart();
                 h.ptr += static_cast<SIZE_T>(d) * desc_inc;
-                if (d % 2 == 0) {
+                if (d % kTableSize == 0) {
                     D3D12_UNORDERED_ACCESS_VIEW_DESC uav = {};
                     uav.Format = DXGI_FORMAT_R32_TYPELESS;
                     uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
@@ -918,23 +985,99 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                     device->CreateShaderResourceView(nullptr, &sv, h);
                 }
             }
-            entries.resize(n);
-            for (uint32_t i = 0; i < n; ++i) {
-                if (FAILED(device->CreateCommandAllocator(list_type, IID_PPV_ARGS(&entries[i].alloc))) ||
-                    FAILED(device->CreateCommandList(0, list_type, entries[i].alloc.Get(), nullptr,
-                                                     IID_PPV_ARGS(&entries[i].list))) ||
-                    FAILED(entries[i].list->Close()))
-                    return Fail(FgExecRefusal::AllocationFailed, "command allocator / list");
-                entries[i].desc_base = i * kPairs * 2;
+            if (!CreateEntries(entries, n, 0, ProducerQueue()) ||
+                (compute_queue && !CreateEntries(direct_entries, n, n, queue.Get())))
+                return Fail(FgExecRefusal::AllocationFailed, "command allocator / list");
+            if (desc.timing) {
+                CreateTimingQueries(producer_queries, n, ProducerQueue());
+                if (compute_queue) CreateTimingQueries(direct_queries, n, queue.Get());
             }
         }
         return FgExecResult::Ok;
     }
 
-    bool WaitValue(uint64_t v, uint32_t ms) {
-        if (fence->GetCompletedValue() >= v) return true;
-        if (FAILED(fence->SetEventOnCompletion(v, event))) return false;
-        return WaitForSingleObject(event, ms) == WAIT_OBJECT_0 || fence->GetCompletedValue() >= v;
+    ID3D12CommandQueue* ProducerQueue() const { return compute_queue ? compute_queue.Get() : queue.Get(); }
+
+    bool CreateEntries(std::vector<Entry>& ring, uint32_t count, uint32_t first, ID3D12CommandQueue* q) {
+        const auto type = q->GetDesc().Type;
+        ring.resize(count);
+        for (uint32_t i = 0; i < count; ++i) {
+            Entry& e = ring[i];
+            if (FAILED(device->CreateCommandAllocator(type, IID_PPV_ARGS(&e.alloc))) ||
+                FAILED(device->CreateCommandList(0, type, e.alloc.Get(), nullptr, IID_PPV_ARGS(&e.list))) ||
+                FAILED(e.list->Close()))
+                return false;
+            e.desc_base = (first + i) * kTables * kTableSize;
+            e.query_base = i * kTimingQueries;
+        }
+        return true;
+    }
+
+    void CreateTimingQueries(TimingQueries& q, uint32_t count, ID3D12CommandQueue* source) {
+        if (FAILED(source->GetTimestampFrequency(&q.hz)) || !q.hz) return;
+        D3D12_QUERY_HEAP_DESC qd = {};
+        qd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+        qd.Count = count * kTimingQueries;
+        if (SUCCEEDED(device->CreateQueryHeap(&qd, IID_PPV_ARGS(&q.heap))))
+            q.readback = Buffer(qd.Count * sizeof(uint64_t), D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_FLAG_NONE,
+                                D3D12_RESOURCE_STATE_COPY_DEST);
+    }
+
+    void TimeStage(Rec& r, FgExecStage stage) {
+        const auto& q = r.direct ? direct_queries : producer_queries;
+        if (!q.readback) return;
+        Entry& e = *r.e;
+        if (e.stage_count && e.stages[e.stage_count - 1] == stage) return;
+        r.cl->EndQuery(q.heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, e.query_base + e.stage_count);
+        e.stages[e.stage_count++] = stage;
+    }
+
+    void ResolveTimings(Rec& r) {
+        const Entry& e = *r.e;
+        if (!e.stage_count) return;
+        const auto& q = r.direct ? direct_queries : producer_queries;
+        r.cl->EndQuery(q.heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, e.query_base + e.stage_count);
+        r.cl->ResolveQueryData(q.heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, e.query_base, e.stage_count + 1,
+                              q.readback.Get(), e.query_base * sizeof(uint64_t));
+    }
+
+    void CollectTimings(Entry& e, const TimingQueries& q) {
+        if (!e.stage_count || !e.fence) return;
+        const D3D12_RANGE range = {e.query_base * sizeof(uint64_t),
+                                   (e.query_base + e.stage_count + 1) * sizeof(uint64_t)};
+        void* p = nullptr;
+        if (SUCCEEDED(q.readback->Map(0, &range, &p))) {
+            const auto* ts = static_cast<const uint64_t*>(p) + e.query_base;
+            for (uint32_t i = 0; i < e.stage_count; ++i)
+                timings.ms[static_cast<size_t>(e.stages[i])] += (ts[i + 1] - ts[i]) * 1000.0 / q.hz;
+            const D3D12_RANGE none = {0, 0};
+            q.readback->Unmap(0, &none);
+        } else {
+            timing_failed = true;
+        }
+        e.stage_count = 0;
+    }
+
+    bool WaitFence(ID3D12Fence* f, uint64_t v, uint32_t ms) {
+        const ULONGLONG until = GetTickCount64() + ms;
+        if (!v || f->GetCompletedValue() >= v) return true;
+        if (!ms || !event || FAILED(f->SetEventOnCompletion(v, event))) return false;
+        // An earlier timed-out registration can still signal this event.
+        while (f->GetCompletedValue() < v) {
+            const ULONGLONG now = GetTickCount64();
+            if (now >= until || WaitForSingleObject(event, static_cast<DWORD>(until - now)) != WAIT_OBJECT_0)
+                return f->GetCompletedValue() >= v;
+        }
+        return true;
+    }
+
+    bool WaitValue(uint64_t v, uint32_t ms) { return WaitFence(fence.Get(), v, ms); }
+
+    bool WaitIdle(uint32_t ms) {
+        const ULONGLONG until = GetTickCount64() + ms;
+        if (!WaitValue(next_value, ms)) return false;
+        const ULONGLONG now = GetTickCount64();
+        return WaitFence(handoff_fence.Get(), handoff_value, now < until ? static_cast<uint32_t>(until - now) : 0);
     }
 
     FgExecResult Upload() {
@@ -959,30 +1102,39 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
     }
 
     // ---- recording -------------------------------------------------------------------------------------------
-    FgExecResult Begin(Rec* r) {
+    FgExecResult Begin(Rec* r, bool on_game_queue = false, bool uses_arena = true) {
+        r->direct = compute_queue && on_game_queue;
+        r->uses_arena = uses_arena;
+        auto& ring = r->direct ? direct_entries : entries;
+        ID3D12Fence* reuse_fence = r->direct ? handoff_fence.Get() : fence.Get();
         Entry* e = nullptr;
-        const uint64_t done = fence->GetCompletedValue();
-        for (Entry& x : entries)
+        const uint64_t done = reuse_fence->GetCompletedValue();
+        for (Entry& x : ring)
             if (x.fence <= done) {
                 e = &x;
                 break;
             }
         if (!e) {
-            Entry* oldest = &entries[0];
-            for (Entry& x : entries)
+            Entry* oldest = &ring[0];
+            for (Entry& x : ring)
                 if (x.fence < oldest->fence) oldest = &x;
-            if (!WaitValue(oldest->fence, desc.wait_ms)) {
+            if (!WaitFence(reuse_fence, oldest->fence, desc.wait_ms)) {
                 if (DeviceRemoved()) return Fail(FgExecRefusal::DeviceLost, "device removed");
                 return Fail(FgExecRefusal::WaitTimeout, "no free command allocator");
             }
             e = oldest;
         }
+        CollectTimings(*e, r->direct ? direct_queries : producer_queries);
+        e->fence = 0;
+        e->stage_count = 0;
         if (FAILED(e->alloc->Reset()) || FAILED(e->list->Reset(e->alloc.Get(), nullptr)))
             return Fail(FgExecRefusal::CommandFailed, "command list reset");
         r->e = e;
         r->cl = e->list.Get();
-        r->pair = 0;
+        r->open = true;
+        r->table = 0;
         r->dirty = false;
+        if (!uses_arena) return FgExecResult::Ok;
         ID3D12DescriptorHeap* heaps[] = {heap.Get()};
         r->cl->SetDescriptorHeaps(1, heaps);
         r->cl->SetComputeRootSignature(root.Get());
@@ -995,9 +1147,9 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         return FgExecResult::Ok;
     }
 
-    void SetTable(Rec& r, uint32_t pair) {
+    void SetTable(Rec& r, uint32_t table) {
         D3D12_GPU_DESCRIPTOR_HANDLE h = heap->GetGPUDescriptorHandleForHeapStart();
-        h.ptr += static_cast<UINT64>(r.e->desc_base + 2 * pair) * desc_inc;
+        h.ptr += static_cast<UINT64>(r.e->desc_base + kTableSize * table) * desc_inc;
         r.cl->SetComputeRootDescriptorTable(3, h);
     }
 
@@ -1034,9 +1186,9 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         r.dirty = false;
     }
 
-    void Dispatch(Rec& r, uint32_t k, uint32_t groups, const uint32_t* args, uint32_t n) {
+    void Dispatch(Rec& r, uint32_t k, uint32_t groups, const uint32_t* args, uint32_t n, bool barrier = true) {
         ArenaTo(r, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        Barrier(r);
+        if (barrier) Barrier(r);
         r.cl->SetPipelineState(pso[k].Get());
         uint32_t c[kRootConstants] = {};
         c[1] = groups;
@@ -1049,29 +1201,68 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         r.dirty = true;
         ++counters.dispatches;
     }
-    void D(Rec& r, uint32_t k, uint32_t groups, std::initializer_list<uint32_t> a) {
+    void D(Rec& r, uint32_t k, uint32_t groups, std::initializer_list<uint32_t> a, bool barrier = true) {
         uint32_t v[kMaxArgs] = {};
         uint32_t n = 0;
         for (uint32_t x : a)
             if (n < kMaxArgs) v[n++] = x;
-        Dispatch(r, k, groups, v, n);
+        Dispatch(r, k, groups, v, n, barrier);
     }
 
     FgExecResult Submit(Rec* r, uint64_t* value) {
         cur = nullptr;
+        // Buffers decay at submission boundaries. Make the Direct-to-Compute release explicit.
+        if (r->direct && r->uses_arena) ArenaTo(*r, D3D12_RESOURCE_STATE_COMMON);
+        ResolveTimings(*r);
+        r->open = false;
         if (FAILED(r->cl->Close())) return Fail(FgExecRefusal::CommandFailed, "command list close");
+        ID3D12CommandQueue* q = r->direct ? queue.Get() : ProducerQueue();
+        if (r->direct) {
+            uint64_t dependency = r->uses_arena ? arena_value : 0;
+            const auto slot = compute_slot_values.find(r->written_slot);
+            if (slot != compute_slot_values.end()) dependency = std::max(dependency, slot->second);
+            if (dependency > fence->GetCompletedValue() && FAILED(q->Wait(fence.Get(), dependency)))
+                return QueueFailure("wait for compute writes");
+        }
+        if (!r->direct && !JoinGameQueue()) return QueueFailure("wait for game queue handoff");
         ID3D12CommandList* l[] = {r->cl};
-        queue->ExecuteCommandLists(1, l);
-        const uint64_t v = ++next_value;
-        if (FAILED(queue->Signal(fence.Get(), v))) {
-            if (DeviceRemoved()) return Fail(FgExecRefusal::DeviceLost, "device removed");
-            return Fail(FgExecRefusal::CommandFailed, "queue signal");
+        q->ExecuteCommandLists(1, l);
+        uint64_t v = 0;
+        if (!(r->direct ? SignalHandoff(&v) : SignalProducer(&v))) return QueueFailure("queue signal");
+        if (compute_queue && !r->direct) {
+            if (r->uses_arena) arena_value = v;
+            if (r->written_slot) compute_slot_values[r->written_slot] = v;
         }
         r->e->fence = v;
         ++counters.submissions;
         *value = v;
         if (DeviceRemoved()) return Fail(FgExecRefusal::DeviceLost, "device removed");
         return FgExecResult::Ok;
+    }
+
+    FgExecResult QueueFailure(const char* operation) {
+        if (DeviceRemoved()) return Fail(FgExecRefusal::DeviceLost, "device removed");
+        return Fail(FgExecRefusal::CommandFailed, operation);
+    }
+
+    bool SignalHandoff(uint64_t* value) {
+        if (FAILED(queue->Signal(handoff_fence.Get(), handoff_value + 1))) return false;
+        *value = ++handoff_value;
+        return true;
+    }
+
+    bool JoinGameQueue() {
+        if (!compute_queue || joined_handoff == handoff_value) return true;
+        if (FAILED(compute_queue->Wait(handoff_fence.Get(), handoff_value))) return false;
+        joined_handoff = handoff_value;
+        return true;
+    }
+
+    bool SignalProducer(uint64_t* value) {
+        // Only the producer queue publishes values, so a direct copy cannot overtake earlier compute work.
+        if (FAILED(ProducerQueue()->Signal(fence.Get(), next_value + 1))) return false;
+        *value = ++next_value;
+        return true;
     }
 
     // IFgComputeRecorder (net1)
@@ -1082,26 +1273,86 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
             Barrier(*cur);
         }
     }
-    void SetPipeline(FgNet1Kernel k) override {
-        if (cur) cur->cl->SetPipelineState(pso[kMConv1 + static_cast<uint32_t>(k)].Get());
-    }
+    FgNet1Kernel n1_record_kernel{};
+    std::array<uint32_t, kFgNet1Args + 2> n1_record_constants{};
+
+    void SetPipeline(FgNet1Kernel k) override { n1_record_kernel = k; }
     void SetConstants(const uint32_t* dwords, uint32_t count) override {
-        if (cur) cur->cl->SetComputeRoot32BitConstants(2, count, dwords, 0);
+        std::copy_n(dwords, count, n1_record_constants.begin());
     }
+
+    void Net1PairSplit(Rec& r, Kernel first, Kernel second, uint32_t first_tiles, uint32_t second_tiles,
+                       const uint32_t* args) {
+        const uint32_t pixel_groups = cdiv(static_cast<uint64_t>(args[8]) * args[9], 32);
+        const uint32_t dst = args[6];
+        uint32_t a[kFgNet1Args];
+        std::copy_n(args, kFgNet1Args, a);
+        a[6] = n1_pair_scratch;
+        Dispatch(r, first, pixel_groups * (first_tiles / 2), a, kFgNet1Args, false);
+        a[0] = n1_pair_scratch;
+        a[6] = dst;
+        Dispatch(r, second, pixel_groups * (second_tiles / 2), a, kFgNet1Args);
+    }
+
     void Dispatch(uint32_t groups_x) override {
-        if (cur) {
-            cur->cl->Dispatch(groups_x, 1, 1);
-            cur->dirty = true;
-            ++counters.dispatches;
+        if (!cur) return;
+        const auto& c = n1_record_constants;
+        const uint32_t* args = c.data() + 2;
+        const FgNet1Kernel kernel = n1_record_kernel;
+        // The validator records the original launch. Retile complete launches when a tuned PSO is available.
+        if (c[0] == 0 && c[1] == groups_x) {
+            if (kernel == FgNet1Kernel::MPairB && pso[kMPairBFirst] && pso[kMPairBSecond] && n1_pair_scratch) {
+                Net1PairSplit(*cur, kMPairBFirst, kMPairBSecond, 32, 16, args);
+                return;
+            }
+            if (kernel == FgNet1Kernel::MPairD4 && pso[kMPairD4First] && pso[kMPairD4Second] && n1_pair_scratch) {
+                Net1PairSplit(*cur, kMPairD4First, kMPairD4Second, 16, 8, args);
+                return;
+            }
+            if ((kernel == FgNet1Kernel::MPairD3 && pso[kMPairD3Narrow]) ||
+                (kernel == FgNet1Kernel::MPairD2 && pso[kMPairD2Narrow])) {
+                const Kernel tuned = kernel == FgNet1Kernel::MPairD3 ? kMPairD3Narrow : kMPairD2Narrow;
+                Dispatch(*cur, tuned, cdiv(static_cast<uint64_t>(args[8]) * args[9], 32), args, kFgNet1Args, false);
+                return;
+            }
+
+            Kernel tuned = kKernelCount;
+            uint32_t tiles_per_wave = 0;
+            uint32_t tile_h = 4;
+            const bool small_conv = kernel == FgNet1Kernel::MConv4 && args[9] == 3 && groups_x <= 128;
+            if (small_conv && groups_x <= 48 && pso[kMConv1Late]) {
+                tuned = kMConv1Late;
+                tiles_per_wave = 1;
+            } else if (kernel == FgNet1Kernel::MConv2 && args[9] == 3 && args[10] == 1 && pso[kMConv2Mid]) {
+                tuned = kMConv2Mid;
+                tiles_per_wave = 2;
+                tile_h = 8;
+            } else if ((kernel == FgNet1Kernel::MConv2 || small_conv) && pso[kMConv2Narrow]) {
+                tuned = kMConv2Narrow;
+                tiles_per_wave = 2;
+            }
+            if (tuned != kKernelCount) {
+                uint32_t a[kFgNet1Args];
+                std::copy_n(args, kFgNet1Args, a);
+                a[14] = cdiv(a[7], tile_h);
+                const uint32_t groups = a[13] * a[14] * (a[6] / (16 * tiles_per_wave));
+                Dispatch(*cur, tuned, groups, a, kFgNet1Args, false);
+                return;
+            }
         }
+        cur->cl->SetPipelineState(pso[kMConv1 + static_cast<uint32_t>(kernel)].Get());
+        cur->cl->SetComputeRoot32BitConstants(2, static_cast<uint32_t>(c.size()), c.data(), 0);
+        cur->cl->Dispatch(groups_x, 1, 1);
+        cur->dirty = true;
+        ++counters.dispatches;
     }
 
     // ---- stages ----------------------------------------------------------------------------------------------
     uint32_t R(uint32_t role) const { return role_off[role]; }
 
-    void Fill16(Rec& r, uint32_t off, uint64_t bytes, const uint32_t* p, uint32_t period) {
+    void Fill16(Rec& r, uint32_t off, uint64_t bytes, const uint32_t* p, uint32_t period, bool barrier = true) {
         const uint32_t n16 = static_cast<uint32_t>(bytes / 2);
-        D(r, kFill16, groups_for(n16, 8), {off, n16, p[0], p[1], p[2], p[3], period});
+        D(r, kFill16, groups_for(n16, 8), {off, n16, p[0], p[1], p[2], p[3], period}, barrier);
     }
 
     void RegArgs(const InputTex& t, bool present, uint32_t* out10) const {
@@ -1113,7 +1364,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
     }
 
     // One schedule operation. Returns false when a step cannot be recorded (net1 refusal).
-    bool RecordOp(Rec& r, const FgExecOp& op) {
+    bool RecordOp(Rec& r, const FgExecOp& op, bool input_srvs = false) {
         const FrameCtx& f = frame;
         const uint32_t col = cap_colour, ctw = f.colour.w;
         const InputTex& cr = f.colour;
@@ -1133,14 +1384,14 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         const uint32_t inv = f.inverted ? 1u : 0u;
         switch (op.op) {
             case FgOp::Clear:
-                Fill16(r, R(op.role), FgRoleBytes(g, op.role), op.value, op.period);
-                return true;
             case FgOp::Fill64:
-                Fill16(r, R(op.role), FgRoleBytes(g, op.role), op.value, op.period);
+                // History clears have distinct destinations, S is independent of downsample and motion prep,
+                // and the per-index MA and MB clears are independent of each other.
+                Fill16(r, R(op.role), FgRoleBytes(g, op.role), op.value, op.period, false);
                 return true;
             case FgOp::SetDisable: {
                 const uint32_t p[4] = {op.base & 0xFFFFu, op.base >> 16, 0, 0};
-                Fill16(r, dis_off, 4, p, 2);
+                Fill16(r, dis_off, 4, p, 2, false);
                 frame.disable = op.base;
                 return true;
             }
@@ -1178,7 +1429,19 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                                          R(kRoleUm), g.wo, g.ho, g.wd, g.hd, host.Frame().r3_bits};
                 for (uint32_t x : h3) a[n++] = x;
                 const uint64_t nb = static_cast<uint64_t>(cdiv(g.wo, g.d)) * cdiv(g.ho, g.d);
-                Dispatch(r, g.d == 4 ? kDown4 : kDown2, groups_for(nb), a, n);
+                // A reset cleared the history/UI roles this dispatch accesses. With history, the preceding
+                // SetDisable writes a separate word, or the detector already ended its own submission.
+                if (input_srvs)
+                    BindInputs(r, {&cr, f.hud ? &f.hudless : nullptr, alpha ? &f.alpha : nullptr});
+                uint32_t kernel = input_srvs ? (g.d == 4 ? kDown4Srv : kDown2Srv) : (g.d == 4 ? kDown4 : kDown2);
+                uint32_t groups = groups_for(nb);
+                const auto& hr = f.hudless.region;
+                if (kernel == kDown2Srv && pso[kDown2HudTile] && (host.Frame().r3_bits & 16u) &&
+                    hw == g.wo && hh == g.ho && !hr.bx && !hr.by && hr.ew == hw && hr.eh == hh) {
+                    kernel = kDown2HudTile;
+                    groups = cdiv(g.wo, 32) * cdiv(g.ho, 8);
+                }
+                Dispatch(r, kernel, groups, a, n, !host.Frame().history);
                 return true;
             }
             case FgOp::Mvec: {
@@ -1197,7 +1460,10 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                 for (uint32_t x : mreg) a[n++] = x;
                 const uint32_t t[8] = {R(kRoleZc), R(kRoleMv), g.w1, g.h1, inv, fb(st.s_k), fb(f.scx), fb(f.scy)};
                 for (uint32_t x : t) a[n++] = x;
-                Dispatch(r, kMvec, groups_for(nsc), a, n);
+                // Downsample writes colour/UI roles. Motion prep writes depth and motion roles.
+                if (input_srvs) BindInputs(r, {&f.depth, &f.motion});
+                Dispatch(r, input_srvs ? kMvecSrv : kMvec, groups_for(nsc), a, n, false);
+                if (input_srvs) SetTable(r, 0);
                 return true;
             }
             case FgOp::P2cScatter: {
@@ -1227,6 +1493,17 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                 D(r, kInpaint, groups_for(nsc), {R(kRoleFl), R(kRoleG), g.w1, g.h1});
                 return true;
             case FgOp::P2cPull:
+                if (pso[kPullTiled]) {
+                    for (uint32_t l : {1u, 5u}) {
+                        if (l > g.top) break;
+                        const uint32_t w = g.lw[l], h = g.lh[l];
+                        D(r, kPullTiled, cdiv(w, 16) * cdiv(h, 16),
+                          {l == 1 ? 0u : 2u, l == 1 ? R(kRoleG) : R(kRoleP1 + 3), R(kRoleVf), 0u,
+                           R(kRoleP1 + l - 1), g.lw[l - 1], g.lh[l - 1], w, h, fb(4.0f),
+                           R(kRoleP1 + l), R(kRoleP1 + l + 1), R(kRoleP1 + l + 2), std::min(4u, g.top - l + 1)});
+                    }
+                    return true;
+                }
                 for (uint32_t l = 1; l <= g.top; ++l) {
                     const uint32_t wl = g.lw[l], hl = g.lh[l], ws = g.lw[l - 1], hs = g.lh[l - 1];
                     uint32_t mode, sa, sb = 0;
@@ -1248,23 +1525,40 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                       {mode, sa, sb, ps_off[l], R(kRoleP1 + l - 1), ws, hs, wl, hl, fb(n)});
                 }
                 return true;
-            case FgOp::P2cPush:
-                for (uint32_t l = g.top - 1; l >= 1; --l) {
+            case FgOp::P2cPush: {
+                uint32_t l = g.top - 1;
+                if (pso[kPushTail]) {
+                    uint32_t args[25] = {};
+                    for (uint32_t j = 0; j <= l && g.lw[g.top - j] * g.lh[g.top - j] <= 256; ++j) {
+                        const uint32_t level = g.top - j;
+                        args[0] = j;
+                        args[1 + j] = R(kRoleP1 + level - 1);
+                        args[9 + j] = g.lw[level];
+                        args[17 + j] = g.lh[level];
+                    }
+                    if (args[0] > 1) {
+                        Dispatch(r, kPushTail, 1, args, 25);
+                        l -= args[0];
+                    }
+                }
+                for (; l >= 1; --l) {
                     D(r, kPush, groups_for(static_cast<uint64_t>(g.lw[l]) * g.lh[l]),
                       {R(kRoleP1 + l), g.lw[l + 1], g.lh[l + 1], R(kRoleP1 + l - 1), g.lw[l], g.lh[l]});
                     if (l == 1) break;
                 }
                 D(r, kFine, groups_for(nsc), {R(kRoleP1), g.lw[1], g.lh[1], R(kRoleG), R(kRoleF), g.w1, g.h1});
                 return true;
+            }
             case FgOp::HoleMask: {
                 const uint32_t p[4] = {0x3C00u, 0, 0, 0};
-                Fill16(r, R(kRoleHc), FgRoleBytes(g, kRoleHc), p, 1);
+                Fill16(r, R(kRoleHc), FgRoleBytes(g, kRoleHc), p, 1, false);
                 D(r, kHoleMask, groups_for(static_cast<uint64_t>(g.wd) * g.hd),
                   {R(kRoleF), g.w1, g.h1, R(kRoleHc), g.wd, g.hd});
                 return true;
             }
             case FgOp::QualityInit:
-                D(r, kQualityInit, groups_for(static_cast<uint64_t>(g.wd) * g.hd), {R(kRoleDc), R(kRoleQc), g.wd * g.hd});
+                D(r, kQualityInit, groups_for(static_cast<uint64_t>(g.wd) * g.hd),
+                  {R(kRoleDc), R(kRoleQc), g.wd * g.hd}, false);
                 return true;
             case FgOp::Net1Input:
                 D(r, kNet1Input, groups_for(4ull * g.W0 * g.H0),
@@ -1292,12 +1586,16 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                   {n1_out, R(kRoleOm), R(kRoleUm), R(kRoleUmp), R(kRoleNA), R(kRoleNB), R(kRoleM), g.wd, g.hd,
                    g.pad_l, g.pad_t, g.W0, g.H0, 1u, 16u, op.ui_forcing ? 1u : 0u});
                 return true;
-            case FgOp::Interm:
-                D(r, kInterm, groups_for(nsc),
+            case FgOp::Interm: {
+                const uint32_t kernel = pso[kIntermTiled] ? kIntermTiled : kInterm;
+                const uint32_t groups = kernel == kIntermTiled ? cdiv(g.w1, 16) * cdiv(g.h1, 16) : groups_for(nsc);
+                D(r, kernel, groups,
                   {0u, R(kRoleMv), R(kRoleZc), R(kRoleMA), g.w1, g.h1, fb(op.t), fb(st.s_k), inv, fb(t2), fb(st.tau)});
-                D(r, kInterm, groups_for(nsc),
-                  {1u, R(kRoleF), R(kRoleZp), R(kRoleMB), g.w1, g.h1, fb(op.t), fb(st.s_k), inv, fb(t2), fb(st.tau)});
+                D(r, kernel, groups,
+                  {1u, R(kRoleF), R(kRoleZp), R(kRoleMB), g.w1, g.h1, fb(op.t), fb(st.s_k), inv, fb(t2), fb(st.tau)},
+                  false);
                 return true;
+            }
             case FgOp::Weights:
                 D(r, kWeights, groups_for(nsc),
                   {R(kRoleMA), R(kRoleMB), R(kRoleNA), R(kRoleNB), R(kRoleW), g.w1, g.h1, g.wd, g.hd});
@@ -1360,12 +1658,12 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
     void Conv(Rec& r, uint32_t layer, const Net2Buf& x, const Net2Buf& y, uint32_t in_cs, uint32_t in_co,
               uint32_t cin, uint32_t co_lo, uint32_t co_n, uint32_t out_cs, uint32_t out_co, uint32_t H, uint32_t W,
               uint32_t pool, uint32_t leaky, uint32_t clamp_from, uint32_t res, uint32_t res_mul, uint32_t skip,
-              uint32_t skip_cs) {
+              uint32_t skip_cs, bool barrier = true) {
         const FgNet2Layer& l = FgNet2Layers()[layer - 1];
         const uint64_t threads = static_cast<uint64_t>(pool ? H / 2 : H) * (pool ? W / 2 : W) * co_n;
         D(r, kNet2Conv, groups_for(threads),
           {x.off, n2w[layer - 1], n2b[layer - 1], y.off, skip, in_cs, in_co, cin, l.cin, co_lo, co_n, out_cs, out_co,
-           H, W, pool, leaky, clamp_from, res, res_mul, skip_cs, 0u});
+           H, W, pool, leaky, clamp_from, res, res_mul, skip_cs, 0u}, barrier);
     }
     // conv(n, src, dst, cin, ...) of the reference chain: the layer's full output, input channels from 0
     void ConvL(Rec& r, uint32_t layer, const Net2Buf& src, const Net2Buf& dst, uint32_t cin, uint32_t pool,
@@ -1374,13 +1672,21 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         Conv(r, layer, src, dst, src.c, 0, cin, 0, l.cout, l.cout, 0, src.h, src.w, pool, 1, clamp_from, res, kHalfOne,
              skip ? skip->off : 0u, skip ? cin : 0u);
     }
-    void Up2(Rec& r, const Net2Buf& x, const Net2Buf& y) {
-        D(r, kNet2Up2, groups_for(4ull * x.h * x.w * x.c), {x.off, y.off, x.c, x.h, x.w});
+    void Up2(Rec& r, const Net2Buf& x, const Net2Buf& y, bool barrier = true) {
+        D(r, kNet2Up2, groups_for(4ull * x.h * x.w * x.c), {x.off, y.off, x.c, x.h, x.w}, barrier);
+    }
+
+    void MergeNet2Inputs(Rec& r, uint32_t npx, float f) {
+        if (pso[kNet2MergePixels]) {
+            D(r, kNet2MergePixels, groups_for(npx), {ib, ic, ia, nb_x.off, npx, fb(f)});
+        } else {
+            D(r, kNet2Merge, groups_for(10ull * npx), {ib, ic, ia, nb_x.off, npx, fb(f)});
+        }
     }
 
     void RecordNet2(Rec& r, float f) {
         const uint32_t npx = g.W2 * g.H2;
-        D(r, kNet2Merge, groups_for(10ull * npx), {ib, ic, ia, nb_x.off, npx, fb(f)});
+        MergeNet2Inputs(r, npx, f);
         ConvL(r, 1, nb_x, nb_a1, 10, 1, 0, 0, nullptr);
         ConvL(r, 2, nb_a1, nb_a2, 32, 1, 0, 0, nullptr);
         ConvL(r, 3, nb_a2, nb_r0, 32, 1, 0, 0, nullptr);
@@ -1397,10 +1703,10 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         const uint32_t lo[3] = {0, 4, 5}, cnt[3] = {4, 1, 3}, cf[3] = {kNoClamp, 0, 0};
         for (uint32_t j = 0; j < 3; ++j)
             Conv(r, 13, nb_gu, *heads[j], 96, 32 * j, 32, lo[j], cnt[j], cnt[j], 0, nb_gu.h, nb_gu.w, 0, 0, cf[j], 0,
-                 kHalfOne, 0, 0);
+                 kHalfOne, 0, 0, j == 0);
         Up2(r, nb_hA4, nb_U4);
-        Up2(r, nb_hA1, nb_U1);
-        Up2(r, nb_hA3, nb_U3);
+        Up2(r, nb_hA1, nb_U1, false);
+        Up2(r, nb_hA3, nb_U3, false);
         D(r, kNet2Warp, groups_for(18ull * npx), {ib, ic, ia, nb_U4.off, nb_U1.off, nb_U3.off, nb_y.off, g.W2, g.H2, fb(f)});
         ConvL(r, 14, nb_y, nb_b1, 18, 1, 0, 0, nullptr);
         ConvL(r, 15, nb_b1, nb_s0, 16, 1, 0, 0, nullptr);
@@ -1417,7 +1723,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         const uint32_t rm[3] = {kHalfTwo, kHalfOne, kHalfOne};
         for (uint32_t j = 0; j < 3; ++j)
             Conv(r, 25, nb_eu, nb_out, 48, 16 * j, 16, lo[j], cnt[j], 8, lo[j], g.H2, g.W2, 0, 0, cf[j], 2, rm[j],
-                 us[j]->off, cnt[j]);
+                 us[j]->off, cnt[j], j == 0);
         ++counters.net2_exact;
     }
 
@@ -1442,7 +1748,19 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         uint32_t groups = 0, rows = 0;
         // Configure checked every layer's variant (FgNet2FastPlan)
         if (!ChooseMconv(l.cout, l.cin, o.up, static_cast<uint64_t>(H) * W, &v, &groups, &rows)) return;
-        if (o.heads) groups = 3;
+        if (n == 12 && static_cast<uint64_t>(H) * W <= 8192) {
+            // Two output tiles per wave give the smaller L12 grids more workgroups.
+            v.kernel = kN2m2b4u;
+            groups = l.cout / (2 * kMTile);
+        }
+        if (o.heads) {
+            if (n == 25 && pso[kN2h3b1u]) {
+                v.kernel = kN2h3b1u;
+                groups = 1;
+            } else {
+                groups = 3;
+            }
+        }
         const uint32_t co_n = o.co_n ? o.co_n : l.cout;
         const uint32_t out_cs = o.out_cs < 0 ? co_n : static_cast<uint32_t>(o.out_cs);
         const uint32_t tx = cdiv(W, kMTile), ty = cdiv(H, rows);
@@ -1460,7 +1778,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
 
     void RecordNet2Fast(Rec& r, float f, bool half_last) {
         const uint32_t npx = g.W2 * g.H2;
-        D(r, kNet2Merge, groups_for(10ull * npx), {ib, ic, ia, nb_x.off, npx, fb(f)});
+        MergeNet2Inputs(r, npx, f);
         MOpt pool;
         pool.pool = 1;
         MConv(r, 1, nb_x, nb_a1, 10, g.H2, g.W2, pool);
@@ -1548,16 +1866,24 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
             FgExecOutLevelSize(g, l, &wf, &hf);
             FgExecOutLevelSize(g, l + 1, &wc, &hc);
             D(r, kOutPush, groups_for(static_cast<uint64_t>(wf) * hf),
-              {lv[l], l == lc - 1 ? lv[lc] : fd[l + 1], fd[l], wf, hf, wc, hc});
+              {lv[l], lv[l + 1], lv[l], wf, hf, wc, hc});
             if (l == 1) break;
         }
         uint32_t w1o, h1o;
         FgExecOutLevelSize(g, 1, &w1o, &h1o);
         D(r, kOutPushFine, groups_for(static_cast<uint64_t>(g.wo) * g.ho),
-          {fine, fd[1], out_off, g.wo, g.ho, w1o, h1o, out_stride, 0u, 0u});
+          {fine, lv[1], out_off, g.wo, g.ho, w1o, h1o, out_stride, 0u, 0u});
     }
 
     // ---- inputs ----------------------------------------------------------------------------------------------
+    bool CanTransitionInput(D3D12_RESOURCE_STATES state) const {
+        constexpr uint32_t compute_states = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+            D3D12_RESOURCE_STATE_COPY_SOURCE | D3D12_RESOURCE_STATE_COPY_DEST |
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS | D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT |
+            D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
+        return list_type == D3D12_COMMAND_LIST_TYPE_DIRECT || !(state & ~compute_states);
+    }
+
     FgExecRefusal TakeInput(const FgTextureRef& t, InputTex* out, std::string* w, const char* name) {
         if (!t.resource) {
             *w = std::string(name) + " missing";
@@ -1581,6 +1907,10 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         x.w = static_cast<uint32_t>(d.Width);
         x.h = d.Height;
         x.state = static_cast<D3D12_RESOURCE_STATES>(t.state);
+        if (NeedsTransition(x.state) && !CanTransitionInput(x.state)) {
+            *w = std::string(name) + ": state transition requires a direct queue";
+            return FgExecRefusal::InputFormat;
+        }
         if (x.w > cap_w || x.h > cap_h) {
             *w = std::string(name) + ": texture larger than the capture area";
             return FgExecRefusal::InputExtent;
@@ -1595,18 +1925,25 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         return FgExecRefusal::None;
     }
 
-    void Capture(Rec& r, const InputTex& t, uint32_t dst, uint32_t kind) {
-        const uint32_t pair = r.pair + 1 < kPairs ? ++r.pair : r.pair;
+    void BindInputs(Rec& r, std::initializer_list<const InputTex*> inputs) {
+        const uint32_t table = ++r.table;
         D3D12_CPU_DESCRIPTOR_HANDLE h = heap->GetCPUDescriptorHandleForHeapStart();
-        h.ptr += static_cast<SIZE_T>(r.e->desc_base + 2 * pair + 1) * desc_inc;
+        h.ptr += static_cast<SIZE_T>(r.e->desc_base + kTableSize * table + 1) * desc_inc;
         D3D12_SHADER_RESOURCE_VIEW_DESC sv = {};
-        sv.Format = t.view;
         sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         sv.Texture2D.MipLevels = 1;
-        device->CreateShaderResourceView(t.res, &sv, h);
-        SetTable(r, pair);
-        D(r, kCapture, groups_for(static_cast<uint64_t>(t.w) * t.h), {dst, t.w, t.h, kind});
+        for (const InputTex* t : inputs) {
+            sv.Format = t ? t->view : DXGI_FORMAT_R16G16B16A16_FLOAT;
+            device->CreateShaderResourceView(t ? t->res : nullptr, &sv, h);
+            h.ptr += desc_inc;
+        }
+        SetTable(r, table);
+    }
+
+    void Capture(Rec& r, const InputTex& t, uint32_t dst, uint32_t kind) {
+        BindInputs(r, {&t});
+        D(r, kCapture, groups_for(static_cast<uint64_t>(t.w) * t.h), {dst, t.w, t.h, kind}, false);
         ++counters.captures;
     }
 
@@ -1614,7 +1951,54 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         return s != D3D12_RESOURCE_STATE_COMMON && !(s & D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     }
 
+    void CaptureColour(Rec& r) {
+        const InputTex& src = frame.colour;
+        const bool transition = NeedsTransition(src.state);
+        if (transition) Transition(r, src.res, src.state, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        Capture(r, src, cap_colour, 4);
+        if (transition) Transition(r, src.res, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, src.state);
+        SetTable(r, 0);
+    }
+
     // ---- slot output -----------------------------------------------------------------------------------------
+    ID3D12Resource* DirectCopySlot(uint32_t slot) const {
+        const InputTex& src = frame.colour;
+        if (desc.keep_outputs || !target || !src.res || !CanTransitionInput(src.state) ||
+            src.w != g.wo || src.h != g.ho || src.region.bx || src.region.by ||
+            src.region.ew != g.wo || src.region.eh != g.ho)
+            return nullptr;
+        ID3D12Resource* dst = target->SlotResource(slot);
+        if (!dst || dst == src.res) return nullptr;
+        const auto in = src.res->GetDesc();
+        const auto out = dst->GetDesc();
+        if (out.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || out.Width != in.Width || out.Height != in.Height ||
+            out.DepthOrArraySize != 1 || out.MipLevels != 1 || in.MipLevels != 1 ||
+            out.SampleDesc.Count != 1 || out.SampleDesc.Quality != in.SampleDesc.Quality)
+            return nullptr;
+        // Capture linearizes an sRGB SRV, and its float16 conversion quiets signaling NaNs. Only the linear
+        // UNORM formats round-trip every input code through capture and pack.
+        const DXGI_FORMAT format = linear_copy_format(out.Format);
+        if (src.view != format ||
+            (format != DXGI_FORMAT_R8G8B8A8_UNORM && format != DXGI_FORMAT_B8G8R8A8_UNORM &&
+             format != DXGI_FORMAT_R10G10B10A2_UNORM))
+            return nullptr;
+        return dst;
+    }
+
+    void CopySlot(Rec& r, ID3D12Resource* dst, char kind, uint64_t token, uint32_t index) {
+        const InputTex& src = frame.colour;
+        const auto out = dst->GetDesc();
+        Transition(r, src.res, src.state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        Transition(r, dst, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+        r.cl->CopyResource(dst, src.res);
+        r.written_slot = dst;
+        Transition(r, src.res, D3D12_RESOURCE_STATE_COPY_SOURCE, src.state);
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp = {};
+        fp.Footprint = {linear_copy_format(out.Format), g.wo, g.ho, 1, 0};
+        RecordDump(r, dst, fp, 4, kind, token, index);
+        Transition(r, dst, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+    }
+
     FgExecResult WriteSlot(Rec& r, uint32_t slot, char kind, uint64_t token, uint32_t index) {
         if (!target) return Fail(FgExecRefusal::SlotTargetMissing, "no presenter bound to the executor");
         ID3D12Resource* res = target->SlotResource(slot);
@@ -1629,7 +2013,9 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         uint64_t src_off = out_off;
         uint32_t pitch = out_stride * 8;
         if (code_ != 0) {
-            D(r, kPack, groups_for(static_cast<uint64_t>(g.wo) * g.ho),
+            const bool pairs = pso[kPackPairs] != nullptr;
+            const uint32_t columns = pairs ? cdiv(g.wo, 2) : g.wo;
+            D(r, pairs ? kPackPairs : kPack, groups_for(static_cast<uint64_t>(columns) * g.ho),
               {out_off, out_stride, pack_off, pack_pitch, g.wo, g.ho, static_cast<uint32_t>(code_)});
             src_off = pack_off;
             pitch = pack_pitch;
@@ -1650,6 +2036,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         src.PlacedFootprint.Footprint.Depth = 1;
         src.PlacedFootprint.Footprint.RowPitch = pitch;
         r.cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        r.written_slot = res;
         if (desc.keep_outputs) {
             PendingRb p;
             p.rec.kind = kind;
@@ -1692,14 +2079,15 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
     FgExecResult Finish(Rec& r, FgReadyFence* ready) {
         uint64_t v = 0;
         const FgExecResult s = Submit(&r, &v);
-        if (s != FgExecResult::Ok) {
-            // the recording was not submitted: its dump copies never run
+        if (!v) {
             dumps.erase(std::remove_if(dumps.begin(), dumps.end(), [](const DumpRb& d) { return d.fence_value == 0; }),
                         dumps.end());
-            return s;
         }
         for (DumpRb& d : dumps)
             if (d.fence_value == 0) d.fence_value = v;
+        if (s != FgExecResult::Ok) return s;
+        if (r.direct && (!JoinGameQueue() || !SignalProducer(&v)))
+            return QueueFailure("publish the game queue handoff");
         if (desc.keep_outputs)
             for (PendingRb& p : pending)
                 if (p.rec.fence_value == 0) p.rec.fence_value = v;
@@ -1709,12 +2097,49 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         }
         return FgExecResult::Ok;
     }
+
+    FgExecResult CopyFrameToSlot(uint32_t slot, char kind, uint64_t token, uint32_t index, FgReadyFence* ready) {
+        ID3D12Resource* dst = DirectCopySlot(slot);
+        const bool capture = !dst && !frame.colour_captured;
+        Rec first;
+        Rec after_capture;
+        Rec* r = &first;
+        FgExecResult s = Begin(r, dst || capture, !dst);
+        if (s != FgExecResult::Ok) return s;
+        if (kind == 'r') TimeStage(*r, FgExecStage::RealEndpoint);
+        if (dst) {
+            CopySlot(*r, dst, kind, token, index);
+        } else {
+            if (capture) {
+                CaptureColour(*r);
+                if (compute_queue) {
+                    uint64_t v = 0;
+                    s = Submit(r, &v);
+                    if (s != FgExecResult::Ok) return s;
+                    r = &after_capture;
+                    s = Begin(r);
+                    if (s != FgExecResult::Ok) return s;
+                    if (kind == 'r') TimeStage(*r, FgExecStage::RealEndpoint);
+                }
+            }
+            FgExecOp op;
+            op.op = FgOp::FinalCopy;
+            RecordOp(*r, op);
+            s = WriteSlot(*r, slot, kind, token, index);
+            if (s != FgExecResult::Ok) return s;
+        }
+        s = Finish(*r, ready);
+        if (s == FgExecResult::Ok && capture) frame.colour_captured = true;
+        return s;
+    }
 };
 
 // ---- public ------------------------------------------------------------------------------------------------------
 
 FgD3d12Executor::FgD3d12Executor(const FgD3d12ExecutorDesc& desc) : impl_(new Impl()) {
     impl_->desc = desc;
+    char timing[2] = {};
+    impl_->desc.timing |= GetEnvironmentVariableA("WRONGGPU_FG_TIMING", timing, sizeof(timing)) == 1 && timing[0] == '1';
     if (desc.weights) {
         impl_->weights = *desc.weights;
         impl_->have_weights = true;
@@ -1724,7 +2149,7 @@ FgD3d12Executor::FgD3d12Executor(const FgD3d12ExecutorDesc& desc) : impl_(new Im
 
 FgD3d12Executor::~FgD3d12Executor() {
     if (impl_ && impl_->fence) {
-        impl_->WaitValue(impl_->next_value, impl_->desc.wait_ms);
+        impl_->WaitIdle(impl_->desc.wait_ms);
         impl_->FlushDumps(true);
     }
 }
@@ -1772,12 +2197,37 @@ FgExecResult FgD3d12Executor::Configure(const FgCreateDesc& cd, uint32_t /*histo
     ID3D12Device* dev = static_cast<ID3D12Device*>(cd.device);
     ID3D12CommandQueue* q = static_cast<ID3D12CommandQueue*>(cd.queue);
     if (m.device && m.device.Get() != dev) return m.Fail(FgExecRefusal::BadArgument, "another device than before");
+    const D3D12_COMMAND_QUEUE_DESC queue_desc = q->GetDesc();
+    if (queue_desc.Type != D3D12_COMMAND_LIST_TYPE_DIRECT && queue_desc.Type != D3D12_COMMAND_LIST_TYPE_COMPUTE)
+        return m.Fail(FgExecRefusal::NullQueue, "the queue is neither a direct nor a compute queue");
+    if (!m.WaitIdle(m.desc.wait_ms)) return m.Fail(FgExecRefusal::WaitTimeout, "reconfigure while work is in flight");
+    m.FlushDumps(false);
     m.device = dev;
     m.queue = q;
-    m.list_type = q->GetDesc().Type;
-    if (m.list_type != D3D12_COMMAND_LIST_TYPE_DIRECT && m.list_type != D3D12_COMMAND_LIST_TYPE_COMPUTE)
-        return m.Fail(FgExecRefusal::NullQueue, "the queue is neither a direct nor a compute queue");
-    if (m.fence) m.WaitValue(m.next_value, m.desc.wait_ms);
+    m.list_type = queue_desc.Type;
+    m.entries.clear();
+    m.direct_entries.clear();
+    m.heap.Reset();
+    m.producer_queries = {};
+    m.direct_queries = {};
+    m.timings = {};
+    m.timing_failed = false;
+    m.compute_queue.Reset();
+    m.handoff_fence.Reset();
+    m.handoff_value = m.joined_handoff = m.arena_value = 0;
+    m.compute_slot_values.clear();
+    char async_compute[2] = {};
+    const bool async_off = GetEnvironmentVariableA("WRONGGPU_FG_ASYNC_COMPUTE", async_compute, sizeof(async_compute)) ==
+                               1 && async_compute[0] == '0';
+    if (m.list_type == D3D12_COMMAND_LIST_TYPE_DIRECT && !async_off) {
+        D3D12_COMMAND_QUEUE_DESC compute_desc = {};
+        compute_desc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+        compute_desc.NodeMask = queue_desc.NodeMask;
+        if (FAILED(dev->CreateCommandQueue(&compute_desc, IID_PPV_ARGS(&m.compute_queue))))
+            return m.Fail(FgExecRefusal::AllocationFailed, "compute queue");
+        if (FAILED(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m.handoff_fence))))
+            return m.Fail(FgExecRefusal::FenceFailed, "game queue handoff fence");
+    }
     if (!m.pipelines_built) {
         const FgExecResult p = m.BuildPipelines();
         if (p != FgExecResult::Ok) return p;
@@ -1888,7 +2338,21 @@ FgExecResult FgD3d12Executor::RecordSharedGameFrame(const FgSharedDispatchDesc& 
     }
     std::memcpy(f.clip_to_prev, p.camera_current, sizeof(f.clip_to_prev));
     std::memcpy(f.prev_to_clip, p.camera_previous, sizeof(f.prev_to_clip));
-    f.valid = true;
+
+    const InputTex* ins[5] = {&f.colour, &f.depth, &f.motion, f.hud ? &f.hudless : nullptr,
+                             (f.ui1 || f.ui4) ? &f.alpha : nullptr};
+    bool transition[5] = {};
+    for (int i = 0; i < 5; ++i) {
+        if (!ins[i]) continue;
+        transition[i] = Impl::NeedsTransition(ins[i]->state);
+        for (int j = 0; j < i; ++j) {
+            if (!ins[j] || ins[i]->res != ins[j]->res) continue;
+            if (ins[i]->state != ins[j]->state)
+                return m.Fail(FgExecRefusal::BadArgument, "aliased inputs report different resource states");
+            transition[i] = false;
+            break;
+        }
+    }
 
     // the previous game frame's last-index part, then this frame's schedule
     std::vector<uint32_t> pairs;
@@ -1903,53 +2367,71 @@ FgExecResult FgD3d12Executor::RecordSharedGameFrame(const FgSharedDispatchDesc& 
     else
         ++m.counters.full_frames;
 
-    // submission 1: capture, clears and the menu decision
-    Rec r;
-    FgExecResult s = m.Begin(&r);
+    // Menu detection and the corresponding generated MenuOutput both consume the captured inputs.
+    const bool input_srvs = !m.host.Frame().detect_ran && !m.desc.keep_outputs &&
+                            m.pso[m.g.d == 4 ? kDown4Srv : kDown2Srv] && m.pso[kMvecSrv];
+    Rec inputs;
+    FgExecResult s = m.Begin(&inputs, true);
     if (s != FgExecResult::Ok) return s;
-    InputTex* ins[5] = {&m.frame.colour, &m.frame.depth, &m.frame.motion, f.hud ? &m.frame.hudless : nullptr,
-                        (f.ui1 || f.ui4) ? &m.frame.alpha : nullptr};
-    const uint32_t dst[5] = {m.cap_colour, m.cap_depth, m.cap_motion, m.cap_hud, f.ui1 ? m.cap_ui1 : m.cap_ui4};
-    const uint32_t kind[5] = {4, 6, 5, 4, f.ui1 ? 1u : 4u};
-    for (InputTex* t : ins)
-        if (t && Impl::NeedsTransition(t->state))
-            m.Transition(r, t->res, t->state, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    for (int i = 0; i < 5; ++i)
-        if (ins[i]) m.Capture(r, *ins[i], dst[i], kind[i]);
-    for (InputTex* t : ins)
-        if (t && Impl::NeedsTransition(t->state))
-            m.Transition(r, t->res, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, t->state);
-    size_t i = 0;
-    bool detected = false;
-    for (; i < ops.size(); ++i) {
-        if (!m.RecordOp(r, ops[i])) return FgExecResult::Refused;
-        if (ops[i].op == FgOp::Detect || ops[i].op == FgOp::SetDisable) {
-            detected = ops[i].op == FgOp::Detect;
-            ++i;
-            break;
+    m.TimeStage(inputs, input_srvs ? FgExecStage::SharedPreNet1 : FgExecStage::Capture);
+    size_t next_op = 0;
+    if (input_srvs) {
+        // History clears must precede downsample. Keep the input transitions around the two SRV users.
+        while (ops[next_op].op != FgOp::Downsample) {
+            if (!m.RecordOp(inputs, ops[next_op++])) return FgExecResult::Refused;
         }
     }
-    if (detected) {
-        m.ArenaTo(r, D3D12_RESOURCE_STATE_COPY_SOURCE);
-        r.cl->CopyBufferRegion(m.menu_rb.Get(), 0, m.arena.Get(), m.detres_off, 32);
+    for (int i = 0; i < 5; ++i)
+        if (transition[i])
+            m.Transition(inputs, ins[i]->res, ins[i]->state, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    if (input_srvs) {
+        if (!m.RecordOp(inputs, ops[next_op++], true) || !m.RecordOp(inputs, ops[next_op++], true))
+            return FgExecResult::Refused;
+    } else {
+        const uint32_t dst[5] = {m.cap_colour, m.cap_depth, m.cap_motion, m.cap_hud, f.ui1 ? m.cap_ui1 : m.cap_ui4};
+        const uint32_t kind[5] = {4, 6, 5, 4, f.ui1 ? 1u : 4u};
+        for (int i = 0; i < 5; ++i)
+            if (ins[i]) m.Capture(inputs, *ins[i], dst[i], kind[i]);
+        m.SetTable(inputs, 0);
     }
-    uint64_t v1 = 0;
-    s = m.Submit(&r, &v1);
-    if (s != FgExecResult::Ok) return s;
-    // submission 2: the rest of the once-per-game-frame stages
-    Rec r2;
-    s = m.Begin(&r2);
-    if (s != FgExecResult::Ok) return s;
-    for (; i < ops.size(); ++i)
-        if (!m.RecordOp(r2, ops[i])) return FgExecResult::Refused;
-    uint64_t v2 = 0;
-    s = m.Submit(&r2, &v2);
+    for (int i = 0; i < 5; ++i)
+        if (transition[i])
+            m.Transition(inputs, ins[i]->res, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, ins[i]->state);
+    Rec compute;
+    Rec post_detect;
+    Rec* r = &inputs;
+    uint64_t v = 0, menu_value = 0;
+    if (m.compute_queue) {
+        s = m.Submit(&inputs, &v);
+        if (s != FgExecResult::Ok) return s;
+        r = &compute;
+        s = m.Begin(r);
+        if (s != FgExecResult::Ok) return s;
+    } else if (!input_srvs) {
+        m.Barrier(inputs);
+    }
+    for (; next_op < ops.size(); ++next_op) {
+        const FgExecOp& op = ops[next_op];
+        m.TimeStage(*r, op.op == FgOp::Net1 ? FgExecStage::Net1 :
+                        op.op == FgOp::Net1Output ? FgExecStage::SharedPostNet1 : FgExecStage::SharedPreNet1);
+        if (!m.RecordOp(*r, op)) return FgExecResult::Refused;
+        if (op.op == FgOp::Detect) {
+            m.ArenaTo(*r, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            r->cl->CopyBufferRegion(m.menu_rb.Get(), 0, m.arena.Get(), m.detres_off, 32);
+            s = m.Submit(r, &menu_value);
+            if (s != FgExecResult::Ok) return s;
+            r = &post_detect;
+            s = m.Begin(r);
+            if (s != FgExecResult::Ok) return s;
+        }
+    }
+    s = m.Submit(r, &v);
     if (s != FgExecResult::Ok) return s;
     out->menu.frame_token = d.frame_token;
     out->menu.detected = false;
-    if (detected) {
+    if (menu_value) {
         ++m.counters.menu_waits;
-        if (!m.WaitValue(v1, m.desc.wait_ms)) {
+        if (!m.WaitValue(menu_value, m.desc.wait_ms)) {
             if (m.DeviceRemoved()) return m.Fail(FgExecRefusal::DeviceLost, "device removed");
             return m.Fail(FgExecRefusal::WaitTimeout, "menu decision");
         }
@@ -1964,6 +2446,8 @@ FgExecResult FgD3d12Executor::RecordSharedGameFrame(const FgSharedDispatchDesc& 
         m.frame.disable = words[4];
     }
     ++m.counters.shared;
+    m.frame.valid = true;
+    m.frame.colour_captured = !input_srvs;
     return FgExecResult::Ok;
 }
 
@@ -1979,15 +2463,42 @@ FgExecResult FgD3d12Executor::RecordGeneratedIndex(const FgIndexDispatchDesc& d,
     m.ArmDumpOnGenerated(d.frame_token);
     std::vector<FgExecOp> ops;
     m.host.IndexOps(d.t, m.frame.hud, m.frame.ui4, false, &ops);
+    const bool capture = !m.frame.colour_captured && std::any_of(ops.begin(), ops.end(), [](const FgExecOp& op) {
+        return op.op == FgOp::FinalCopy || op.op == FgOp::Prefill;
+    });
+    if (capture && m.compute_queue) {
+        Rec inputs;
+        FgExecResult s = m.Begin(&inputs, true);
+        if (s != FgExecResult::Ok) return s;
+        m.TimeStage(inputs, FgExecStage::GenPreNet2);
+        m.CaptureColour(inputs);
+        uint64_t value = 0;
+        s = m.Submit(&inputs, &value);
+        if (s != FgExecResult::Ok) return s;
+        m.frame.colour_captured = true;
+    }
     Rec r;
     FgExecResult s = m.Begin(&r);
     if (s != FgExecResult::Ok) return s;
-    for (const FgExecOp& op : ops)
+    FgExecStage stage = FgExecStage::GenPreNet2;
+    if (capture && !m.frame.colour_captured) {
+        m.TimeStage(r, stage);
+        m.CaptureColour(r);
+    }
+    for (const FgExecOp& op : ops) {
+        if (op.op == FgOp::Net2) stage = FgExecStage::Net2;
+        if (op.op == FgOp::OutPyramid) stage = FgExecStage::OutPyramid;
+        m.TimeStage(r, stage);
         if (!m.RecordOp(r, op)) return FgExecResult::Refused;
+    }
+    m.TimeStage(r, FgExecStage::PackCopy);
     s = m.WriteSlot(r, d.slot.slot, 'g', d.frame_token, d.index);
     if (s != FgExecResult::Ok) return s;
     s = m.Finish(r, ready);
-    if (s == FgExecResult::Ok) ++m.counters.indices;
+    if (s == FgExecResult::Ok) {
+        if (capture) m.frame.colour_captured = true;
+        ++m.counters.indices;
+    }
     return s;
 }
 
@@ -1997,15 +2508,7 @@ FgExecResult FgD3d12Executor::RecordMenuCopy(const FgCopyDispatchDesc& d, FgRead
     if (!ready) return m.Fail(FgExecRefusal::BadArgument, "null ready fence");
     if (!m.frame.valid || m.frame.token != d.frame_token)
         return m.Fail(FgExecRefusal::BadArgument, "no captured game frame for this token");
-    Rec r;
-    FgExecResult s = m.Begin(&r);
-    if (s != FgExecResult::Ok) return s;
-    FgExecOp op;
-    op.op = FgOp::FinalCopy;
-    m.RecordOp(r, op);
-    s = m.WriteSlot(r, d.slot.slot, 'm', d.frame_token, d.index);
-    if (s != FgExecResult::Ok) return s;
-    s = m.Finish(r, ready);
+    const FgExecResult s = m.CopyFrameToSlot(d.slot.slot, 'm', d.frame_token, d.index, ready);
     if (s == FgExecResult::Ok) ++m.counters.copies;
     return s;
 }
@@ -2048,35 +2551,25 @@ FgExecResult FgD3d12Executor::RecordRealEndpoint(const FgRealDispatchDesc& d, Fg
     if (write) {
         if (!have_frame && !from_bb)
             return m.Fail(FgExecRefusal::BadArgument, "no captured game frame for this token");
-        Rec r;
-        FgExecResult s = m.Begin(&r);
-        if (s != FgExecResult::Ok) return s;
         if (from_bb) {
-            // capture the back buffer as this token's colour; the previous game frame's indices are all recorded
-            // before this (single caller, queue order), and the next game frame captures its own inputs
             FrameCtx f;
             f.token = d.frame_token;
             f.colour = bb;
             f.valid = true;
             m.frame = f;
-            if (Impl::NeedsTransition(bb.state))
-                m.Transition(r, bb.res, bb.state, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-            m.Capture(r, m.frame.colour, m.cap_colour, 4);
-            if (Impl::NeedsTransition(bb.state))
-                m.Transition(r, bb.res, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, bb.state);
-            ++m.counters.game_colour_copies;
         }
-        FgExecOp op;
-        op.op = FgOp::FinalCopy;
-        m.RecordOp(r, op);
-        s = m.WriteSlot(r, slot, 'r', d.frame_token, 0);
-        if (s != FgExecResult::Ok) return s;
-        s = m.Finish(r, ready);
-        if (s == FgExecResult::Ok) ++m.counters.real_endpoints;
+        const FgExecResult s = m.CopyFrameToSlot(slot, 'r', d.frame_token, 0, ready);
+        if (s == FgExecResult::Ok) {
+            ++m.counters.real_endpoints;
+            if (from_bb) ++m.counters.game_colour_copies;
+        }
+        if (s != FgExecResult::Ok && from_bb) m.frame.valid = false;
         return s;
     }
-    const uint64_t v = ++m.next_value;
-    if (FAILED(m.queue->Signal(m.fence.Get(), v))) return m.Fail(FgExecRefusal::CommandFailed, "queue signal");
+    uint64_t v = 0;
+    if (m.compute_queue && (!m.SignalHandoff(&v) || !m.JoinGameQueue()))
+        return m.QueueFailure("publish the game queue handoff");
+    if (!m.SignalProducer(&v)) return m.QueueFailure("queue signal");
     ready->fence = m.fence_id;
     ready->value = v;
     ++m.counters.real_endpoints;
@@ -2151,7 +2644,7 @@ FgExecResult FgD3d12Executor::Net2SelfTest(uint32_t seed, float t, uint32_t runs
 
     if (runs == 0 || !gpu_ms) return FgExecResult::Ok;
     UINT64 freq = 0;
-    if (FAILED(m.queue->GetTimestampFrequency(&freq)) || freq == 0) return FgExecResult::Ok;
+    if (FAILED(m.ProducerQueue()->GetTimestampFrequency(&freq)) || freq == 0) return FgExecResult::Ok;
     D3D12_QUERY_HEAP_DESC qd = {};
     qd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
     qd.Count = 2;
@@ -2198,11 +2691,27 @@ uint64_t FgD3d12Executor::CompletedComputeValue() const {
     return impl_->fence ? impl_->fence->GetCompletedValue() : 0;
 }
 
+bool FgD3d12Executor::WaitForComputeValue(uint64_t value, uint32_t timeout_ms) {
+    return impl_->fence && impl_->WaitValue(value, timeout_ms);
+}
+
 bool FgD3d12Executor::WaitIdle(uint32_t timeout_ms) {
-    if (!impl_->fence) return true;
-    const bool idle = impl_->WaitValue(impl_->next_value, timeout_ms);
+    const bool idle = impl_->WaitIdle(timeout_ms);
     if (idle) impl_->FlushDumps(false);
     return idle;
+}
+
+bool FgD3d12Executor::TakeTimings(FgExecTimings* out, uint32_t timeout_ms) {
+    Impl& m = *impl_;
+    if (!out || !m.producer_queries.readback || (m.compute_queue && !m.direct_queries.readback) ||
+        !WaitIdle(timeout_ms))
+        return false;
+    for (Entry& e : m.entries) m.CollectTimings(e, m.producer_queries);
+    for (Entry& e : m.direct_entries) m.CollectTimings(e, m.direct_queries);
+    if (m.timing_failed) return false;
+    *out = m.timings;
+    m.timings = {};
+    return true;
 }
 
 bool FgD3d12Executor::TakeOutputs(std::vector<FgExecOutputRecord>* out) {

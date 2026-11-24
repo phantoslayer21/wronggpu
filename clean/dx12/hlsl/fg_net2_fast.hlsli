@@ -69,9 +69,26 @@ uint4 fg_fma8v(float w[8], uint4 p, uint4 t)
     [unroll] for (uint i = 0; i < 8; ++i) m[i] = fg_sum_odd(w[i] * wg_h2f(fg_half(p, i)), wg_h2f(fg_half(t, i)));
     return fg_cvt8(m);
 }
+#if FG_NATIVE_LEAKY
+uint fg_leaky2(uint packed)
+{
+    const half2 slope = asfloat16((uint16_t)FG2_SLOPE16);
+    const half2 negzero = asfloat16((uint16_t)(0x8000u | fg_opq0()));
+    const uint scaled = wg_h2_bits(mad(slope, wg_as_h2(packed), negzero));
+    const uint lo = packed & 0xffffu, hi = packed >> 16;
+    const uint mask = select(lo > 0x8000u && lo <= 0xfc00u, 0xffffu, 0u) |
+                      select(hi > 0x8000u && hi <= 0xfc00u, 0xffff0000u, 0u);
+    return (packed & ~mask) | (scaled & mask);
+}
+#endif
+
 // fg2_leaky on 8 values: max(h(s v), v) by the keys (NaN unchanged)
 uint4 fg_leaky8(uint4 v)
 {
+#if FG_NATIVE_LEAKY
+    // For a negative number the slope product wins. Zeros, positives and NaNs keep their bits.
+    return uint4(fg_leaky2(v.x), fg_leaky2(v.y), fg_leaky2(v.z), fg_leaky2(v.w));
+#else
     const uint4 t = fg_mul8(wg_h2f(FG2_SLOPE16), v);
     uint r[8];
     [unroll] for (uint i = 0; i < 8; ++i) {
@@ -79,6 +96,77 @@ uint4 fg_leaky8(uint4 v)
         r[i] = select(fg_is_nan16(hv) != 0u, hv, select(fg_key16(ht) > fg_key16(hv), ht, hv));
     }
     return fg_pack8(r);
+#endif
+}
+
+#if FG_NATIVE_UP || FG_NATIVE_POST
+bool fg_nonfinite2(uint p)
+{
+    return or((p & 0x7c00u) == 0x7c00u, (p & 0x7c000000u) == 0x7c000000u);
+}
+
+bool fg_nonfinite8(uint4 p)
+{
+    return or(or(fg_nonfinite2(p.x), fg_nonfinite2(p.y)), or(fg_nonfinite2(p.z), fg_nonfinite2(p.w)));
+}
+
+#endif
+
+#if FG_NATIVE_POST
+uint4 fg_fma8_post(uint wbits, uint4 p, uint4 t)
+{
+    if (!WaveActiveAnyTrue(fg_nonfinite8(p) || fg_nonfinite8(t) || fg_nonfinite2(wbits))) {
+        const half2 w = asfloat16((uint16_t)wbits);
+        return uint4(wg_h2_bits(mad(w, wg_as_h2(p.x), wg_as_h2(t.x))),
+                     wg_h2_bits(mad(w, wg_as_h2(p.y), wg_as_h2(t.y))),
+                     wg_h2_bits(mad(w, wg_as_h2(p.z), wg_as_h2(t.z))),
+                     wg_h2_bits(mad(w, wg_as_h2(p.w), wg_as_h2(t.w))));
+    }
+    return fg_fma8(wg_h2f(wbits), p, t);
+}
+#endif
+
+#if FG_JOINED_POST
+uint4 fg_fma8_heads(uint wbits, uint4 p, uint4 t)
+{
+#if FG_NATIVE_POST
+    if (!WaveActiveAnyTrue(fg_nonfinite8(p) || fg_nonfinite8(t) || fg_nonfinite2(wbits))) {
+        const half2 w = asfloat16((uint16_t)wbits);
+        const half2 one = asfloat16((uint16_t)FG2_ONE16);
+        return uint4(wg_h2_bits(mad(w, wg_as_h2(p.x), wg_as_h2(t.x))),
+                     wg_h2_bits(mad(w, wg_as_h2(p.y), wg_as_h2(t.y))),
+                     wg_h2_bits(mad(one, wg_as_h2(p.z), wg_as_h2(t.z))),
+                     wg_h2_bits(mad(one, wg_as_h2(p.w), wg_as_h2(t.w))));
+    }
+#endif
+    float weights[8];
+    [unroll] for (int i = 0; i < 8; ++i) weights[i] = i < 4 ? wg_h2f(wbits) : 1.0f;
+    return fg_fma8v(weights, p, t);
+}
+#endif
+
+#if FG_NATIVE_UP
+uint fg_up_axis2(half2 w0, half2 w1, half2 nz, uint p0, uint p1)
+{
+    const half2 t = mad(w0, wg_as_h2(p0), nz);
+    return wg_h2_bits(mad(w1, wg_as_h2(p1), t));
+}
+#endif
+
+// One axis of net2's 2x half-pixel upsample, with the same two float16 roundings as fg_net2_up2.
+uint4 fg_up_axis8(Fg2Tap tap, uint4 p0, uint4 p1)
+{
+#if FG_NATIVE_UP
+    // Preserve FP32 NaN propagation in the exceptional case. Otherwise the two FP16 fused instructions
+    // reproduce the same roundings. Using -0 in the first FMA preserves the sign of a zero product.
+    if (!WaveActiveAnyTrue(fg_nonfinite8(p0) || fg_nonfinite8(p1))) {
+        const half2 w0 = asfloat16((uint16_t)tap.w0), w1 = asfloat16((uint16_t)tap.w1);
+        const half2 nz = asfloat16((uint16_t)(0x8000u | fg_opq0()));
+        return uint4(fg_up_axis2(w0, w1, nz, p0.x, p1.x), fg_up_axis2(w0, w1, nz, p0.y, p1.y),
+                     fg_up_axis2(w0, w1, nz, p0.z, p1.z), fg_up_axis2(w0, w1, nz, p0.w, p1.w));
+    }
+#endif
+    return fg_fma8(wg_h2f(tap.w1), p1, fg_mul8(wg_h2f(tap.w0), p0));
 }
 
 // net2's 2x half-pixel upsample (fg_net2_up2's bits) of 8 values at output (ox, oy) from q00 = (y0, x0), q01 =

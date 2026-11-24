@@ -6,30 +6,28 @@
 // Device side:
 //  - One root signature for every FG kernel (clean/dx12/hlsl/wg_platform.hlsli): the arena as root UAV u0 and its
 //    coherent alias u1, 59 root constants at b0 ([group base, workgroups, arguments...]) and a descriptor table with
-//    the driver channel's raw UAV (u0, space 0x7FFF0ADE, clean/dx12/hlsl/wg_ags.hlsli) and one texture view (t0) for
-//    the input capture. Kernels address the arena by 32-bit byte offsets; offset 0 is never a buffer (null).
+//    the driver channel's raw UAV (u0, space 0x7FFF0ADE, clean/dx12/hlsl/wg_ags.hlsli) and four input texture
+//    views (t0..t3). Kernels address the arena by 32-bit byte offsets; offset 0 is never a buffer (null).
 //  - Configure (off the present path): loads the DXIL of every kernel it needs from FgD3d12ExecutorDesc::dxil_dir
 //    (<dir>/<kernel>.dxil, built by clean/dx12/build_dx12.py --only), builds every pipeline once, sizes the arena for
 //    the frame size (every light-path image, the pyramid, net1's three regions, the input capture areas, the generated
 //    image, and with the Full path its images, net2's tensors, the output pyramid and the logistic table), uploads the
 //    weights (net1's fragments, net2's canonical weights) and creates the shared producer fence, the command
 //    allocators, the descriptor heap and the readback buffer for the menu decision.
-//  - RecordSharedGameFrame: captures the game frame's colour, motion, depth and optional hudless colour / UI alpha
-//    into the arena (fg_exec_io.hlsl fg_exec_capture), then runs the once-per-game-frame stages of fg_exec_plan.h's
-//    schedule: history clears, menu detection, R3 downsample / UI, R4 motion and depth, the previous-to-current scatter
-//    (signed 64-bit atomic minimum), unpack, hole rule, pull / push, the hole mask, and net1's input pack, the fused
-//    11-launch net1 (fg_net1_plan.h FgRecordNet1) and its output, or the quality image without history. The capture
-//    and the detection are submitted first; when a detector ran, the executor waits (bounded) for that submission
-//    only and reads the detection back, so the session gets this frame's decision.
+//  - RecordSharedGameFrame: runs the history clears, R3 downsample / UI and R4 motion and depth. The SRV kernels read
+//    the game textures on the game queue. Menu detection and output readbacks use arena captures. The remaining
+//    work uses the arena: previous-to-current scatter, unpack, hole rule, pull / push, hole mask, and net1's input,
+//    network and output (or the quality image without history). Menu detection waits for its decision readback.
 //  - RecordGeneratedIndex: the per-index stages (intermediate-time scatters MA / MB, blend weights, then the light
 //    blend (preset C) or the Full blend, net2 and the output pyramid (presets A / B), the menu output) into the
 //    generated image, which is written into the presenter slot's texture (fg_exec_pack when the slot is not float16,
 //    then a copy; the slot goes COMMON -> COPY_DEST -> COMMON), followed by a signal of the shared producer fence.
-//  - RecordMenuCopy / RecordRealEndpoint: the game frame's colour, exactly, into the slot; a real-only endpoint only
-//    signals the fence after the game frame's work on the queue.
+//  - RecordMenuCopy / RecordRealEndpoint: copy matching linear UNORM textures on the game queue, or capture colour
+//    on demand and convert it to the slot format. An endpoint without a slot signals the game frame's queue work.
 //  - Every refusal names its reason (LastRefusal / LastWhy); nothing falls back to another path.
-// The executor records on the session's queue (FgCreateDesc::queue), so the game's work that produced the inputs is
-// ordered before it. Single caller (the session's present owner). No lambda captures a copy that can throw.
+// The executor reads game textures on the session's queue (FgCreateDesc::queue), ordered after the game's producers.
+// A direct game queue hands arena work to a dedicated compute queue by default
+// (WRONGGPU_FG_ASYNC_COMPUTE=0 selects the game queue for all work). Single caller (the session's present owner).
 //
 // Conventions the frame contract leaves to the executor (until the adapter contract names them):
 //  - FgFramePacket::camera_current is the clip-to-previous-clip matrix and camera_previous the previous-clip-to-clip
@@ -39,9 +37,10 @@
 //  - net2's scalar input f is the index's intermediate time t.
 //  - A real-only interval shows the game frame from a slot the executor reserves (ReserveRealSlot) and fills with an
 //    exact copy, when the session recorded that frame's shared work, or, for an adapter-side real-only frame (FG off,
-//    menu flag, missing inputs), from the game's back buffer (FgRealDispatchDesc::game_colour: captured, then copied
-//    exactly) when it is a four-channel image of the output size; otherwise only the fence is signalled.
+//    menu flag, missing inputs), from the game's back buffer (FgRealDispatchDesc::game_colour) when it is a
+//    four-channel image of the output size; otherwise only the fence is signalled.
 //  - A frame that carries the distortion field is refused (not modelled) unless the setting ignores it.
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -132,7 +131,7 @@ void FgExecSigTable(std::vector<float>* out);
 enum class FgNet2Path : uint32_t { Fast = 0, Exact = 1 };
 const char* FgNet2PathName(FgNet2Path p);
 
-// One launch of the fast net2 plan for a net2 grid (CPU side, tested on its own): the kernel variant chosen for the
+// One launch of the fast net2 plan for a net2 grid (CPU side, tested on its own): the baseline kernel variant for the
 // layer (clean/fg/runner/fg_net2_mma.py variant()), its workgroup count and the conv grid.
 struct FgNet2FastLaunch {
     uint32_t layer = 0;       // 1..25, 0: the input merge, 26: the upwarp
@@ -147,7 +146,7 @@ bool FgNet2FastPlan(uint32_t W2, uint32_t H2, std::vector<FgNet2FastLaunch>* out
 bool FgNet2SwizzleFast(const std::vector<uint8_t>& canonical, const std::vector<uint8_t>& bias, uint32_t cout,
                        uint32_t cw, std::vector<uint8_t>* fragments, std::vector<uint8_t>* bias_padded);
 
-// The DXIL files (without ".dxil") an executor with these choices loads from FgD3d12ExecutorDesc::dxil_dir.
+// The required DXIL files (without ".dxil") for these choices. The executor also loads available net1 tuning variants.
 std::vector<std::string> FgD3d12ExecutorKernelNames(bool enable_full, FgNet2Path net2);
 
 // Whether a game texture of this DXGI format is accepted as the motion-vector input: it must be readable as a colour
@@ -164,6 +163,7 @@ struct FgD3d12ExecutorDesc {
     uint32_t wait_ms = 2000;                // bounded waits (menu decision, allocator reuse, idle)
     uint32_t allocators = 24;               // command allocators in the ring
     bool keep_outputs = false;              // tests: keep a host copy of every image written into a slot
+    bool timing = false;                    // also enabled by WRONGGPU_FG_TIMING=1
     // Developer frame dumps (off while dump_dir is empty; the ASI sets it only in a developer build): of the game
     // frames that generate, every dump_every-th one (at most dump_max), the game frame's slot image (game_<n>.ppm) and
     // each generated slot image (gen_<n>_<i>.ppm) are copied to a readback buffer after the slot write, and written as
@@ -199,6 +199,15 @@ struct FgExecCounters {
     uint64_t net2_fast = 0, net2_exact = 0;  // net2 recordings per path
 };
 
+enum class FgExecStage : uint32_t {
+    Capture, SharedPreNet1, Net1, SharedPostNet1, GenPreNet2, Net2, OutPyramid, PackCopy, RealEndpoint, Count
+};
+
+struct FgExecTimings {
+    // Sum of GPU timestamp intervals for each stage since the previous collection, in milliseconds.
+    std::array<double, static_cast<size_t>(FgExecStage::Count)> ms = {};
+};
+
 class FgD3d12Executor final : public IFgKernelExecutor {
 public:
     explicit FgD3d12Executor(const FgD3d12ExecutorDesc& desc);
@@ -221,8 +230,12 @@ public:
     const FgExecCounters& Counters() const;
     const FgExecGeometry& Geometry() const;
     uint64_t ArenaBytes() const;
+    // Bounded wait for a value on the producer fence.
+    bool WaitForComputeValue(uint64_t value, uint32_t timeout_ms);
     // Bounded wait until every submission completed.
     bool WaitIdle(uint32_t timeout_ms);
+    // Collect and clear the timings through the latest submission. Returns false when profiling is unavailable.
+    bool TakeTimings(FgExecTimings* out, uint32_t timeout_ms);
     // keep_outputs: waits idle and moves the host copies out (oldest first).
     bool TakeOutputs(std::vector<FgExecOutputRecord>* out);
 

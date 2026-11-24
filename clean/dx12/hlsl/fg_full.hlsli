@@ -3,7 +3,7 @@
 // fg_out_pull.hlsl, fg_out_push.hlsl, fg_distortion.hlsl), with the bits of clean/fg/reference/stages_full.py.
 //
 // - Images live in the arena, row-major: 4 x float16 = 8 bytes per texel (r | g << 16, b | a << 16), 2 x float16 = 4
-//   bytes, 1 x float16 = 2 bytes, 2 x float32 = 8 bytes; float16 is written with wg_f2h (nearest even).
+//   bytes, 1 x float16 = 2 bytes, 2 x float32 = 8 bytes; float16 is written with fg_f2h (nearest even).
 // - The reference's approximate division is wg_div (IEEE); float -> int is (int) (truncate, saturate, NaN -> 0).
 // - Bilinear reads by hand (fgf_tap / fgf_mix): i = floor(t), f = t - i, taps i and i + 1 clamped to the image, weights
 //   (1 - fx)(1 - fy), fx (1 - fy), fy (1 - fx), fx fy, value fma(w11, c11, fma(w01, c01, fma(w00, c00, w10 c10))).
@@ -13,15 +13,40 @@
 //   1, 2, 4, ... sums pairs in x, then y, at every scale (the reference's block_sums order).
 // The including file includes wg_platform.hlsli first and starts its kernel with FGF_SETUP().
 #pragma once
+#include "fg_fp16.hlsli"
 
 static uint fgf_z_;   // an opaque zero: wg_grid_ >> 31 (a grid never has 2^31 workgroups)
-#define FGF_SETUP() (WG_SETUP(), fgf_z_ = wg_grid_ >> 31)
+#define FGF_SETUP() (FG_FP16_SETUP(), fgf_z_ = wg_grid_ >> 31)
 
 float fgf_opq(float x) { return asfloat(asuint(x) ^ fgf_z_); }
 float3 fgf_opq3(float3 x) { return asfloat(asuint(x) ^ fgf_z_); }
 float fgf_zero() { return asfloat(fgf_z_); }
 float fgf_sat(float x) { return min(max(x, 0.0f), 1.0f); }
 float3 fgf_sat3(float3 x) { return min(max(x, 0.0f), 1.0f); }
+
+// The refinement in wg_div without exponent normalization. Use it for a positive
+// normal divisor and finite operands in the range needed by the Full path.
+float fgf_div_reciprocal(float b)
+{
+    const float y = rcp(b);
+    return mad(mad(-b, y, 1.0f), y, y);
+}
+
+float3 fgf_div_normal3(float3 a, float b, float y)
+{
+    float3 q = a * y;
+    q = mad(mad(-b, q, a), y, q);
+    return mad(mad(-b, q, a), y, q);
+}
+
+float fgf_pixel_centre(int i, int n)
+{
+    const float a = (float)i + 0.5f, b = (float)n;
+    const float y = fgf_div_reciprocal(b);
+    float q = a * y;
+    q = mad(mad(-b, q, a), y, q);
+    return fgf_sat(mad(mad(-b, q, a), y, q));
+}
 
 // sat((i + 0.5) / n): the normalized centre of pixel i of an n-pixel axis
 float fgf_centre(int i, int n) { return fgf_sat(wg_div((float)i + 0.5f, (float)n)); }
@@ -40,9 +65,23 @@ float4 fgf_ld4h(uint p, int i)
 }
 float2 fgf_ld2h(uint p, int i) { const uint d = wg_ld32(p, (uint)i * 4u); return float2(wg_h2f_lo(d), wg_h2f_hi(d)); }
 float fgf_ld1h(uint p, int i) { return wg_h2f(wg_ld16(p, (uint)i * 2u)); }
-void fgf_st4h(uint p, int i, float4 v) { wg_st64(p, (uint)i * 8u, uint2(wg_pack_h2(v.x, v.y), wg_pack_h2(v.z, v.w))); }
-void fgf_st2h(uint p, int i, float2 v) { wg_st32(p, (uint)i * 4u, wg_pack_h2(v.x, v.y)); }
-void fgf_st1h(uint p, int i, float v) { wg_st16(p, (uint)i * 2u, wg_f2h(v)); }
+void fgf_st4h(uint p, int i, float4 v) { wg_st64(p, (uint)i * 8u, uint2(fg_pack_h2(v.x, v.y), fg_pack_h2(v.z, v.w))); }
+void fgf_st2h(uint p, int i, float2 v) { wg_st32(p, (uint)i * 4u, fg_pack_h2(v.x, v.y)); }
+void fgf_st1h(uint p, int i, float v) { wg_st16(p, (uint)i * 2u, fg_f2h(v)); }
+
+// Adjacent Morton lanes cover an aligned horizontal pair when the row pitch is even.
+// Call with the full wave active, including lanes outside the frame.
+void fgf_store_morton_flag(uint p, int x, int y, int w, int h, bool flag)
+{
+    const uint bits = flag ? 0x3c00u : 0u;
+    if ((w & 1) == 0 && (p & 3u) == 0u) {
+        const uint other = QuadReadAcrossX(bits);
+        if ((x & 1) == 0 && x < w && y < h)
+            wg_st32(p, (uint)(y * w + x) * 2u, bits | (other << 16));
+    } else if (x < w && y < h) {
+        wg_st16(p, (uint)(y * w + x) * 2u, bits);
+    }
+}
 
 // ---- bilinear reads ---------------------------------------------------------------------------------------------------
 struct FgfTap { int i00, i10, i01, i11; float w00, w10, w01, w11; };
@@ -53,9 +92,9 @@ FgfTap fgf_tap(float tx, float ty, int W, int H)
     FgfTap t;
     const float x0f = floor(tx), y0f = floor(ty);
     const float fx = tx - x0f, fy = ty - y0f;
-    const int xi = (int)x0f, yi = (int)y0f;
-    const int x0 = clamp(xi, 0, W - 1), x1 = clamp(xi, -1, W - 2) + 1;
-    const int y0 = clamp(yi, 0, H - 1), y1 = clamp(yi, -1, H - 2) + 1;
+    const int xi = clamp((int)x0f, -1, W - 1), yi = clamp((int)y0f, -1, H - 1);
+    const int x0 = max(xi, 0), x1 = min(xi + 1, W - 1);
+    const int y0 = max(yi, 0), y1 = min(yi + 1, H - 1);
     t.i00 = y0 * W + x0; t.i10 = y0 * W + x1; t.i01 = y1 * W + x0; t.i11 = y1 * W + x1;
     const float gx = 1.0f - fx, gy = 1.0f - fy;
     t.w00 = fgf_opq(gx * gy);

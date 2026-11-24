@@ -318,8 +318,7 @@ struct FgAsiSessionHost::Impl {
         last_values[1] = last_values[2];
         last_values[2] = exec->LastComputeValue();
         if (want == 0) return;
-        const ULONGLONG until = GetTickCount64() + 50;
-        while (exec->CompletedComputeValue() < want && GetTickCount64() < until) Sleep(0);
+        exec->WaitForComputeValue(want, 50);
     }
 
     void DestroySession(const char* why) {

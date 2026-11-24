@@ -20,19 +20,66 @@
 #define FGP_MID 0
 #endif
 
-groupshared float4 fgp_s[256];
-
-// two lane-tree steps (x then y) at strides s and 2 s
-void fgp_steps(uint l, uint s)
-{
-    wg_barrier_lds();
-    if ((l & (2u * s - 1u)) == 0u) fgp_s[l] = fgp_s[l] + fgp_s[l + s];
-    wg_barrier_lds();
-    if ((l & (4u * s - 1u)) == 0u) fgp_s[l] = fgp_s[l] + fgp_s[l + 2u * s];
-    wg_barrier_lds();
-}
+groupshared float4 fgp_wave_sums[8];
 
 int fgp_size(int n, uint lvl) { return (n + (1 << lvl) - 1) >> lvl; }
+
+float4 fgp_level(float4 acc, uint m)
+{
+#if FGP_MID
+    return fgf_level(acc, (float)(1u << (2u * m)));
+#else
+    // The first tile receives saturated finite RGB and weights of zero or one.
+    // With no contributing pixels RGB is zero, so its denominator can be one.
+    const float den = max(acc.w, 1.0f);
+    const float3 rgb = fgf_div_normal3(acc.xyz, den, fgf_div_reciprocal(den));
+    const float scale = asfloat((127u - 2u * m) << 23u);
+    return float4(select(acc.xyz == 0.0f, acc.xyz, rgb), acc.w * scale);
+#endif
+}
+
+void fgp_write(uint dst, int px, int py, int w, int h, uint lvl, uint m, float4 acc)
+{
+    const int X = px >> m, Y = py >> m;
+    if (X < fgp_size(w, lvl) && Y < fgp_size(h, lvl))
+        fgf_st4h(dst, Y * fgp_size(w, lvl) + X, fgp_level(acc, m));
+}
+
+float4 fgp_pair(float4 acc, uint lane, uint stride)
+{
+    return acc + WaveReadLaneAt(acc, lane ^ stride);
+}
+
+void fgp_reduce(float4 acc, int2 origin, int w, int h, uint lvl0, uint4 dst)
+{
+    const uint l = wg_lane_id(), lane = wg_wave_lane();
+    const int px = origin.x + (int)fgf_mx(l), py = origin.y + (int)fgf_my(l);
+#if FGP_MID
+    acc = fgp_pair(fgp_pair(acc, lane, 1u), lane, 2u);
+#else
+    acc += QuadReadAcrossX(acc);
+    acc += QuadReadAcrossY(acc);
+#endif
+    if ((l & 3u) == 0u) fgp_write(dst.x, px, py, w, h, lvl0 + 1u, 1u, acc);
+    acc = fgp_pair(fgp_pair(acc, lane, 4u), lane, 8u);
+    if ((l & 15u) == 0u) fgp_write(dst.y, px, py, w, h, lvl0 + 2u, 2u, acc);
+    acc = fgp_pair(acc, lane, 16u);
+    if (lane == 0u) fgp_wave_sums[l >> 5] = acc;
+    wg_barrier_lds();
+
+    // The first wave gathers the eight partial sums and continues the same tree.
+    if (l < 32u) {
+        const uint part = lane & 7u;
+        acc = fgp_pair(fgp_wave_sums[part], lane, 1u);
+        if (l < 8u && (part & 1u) == 0u) {
+            const uint tile_lane = part * 32u;
+            fgp_write(dst.z, origin.x + (int)fgf_mx(tile_lane), origin.y + (int)fgf_my(tile_lane),
+                      w, h, lvl0 + 3u, 3u, acc);
+        }
+        acc = fgp_pair(fgp_pair(acc, lane, 2u), lane, 4u);
+        if (l == 0u) fgp_write(dst.w, origin.x, origin.y, w, h, lvl0 + 4u, 4u, acc);
+    }
+}
 
 WG_ARGS_BEGIN
 #if FGP_MID
@@ -51,25 +98,14 @@ WG_KERNEL(fg_out_pull_mid)
     FGF_SETUP();
     const uint l = wg_lane_id();
     const uint t = wg_block_id();
-    const int ex = (int)((t % (uint)tiles_x) * 16u + fgf_mx(l));
-    const int ey = (int)((t / (uint)tiles_x) * 16u + fgf_my(l));
+    const int2 origin = int2(t % (uint)tiles_x, t / (uint)tiles_x) * 16;
+    const int ex = origin.x + (int)fgf_mx(l), ey = origin.y + (int)fgf_my(l);
     float4 acc = 0.0f;
     if (ex < w4 && ey < h4) {
         const float4 e = fgf_ld4h(lv4, ey * w4 + ex);
         acc = float4(e.xyz * e.w, e.w);
     }
-    fgp_s[l] = acc;
-    [unroll] for (uint m = 1u; m <= 4u; ++m) {
-        fgp_steps(l, 1u << (2u * m - 2u));
-        const uint lvl = m + 4u;
-        if ((l & ((1u << (2u * m)) - 1u)) == 0u) {
-            const int X = ex >> m, Y = ey >> m;
-            if (X < fgp_size(Wo, lvl) && Y < fgp_size(Ho, lvl)) {
-                const uint dst = m == 1u ? lv5 : (m == 2u ? lv6 : (m == 3u ? lv7 : lv8));
-                fgf_st4h(dst, Y * fgp_size(Wo, lvl) + X, fgf_level(fgp_s[l], (float)(1u << (2u * m))));
-            }
-        }
-    }
+    fgp_reduce(acc, origin, Wo, Ho, 4u, uint4(lv5, lv6, lv7, lv8));
 }
 #else
 // net2's bilinear rule: fma(1 - fy, fma(1 - fx, q00, fx q10), fy fma(1 - fx, q01, fx q11))
@@ -78,67 +114,109 @@ float fgp_bil(float fx, float fy, float gx, float gy, float q00, float q10, floa
     return mad(gy, mad(gx, q00, fx * q10), fy * mad(gx, q01, fx * q11));
 }
 
+// One 20-bit mask per row of the 16 x 16 tile with its two-pixel halo.
+groupshared uint fgp_need_rows[20];
+groupshared uint3 fgp_n2_tile[25];
+
+uint3 fgp_n2_at(int x, int y)
+{
+    const uint4 d = wg_ld128(n2, (uint)(y * W2 + x) * 16u);
+    return uint3(d.x, d.y, wg_ld32(sigtab, (d.z & 0xffffu) * 4u));
+}
+
+void fgp_stage(int2 origin, bool cache_n2)
+{
+    const uint l = wg_lane_id(), lane = wg_wave_lane();
+    const int x = origin.x + (int)lane - 2;
+    for (uint row = l >> 5; row < 20u; row += 8u) {
+        const int y = origin.y + (int)row - 2;
+        const bool inside = x >= 0 && x < Wo && y >= 0 && y < Ho;
+        const bool need = lane < 20u && (!inside || fgf_ld1h(xw, y * Wo + x) > 0.0f);
+        const uint mask = WaveActiveBallot(need).x;
+        if (lane == 0u) fgp_need_rows[row] = mask;
+    }
+
+    // With k = 4, sixteen adjacent pixels sample the same four taps. The tile spans
+    // four coarse cells in each dimension and needs one extra tap on the right and bottom.
+    if (cache_n2 && l < 25u) {
+        const int x0 = min((origin.x >> 2) + (int)(l % 5u), W2 - 1);
+        const int y0 = min((origin.y >> 2) + (int)(l / 5u), H2 - 1);
+        fgp_n2_tile[l] = fgp_n2_at(x0, y0);
+    }
+    wg_barrier_lds();
+}
+
 WG_KERNEL(fg_out_pull)
 {
     FGF_SETUP();
     const uint l = wg_lane_id();
     const uint t = wg_block_id();
-    const int px = (int)((t % (uint)tiles_x) * 16u + fgf_mx(l));
-    const int py = (int)((t / (uint)tiles_x) * 16u + fgf_my(l));
+    const int2 origin = int2(t % (uint)tiles_x, t / (uint)tiles_x) * 16;
+    const uint lx = fgf_mx(l), ly = fgf_my(l);
+    const int px = origin.x + (int)lx, py = origin.y + (int)ly;
+    const bool cache_n2 = k == 4 && rk_bits == 0x3e800000u;
+    fgp_stage(origin, cache_n2);
+
     float4 acc = 0.0f;
-    if (px < Wo && py < Ho) {
-        // hole: every 3 x 3 window containing the pixel holds a pixel with Xw > 0 (outside the frame: need)
+    float3 out_c = 0.0f;
+    bool hole = false;
+    const bool in_bounds = px < Wo && py < Ho;
+    if (in_bounds) {
+        // Every 3 x 3 window containing this pixel must have at least one need bit.
         uint m = 0u;
-        [unroll] for (int dy = 0; dy < 5; ++dy) {
-            [unroll] for (int dx = 0; dx < 5; ++dx) {
-                const int qx = px + dx - 2, qy = py + dy - 2;
-                const bool inside = qx >= 0 && qy >= 0 && qx < Wo && qy < Ho;
-                const float need = fgf_ld1h(xw, clamp(qy, 0, Ho - 1) * Wo + clamp(qx, 0, Wo - 1));
-                m |= ((!inside || need > 0.0f) ? 1u : 0u) << (uint)(dy * 5 + dx);
+        [unroll] for (uint dy = 0u; dy < 5u; ++dy)
+            m |= ((fgp_need_rows[ly + dy] >> lx) & 31u) << (dy * 5u);
+        // OR down three rows, then across three columns. Only the nine valid
+        // window origins are tested, so shifts across packed row boundaries are harmless.
+        const uint rows = m | (m >> 5u) | (m >> 10u);
+        const uint windows = rows | (rows >> 1u) | (rows >> 2u);
+        const uint origins = 7u | (7u << 5u) | (7u << 10u);
+        hole = (windows & origins) == origins;
+        float3 c = 0.0f;
+        [branch] if (!hole) {
+            // net2's output at (x / k, y / k)
+            const float rk = asfloat(rk_bits);
+            const float s = min((float)px * rk, (float)(W2 - 1)), tt = min((float)py * rk, (float)(H2 - 1));
+            const float sf = floor(s), tf = floor(tt);
+            const int i0 = (int)sf, j0 = (int)tf, i1 = min(i0 + 1, W2 - 1), j1 = min(j0 + 1, H2 - 1);
+            const float fx = s - sf, fy = tt - tf, gx = 1.0f - fx, gy = 1.0f - fy;
+            uint3 d00, d10, d01, d11;
+            [branch] if (cache_n2) {
+                const uint i = (ly >> 2) * 5u + (lx >> 2);
+                d00 = fgp_n2_tile[i];
+                d10 = fgp_n2_tile[i + 1u];
+                d01 = fgp_n2_tile[i + 5u];
+                d11 = fgp_n2_tile[i + 6u];
+            } else {
+                d00 = fgp_n2_at(i0, j0);
+                d10 = fgp_n2_at(i1, j0);
+                d01 = fgp_n2_at(i0, j1);
+                d11 = fgp_n2_at(i1, j1);
             }
+            const float sigma = fgp_bil(fx, fy, gx, gy, asfloat(d00.z), asfloat(d10.z), asfloat(d01.z), asfloat(d11.z));
+            const float vax = fgp_bil(fx, fy, gx, gy, wg_h2f_lo(d00.x), wg_h2f_lo(d10.x), wg_h2f_lo(d01.x), wg_h2f_lo(d11.x));
+            const float vay = fgp_bil(fx, fy, gx, gy, wg_h2f_hi(d00.x), wg_h2f_hi(d10.x), wg_h2f_hi(d01.x), wg_h2f_hi(d11.x));
+            const float vbx = fgp_bil(fx, fy, gx, gy, wg_h2f_lo(d00.y), wg_h2f_lo(d10.y), wg_h2f_lo(d01.y), wg_h2f_lo(d11.y));
+            const float vby = fgp_bil(fx, fy, gx, gy, wg_h2f_hi(d00.y), wg_h2f_hi(d10.y), wg_h2f_hi(d01.y), wg_h2f_hi(d11.y));
+            // the two candidates re-sampled at the pixel plus k times the vectors (pixel units)
+            const float kf = (float)k;
+            const float3 A = fgf_bil4h(x0, fgf_tap(vax * kf + (float)px, vay * kf + (float)py, Wo, Ho)).xyz;
+            const float3 B = fgf_bil4h(x1, fgf_tap(vbx * kf + (float)px, vby * kf + (float)py, Wo, Ho)).xyz;
+            c = fgf_sat3(mad(sigma, A, (1.0f - sigma) * B));
+            if (isnan(abs(c.z * (c.x * c.y)))) c = float3(0.0f, 1.0f, 1.0f);
         }
-        bool hole = true;
-        [unroll] for (int cy = 0; cy < 3; ++cy) {
-            [unroll] for (int cx = 0; cx < 3; ++cx) {
-                const uint wmask = (7u << (uint)(cy * 5 + cx)) | (7u << (uint)(cy * 5 + 5 + cx)) | (7u << (uint)(cy * 5 + 10 + cx));
-                hole = hole && (m & wmask) != 0u;
-            }
-        }
-        // net2's output at (x / k, y / k)
-        const float rk = asfloat(rk_bits);
-        const float s = min((float)px * rk, (float)(W2 - 1)), tt = min((float)py * rk, (float)(H2 - 1));
-        const float sf = floor(s), tf = floor(tt);
-        const int i0 = (int)sf, j0 = (int)tf, i1 = min(i0 + 1, W2 - 1), j1 = min(j0 + 1, H2 - 1);
-        const float fx = s - sf, fy = tt - tf, gx = 1.0f - fx, gy = 1.0f - fy;
-        const uint4 d00 = wg_ld128(n2, (uint)(j0 * W2 + i0) * 16u), d10 = wg_ld128(n2, (uint)(j0 * W2 + i1) * 16u);
-        const uint4 d01 = wg_ld128(n2, (uint)(j1 * W2 + i0) * 16u), d11 = wg_ld128(n2, (uint)(j1 * W2 + i1) * 16u);
-        const float sigma = fgp_bil(fx, fy, gx, gy, wg_ldf(sigtab, (d00.z & 0xFFFFu) * 4u), wg_ldf(sigtab, (d10.z & 0xFFFFu) * 4u),
-                                    wg_ldf(sigtab, (d01.z & 0xFFFFu) * 4u), wg_ldf(sigtab, (d11.z & 0xFFFFu) * 4u));
-        const float vax = fgp_bil(fx, fy, gx, gy, wg_h2f_lo(d00.x), wg_h2f_lo(d10.x), wg_h2f_lo(d01.x), wg_h2f_lo(d11.x));
-        const float vay = fgp_bil(fx, fy, gx, gy, wg_h2f_hi(d00.x), wg_h2f_hi(d10.x), wg_h2f_hi(d01.x), wg_h2f_hi(d11.x));
-        const float vbx = fgp_bil(fx, fy, gx, gy, wg_h2f_lo(d00.y), wg_h2f_lo(d10.y), wg_h2f_lo(d01.y), wg_h2f_lo(d11.y));
-        const float vby = fgp_bil(fx, fy, gx, gy, wg_h2f_hi(d00.y), wg_h2f_hi(d10.y), wg_h2f_hi(d01.y), wg_h2f_hi(d11.y));
-        // the two candidates re-sampled at the pixel plus k times the vectors (pixel units)
-        const float kf = (float)k;
-        const float3 A = fgf_bil4h(x0, fgf_tap(vax * kf + (float)px, vay * kf + (float)py, Wo, Ho)).xyz;
-        const float3 B = fgf_bil4h(x1, fgf_tap(vbx * kf + (float)px, vby * kf + (float)py, Wo, Ho)).xyz;
-        float3 c = fgf_sat3(mad(sigma, A, (1.0f - sigma) * B));
-        if (isnan(abs(c.z * (c.x * c.y)))) c = float3(0.0f, 1.0f, 1.0f);
-        if (hole) c = 0.0f;
-        fgf_st4h(outp, (py + out_y) * out_pitch + px + out_x, float4(c, 1.0f));
-        fgf_st1h(fine, py * Wo + px, hole ? 1.0f : 0.0f);
+        out_c = c;
         acc = float4(c, hole ? 0.0f : 1.0f);
     }
-    fgp_s[l] = acc;
-    [unroll] for (uint lvl = 1u; lvl <= 4u; ++lvl) {
-        fgp_steps(l, 1u << (2u * lvl - 2u));
-        if ((l & ((1u << (2u * lvl)) - 1u)) == 0u) {
-            const int X = px >> lvl, Y = py >> lvl;
-            if (X < fgp_size(Wo, lvl) && Y < fgp_size(Ho, lvl)) {
-                const uint dst = lvl == 1u ? lv1 : (lvl == 2u ? lv2 : (lvl == 3u ? lv3 : lv4));
-                fgf_st4h(dst, Y * fgp_size(Wo, lvl) + X, fgf_level(fgp_s[l], (float)(1u << (2u * lvl))));
-            }
-        }
+    {
+        v8f pv;
+        pv.v[0] = fgf_opq(out_c.x); pv.v[1] = fgf_opq(out_c.y); pv.v[2] = fgf_opq(out_c.z);
+        [unroll] for (uint ci = 3u; ci < 8u; ++ci) pv.v[ci] = 0.0f;
+        const uint4 h = wg_to_f16_ags(pv);
+        if (in_bounds)
+            wg_st64(outp, (uint)((py + out_y) * out_pitch + px + out_x) * 8u, uint2(h.x, (h.y & 0xffffu) | 0x3c000000u));
     }
+    fgf_store_morton_flag(fine, px, py, Wo, Ho, hole);
+    fgp_reduce(acc, origin, Wo, Ho, 0u, uint4(lv1, lv2, lv3, lv4));
 }
 #endif

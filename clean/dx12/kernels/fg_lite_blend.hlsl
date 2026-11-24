@@ -28,7 +28,6 @@ bool fg_in_box(float px, float py)
 float3 fg_correct(float3 c, float alpha, float2 uv, float u, float v, bool empty, float4 P0, float4 Q0, uint L,
                   float3 own)
 {
-    const FgRegion lr = FG_REGION(l);
     bool ok = fg_finite3(c) && !empty && fg_finite(uv.x) && fg_finite(uv.y) && wo >= 2u && ho >= 2u;
     ok = ok && fg_in_box(mad(uv.x, (float)wo, -0.5f), mad(uv.y, (float)ho, -0.5f));
     ok = ok && fg_finite(u) && fg_finite(v) && fg_in_box(mad(u, (float)wo, -0.5f), mad(v, (float)ho, -0.5f));
@@ -39,12 +38,15 @@ float3 fg_correct(float3 c, float alpha, float2 uv, float u, float v, bool empty
     const float dx = fg_mul(uv.x - u, (float)wo), dy = fg_mul(uv.y - v, (float)ho);
     ok = ok && fg_sq(dx, dy) >= 4.0f;
     ok = ok && fg_finite3(P0.xyz) && fg_finite3(Q0.xyz) && P0.w == 0.0f && Q0.w == 0.0f;
+    [branch] if (!ok) return c;
+
+    const FgRegion lr = FG_REGION(l);
     const float2 X1 = fg_region_xy(lr, uv.x, uv.y, false);
     const float3 d1 = fg_read_linear(L, 4u, (int)wo, (int)ho, X1.x, X1.y).xyz;
     const float2 X0 = fg_region_xy(lr, u, v, false);
     const float3 d0 = fg_read_linear(L, 4u, (int)wo, (int)ho, X0.x, X0.y).xyz;
     const float3 dl = own - d0;
-    ok = ok && fg_finite3(d1) && fg_finite3(d0) && fg_finite3(dl);
+    ok = fg_finite3(d1) && fg_finite3(d0) && fg_finite3(dl);
     const float3 ad = abs(dl);
     ok = ok && max(max(ad.x, ad.y), ad.z) <= asfloat(0x3E19999Au);
     const float3 tgt = d1 + dl;

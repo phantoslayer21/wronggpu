@@ -19,6 +19,7 @@ WG_ARGS_BEGIN
     int W, H;
     uint fbits;
 WG_ARGS_END
+#define FG_NATIVE_UP 1
 #include "fg_net2_fast.hlsli"
 
 // the 8 head channels of half-resolution pixel q
@@ -61,6 +62,19 @@ uint4 fg_pair8(int yy, int xx, int zy, int zx)
     return uint4(b.x, b.y, c.x, c.y);
 }
 
+// The taps have fixed FP16 weights on the 2x grid; preserve the extrapolation at pixel zero.
+Fg2Tap fg_upwarp_tap(int o, int n)
+{
+    const bool odd = (o & 1) != 0;
+    const int i = (o >> 1) - (int)!odd;
+    Fg2Tap t;
+    t.i0 = clamp(i, 0, n - 1);
+    t.i1 = min(i + 1, n - 1);
+    t.w0 = select(o == 0, 0x3d00u, select(odd, 0x3a00u, FG2_QUARTER16));
+    t.w1 = select(o == 0, 0xb400u, select(odd, FG2_QUARTER16, 0x3a00u));
+    return t;
+}
+
 WG_KERNEL(fg_net2_upwarp)
 {
     WG_SETUP();
@@ -69,9 +83,10 @@ WG_KERNEL(fg_net2_upwarp)
     const int p = min(idx, W * H - 1);
     const int py_ = p / W, px_ = p - (p / W) * W;
     const int wi = W / 2, hi = H / 2;
-    const Fg2Tap tX = fg2_up_tap(px_, wi), tY = fg2_up_tap(py_, hi);
-    const uint4 U = fg_up8(tX, tY, fg_heads8(tY.i0 * wi + tX.i0), fg_heads8(tY.i0 * wi + tX.i1),
-                           fg_heads8(tY.i1 * wi + tX.i0), fg_heads8(tY.i1 * wi + tX.i1));
+    const Fg2Tap tX = fg_upwarp_tap(px_, wi), tY = fg_upwarp_tap(py_, hi);
+    const uint4 top = fg_up_axis8(tX, fg_heads8(tY.i0 * wi + tX.i0), fg_heads8(tY.i0 * wi + tX.i1));
+    const uint4 bottom = fg_up_axis8(tX, fg_heads8(tY.i1 * wi + tX.i0), fg_heads8(tY.i1 * wi + tX.i1));
+    const uint4 U = fg_up_axis8(tY, top, bottom);
 
     const FgSample sb = fg_sample(fg_half(U, 0u), fg_half(U, 1u), px_, py_);
     const FgSample sc = fg_sample(fg_half(U, 2u), fg_half(U, 3u), px_, py_);

@@ -19,6 +19,8 @@
 // @wg-kernel fg_lite_p2c_inpaint_mut co=- entry=fg_lite_p2c_inpaint block=256 wave=32 args=p,p,u,u defines=FG_K=3,FG_MUT=1
 // @wg-kernel fg_lite_p2c_pull co=- block=256 wave=32 args=u,p,p,p,p,u,u,u,u,u defines=FG_K=4
 // @wg-kernel fg_lite_p2c_push co=- block=256 wave=32 args=p,u,u,p,u,u defines=FG_K=5
+// @wg-kernel fg_lite_p2c_pull_tiled co=- entry=fg_lite_p2c_pull block=256 wave=32 args=u,p,p,p,p,u,u,u,u,u,p,p,p,u defines=FG_K=4,FG_PULL_TILE=1
+// @wg-kernel fg_lite_p2c_push_tail co=- block=256 wave=32 args=u,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_K=7
 // @wg-kernel fg_lite_p2c_fine co=- block=256 wave=32 args=p,u,u,p,p,u,u defines=FG_K=6
 #include "wg_platform.hlsli"
 #include "fg_lite_common.hlsli"
@@ -49,7 +51,7 @@ WG_KERNEL(fg_lite_p2c_scatter)
     fg_st_h1(kc, idx, cons ? 0.0f : 1.0f);
     const float key = cons ? kap + fg_opq(fg_mul(kap, cam.z) - kap) : kap;
     const uint hi = (asuint(key) & 0xFFFFFFFEu) | (cons ? 1u : 0u);
-    const uint lo = (wg_f2h(mx) << 16) | wg_f2h(my);
+    const uint lo = (fg_f2h(mx) << 16) | fg_f2h(my);
     const float thr2 = max(fg_adiv(msq, asfloat(t2)), 1.0f);
     const int sx = fg_sgn(mx), sy = fg_sgn(my);
     const int bx = x + (int)mx, by = y + (int)my;
@@ -116,31 +118,52 @@ WG_ARGS_BEGIN
     uint fl, gout, w1, h1;
 WG_ARGS_END
 
+// Each row holds the 256 centers and the two horizontal halo pixels on either side.
+// A row is addressed in the flat grid, then trimmed at the center pixel's image edges.
+groupshared uint fg_inpaint_flags[5][9];
+
 WG_KERNEL(fg_lite_p2c_inpaint)
 {
     FG_SETUP();
-    const uint idx = wg_block_id() * 256u + wg_lane_id();
-    if (idx >= w1 * h1) return;
-    const int x = (int)(idx % w1), y = (int)(idx / w1);
-    uint bits = 0u;          // bit (j + 2) * 5 + (i + 2): flag bit 1 of pixel (x + i, y + j), 0 outside the grid
-    [unroll] for (int j = -2; j <= 2; ++j)
-        [unroll] for (int i = -2; i <= 2; ++i)
+    const uint l = wg_lane_id();
+    const uint idx = wg_block_id() * 256u + l;
+    const uint size = w1 * h1;
+    const uint lane = wg_wave_lane();
+    [unroll] for (int j = 0; j < 5; ++j)
+    {
+        const int p = (int)idx + (j - 2) * (int)w1 - 2;
+        const bool flag = (uint)p < size && (wg_ld32(fl, (uint)p * 4u) & 2u) != 0u;
+        const uint row = WaveActiveBallot(flag).x;
+        if (lane == 0u) fg_inpaint_flags[j][l >> 5] = row;
+        if (l < 32u)
         {
-            const int px = x + i, py = y + j;
-            const bool in_ = px >= 0 && px < (int)w1 && py >= 0 && py < (int)h1;
-            const uint b = in_ ? (wg_ld32(fl, (uint)(py * (int)w1 + px) * 4u) >> 1) & 1u : 0u;
-            bits |= b << (uint)((j + 2) * 5 + (i + 2));
+            const int q = p + 256;
+            const bool halo = l < 4u && (uint)q < size && (wg_ld32(fl, (uint)q * 4u) & 2u) != 0u;
+            const uint tail = WaveActiveBallot(halo).x;
+            if (lane == 0u) fg_inpaint_flags[j][8] = tail;
         }
+    }
+    wg_barrier_lds();
+    if (idx >= size) return;
+
+    const int x = (int)(idx % w1);
+    const uint xmask = ((1u << (uint)min((int)w1 - x + 2, 5)) - 1u) & (31u << (uint)max(2 - x, 0));
+    uint bits = 0u;
+    [unroll] for (int j = 0; j < 5; ++j)
+    {
+        const uint a = fg_inpaint_flags[j][l >> 5];
+        const uint b = fg_inpaint_flags[j][(l >> 5) + 1u];
+        const uint row = (a >> lane) | (lane > 27u ? (b << (32u - lane)) : 0u);
+        bits |= (row & xmask) << (uint)(j * 5);
+    }
     bool inp = true;
-    [unroll] for (int cj = -1; cj <= 1; ++cj)
-        [unroll] for (int ci = -1; ci <= 1; ++ci)
+    [unroll] for (int j = 0; j < 3; ++j)
+        [unroll] for (int i = 0; i < 3; ++i)
         {
-            bool w = false;
-            [unroll] for (int j2 = -1; j2 <= 1; ++j2)
-                [unroll] for (int i2 = -1; i2 <= 1; ++i2)
-                    w = w || ((bits >> (uint)((cj + j2 + 2) * 5 + (ci + i2 + 2))) & 1u) != 0u;
+            const uint mask = 0x1ce7u << (uint)(j * 5 + i); // three 3-bit rows on a 5-bit stride
+            const bool w = (bits & mask) != 0u;
 #if FG_MUT
-            inp = inp && (w || (cj == 1 && ci == 1));   // mutant: the last window is not required
+            inp = inp && (w || (j == 2 && i == 2));   // mutant: the last window is not required
 #else
             inp = inp && w;
 #endif
@@ -153,6 +176,9 @@ WG_KERNEL(fg_lite_p2c_inpaint)
 #if FG_K == 4
 WG_ARGS_BEGIN
     uint mode, srca, srcb, sums_out, elem_out, ws, hs, wl, hl, nbits;
+#if FG_PULL_TILE
+    uint elem2, elem3, elem4, levels;
+#endif
 WG_ARGS_END
 
 float3 fg_child(int cx, int cy)
@@ -170,30 +196,99 @@ float3 fg_child(int cx, int cy)
     return float3(fg_mul(e.x, e.z), fg_mul(e.y, e.z), e.z);
 }
 
-WG_KERNEL(fg_lite_p2c_pull)
+float3 fg_pull_sum(int X, int Y)
 {
-    FG_SETUP();
-    const uint idx = wg_block_id() * 256u + wg_lane_id();
-    if (idx >= wl * hl) return;
-    const int X = (int)(idx % wl), Y = (int)(idx / wl);
     const float3 c00 = fg_child(2 * X, 2 * Y), c10 = fg_child(2 * X + 1, 2 * Y);
     const float3 c01 = fg_child(2 * X, 2 * Y + 1), c11 = fg_child(2 * X + 1, 2 * Y + 1);
     float3 s;
     s.x = fg_opq(fg_opq(c00.x + c10.x) + fg_opq(c01.x + c11.x));
     s.y = fg_opq(fg_opq(c00.y + c10.y) + fg_opq(c01.y + c11.y));
     s.z = fg_opq(fg_opq(c00.z + c10.z) + fg_opq(c01.z + c11.z));
+    return s;
+}
+
+void fg_pull_element(uint dst, uint idx, float3 s, float area)
+{
+    const float den = max(s.z, FG_WEIGHT_FLOOR);
+    fg_st_h3(dst, idx, float3(fg_adiv(s.x, den), fg_adiv(s.y, den), fg_adiv(s.z, area)));
+}
+
+#if FG_PULL_TILE
+groupshared float3 fg_pull_waves[8];
+
+uint fg_pull_morton_x(uint l)
+{
+    return (l & 1u) | ((l >> 1u) & 2u) | ((l >> 2u) & 4u) | ((l >> 3u) & 8u);
+}
+
+float3 fg_pull_ordered(float3 left, float3 right)
+{
+    const float3 s = left + right;
+    // A WaveReadLaneAt operand may be commuted by the compiler. When both
+    // operands are NaNs, retain the left operand as the standalone pull does.
+    return select(isnan(left), left, float3(fg_opq(s.x), fg_opq(s.y), fg_opq(s.z)));
+}
+
+float3 fg_pull_quad(float3 s, uint lane, uint stride)
+{
+    s = fg_pull_ordered(s, WaveReadLaneAt(s, lane ^ stride));
+    return fg_pull_ordered(s, WaveReadLaneAt(s, lane ^ (2u * stride)));
+}
+
+void fg_pull_level(uint dst, uint x, uint y, uint shift, float3 s)
+{
+    const uint mask = (1u << shift) - 1u;
+    const uint w = (wl + mask) >> shift, h = (hl + mask) >> shift;
+    x >>= shift;
+    y >>= shift;
+    if (x < w && y < h) fg_pull_element(dst, y * w + x, s, (float)(4u << (2u * shift)));
+}
+#endif
+
+WG_KERNEL(fg_lite_p2c_pull)
+{
+    FG_SETUP();
+#if FG_PULL_TILE
+    const uint l = wg_lane_id(), lane = wg_wave_lane();
+    const uint tiles_x = (wl + 15u) >> 4u, tile = wg_block_id();
+    const uint base_x = (tile % tiles_x) * 16u, base_y = (tile / tiles_x) * 16u;
+    const uint x = base_x + fg_pull_morton_x(l), y = base_y + fg_pull_morton_x(l >> 1u);
+    float3 s = 0.0f;
+    if (x < wl && y < hl) {
+        s = fg_pull_sum((int)x, (int)y);
+        fg_pull_element(elem_out, y * wl + x, s, asfloat(nbits));
+    }
+    if (levels == 1u) return;
+    s = fg_pull_quad(s, lane, 1u);
+    if ((l & 3u) == 0u) fg_pull_level(elem2, x, y, 1u, s);
+    if (levels == 2u) return;
+    s = fg_pull_quad(s, lane, 4u);
+    if ((l & 15u) == 0u) fg_pull_level(elem3, x, y, 2u, s);
+    if (levels == 3u) return;
+    s = fg_pull_ordered(s, WaveReadLaneAt(s, lane ^ 16u));
+    if (lane == 0u) fg_pull_waves[l >> 5u] = s;
+    wg_barrier_lds();
+    if (l < 4u) {
+        const uint wave = 2u * l;
+        s = fg_pull_ordered(fg_pull_waves[wave], fg_pull_waves[wave + 1u]);
+        fg_pull_level(elem4, base_x + (l & 1u) * 8u, base_y + (l >> 1u) * 8u, 3u, s);
+    }
+#else
+    const uint idx = wg_block_id() * 256u + wg_lane_id();
+    if (idx >= wl * hl) return;
+    const float3 s = fg_pull_sum((int)(idx % wl), (int)(idx / wl));
     if (sums_out != 0u)
     {
         wg_st32(sums_out, idx * 12u, asuint(s.x));
         wg_st32(sums_out, idx * 12u + 4u, asuint(s.y));
         wg_st32(sums_out, idx * 12u + 8u, asuint(s.z));
     }
-    const float den = max(s.z, FG_WEIGHT_FLOOR);
-    fg_st_h3(elem_out, idx, float3(fg_adiv(s.x, den), fg_adiv(s.y, den), fg_adiv(s.z, asfloat(nbits))));
+    fg_pull_element(elem_out, idx, s, asfloat(nbits));
+#endif
 }
 #endif
 
-#if FG_K == 5 || FG_K == 6
+#if FG_K == 5 || FG_K == 6 || FG_K == 7
 // (v_up, w_up) of fine element (qx, qy) from the filled parent level [ph][pw] (float16 x 3)
 float3 fg_upsample(uint parent, int pw, int ph, int qx, int qy)
 {
@@ -216,6 +311,16 @@ float3 fg_upsample(uint parent, int pw, int ph, int qx, int qy)
 }
 #endif
 
+#if FG_K == 5 || FG_K == 7
+void fg_push_pixel(uint parent, int pw, int ph, uint level, uint lw, uint lh, uint idx)
+{
+    if (idx >= lw * lh) return;
+    const float4 own = fg_texel(level, 3u, idx);
+    if (!(own.z <= 0.0f)) return;
+    fg_st_h3(level, idx, fg_upsample(parent, pw, ph, (int)(idx % lw), (int)(idx / lw)));
+}
+#endif
+
 #if FG_K == 5
 WG_ARGS_BEGIN
     uint parent, pw, ph, level, lw, lh;
@@ -225,11 +330,29 @@ WG_KERNEL(fg_lite_p2c_push)
 {
     FG_SETUP();
     const uint idx = wg_block_id() * 256u + wg_lane_id();
-    if (idx >= lw * lh) return;
-    const int qx = (int)(idx % lw), qy = (int)(idx / lw);
-    const float4 own = fg_texel(level, 3u, idx);
-    if (!(own.z <= 0.0f)) return;                 // the level's own value stays
-    fg_st_h3(level, idx, fg_upsample(parent, (int)pw, (int)ph, qx, qy));
+    fg_push_pixel(parent, (int)pw, (int)ph, level, lw, lh, idx);
+}
+#endif
+
+#if FG_K == 7
+WG_ARGS_BEGIN
+    uint count, p0, p1, p2, p3, p4, p5, p6, p7;
+    uint w0, w1, w2, w3, w4, w5, w6, w7;
+    uint h0, h1, h2, h3, h4, h5, h6, h7;
+WG_ARGS_END
+
+// Every level fits in this one workgroup. The device barrier makes the stored FP16
+// parent visible to the next level, with the same rounding as separate dispatches.
+WG_KERNEL(fg_lite_p2c_push_tail)
+{
+    FG_SETUP();
+    const uint p[8] = {p0, p1, p2, p3, p4, p5, p6, p7};
+    const uint w[8] = {w0, w1, w2, w3, w4, w5, w6, w7};
+    const uint h[8] = {h0, h1, h2, h3, h4, h5, h6, h7};
+    [loop] for (uint i = 1u; i <= count; ++i) {
+        fg_push_pixel(p[i - 1u], (int)w[i - 1u], (int)h[i - 1u], p[i], w[i], h[i], wg_lane_id());
+        if (i < count) wg_barrier();
+    }
 }
 #endif
 

@@ -12,9 +12,10 @@
 // The driver's compiler regroups chains of operations with constant or uniform terms (clean/dx12/README.md "Driver
 // exceptions"); fg_opq() passes a value through an integer xor with a zero it cannot see, which cuts such a chain.
 #pragma once
+#include "fg_fp16.hlsli"
 
 static uint fg_z_;   // 0 at run time (the grid size is below 2^31), unknown to the compiler
-#define FG_SETUP() (WG_SETUP(), fg_z_ = wg_grid_ >> 31)
+#define FG_SETUP() (FG_FP16_SETUP(), fg_z_ = wg_grid_ >> 31)
 
 float fg_opq(float x) { return asfloat(asuint(x) ^ fg_z_); }
 // a * b exactly as one rounded product, as an fma with an opaque -0: neither regrouped nor fused
@@ -38,6 +39,18 @@ int fg_sgn(float x) { return x > 0.0f ? 1 : -1; }
 float fg_sq(float x, float y) { return mad(x, x, fg_mul(y, y)); }
 // u = sat((i + 0.5) / n), approximate division
 float fg_centre(uint i, uint n) { return fg_sat(fg_mul((float)i + 0.5f, fg_rcp((float)n))); }
+
+// Remap the existing 256-thread linear dispatch when the frame fits 32 x 8 tiles.
+uint2 fg_lite_tile_pixel(uint idx, uint w, uint h)
+{
+    if ((w & 31u) == 0u && (h & 7u) == 0u) {
+        const uint tile = wg_block_id(), tiles_x = w >> 5u, lane = wg_lane_id();
+        const uint ty = tile / tiles_x;
+        return uint2(((tile - ty * tiles_x) << 5u) + (lane & 31u), (ty << 3u) + (lane >> 5u));
+    }
+    const uint y = idx / w;
+    return uint2(idx - y * w, y);
+}
 
 // 2^y: the coefficients are stages_common.EX2_COEFFS (this project's least-squares fit of 2^f on [0, 1])
 float fg_ex2(float y)
@@ -90,17 +103,17 @@ float4 fg_texel(uint base, uint kind, uint idx)
     return float4(asfloat(wg_ld32(base, idx * 4u)), 0.0f, 0.0f, 0.0f);
 }
 
-void fg_st_h1(uint base, uint idx, float a) { wg_st16(base, idx * 2u, wg_f2h(a)); }
-void fg_st_h2(uint base, uint idx, float a, float b) { wg_st32(base, idx * 4u, wg_f2h(a) | (wg_f2h(b) << 16)); }
+void fg_st_h1(uint base, uint idx, float a) { wg_st16(base, idx * 2u, fg_f2h(a)); }
+void fg_st_h2(uint base, uint idx, float a, float b) { wg_st32(base, idx * 4u, fg_pack_h2(a, b)); }
 void fg_st_h3(uint base, uint idx, float3 a)
 {
-    wg_st16(base, idx * 6u, wg_f2h(a.x));
-    wg_st16(base, idx * 6u + 2u, wg_f2h(a.y));
-    wg_st16(base, idx * 6u + 4u, wg_f2h(a.z));
+    wg_st16(base, idx * 6u, fg_f2h(a.x));
+    wg_st16(base, idx * 6u + 2u, fg_f2h(a.y));
+    wg_st16(base, idx * 6u + 4u, fg_f2h(a.z));
 }
 void fg_st_h4(uint base, uint idx, float4 a)
 {
-    wg_st64(base, idx * 8u, uint2(wg_f2h(a.x) | (wg_f2h(a.y) << 16), wg_f2h(a.z) | (wg_f2h(a.w) << 16)));
+    wg_st64(base, idx * 8u, uint2(fg_pack_h2(a.x, a.y), fg_pack_h2(a.z, a.w)));
 }
 
 // integer read at (x, y), clamped

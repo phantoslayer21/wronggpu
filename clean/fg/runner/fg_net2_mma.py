@@ -4,7 +4,7 @@ path (clean/fg/runner/fg_net2_d3d12_check.py) selectable as the validation mode.
 
     python clean/fg/runner/fg_net2_mma.py --build <dir> --rocm "C:\\Program Files\\AMD\\ROCm\\7.2" --prepare
     python clean/fg/runner/fg_net2_mma.py --build <dir> --make
-    python clean/fg/runner/fg_net2_mma.py --build <dir> --run [--json out.json]
+    python clean/fg/runner/fg_net2_mma.py --build <dir> --run [--model <model.wgcm>] [--json out.json]
     python clean/fg/runner/fg_net2_mma.py --build <dir> --timing --record out.json [--json timing.json]
     python clean/fg/runner/fg_net2_mma.py --build <dir> --profile "<case>,<case>" [--json profile.json]
 
@@ -633,93 +633,287 @@ def chain_lines(m, fill, tag, **kw):
     return out
 
 
-def run(build, groups=("exactval", "probe", "kernel", "chain", "mutant", "exact", "full")):
-    cdir = os.path.join(build, "replay-net2-mma")
-    man = json.load(open(os.path.join(cdir, "manifest.json"), encoding="utf-8"))
+def _model_chain_no_ref(name, W2, H2, params, ib, ic, ia, f, fast):
+    """net2 fast or exact chain without running the slow CPU reference (for large --model grids compared GPU-vs-GPU)."""
+    ext = N.extents(W2, H2)
+    c = FastCase(name, "chain") if fast else K.Case(name, "chain")
+    A = {"Ib": c.buf("Ib", ib), "Ic": c.buf("Ic", ic), "Ia": c.buf("Ia", ia)}
+    for l in L.NET2:
+        w, b = params[l.name]
+        A["w" + l.name[-2:]], A["b" + l.name[-2:]] = c.buf("w" + l.name[-2:], w), c.buf("b" + l.name[-2:], b)
+    shapes = {
+        "x": (H2, W2, 10), "a1": (H2 // 2, W2 // 2, 32), "a2": (H2 // 4, W2 // 4, 32),
+        "r0": (H2 // 8, W2 // 8, 64), "g": (H2 // 4, W2 // 4, 96),
+        "hA4": (*ext["A4"], 4), "hA1": (*ext["A1"], 1), "hA3": (*ext["A3"], 3),
+        "U4": (H2, W2, 4), "U1": (H2, W2, 1), "U3": (H2, W2, 3),
+        "y": (H2, W2, 18), "b1": (H2 // 2, W2 // 2, 16), "s0": (H2 // 4, W2 // 4, 32),
+        "e": (H2 // 2, W2 // 2, 48), "out": (H2, W2, 8),
+    }
+    for u in range(1, 5):
+        shapes["t%d" % u] = (H2 // 8, W2 // 8, 64)
+        shapes["r%d" % u] = (H2 // 8, W2 // 8, 64)
+        shapes["tb%d" % u] = (H2 // 4, W2 // 4, 32)
+        shapes["s%d" % u] = (H2 // 4, W2 // 4, 32)
+    if not fast:
+        shapes["r4u"] = (H2 // 4, W2 // 4, 64)
+        shapes["gu"] = (*ext["A4"], 96)
+        shapes["s4u"] = (H2 // 2, W2 // 2, 32)
+        shapes["eu"] = (H2, W2, 48)
+    for i, sh in shapes.items():
+        A[i] = c.out(i, sh)
+
+    def wb(n):
+        return A["w%02d" % n], A["b%02d" % n]
+
+    def conv(n, src, dst, cin, H, W, **kw):
+        l = L.NET2[n - 1]
+        c.conv(A[src], *wb(n), A[dst], in_cs=shapes[src][2], cin=cin, cw=l.cin,
+               co_n=kw.pop("co_n", l.out), H=H, W=W, **kw)
+
+    def block(first, src, temps, outs, cin):
+        H, W = shapes[src][:2]
+        for u in range(4):
+            t, r = "%s%d" % (temps, u + 1), "%s%d" % (outs, u + 1)
+            conv(first + 2 * u, src, t, cin, H, W, res=1)
+            conv(first + 2 * u + 1, t, r, cin, H, W, res=2, skip=A[src], skip_cs=cin)
+            src = r
+
+    c.merge(A["Ib"], A["Ic"], A["Ia"], A["x"], W2 * H2, f)
+    conv(1, "x", "a1", 10, H2, W2, pool=1)
+    conv(2, "a1", "a2", 32, *shapes["a1"][:2], pool=1)
+    conv(3, "a2", "r0", 32, *shapes["a2"][:2], pool=1)
+    block(4, "r0", "t", "r", 64)
+    h4, w4 = shapes["g"][:2]
+    h2, w2 = ext["A4"]
+    if fast:
+        conv(12, "r4", "g", 64, h4, w4, up=1, clamp_from=32)
+        conv(13, "g", "hA4", 32, h2, w2, up=1, heads=1, co_n=8, out_cs=0, leaky=0, clamp_from=4, y1=A["hA1"], y2=A["hA3"])
+        c.upwarp(A["Ib"], A["Ic"], A["Ia"], A["hA4"], A["hA1"], A["hA3"], A["U4"], A["U1"], A["U3"], A["y"], W2, H2, f)
+    else:
+        c.up2(A["r4"], A["r4u"], 64, *shapes["r4"][:2])
+        conv(12, "r4u", "g", 64, h4, w4, clamp_from=32)
+        c.up2(A["g"], A["gu"], 96, h4, w4)
+        for j, ((lo, n), cf, nm) in enumerate(zip(HEAD_KEEP, (K.NO_CLAMP, 0, 0), ("hA4", "hA1", "hA3"))):
+            conv(13, "gu", nm, 32, h2, w2, in_co=32 * j, co_lo=lo, co_n=n, leaky=0, clamp_from=cf)
+        for nm, ch in (("A4", 4), ("A1", 1), ("A3", 3)):
+            c.up2(A["h" + nm], A["U" + nm[1]], ch, h2, w2)
+        c.warp(A["Ib"], A["Ic"], A["Ia"], A["U4"], A["U1"], A["U3"], A["y"], W2, H2, f)
+    conv(14, "y", "b1", 18, H2, W2, pool=1)
+    conv(15, "b1", "s0", 16, *shapes["b1"][:2], pool=1)
+    block(16, "s0", "tb", "s", 32)
+    eh, ew = shapes["e"][:2]
+    if fast:
+        conv(24, "s4", "e", 32, eh, ew, up=1, clamp_from=K.NO_CLAMP)
+        conv(25, "e", "out", 16, H2, W2, up=1, heads=1, co_n=8, out_cs=8, leaky=0, clamp_from=4, res=2,
+             res_mul=K.F16_TWO, skip=A["U4"], skip1=A["U1"], skip2=A["U3"])
+    else:
+        c.up2(A["s4"], A["s4u"], 32, *shapes["s4"][:2])
+        conv(24, "s4u", "e", 32, eh, ew, clamp_from=K.NO_CLAMP)
+        c.up2(A["e"], A["eu"], 48, eh, ew)
+        for j, ((lo, n), cf, unm) in enumerate(zip(HEAD_KEEP, (K.NO_CLAMP, 0, 0), ("U4", "U1", "U3"))):
+            conv(25, "eu", "out", 16, H2, W2, in_co=16 * j, co_lo=lo, co_n=n, out_cs=8, out_co=lo, leaky=0,
+                 clamp_from=cf, res=2, res_mul=K.F16_TWO if j == 0 else K.F16_ONE, skip=A[unm], skip_cs=n)
+    return c
+
+
+def run_model(build, model_path):
+    """Execute-only check of a converted preset-FG model.wgcm on net2 (fast Tier B vs exact oracle):
+    - 48x32 smooth input with CPU reference (exact must match CPU bit-for-bit; fast reported vs CPU/exact);
+    - 480x272 (1080p/4K net2 grid) smooth input GPU-vs-GPU (fast vs exact on D3D12, both fills, slack checked).
+    Every temporary file written for the replay (weights, inputs, expectations, outputs) is deleted in finally."""
+    from clean.fg.reference import forward as F
+    with open(model_path, "rb") as fh:
+        model_sha = hashlib.sha256(fh.read()).hexdigest()
+    raw_params = F.params_from_model_file(model_path)
+    params = {}
+    for l in L.NET2:
+        w, b = raw_params[l.name]
+        w = np.asarray(w, np.float64)
+        if w.shape[3] < l.cin:
+            p = np.zeros((l.out, 3, 3, l.cin), np.float64)
+            p[:, :, :, :w.shape[3]] = w
+            w = p
+        params[l.name] = (w, np.asarray(b, np.float64))
     rid = time.strftime("%H%M%S")
-    tags = [("f%02x_%s" % (f, rid), f) for f in FILLS]
-    neg_tag = "neg_" + rid
-    lines, negs = [], {}
-    for g in groups:
-        for m in man.get(g, []):
-            if g == "mutant":
-                lines += chain_lines(m, FILLS[0], tags[0][0])
-                continue
-            for tag, fill in tags:
-                lines += chain_lines(m, fill, tag)
-            k0 = m["steps"][0][0]
-            if g == "exactval" and k0 not in negs and m["steps"][0][1] >= 2:
-                negs[k0] = m
-                lines += chain_lines(m, FILLS[0], neg_tag, half=0)
-    used = [m for g in groups for m in man.get(g, [])]
-    rep, out = K.replay(build, cdir, lines, K.arena_for(used))
-    names = [ln.split()[1] for ln in lines if ln.startswith("chain ")]
-    not_ok = [n for n in names if "%s: ok" % n not in out]
-    rep["chains"], rep["chains_not_ok"] = len(names), not_ok
-    res = {"replay": rep, "cases": [], "negative_controls": {}, "mutants": {}}
-    ok = rep["exit"] == 0 and rep["killed"] is None and not not_ok
-    base = None
-    for g in groups:
-        for m in man.get(g, []):
-            if g == "mutant":
-                if m["name"] == "fast mutant base":
-                    base = m
-                    good, bufs = fills_agree(cdir, m, [tags[0], tags[0]])
-                    res["mutants"]["base"] = {"present": good, "report": total_report(report_entry(cdir, m,
-                                                                                                   tags[0][0]).values())}
-                    ok = ok and good
+    mdir = os.path.join(build, "replay-net2-model-" + rid)
+    os.makedirs(mdir, exist_ok=True)
+    tags = [("f%02x_%s" % (fl, rid), fl) for fl in FILLS]
+    try:
+        rng = np.random.default_rng(20261123)
+        ib_s, ic_s, ia_s = (smooth(rng, 32, 48, ch, 1.0) for ch in (4, 4, 1))
+        ib_l, ic_l, ia_l = (smooth(rng, 272, 480, ch, 1.0) for ch in (4, 4, 1))
+        fval = np.float32(0.4375)
+        with reference_memo():
+            c_small_fast = fast_chain_case("model fast 48x32", 48, 32, params, ib_s, ic_s, ia_s, fval)
+            c_small_exact = K.chain_case("model exact 48x32", 48, 32, params, ib_s, ic_s, ia_s, fval)
+        c_big_fast = _model_chain_no_ref("model fast 480x272", 480, 272, params, ib_l, ic_l, ia_l, fval, True)
+        c_big_exact = _model_chain_no_ref("model exact 480x272", 480, 272, params, ib_l, ic_l, ia_l, fval, False)
+        cases_list = [c_small_fast, c_small_exact, c_big_fast, c_big_exact]
+        metas = []
+        for c in cases_list:
+            m = K.write_case(mdir, c)
+            m["sizes"] = {i: len(b) for i, b in c.data.items()}
+            metas.append(m)
+        lines = []
+        for m in metas:
+            for tag, fl in tags:
+                lines += chain_lines(m, fl, tag)
+        rep, out = K.replay(build, mdir, lines, K.arena_for(metas))
+        names = [ln.split()[1] for ln in lines if ln.startswith("chain ")]
+        not_ok = [n for n in names if "%s: ok" % n not in out]
+        rep["chains"], rep["chains_not_ok"] = len(names), not_ok
+        ok = rep["exit"] == 0 and rep["killed"] is None and not not_ok
+        entries = []
+        # small exact vs CPU reference
+        msf, mse, mbf, mbe = metas
+        good_se, bufs_se = K.check_entry(mdir, mse, tags)
+        ok = ok and good_se
+        entries.append({"group": "model", "case": mse["name"], "launches": len(mse["steps"]),
+                        "gate": "byte-identical to the CPU reference", "ok": good_se,
+                        "out_sha256": hashlib.sha256(_saved(mdir, mse, tags[0][0], "out")[:mse["outs"]["out"]]).hexdigest()})
+        # small fast vs CPU reference + fills
+        good_sf, _ = fills_agree(mdir, msf, tags)
+        reps_sf = report_entry(mdir, msf, tags[0][0])
+        ok = ok and good_sf
+        entries.append({"group": "model", "case": msf["name"], "launches": len(msf["steps"]),
+                        "gate": "both fills identical, slack kept", "ok": good_sf,
+                        "vs_cpu_out": reps_sf.get("out"), "vs_cpu_total": total_report(reps_sf.values()),
+                        "out_sha256": hashlib.sha256(_saved(mdir, msf, tags[0][0], "out")[:msf["outs"]["out"]]).hexdigest()})
+        # large exact (both fills deterministic + slack)
+        good_be, _ = fills_agree(mdir, mbe, tags)
+        ok = ok and good_be
+        be_out = _saved(mdir, mbe, tags[0][0], "out")[:mbe["outs"]["out"]]
+        entries.append({"group": "model", "case": mbe["name"], "launches": len(mbe["steps"]),
+                        "gate": "both fills identical, slack kept", "ok": good_be,
+                        "out_sha256": hashlib.sha256(be_out).hexdigest()})
+        # large fast vs large exact (GPU-vs-GPU across all common buffers)
+        good_bf, _ = fills_agree(mdir, mbf, tags)
+        ok = ok and good_bf
+        bf_out = _saved(mdir, mbf, tags[0][0], "out")[:mbf["outs"]["out"]]
+        common = [i for i in mbf["outs"] if i in mbe["outs"]]
+        vs_ex = {}
+        for i in common:
+            n = mbf["outs"][i]
+            rf = _saved(mdir, mbf, tags[0][0], i)[:n]
+            re = _saved(mdir, mbe, tags[0][0], i)[:n]
+            vs_ex[i] = step_report(np.frombuffer(rf, np.uint16), np.frombuffer(re, np.float16).astype(np.float64))
+        entries.append({"group": "model", "case": mbf["name"], "launches": len(mbf["steps"]),
+                        "gate": "both fills identical, slack kept", "ok": good_bf,
+                        "vs_exact_out": vs_ex.get("out"), "vs_exact_total": total_report(vs_ex.values()),
+                        "out_sha256": hashlib.sha256(bf_out).hexdigest()})
+        return {"model_sha256": model_sha, "replay": rep, "cases": entries, "ok": bool(ok)}
+    finally:
+        for fn in os.listdir(mdir):
+            p = os.path.join(mdir, fn)
+            if os.path.isfile(p):
+                os.remove(p)
+        if os.path.isdir(mdir) and not os.listdir(mdir):
+            os.rmdir(mdir)
+
+
+def run(build, groups=("exactval", "probe", "kernel", "chain", "mutant", "exact", "full"), model=None):
+    cdir = os.path.join(build, "replay-net2-mma")
+    std_groups = [g for g in groups if g != "model"]
+    run_mod = bool(model) or ("model" in groups)
+    if run_mod and not model:
+        raise SystemExit("--groups model requires --model <model.wgcm>")
+    res = {"replay": None, "cases": [], "negative_controls": {}, "mutants": {}}
+    ok = True
+    if std_groups:
+        man = json.load(open(os.path.join(cdir, "manifest.json"), encoding="utf-8"))
+        rid = time.strftime("%H%M%S")
+        tags = [("f%02x_%s" % (f, rid), f) for f in FILLS]
+        neg_tag = "neg_" + rid
+        lines, negs = [], {}
+        for g in std_groups:
+            for m in man.get(g, []):
+                if g == "mutant":
+                    lines += chain_lines(m, FILLS[0], tags[0][0])
                     continue
-                kind = m["name"].split()[-1]
-                target, before = K.MUTANT_TARGETS[kind]
-                diff = {}
-                for i, n in m["outs"].items():
-                    a, b = _saved(cdir, m, tags[0][0], i), _saved(cdir, base, tags[0][0], i)
-                    diff[i] = (-1 if len(a) != n + SLACK or len(b) != n + SLACK else
-                               int(np.sum(np.frombuffer(a[:n], np.uint16) != np.frombuffer(b[:n], np.uint16))))
-                before = [i for i in before if i in diff] if before is not None else [i for i in diff if i != target]
-                caught = diff[target] > 0
-                clean = all(diff[i] == 0 for i in before)
-                res["mutants"][m["name"]] = {"caught": caught and clean, "target": target, "target_differ": diff[target],
-                                             "before_match_plain_run": clean}
-                ok = ok and caught and clean
-                continue
-            entry = {"group": g, "case": m["name"], "kernels": m["launch_kernels"], "launches": len(m["steps"])}
-            if g in ("exactval", "probe", "exact"):
-                good, bufs = K.check_entry(cdir, m, tags)
-                entry.update({"gate": "byte-identical to the CPU reference", "ok": good, "buffers": bufs})
-                if m.get("alts"):
-                    n = 0
-                    for i in m["alts"]:
-                        alt = np.load(os.path.join(cdir, "%s.alt.%s.npy" % (m["id"], i)))
-                        r = K.compare(_saved(cdir, m, tags[0][0], i), alt, m["outs"][i], tags[0][1])
-                        n += max(0, r["differ"])
-                    res["mutants"]["two roundings: " + m["name"]] = {"caught": n > 0, "differ": n}
-                    good = good and n > 0
-            else:
-                good, bufs = fills_agree(cdir, m, tags)
-                reps = report_entry(cdir, m, tags[0][0])
-                entry.update({"gate": "both fills identical, slack kept", "ok": good, "buffers": bufs,
-                              "vs_cpu": reps, "vs_cpu_total": total_report(reps.values())})
-                if "out" in m["outs"]:
-                    entry["out_sha256"] = hashlib.sha256(_saved(cdir, m, tags[0][0], "out")[:m["outs"]["out"]]).hexdigest()
-            ok = ok and good
-            res["cases"].append(entry)
-    for k in FAST_KERNELS:
-        m = negs.get(k)
-        if m is None:
-            res["negative_controls"][k] = None
-            ok = False
-            continue
-        _, bufs = K.check_entry(cdir, m, [(neg_tag, FILLS[0])])
-        caught = any(b["differ"][0] > 0 for b in bufs.values()) and all(b["differ"][0] >= 0 for b in bufs.values())
-        res["negative_controls"][k] = {"case": m["name"], "half_grid": True, "caught": caught,
-                                       "differ": sum(b["differ"][0] for b in bufs.values())}
-        ok = ok and caught
+                for tag, fill in tags:
+                    lines += chain_lines(m, fill, tag)
+                k0 = m["steps"][0][0]
+                if g == "exactval" and k0 not in negs and m["steps"][0][1] >= 2:
+                    negs[k0] = m
+                    lines += chain_lines(m, FILLS[0], neg_tag, half=0)
+        used = [m for g in std_groups for m in man.get(g, [])]
+        rep, out = K.replay(build, cdir, lines, K.arena_for(used))
+        names = [ln.split()[1] for ln in lines if ln.startswith("chain ")]
+        not_ok = [n for n in names if "%s: ok" % n not in out]
+        rep["chains"], rep["chains_not_ok"] = len(names), not_ok
+        res["replay"] = rep
+        ok = rep["exit"] == 0 and rep["killed"] is None and not not_ok
+        base = None
+        for g in std_groups:
+            for m in man.get(g, []):
+                if g == "mutant":
+                    if m["name"] == "fast mutant base":
+                        base = m
+                        good, bufs = fills_agree(cdir, m, [tags[0], tags[0]])
+                        res["mutants"]["base"] = {"present": good, "report": total_report(report_entry(cdir, m,
+                                                                                                       tags[0][0]).values())}
+                        ok = ok and good
+                        continue
+                    kind = m["name"].split()[-1]
+                    target, before = K.MUTANT_TARGETS[kind]
+                    diff = {}
+                    for i, n in m["outs"].items():
+                        a, b = _saved(cdir, m, tags[0][0], i), _saved(cdir, base, tags[0][0], i)
+                        diff[i] = (-1 if len(a) != n + SLACK or len(b) != n + SLACK else
+                                   int(np.sum(np.frombuffer(a[:n], np.uint16) != np.frombuffer(b[:n], np.uint16))))
+                    before = [i for i in before if i in diff] if before is not None else [i for i in diff if i != target]
+                    caught = diff[target] > 0
+                    clean = all(diff[i] == 0 for i in before)
+                    res["mutants"][m["name"]] = {"caught": caught and clean, "target": target, "target_differ": diff[target],
+                                                 "before_match_plain_run": clean}
+                    ok = ok and caught and clean
+                    continue
+                entry = {"group": g, "case": m["name"], "kernels": m["launch_kernels"], "launches": len(m["steps"])}
+                if g in ("exactval", "probe", "exact"):
+                    good, bufs = K.check_entry(cdir, m, tags)
+                    entry.update({"gate": "byte-identical to the CPU reference", "ok": good, "buffers": bufs})
+                    if m.get("alts"):
+                        n = 0
+                        for i in m["alts"]:
+                            alt = np.load(os.path.join(cdir, "%s.alt.%s.npy" % (m["id"], i)))
+                            r = K.compare(_saved(cdir, m, tags[0][0], i), alt, m["outs"][i], tags[0][1])
+                            n += max(0, r["differ"])
+                        res["mutants"]["two roundings: " + m["name"]] = {"caught": n > 0, "differ": n}
+                        good = good and n > 0
+                else:
+                    good, bufs = fills_agree(cdir, m, tags)
+                    reps = report_entry(cdir, m, tags[0][0])
+                    entry.update({"gate": "both fills identical, slack kept", "ok": good, "buffers": bufs,
+                                  "vs_cpu": reps, "vs_cpu_total": total_report(reps.values())})
+                    if "out" in m["outs"]:
+                        entry["out_sha256"] = hashlib.sha256(_saved(cdir, m, tags[0][0], "out")[:m["outs"]["out"]]).hexdigest()
+                ok = ok and good
+                res["cases"].append(entry)
+        if "exactval" in std_groups:
+            for k in FAST_KERNELS:
+                m = negs.get(k)
+                if m is None:
+                    res["negative_controls"][k] = None
+                    ok = False
+                    continue
+                _, bufs = K.check_entry(cdir, m, [(neg_tag, FILLS[0])])
+                caught = any(b["differ"][0] > 0 for b in bufs.values()) and all(b["differ"][0] >= 0 for b in bufs.values())
+                res["negative_controls"][k] = {"case": m["name"], "half_grid": True, "caught": caught,
+                                               "differ": sum(b["differ"][0] for b in bufs.values())}
+                ok = ok and caught
+    if run_mod:
+        mres = run_model(build, model)
+        res["model"] = {"model_sha256": mres["model_sha256"], "replay": mres["replay"], "ok": mres["ok"]}
+        if res["replay"] is None:
+            res["replay"] = mres["replay"]
+        res["cases"].extend(mres["cases"])
+        ok = ok and mres["ok"]
     cs = res["cases"]
     res["summary"] = {"cases": len(cs), "cases_ok": sum(c["ok"] for c in cs),
-                      "byte_exact_cases": sum(1 for c in cs if c["group"] in ("exactval", "probe", "exact")),
+                      "byte_exact_cases": sum(1 for c in cs if c["group"] in ("exactval", "probe", "exact") or c["case"] == "model exact 48x32"),
                       "fills": [hex(f) for f in FILLS], "pass": bool(ok)}
-    res["accuracy"] = {c["case"]: c["vs_cpu_total"] for c in cs if c.get("vs_cpu_total")}
+    res["accuracy"] = {c["case"]: (c.get("vs_cpu_total") or c.get("vs_exact_total"))
+                       for c in cs if (c.get("vs_cpu_total") or c.get("vs_exact_total"))}
     return res
 
 
@@ -840,6 +1034,7 @@ def main(argv=None):
     ap.add_argument("--make", action="store_true")
     ap.add_argument("--no-full", action="store_true", help="--make / --run without the 480 x 272 and 640 x 368 chains")
     ap.add_argument("--run", action="store_true")
+    ap.add_argument("--model", help="converted preset-FG model.wgcm (execute-only: per-run files deleted after run)")
     ap.add_argument("--groups", default="exactval,probe,kernel,chain,mutant,exact,full")
     ap.add_argument("--timing", action="store_true")
     ap.add_argument("--record", help="--timing: the passing --run record")
@@ -856,7 +1051,7 @@ def main(argv=None):
     res = None
     if a.run:
         groups = [g for g in a.groups.split(",") if not (a.no_full and g == "full")]
-        res = run(a.build, groups)
+        res = run(a.build, groups, model=a.model)
         print(json.dumps(res["summary"]))
         print("negative controls:", json.dumps({k: v and v["caught"] for k, v in res["negative_controls"].items()}),
               "mutants:", json.dumps({k: v.get("caught", v.get("present")) for k, v in res["mutants"].items()}))

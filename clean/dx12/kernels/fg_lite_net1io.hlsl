@@ -7,8 +7,8 @@
 // fg_lite_quality_init: Qc := (sat(((r + g) + b) / 3), 0) of Dc.
 // fg_lite_net1_input: one lane per pixel of the 2 x 2-fold grid (2 W0 x 2 H0): the ten values of its image pixel (zero
 //   outside the image) at cell channels 4 v + 2 dy + dx (channels 40..47 zero, written by the dx = dy = 0 lane); the
-//   cell layout is element (channel * cs + (Y * W0 + X) * ps) of float16 (HWC: cs 1, ps 48; CHW: cs H0 W0, ps 1);
-//   image pixels also write Qc = (v6, v2) and Om = sat((E Hp) Hc).
+//   cell layout is element (channel * cs + (Y * W0 + X) * ps) of float16 (HWC: cs 1, ps 48; CHW: cs H0 W0, ps 1).
+//   Aligned HWC cells use six vector stores. Image pixels also write Qc = (v6, v2) and Om = sat((E Hp) Hc).
 // fg_lite_net1_output: one lane per net1 image pixel: the four values of its (clamped) cell, the occlusion push-down, the
 //   sigmoid map m, the UI forcing (ui_forcing != 0) and the logit pairs NA, NB.
 //
@@ -71,20 +71,51 @@ float fg_warp(float3 a, float3 b)
 
 void fg_cell_store(uint X, uint Y, uint ch, float val)
 {
-    wg_st16(cells, (ch * cs + (Y * W0 + X) * ps) * 2u, wg_f2h(val));
+    wg_st16(cells, (ch * cs + (Y * W0 + X) * ps) * 2u, fg_f2h(val));
+}
+
+// Each quad generates the four pixels of one HWC cell. The tile stores two channels per
+// word from each pixel, then transposes those words into vectors in channel order.
+groupshared uint fg_cell_pairs[5][256];
+
+uint4 fg_cell_vector(uint pair, uint lane)
+{
+    const uint a = fg_cell_pairs[pair][lane], b = fg_cell_pairs[pair][lane + 1u];
+    const uint c = fg_cell_pairs[pair][lane + 2u], d = fg_cell_pairs[pair][lane + 3u];
+    return uint4((a & 0xffffu) | (b << 16), (c & 0xffffu) | (d << 16),
+                 (a >> 16) | (b & 0xffff0000u), (c >> 16) | (d & 0xffff0000u));
 }
 
 WG_KERNEL(fg_lite_net1_input)
 {
     FG_SETUP();
-    const uint idx = wg_block_id() * 256u + wg_lane_id();
+    const uint lane = wg_lane_id(), block = wg_block_id();
+    const uint idx = block * 256u + lane;
     const uint gw = 2u * W0, gh = 2u * H0;
-    if (idx >= gw * gh) return;
-    const uint gx = idx % gw, gy = idx / gw;
-    const int x = (int)gx - 2 * (int)pad_l, y = (int)gy - 2 * (int)pad_t;
-    const uint X = gx >> 1, Y = gy >> 1, q = 2u * (gy & 1u) + (gx & 1u);
+    const bool hwc = cs == 1u && ps == 48u && (cells & 15u) == 0u;
+    const bool tiled = hwc && ((W0 | H0) & 7u) == 0u;
+    uint X, Y, q;
+    if (hwc) {
+        const uint cell = idx >> 2u;
+        q = lane & 3u;
+        if (tiled) {
+            X = (block % (W0 >> 3u)) * 8u + ((lane >> 2u) & 7u);
+            Y = (block / (W0 >> 3u)) * 8u + (lane >> 5u);
+        } else {
+            X = cell % W0;
+            Y = cell / W0;
+        }
+    } else {
+        if (idx >= gw * gh) return;
+        const uint gx = idx % gw, gy = idx / gw;
+        X = gx >> 1u;
+        Y = gy >> 1u;
+        q = 2u * (gy & 1u) + (gx & 1u);
+    }
+    const int x = (int)(2u * X + (q & 1u)) - 2 * (int)pad_l;
+    const int y = (int)(2u * Y + (q >> 1u)) - 2 * (int)pad_t;
     float vals[10] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
-    if (x >= 0 && x < (int)wd && y >= 0 && y < (int)hd)
+    if (Y < H0 && x >= 0 && x < (int)wd && y >= 0 && y < (int)hd)
     {
         const uint pi = (uint)y * wd + (uint)x;
         const float u = fg_centre((uint)x, wd), v = fg_centre((uint)y, hd);
@@ -111,6 +142,18 @@ WG_KERNEL(fg_lite_net1_input)
         fg_st_h2(qc, pi, v6, v2);
         fg_st_h1(om, pi, fg_sat(fg_mul(fg_mul(e, hpv), hcv)));
     }
+    if (hwc) {
+        [unroll] for (uint pair = 0u; pair < 5u; ++pair)
+            fg_cell_pairs[pair][lane] = fg_pack_h2(vals[2u * pair], vals[2u * pair + 1u]);
+        wg_barrier_lds();
+        if (Y >= H0) return;
+        const uint off = (Y * W0 + X) * 96u;
+        const uint quad = lane & ~3u;
+        wg_st128(cells, off + 16u * q, fg_cell_vector(q, quad));
+        if (q == 0u) wg_st128(cells, off + 64u, fg_cell_vector(4u, quad));
+        if (q == 1u) wg_st128(cells, off + 80u, uint4(0u, 0u, 0u, 0u));
+        return;
+    }
     [unroll] for (uint k = 0u; k < 10u; ++k) fg_cell_store(X, Y, 4u * k + q, vals[k]);
     if (q == 0u)
         [unroll] for (uint c = 40u; c < 48u; ++c) fg_cell_store(X, Y, c, 0.0f);
@@ -122,6 +165,9 @@ WG_ARGS_BEGIN
     uint n1, om, um, ump, na, nb, mimg;
     uint wd, hd, pad_l, pad_t, W0, H0, cs, ps, ui_forcing;
 WG_ARGS_END
+
+void fg_output_h1(uint base, uint idx, float a) { wg_st16(base, idx * 2u, wg_f2h(a)); }
+void fg_output_h2(uint base, uint idx, float a, float b) { wg_st32(base, idx * 4u, wg_f2h(a) | (wg_f2h(b) << 16)); }
 
 WG_KERNEL(fg_lite_net1_output)
 {
@@ -143,8 +189,10 @@ WG_KERNEL(fg_lite_net1_output)
         if (fg_texel(ump, 1u, idx).x > 0.99f) { o[0] = o[0] - 1000.0f; o[1] = o[1] + 1000.0f; }
         if (fg_texel(um, 1u, idx).x > 0.99f) { o[2] = o[2] - 1000.0f; o[3] = o[3] + 1000.0f; }
     }
-    fg_st_h2(na, idx, o[0], o[1]);
-    fg_st_h2(nb, idx, o[2], o[3]);
-    fg_st_h1(mimg, idx, mm);
+    // Preserve the original conversion sequence for the two logit pairs and
+    // sigmoid output. Its code generation also applies to partial edge grids.
+    fg_output_h2(na, idx, o[0], o[1]);
+    fg_output_h2(nb, idx, o[2], o[3]);
+    fg_output_h1(mimg, idx, mm);
 }
 #endif
