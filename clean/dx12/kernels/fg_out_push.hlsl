@@ -9,13 +9,22 @@
 // fg_out_push_fine: one lane per frame pixel; where the fine flag is > 0 (a hole), out := (upsample of filled level 1,
 // 1.0) (row pitch out_pitch, offset (out_x, out_y)); other pixels are not written.
 //
+// fg_out_push_fine_pack (FGU_PACK): writes the presenter slot's packed row instead (fg_pack.hlsli): outp = the packed
+// rows' offset, out_pitch = their pitch in bytes, out_x = the format code (1 R8G8B8A8, 2 B8G8R8A8, 3 R10G10B10A2),
+// out_y = 0; the pixel is stored as the code fg_exec_pack makes of the float16 pixel fg_out_push_fine writes.
+//
 // @wg-kernel fg_out_push co=fg_full.co block=256 wave=32 args=p,p,p,u,u,u,u
 // @wg-kernel fg_out_push_fine co=fg_full.co block=256 wave=32 args=p,p,p,u,u,u,u,u,u,u defines=FGU_FINE=1
+// @wg-kernel fg_out_push_fine_pack co=- entry=fg_out_push_fine block=256 wave=32 args=p,p,p,u,u,u,u,u,u,u defines=FGU_FINE=1,FGU_PACK=1
 #include "wg_platform.hlsli"
 #include "fg_full.hlsli"
+#include "fg_pack.hlsli"
 
 #ifndef FGU_FINE
 #define FGU_FINE 0
+#endif
+#ifndef FGU_PACK
+#define FGU_PACK 0
 #endif
 
 WG_ARGS_BEGIN
@@ -37,7 +46,12 @@ WG_KERNEL(fg_out_push_fine)
     if (!(fgf_ld1h(fine, idx) > 0.0f)) return;
     const int qy = idx / Wo, qx = idx - qy * Wo;
     const float4 up = fgf_up(filled1, w1, h1, qx, qy);
+#if FGU_PACK
+    const uint2 h = uint2(fg_pack_h2(up.x, up.y), fg_pack_h2(up.z, 1.0f));
+    wg_st32(outp, (uint)(qy + out_y) * (uint)out_pitch + (uint)qx * 4u, fgx_pack_pixel(h, (uint)out_x));
+#else
     fgf_st4h(outp, (qy + out_y) * out_pitch + qx + out_x, float4(up.xyz, 1.0f));
+#endif
 }
 #else
 WG_KERNEL(fg_out_push)

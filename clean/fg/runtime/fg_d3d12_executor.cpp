@@ -40,7 +40,8 @@ enum Kernel : uint32_t {
     kMConv2Narrow, kMConv1Late, kMPairBFirst, kMPairBSecond, kMPairD4First, kMPairD4Second,
     kMPairD3Narrow, kMPairD2Narrow,
     kDown2Srv, kDown4Srv, kMvecSrv, kIntermTiled, kPackPairs, kPullTiled, kPushTail, kDown2HudTile,
-    kMConv2Mid, kN2h3b1u, kNet2MergePixels,
+    kMConv2Mid, kN2h3b1u, kNet2MergePixels, kOutPullPack, kOutPushFinePack,
+    kLiteBlendPack,
     kKernelCount,
 };
 constexpr uint32_t kFirstFull = kFullBlend;
@@ -106,6 +107,7 @@ const char* const kKernelNames[kKernelCount] = {
     "fg_lite_downsample2_srv", "fg_lite_downsample4_srv", "fg_lite_mvec_srv", "fg_lite_interm_tiled", "fg_exec_pack_pairs",
     "fg_lite_p2c_pull_tiled", "fg_lite_p2c_push_tail", "fg_lite_downsample2_srv_hud_tile",
     "fg_mconv2_mid", "fg_net2_mconv_h3b1u", "fg_net2_merge_pixels",
+    "fg_out_pull_pack", "fg_out_push_fine_pack", "fg_lite_blend_pack",
 };
 
 constexpr uint32_t kRootConstants = 59;  // 2 runtime constants + up to 57 argument DWORDs
@@ -573,6 +575,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
     uint32_t cap_colour = 0, cap_hud = 0, cap_ui4 = 0, cap_ui1 = 0, cap_depth = 0, cap_motion = 0;
     uint32_t out_off = 0, out_stride = 0;       // generated image (float16 x 4), stride in texels
     uint32_t pack_off = 0, pack_pitch = 0;      // packed slot rows
+    uint32_t fuse_pack = 0;  // slot format code (1..3) the output pyramid packs directly; 0: fg_exec_pack runs
     FgNet1Plan n1plan;
     FgArenaBinding n1arena;
     uint32_t n1_cells = 0, n1_out = 0, n1_pair_scratch = 0;
@@ -1611,12 +1614,15 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                 fr.Args(rg);
                 uint32_t a[30];
                 uint32_t n = 0;
+                // fuse_pack: the slot's packed rows (pack_pitch bytes, format code in the ox argument)
+                const bool packed = fuse_pack != 0;
                 const uint32_t h[20] = {R(kRoleCp), R(kRoleCc), R(kRoleMA), R(kRoleMB), R(kRoleW), R(kRoleUp),
-                                        R(kRoleUc), R(kRoleLp), R(kRoleLc), out_off, out_stride, 0, 0, g.wo, g.ho,
+                                        R(kRoleUc), R(kRoleLp), R(kRoleLc), packed ? pack_off : out_off,
+                                        packed ? pack_pitch : out_stride, packed ? fuse_pack : 0u, 0, g.wo, g.ho,
                                         g.w1, g.h1, fb(op.t), op.flag1 ? 1u : 0u, op.flag2 ? 1u : 0u};
                 for (uint32_t x : h) a[n++] = x;
                 for (uint32_t x : rg) a[n++] = x;
-                Dispatch(r, kLiteBlend, groups_for(static_cast<uint64_t>(g.wo) * g.ho), a, n);
+                Dispatch(r, packed ? kLiteBlendPack : kLiteBlend, groups_for(static_cast<uint64_t>(g.wo) * g.ho), a, n);
                 return true;
             }
             case FgOp::FullBlend:
@@ -1852,9 +1858,12 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         const uint32_t tx = cdiv(g.wo, 16), ty = cdiv(g.ho, 16);
         const volatile float kf = static_cast<float>(g.k);
         const float rk = 1.0f / kf;
-        D(r, kOutPull, tx * ty,
-          {x0, x1, xw, nb_out.off, sig, out_off, fine, lv[1], lv[2], lv[3], lv[4], g.wo, g.ho, g.W2, g.H2, g.k, tx,
-           out_stride, 0u, 0u, fb(rk)});
+        // fuse_pack: the pull and push-fine kernels write the slot's packed rows (pack_off, pack_pitch bytes, format
+        // code in the out_x argument) instead of the float16 image
+        const bool packed = fuse_pack != 0;
+        D(r, packed ? kOutPullPack : kOutPull, tx * ty,
+          {x0, x1, xw, nb_out.off, sig, packed ? pack_off : out_off, fine, lv[1], lv[2], lv[3], lv[4], g.wo, g.ho,
+           g.W2, g.H2, g.k, tx, packed ? pack_pitch : out_stride, packed ? fuse_pack : 0u, 0u, fb(rk)});
         const uint32_t lc = g.out_coarsest;
         if (lc == 8) {
             uint32_t w4, h4;
@@ -1871,8 +1880,9 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         }
         uint32_t w1o, h1o;
         FgExecOutLevelSize(g, 1, &w1o, &h1o);
-        D(r, kOutPushFine, groups_for(static_cast<uint64_t>(g.wo) * g.ho),
-          {fine, lv[1], out_off, g.wo, g.ho, w1o, h1o, out_stride, 0u, 0u});
+        D(r, packed ? kOutPushFinePack : kOutPushFine, groups_for(static_cast<uint64_t>(g.wo) * g.ho),
+          {fine, lv[1], packed ? pack_off : out_off, g.wo, g.ho, w1o, h1o, packed ? pack_pitch : out_stride,
+           packed ? fuse_pack : 0u, 0u});
     }
 
     // ---- inputs ----------------------------------------------------------------------------------------------
@@ -1999,7 +2009,32 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         Transition(r, dst, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
     }
 
+    // The slot format code the last output kernel of this generated index (the Full path's output pyramid or the light
+    // path's blend) can pack directly, else 0: that kernel is the last writer of the output image (no menu output,
+    // prefill or copy after it), outputs are not kept for readback, the slot is an 8 / 10-bit UNORM image of the output
+    // size and the packing kernels are present.
+    uint32_t PackFusion(const std::vector<FgExecOp>& ops, uint32_t slot) const {
+        if (desc.keep_outputs || !target) return 0;
+        bool pyramid = false, blend = false;
+        for (const FgExecOp& op : ops) {
+            if (op.op == FgOp::OutPyramid) pyramid = true;
+            else if (op.op == FgOp::LiteBlend) blend = true;
+            else if (op.op == FgOp::MenuOutput || op.op == FgOp::Prefill || op.op == FgOp::FinalCopy) return 0;
+        }
+        if (pyramid ? !(pso[kOutPullPack] && pso[kOutPushFinePack]) : !(blend && pso[kLiteBlendPack])) return 0;
+        ID3D12Resource* res = target->SlotResource(slot);
+        if (!res) return 0;
+        const D3D12_RESOURCE_DESC d = res->GetDesc();
+        uint32_t bpp = 0;
+        const int code_ = pack_code(d.Format, &bpp);
+        if (d.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || d.Width != g.wo || d.Height != g.ho || code_ <= 0)
+            return 0;
+        return static_cast<uint32_t>(code_);
+    }
+
     FgExecResult WriteSlot(Rec& r, uint32_t slot, char kind, uint64_t token, uint32_t index) {
+        const uint32_t fused = fuse_pack;  // consumed here, so a refused recording cannot leak it into the next slot
+        fuse_pack = 0;
         if (!target) return Fail(FgExecRefusal::SlotTargetMissing, "no presenter bound to the executor");
         ID3D12Resource* res = target->SlotResource(slot);
         if (!res) return Fail(FgExecRefusal::SlotMissing, "slot " + std::to_string(slot) + " has no texture");
@@ -2015,8 +2050,10 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         if (code_ != 0) {
             const bool pairs = pso[kPackPairs] != nullptr;
             const uint32_t columns = pairs ? cdiv(g.wo, 2) : g.wo;
-            D(r, pairs ? kPackPairs : kPack, groups_for(static_cast<uint64_t>(columns) * g.ho),
-              {out_off, out_stride, pack_off, pack_pitch, g.wo, g.ho, static_cast<uint32_t>(code_)});
+            // the output pyramid already wrote the packed rows
+            if (fused != static_cast<uint32_t>(code_))
+                D(r, pairs ? kPackPairs : kPack, groups_for(static_cast<uint64_t>(columns) * g.ho),
+                  {out_off, out_stride, pack_off, pack_pitch, g.wo, g.ho, static_cast<uint32_t>(code_)});
             src_off = pack_off;
             pitch = pack_pitch;
         }
@@ -2463,6 +2500,7 @@ FgExecResult FgD3d12Executor::RecordGeneratedIndex(const FgIndexDispatchDesc& d,
     m.ArmDumpOnGenerated(d.frame_token);
     std::vector<FgExecOp> ops;
     m.host.IndexOps(d.t, m.frame.hud, m.frame.ui4, false, &ops);
+    m.fuse_pack = m.PackFusion(ops, d.slot.slot);
     const bool capture = !m.frame.colour_captured && std::any_of(ops.begin(), ops.end(), [](const FgExecOp& op) {
         return op.op == FgOp::FinalCopy || op.op == FgOp::Prefill;
     });

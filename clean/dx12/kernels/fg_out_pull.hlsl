@@ -11,13 +11,22 @@
 // fg_out_pull_mid: one workgroup per 16 x 16 tile of level 4 (tiles_x = ceil(w4 / 16)): levels 5..8 from level 4's
 // stored values (partials (r w, g w, b w, w)).
 //
+// fg_out_pull_pack (FGP_PACK): the same, but out is the presenter slot's packed row (fg_pack.hlsli): outp = the packed
+// rows' offset, out_pitch = their pitch in bytes, out_x = the format code (1 R8G8B8A8, 2 B8G8R8A8, 3 R10G10B10A2),
+// out_y = 0; each pixel is stored as the code fg_exec_pack makes of the float16 pixel fg_out_pull writes.
+//
 // @wg-kernel fg_out_pull co=fg_full.co block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u
+// @wg-kernel fg_out_pull_pack co=- entry=fg_out_pull block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u defines=FGP_PACK=1
 // @wg-kernel fg_out_pull_mid co=fg_full.co block=256 wave=32 args=p,p,p,p,p,u,u,u,u,u defines=FGP_MID=1
 #include "wg_platform.hlsli"
 #include "fg_full.hlsli"
+#include "fg_pack.hlsli"
 
 #ifndef FGP_MID
 #define FGP_MID 0
+#endif
+#ifndef FGP_PACK
+#define FGP_PACK 0
 #endif
 
 groupshared float4 fgp_wave_sums[8];
@@ -213,8 +222,19 @@ WG_KERNEL(fg_out_pull)
         pv.v[0] = fgf_opq(out_c.x); pv.v[1] = fgf_opq(out_c.y); pv.v[2] = fgf_opq(out_c.z);
         [unroll] for (uint ci = 3u; ci < 8u; ++ci) pv.v[ci] = 0.0f;
         const uint4 h = wg_to_f16_ags(pv);
+#if FGP_PACK
+        const uint word = fgx_pack_pixel(uint2(h.x, (h.y & 0xffffu) | 0x3c000000u), (uint)out_x);
+        const uint pair = QuadReadAcrossX(word);
+        // Adjacent Morton lanes are a horizontal pair (the origin is a multiple of 16); the rows are 8-byte aligned.
+        if (in_bounds && (px & 1) == 0) {
+            const uint at = (uint)(py + out_y) * (uint)out_pitch + (uint)px * 4u;
+            if (px + 1 < Wo) wg_st64(outp, at, uint2(word, pair));
+            else wg_st32(outp, at, word);
+        }
+#else
         if (in_bounds)
             wg_st64(outp, (uint)((py + out_y) * out_pitch + px + out_x) * 8u, uint2(h.x, (h.y & 0xffffu) | 0x3c000000u));
+#endif
     }
     fgf_store_morton_flag(fine, px, py, Wo, Ho, hole);
     fgp_reduce(acc, origin, Wo, Ho, 0u, uint4(lv1, lv2, lv3, lv4));

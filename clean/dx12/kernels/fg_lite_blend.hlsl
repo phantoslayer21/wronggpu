@@ -4,11 +4,16 @@
 // refined candidates (detail transfer from the reference images Lp / Lc where a candidate's source sits on UI and both
 // co-located pixels are UI-free); flag1: the time-interpolated UI estimate laid over the result. D3D12 only.
 // fg_lite_blend_mut is a negative control for the GPU check (the empty-MB fallback dropped), never used otherwise.
+// fg_lite_blend_pack (FG_PACK) writes the presenter slot's packed row instead (fg_pack.hlsli): outp = the packed rows'
+// offset, ostride = their pitch in bytes, ox = the format code (1 R8G8B8A8, 2 B8G8R8A8, 3 R10G10B10A2), oy = 0; each
+// pixel is stored as the code fg_exec_pack makes of the float16 pixel fg_lite_blend writes.
 //
 // @wg-kernel fg_lite_blend co=- block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u
+// @wg-kernel fg_lite_blend_pack co=- entry=fg_lite_blend block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_PACK=1
 // @wg-kernel fg_lite_blend_mut co=- entry=fg_lite_blend block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_MUT=1
 #include "wg_platform.hlsli"
 #include "fg_lite_common.hlsli"
+#include "fg_pack.hlsli"
 
 WG_ARGS_BEGIN
     uint cp, cc, ma, mb, wimg, up, uc, lp, lc, outp;
@@ -18,6 +23,9 @@ WG_ARGS_END
 
 #ifndef FG_MUT
 #define FG_MUT 0
+#endif
+#ifndef FG_PACK
+#define FG_PACK 0
 #endif
 
 bool fg_in_box(float px, float py)
@@ -94,5 +102,10 @@ WG_KERNEL(fg_lite_blend)
         const float4 U = mad(ucv - upv, t.xxxx, upv);
         o = mad(o, (1.0f - U.w).xxx, U.xyz);
     }
+#if FG_PACK
+    const uint2 h = uint2(fg_pack_h2(o.x, o.y), fg_pack_h2(o.z, 1.0f));
+    wg_st32(outp, (oy + y) * ostride + x * 4u, fgx_pack_pixel(h, ox));
+#else
     fg_st_h4(outp, (oy + y) * ostride + ox + x, float4(o, 1.0f));
+#endif
 }
