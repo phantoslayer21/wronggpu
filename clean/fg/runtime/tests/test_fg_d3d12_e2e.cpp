@@ -1953,7 +1953,8 @@ void TestTurboExact(Gpu& gpu, const std::string& dxil, const FgExecWeights& weig
         if (!wave1b_only) CHECK(!ref.BatchActive() && !ref.HoistActive() && !ref.DualQueueActive());
         bool exact_all = true;
         for (uint64_t token = 1; token <= 4; ++token) {
-            if (!game.Upload(static_cast<uint32_t>(token), false, token == 1)) {
+            // (the textures already hold frame 1's state from the upload above: `first` would claim COMMON again)
+            if (!game.Upload(static_cast<uint32_t>(token), false, false)) {
                 CHECK(false);
                 return;
             }

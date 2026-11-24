@@ -565,6 +565,7 @@ struct Rec {
     bool dirty = false;  // a dispatch or copy wrote since the last UAV barrier
     bool open = false, direct = false, uses_arena = true;
     bool aux = false;    // recorded for the second compute queue
+    ID3D12Resource* ares = nullptr;  // the arena alias of the recording's queue (Impl::ArenaFor)
     ID3D12Resource* written_slots[kMaxWrittenSlots] = {};
     uint32_t written_count = 0;
     // Submit: the game queue handoff value this recording waits for (0: the latest), the producer fence value an
@@ -615,8 +616,54 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
     std::vector<Entry> direct_entries;
     ComPtr<ID3D12DescriptorHeap> heap;
     uint32_t desc_inc = 0;
-    ComPtr<ID3D12Resource> channel;
-    ComPtr<ID3D12Resource> arena;
+    // the driver-channel UAV of the descriptor tables: one buffer per queue's recordings (like the arena aliases, so that
+    // no buffer is referenced by two queues at once)
+    ComPtr<ID3D12Resource> channel, channel_game, channel_aux;
+    // The arena is one block of memory in a heap, seen through one buffer resource per queue that works in it at the same
+    // time (the producer queue's `arena`, the game queue's `arena_game`, the second compute queue's `arena_aux`): all
+    // alias the same bytes and the kernels use the same offsets through each, but no resource ever has writes from two
+    // queues in flight (the debug layer, correctly, refuses that on one resource; the queues write disjoint ranges and
+    // meet only through fences). Every recording uses the alias of its queue (ArenaFor) and starts with an aliasing barrier.
+    ComPtr<ID3D12Heap> arena_heap;
+    ComPtr<ID3D12Resource> arena, arena_game, arena_aux;
+    ID3D12Resource* ArenaFor(const Rec& r) const {
+        if (r.aux && arena_aux) return arena_aux.Get();
+        if (r.direct && arena_game) return arena_game.Get();
+        return arena.Get();
+    }
+    FgExecResult CreateArena() {
+        arena.Reset();
+        arena_game.Reset();
+        arena_aux.Reset();
+        arena_heap.Reset();
+        D3D12_HEAP_DESC hd = {};
+        hd.SizeInBytes = arena_bytes;
+        hd.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+        hd.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+        hd.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
+        if (FAILED(device->CreateHeap(&hd, IID_PPV_ARGS(&arena_heap))))
+            return Fail(FgExecRefusal::AllocationFailed, "arena heap of " + std::to_string(arena_bytes) + " bytes");
+        D3D12_RESOURCE_DESC rd = {};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = arena_bytes;
+        rd.Height = 1;
+        rd.DepthOrArraySize = 1;
+        rd.MipLevels = 1;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        const auto place = [&](ComPtr<ID3D12Resource>* out) {
+            return SUCCEEDED(device->CreatePlacedResource(arena_heap.Get(), 0, &rd, D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                          IID_PPV_ARGS(out->GetAddressOf())));
+        };
+        if (!place(&arena) || (compute_queue && !place(&arena_game)) || (aux_queue && !place(&arena_aux))) {
+            arena.Reset();
+            arena_game.Reset();
+            arena_aux.Reset();
+            return Fail(FgExecRefusal::AllocationFailed, "arena of " + std::to_string(arena_bytes) + " bytes");
+        }
+        return FgExecResult::Ok;
+    }
     uint64_t arena_bytes = 0;
     ComPtr<ID3D12Resource> menu_rb;
     TimingQueries producer_queries, direct_queries, aux_queries;
@@ -1154,8 +1201,17 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
             desc_inc = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
             channel = Buffer(256, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
                              D3D12_RESOURCE_STATE_COMMON);
+            channel_game.Reset();
+            channel_aux.Reset();
+            if (compute_queue)
+                channel_game = Buffer(256, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                                      D3D12_RESOURCE_STATE_COMMON);
+            if (aux_queue)
+                channel_aux = Buffer(256, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                                     D3D12_RESOURCE_STATE_COMMON);
             menu_rb = Buffer(256, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
-            if (!channel || !menu_rb) return Fail(FgExecRefusal::AllocationFailed, "channel / readback buffer");
+            if (!channel || !menu_rb || (compute_queue && !channel_game) || (aux_queue && !channel_aux))
+                return Fail(FgExecRefusal::AllocationFailed, "channel / readback buffer");
             for (uint32_t d = 0; d < hd.NumDescriptors; ++d) {
                 D3D12_CPU_DESCRIPTOR_HANDLE h = heap->GetCPUDescriptorHandleForHeapStart();
                 h.ptr += static_cast<SIZE_T>(d) * desc_inc;
@@ -1165,7 +1221,11 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                     uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
                     uav.Buffer.NumElements = 64;
                     uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
-                    device->CreateUnorderedAccessView(channel.Get(), nullptr, &uav, h);
+                    const uint32_t entry = d / (kTables * kTableSize);   // rings: producer, game queue, second queue
+                    ID3D12Resource* ch = aux_queue && entry >= first_aux ? channel_aux.Get()
+                                         : compute_queue && entry >= n   ? channel_game.Get()
+                                                                         : channel.Get();
+                    device->CreateUnorderedAccessView(ch, nullptr, &uav, h);
                 } else {
                     D3D12_SHADER_RESOURCE_VIEW_DESC sv = {};
                     sv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -1369,7 +1429,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         FgExecResult b = Begin(&r);
         if (b != FgExecResult::Ok) return b;
         ArenaTo(r, D3D12_RESOURCE_STATE_COPY_DEST);
-        r.cl->CopyBufferRegion(arena.Get(), weight_base, up.Get(), 0, weight_image.size());
+        r.cl->CopyBufferRegion(r.ares, weight_base, up.Get(), 0, weight_image.size());
         uint64_t v = 0;
         b = Submit(&r, &v);
         if (b != FgExecResult::Ok) return b;
@@ -1382,6 +1442,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         r->aux = aux && aux_queue;
         r->direct = !r->aux && compute_queue && on_game_queue;
         r->uses_arena = uses_arena;
+        r->ares = ArenaFor(*r);
         auto& ring = r->aux ? aux_entries : r->direct ? direct_entries : entries;
         ID3D12Fence* reuse_fence = r->aux ? aux_fence.Get() : r->direct ? handoff_fence.Get() : fence.Get();
         Entry* e = nullptr;
@@ -1419,9 +1480,17 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         ID3D12DescriptorHeap* heaps[] = {heap.Get()};
         r->cl->SetDescriptorHeaps(1, heaps);
         r->cl->SetComputeRootSignature(root.Get());
-        r->cl->SetComputeRootUnorderedAccessView(0, arena->GetGPUVirtualAddress());
-        r->cl->SetComputeRootUnorderedAccessView(1, arena->GetGPUVirtualAddress());
+        r->cl->SetComputeRootUnorderedAccessView(0, r->ares->GetGPUVirtualAddress());
+        r->cl->SetComputeRootUnorderedAccessView(1, r->ares->GetGPUVirtualAddress());
         SetTable(*r, 0);
+        if (arena_game || arena_aux) {
+            // the memory was last used through another alias (another queue's, or this queue's own earlier recording)
+            D3D12_RESOURCE_BARRIER ab = {};
+            ab.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
+            ab.Aliasing.pResourceBefore = nullptr;
+            ab.Aliasing.pResourceAfter = r->ares;
+            r->cl->ResourceBarrier(1, &ab);
+        }
         r->arena = D3D12_RESOURCE_STATE_COMMON;
         ArenaTo(*r, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         cur = r;
@@ -1438,7 +1507,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         if (r.arena == s) return;
         D3D12_RESOURCE_BARRIER b = {};
         b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        b.Transition.pResource = arena.Get();
+        b.Transition.pResource = r.ares;
         b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         b.Transition.StateBefore = r.arena;
         b.Transition.StateAfter = s;
@@ -2522,7 +2591,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         dst.SubresourceIndex = 0;
         D3D12_TEXTURE_COPY_LOCATION src = {};
-        src.pResource = arena.Get();
+        src.pResource = r.ares;
         src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
         src.PlacedFootprint.Offset = src_off;
         src.PlacedFootprint.Footprint.Format = d.Format;
@@ -2550,8 +2619,8 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
             p.colour = Buffer(colb, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
             p.slot = Buffer(slotb, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST);
             if (p.image && p.colour && p.slot) {
-                r.cl->CopyBufferRegion(p.image.Get(), 0, arena.Get(), out_off, img);
-                r.cl->CopyBufferRegion(p.colour.Get(), 0, arena.Get(), cap_colour, colb);
+                r.cl->CopyBufferRegion(p.image.Get(), 0, r.ares, out_off, img);
+                r.cl->CopyBufferRegion(p.colour.Get(), 0, r.ares, cap_colour, colb);
                 Transition(r, res, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_SOURCE);
                 D3D12_TEXTURE_COPY_LOCATION s2 = {};
                 s2.pResource = res;
@@ -2864,11 +2933,7 @@ FgExecResult FgD3d12Executor::Configure(const FgCreateDesc& cd, uint32_t /*histo
         s = m.Layout(banks);
         if (s == FgExecResult::Ok) s = m.FillWeightImage();
         if (s == FgExecResult::Ok) {
-            m.arena = m.Buffer(m.arena_bytes, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-                               D3D12_RESOURCE_STATE_COMMON);
-            if (!m.arena)
-                s = m.Fail(FgExecRefusal::AllocationFailed,
-                           "arena of " + std::to_string(m.arena_bytes) + " bytes");
+            s = m.CreateArena();
         }
         if (s != FgExecResult::Ok && banks > 1) {
             banks = 1;
@@ -3097,7 +3162,7 @@ FgExecResult FgD3d12Executor::RecordSharedGameFrame(const FgSharedDispatchDesc& 
         if (!m.RecordOp(*r, op)) return FgExecResult::Refused;
         if (op.op == FgOp::Detect) {
             m.ArenaTo(*r, D3D12_RESOURCE_STATE_COPY_SOURCE);
-            r->cl->CopyBufferRegion(m.menu_rb.Get(), 0, m.arena.Get(), m.detres_off, 32);
+            r->cl->CopyBufferRegion(m.menu_rb.Get(), 0, r->ares, m.detres_off, 32);
             s = m.Submit(r, &menu_value);
             if (s != FgExecResult::Ok) return s;
             r = &post_detect;
@@ -3410,9 +3475,9 @@ FgExecResult FgD3d12Executor::Net2SelfTest(uint32_t seed, float t, uint32_t runs
     FgExecResult st = m.Begin(&r);
     if (st != FgExecResult::Ok) return st;
     m.ArenaTo(r, D3D12_RESOURCE_STATE_COPY_DEST);
-    r.cl->CopyBufferRegion(m.arena.Get(), m.ib, up.Get(), 0, n2 * 8);
-    r.cl->CopyBufferRegion(m.arena.Get(), m.ic, up.Get(), n2 * 8, n2 * 8);
-    r.cl->CopyBufferRegion(m.arena.Get(), m.ia, up.Get(), n2 * 16, n2 * 2);
+    r.cl->CopyBufferRegion(r.ares, m.ib, up.Get(), 0, n2 * 8);
+    r.cl->CopyBufferRegion(r.ares, m.ic, up.Get(), n2 * 8, n2 * 8);
+    r.cl->CopyBufferRegion(r.ares, m.ia, up.Get(), n2 * 16, n2 * 2);
     const uint32_t sentinel[4] = {0x5A5A, 0x5A5A, 0x5A5A, 0x5A5A};
     m.Fill16(r, m.nb_out.off, out_bytes, sentinel, 1);
     if (m.fast())
@@ -3420,7 +3485,7 @@ FgExecResult FgD3d12Executor::Net2SelfTest(uint32_t seed, float t, uint32_t runs
     else
         m.RecordNet2(r, t);
     m.ArenaTo(r, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    r.cl->CopyBufferRegion(rb.Get(), 0, m.arena.Get(), m.nb_out.off, out_bytes);
+    r.cl->CopyBufferRegion(rb.Get(), 0, r.ares, m.nb_out.off, out_bytes);
     uint64_t v = 0;
     st = m.Submit(&r, &v);
     if (st != FgExecResult::Ok) return st;
