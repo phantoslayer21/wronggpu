@@ -12,8 +12,10 @@
 //       [--gen N]       N = 1..5 generated images per game frame (2x .. 6x), really recorded (default 1)
 //       [--preset AC]   which presets (default AC)       [--timed N] [--warmup N]
 //       [--kprof]       per-launch profile: kernel, workgroups, time per call (serialises the queue a little)
-//       [--batch 0|1] [--hoist 0|1] [--dualq 0|1] [--fuse 0|1]   Turbo v2 levers for paired A / B runs (default: on,
-//                       or the environment WG_FG_BATCH / _HOIST / _DUALQ / _FUSE = 0)
+//       [--batch 0|1] [--hoist 0|1] [--dualq 0|1] [--fuse 0|1] [--fuse2 0|1|MASK]   Turbo v2 levers for paired A / B runs
+//                       (default: on, or the environment WG_FG_BATCH / _HOIST / _DUALQ / _FUSE / _FUSE2 = 0; --fuse2 takes
+//                       a mask of the Wave 1B levers: 1 net1 cells, 2 net2 pairs, 4 upwarp in L14, 8 blend weights,
+//                       16 pyramid tail, 32 X0 / X1 as RGB)
 //       The report has the per-stage sums and the honest multi-queue numbers: the wall-clock GPU span and the busy
 //       time per game frame over the timed window (overlap between queues is counted once there, twice in the sums).
 //   --reference-dxil <dir>  compare direct-SRV output bytes against the captured path built with these kernels
@@ -1885,11 +1887,15 @@ void TestInputSrvPaths(Gpu& gpu, const std::string& dxil, const std::string& ref
 // and retiled kernels) must give the same bytes as every lever off, in every generated slot and the real one, over several
 // game frames (history, swaps), the presets A / B / C and N = 1 .. 5. Both executors read the same game textures and run
 // the same kernel folder (`dxil`: the Turbo kernels sit beside the ones they replace).
-void TestTurboExact(Gpu& gpu, const std::string& dxil, const FgExecWeights& weights) {
-    g_case = "gpu-turbo-exact";
+// wave1b_only: both executors run the Wave 1 levers (batch, hoist, dualq, fuse), only the Wave 1B levers (fuse2) differ:
+// the fused kernels against exactly the kernels they replace.
+void TestTurboExact(Gpu& gpu, const std::string& dxil, const FgExecWeights& weights, bool wave1b_only = false) {
+    g_case = wave1b_only ? "gpu-turbo-exact-wave1b" : "gpu-turbo-exact";
     {
         std::ifstream probe(dxil + "/fg_lite_interm_both.dxil", std::ios::binary);
         if (!probe) std::printf("  turbo: the Turbo v2 kernels are not in %s (batching, hoisting and the split only)\n", dxil.c_str());
+        std::ifstream probe2(dxil + "/fg_net2_mpair_res_c64.dxil", std::ios::binary);
+        if (!probe2) std::printf("  turbo: the Wave 1B kernels are not in %s (fuse2 has nothing to run)\n", dxil.c_str());
     }
     struct Case {
         FgPreset preset;
@@ -1914,9 +1920,10 @@ void TestTurboExact(Gpu& gpu, const std::string& dxil, const FgExecWeights& weig
         ed.dxil_dir = dxil;
         ed.weights = &weights;
         ed.enable_full = c.preset != FgPreset::C;
-        ed.batch = ed.hoist = ed.dualq = ed.fuse = 1;
+        ed.batch = ed.hoist = ed.dualq = ed.fuse = ed.fuse2 = 1;
         FgD3d12Executor test(ed);
-        ed.batch = ed.hoist = ed.dualq = ed.fuse = 0;
+        ed.batch = ed.hoist = ed.dualq = ed.fuse = wave1b_only ? 1 : 0;
+        ed.fuse2 = 0;
         FgD3d12Executor ref(ed);
         FgCreateDesc create = CpuCreate(c.width, c.height);
         create.device = gpu.device.Get();
@@ -1938,10 +1945,12 @@ void TestTurboExact(Gpu& gpu, const std::string& dxil, const FgExecWeights& weig
             CHECK(false);
             return;
         }
-        std::printf("  turbo %s: batch %d hoist %d dualq %d banks %u (reference: batch %d hoist %d dualq %d)\n", name,
-                    test.BatchActive(), test.HoistActive(), test.DualQueueActive(), test.ScratchBanks(),
-                    ref.BatchActive(), ref.HoistActive(), ref.DualQueueActive());
-        CHECK(!ref.BatchActive() && !ref.HoistActive() && !ref.DualQueueActive());
+        std::printf("  turbo%s %s: batch %d hoist %d dualq %d banks %u fuse2 0x%x (reference: batch %d hoist %d dualq %d fuse2 0x%x)\n",
+                    wave1b_only ? " (wave 1B)" : "", name, test.BatchActive(), test.HoistActive(), test.DualQueueActive(),
+                    test.ScratchBanks(), test.Fuse2Active(), ref.BatchActive(), ref.HoistActive(), ref.DualQueueActive(),
+                    ref.Fuse2Active());
+        CHECK(ref.Fuse2Active() == 0);
+        if (!wave1b_only) CHECK(!ref.BatchActive() && !ref.HoistActive() && !ref.DualQueueActive());
         bool exact_all = true;
         for (uint64_t token = 1; token <= 4; ++token) {
             if (!game.Upload(static_cast<uint32_t>(token), false, token == 1)) {
@@ -2008,7 +2017,7 @@ struct BenchOptions {
     uint32_t gen = 1, warmup = 8, timed = 30;
     std::string presets = "AC";
     bool kprof = false;
-    int batch = -1, hoist = -1, dualq = -1, fuse = -1;  // -1: the environment (default on)
+    int batch = -1, hoist = -1, dualq = -1, fuse = -1, fuse2 = -1;  // -1: the environment (default on)
 };
 
 bool RunBench(Gpu& gpu, const std::string& dxil, const FgExecWeights& weights, FgPreset preset,
@@ -2036,6 +2045,7 @@ bool RunBench(Gpu& gpu, const std::string& dxil, const FgExecWeights& weights, F
     ed.hoist = bo.hoist;
     ed.dualq = bo.dualq;
     ed.fuse = bo.fuse;
+    ed.fuse2 = bo.fuse2;
     FgD3d12Executor exec(ed);
     const auto ok = [&](FgExecResult s) {
         if (s == FgExecResult::Ok) return true;
@@ -2108,8 +2118,9 @@ bool RunBench(Gpu& gpu, const std::string& dxil, const FgExecWeights& weights, F
     static_assert(sizeof(stages) / sizeof(*stages) == static_cast<size_t>(FgExecStage::Count));
     std::printf("bench preset %c %ux (gen %u) %ux%u (%u warmup, %u timed, mean GPU ms per game frame)\n", label,
                 gen_count + 1, gen_count, width, height, warmup, timed);
-    std::printf("  levers: batch %s, hoist %s, dualq %s, scratch banks %u\n", exec.BatchActive() ? "on" : "off",
-                exec.HoistActive() ? "on" : "off", exec.DualQueueActive() ? "on" : "off", exec.ScratchBanks());
+    std::printf("  levers: batch %s, hoist %s, dualq %s, scratch banks %u, fuse2 mask 0x%x\n", exec.BatchActive() ? "on" : "off",
+                exec.HoistActive() ? "on" : "off", exec.DualQueueActive() ? "on" : "off", exec.ScratchBanks(),
+                exec.Fuse2Active());
     double shared = 0.0, gen = 0.0;
     for (size_t i = 0; i < timing.ms.size(); ++i) {
         const double mean = timing.ms[i] / timed;
@@ -2163,6 +2174,7 @@ int main(int argc, char** argv) {
         if (std::strcmp(argv[i], "--hoist") == 0 && i + 1 < argc) bo.hoist = std::atoi(argv[++i]);
         if (std::strcmp(argv[i], "--dualq") == 0 && i + 1 < argc) bo.dualq = std::atoi(argv[++i]);
         if (std::strcmp(argv[i], "--fuse") == 0 && i + 1 < argc) bo.fuse = std::atoi(argv[++i]);
+        if (std::strcmp(argv[i], "--fuse2") == 0 && i + 1 < argc) bo.fuse2 = static_cast<int>(std::strtol(argv[++i], nullptr, 0));
         if (std::strcmp(argv[i], "--dxil") == 0 && i + 1 < argc) dxil = argv[++i];
         if (std::strcmp(argv[i], "--reference-dxil") == 0 && i + 1 < argc) reference_dxil = argv[++i];
         if (std::strcmp(argv[i], "--scratch") == 0 && i + 1 < argc) scratch = argv[++i];
@@ -2255,7 +2267,10 @@ int main(int argc, char** argv) {
             }
             if (only.empty() || only.find("input-srv") != std::string::npos)
                 TestInputSrvPaths(g, dxil, reference_dxil, weights);
-            if (only.empty() || only.find("turbo") != std::string::npos) TestTurboExact(g, dxil, weights);
+            if (only.empty() || only.find("turbo") != std::string::npos) {
+                TestTurboExact(g, dxil, weights);
+                TestTurboExact(g, dxil, weights, true);
+            }
             if (only.empty()) TestBrokenKernels(g, dxil, weights, scratch);
         }
     }

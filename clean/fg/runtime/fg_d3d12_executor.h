@@ -178,7 +178,14 @@ struct FgD3d12ExecutorDesc {
     //  - fuse (WG_FG_FUSE=0 off): the fused / retiled kernels fg_lite_p2c_fine_mask (fine pass + hole mask),
     //    fg_lite_p2c_inpaint_tiled and fg_lite_interm_both (both intermediate-time passes, LDS-binned scatters) replace
     //    their separate kernels when their DXIL is in the kernel folder.
-    int batch = -1, hoist = -1, dualq = -1, fuse = -1;
+    //  - fuse2 (WG_FG_FUSE2=0 off; Wave 1B, each exact against the Wave 1 kernels it replaces): 0 off, 1 (the default) every
+    //    lever whose kernels are in the folder, any other value a mask of levers: 1 net1_01 builds its cells in LDS
+    //    (fg_mconv2_mid_cells, no net1 input launch), 2 net2's residual pairs in one launch (fg_net2_mpair_res_c64 / _c32),
+    //    4 the upwarp computed in L14's staging (fg_net2_mconv_m1b2_uw), 8 the blend weights built in the blends
+    //    (fg_lite_blend_w / _pack_w, fg_full_blend_*_w), 16 the output pyramid's coarse pushes in one workgroup
+    //    (fg_out_tail) and level 1 pushed in the fine pass (fg_out_push_fine_l1), 32 X0 / X1 stored as RGB
+    //    (fg_full_blend_*_x3, fg_out_pull_x3). Independent of fuse.
+    int batch = -1, hoist = -1, dualq = -1, fuse = -1, fuse2 = -1;
     // Developer frame dumps (off while dump_dir is empty; the ASI sets it only in a developer build): of the game
     // frames that generate, every dump_every-th one (at most dump_max), the game frame's slot image (game_<n>.ppm) and
     // each generated slot image (gen_<n>_<i>.ppm) are copied to a readback buffer after the slot write, and written as
@@ -276,6 +283,9 @@ public:
     // The levers that are active after Configure (a lever the device or the arena cannot take stays off).
     bool BatchActive() const;
     bool HoistActive() const;
+    // The Wave 1B levers that run after Configure (bits as FgD3d12ExecutorDesc::fuse2 lists them: 1 net1 cells, 2 net2
+    // pairs, 4 upwarp in L14, 8 blend weights, 16 pyramid tail, 32 X0 / X1 as RGB); 0 when off or their kernels are missing.
+    uint32_t Fuse2Active() const;
     bool DualQueueActive() const;
     uint32_t ScratchBanks() const;
     // keep_outputs: waits idle and moves the host copies out (oldest first).

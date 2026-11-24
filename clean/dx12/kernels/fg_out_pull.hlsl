@@ -14,10 +14,14 @@
 // fg_out_pull_pack (FGP_PACK): the same, but out is the presenter slot's packed row (fg_pack.hlsli): outp = the packed
 // rows' offset, out_pitch = their pitch in bytes, out_x = the format code (1 R8G8B8A8, 2 B8G8R8A8, 3 R10G10B10A2),
 // out_y = 0; each pixel is stored as the code fg_exec_pack makes of the float16 pixel fg_out_pull writes.
+// FGP_X3 (fg_out_pull_x3, fg_out_pull_pack_x3): X0 / X1 are stored as 3 x float16 (6 bytes per pixel, fg_full_blend FGB_X3);
+// a texel is read as the 8 bytes from its dword (the 6 bytes sit in them), the same float16 values as the 4-channel read.
 //
 // @wg-kernel fg_out_pull co=fg_full.co block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u
 // @wg-kernel fg_out_pull_pack co=- entry=fg_out_pull block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u defines=FGP_PACK=1
 // @wg-kernel fg_out_pull_mid co=fg_full.co block=256 wave=32 args=p,p,p,p,p,u,u,u,u,u defines=FGP_MID=1
+// @wg-kernel fg_out_pull_x3 co=- entry=fg_out_pull block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u defines=FGP_X3=1
+// @wg-kernel fg_out_pull_pack_x3 co=- entry=fg_out_pull block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u defines=FGP_PACK=1,FGP_X3=1
 #include "wg_platform.hlsli"
 #include "fg_full.hlsli"
 #include "fg_pack.hlsli"
@@ -27,6 +31,9 @@
 #endif
 #ifndef FGP_PACK
 #define FGP_PACK 0
+#endif
+#ifndef FGP_X3
+#define FGP_X3 0
 #endif
 
 groupshared float4 fgp_wave_sums[8];
@@ -123,6 +130,23 @@ float fgp_bil(float fx, float fy, float gx, float gy, float q00, float q10, floa
     return mad(gy, mad(gx, q00, fx * q10), fy * mad(gx, q01, fx * q11));
 }
 
+#if FGP_X3
+// texel i of a 3 x float16 image: its 6 bytes are inside the 8 bytes from the dword at or below byte 6 i
+float4 fgp_ld3h(uint p, int i)
+{
+    const uint a = (uint)i * 6u;
+    const uint2 d = wg_ld64(p, a & ~3u);
+    const bool hi = (a & 2u) != 0u;
+    const uint rg = hi ? ((d.x >> 16) | (d.y << 16)) : d.x;
+    const uint b = hi ? (d.y >> 16) : (d.y & 0xffffu);
+    return float4(wg_h2f_lo(rg), wg_h2f_hi(rg), wg_h2f(b), 0.0f);
+}
+float4 fgp_bil3h(uint p, FgfTap t) { return fgf_mix4(t, fgp_ld3h(p, t.i00), fgp_ld3h(p, t.i10), fgp_ld3h(p, t.i01), fgp_ld3h(p, t.i11)); }
+#define FGP_BIL_X(p, t) fgp_bil3h(p, t)
+#else
+#define FGP_BIL_X(p, t) fgf_bil4h(p, t)
+#endif
+
 // One 20-bit mask per row of the 16 x 16 tile with its two-pixel halo.
 groupshared uint fgp_need_rows[20];
 groupshared uint3 fgp_n2_tile[25];
@@ -209,8 +233,8 @@ WG_KERNEL(fg_out_pull)
             const float vby = fgp_bil(fx, fy, gx, gy, wg_h2f_hi(d00.y), wg_h2f_hi(d10.y), wg_h2f_hi(d01.y), wg_h2f_hi(d11.y));
             // the two candidates re-sampled at the pixel plus k times the vectors (pixel units)
             const float kf = (float)k;
-            const float3 A = fgf_bil4h(x0, fgf_tap(vax * kf + (float)px, vay * kf + (float)py, Wo, Ho)).xyz;
-            const float3 B = fgf_bil4h(x1, fgf_tap(vbx * kf + (float)px, vby * kf + (float)py, Wo, Ho)).xyz;
+            const float3 A = FGP_BIL_X(x0, fgf_tap(vax * kf + (float)px, vay * kf + (float)py, Wo, Ho)).xyz;
+            const float3 B = FGP_BIL_X(x1, fgf_tap(vbx * kf + (float)px, vby * kf + (float)py, Wo, Ho)).xyz;
             c = fgf_sat3(mad(sigma, A, (1.0f - sigma) * B));
             if (isnan(abs(c.z * (c.x * c.y)))) c = float3(0.0f, 1.0f, 1.0f);
         }

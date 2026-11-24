@@ -130,6 +130,7 @@ struct FgExecOp {
     float t = 0.0f;
     bool flag1 = false, flag2 = false;
     bool ui = false;
+    bool lite_blend = false;  // Weights: the blend that follows is the light blend (else the Full blend)
 };
 
 struct FgExecFrameInfo {

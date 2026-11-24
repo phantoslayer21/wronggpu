@@ -28,6 +28,27 @@
 // the staging rounds are full (972 items over 256 lanes: 3.8 rounds instead of 3 x 1.27) and no barrier separates the heads.
 // Every staged value and every convolution is the same computation on the same data as the three-pass kernel.
 //
+// FG_UPWARP_STAGE = 1 (L14 only, fg_net2_mconv_m1b2_uw / _m1b2s_uw): the input y [H][W][18] is not read from memory: the
+// workgroup evaluates fg_net2_upwarp's lane work (fg_net2_upwarp.hlsli: the 2x head upsample and the warp-merge) for every pixel of its
+// staged tile (one lane per tile pixel, the pixels of the tile's one-pixel border included, zero outside the grid) and
+// puts the four 8-channel groups of y (the 8 warped values; U4, U1, Ia, U3[0..1]; U3[2], h(f); zeros) into the LDS tile
+// as the loads and the channel mask would have, so the convolution is the same computation on the same bits. The
+// pixels of the workgroup's own 16 x FG_TH area also write U4, U1, U3 (net2's L25 residuals), as fg_net2_upwarp does.
+// Extra arguments at the end: ib, ic, ia, a4, a1, a3, u4, u1, u3 (arena offsets), fbits (f's single-precision bits).
+//
+// FG_PAIR = 1 (fg_net2_mpair_res_c64 / _c32, net2's residual pairs L4+L5, L6+L7, L8+L9, L10+L11 and L16+L17, L18+L19,
+// L20+L21, L22+L23; FG_C channels in and out of both, FG_MT = FG_NB = FG_C / 16, 128 lanes): one launch computes both
+// convolutions of a pair. A workgroup owns an interior of 14 x 6 conv pixels (tile tx, ty over the grid); the first
+// convolution (leaky, clamp to [-6, 6], h(v + 0): res 1) runs on the 16 x 8 region = the interior and its one-pixel
+// border, from an input tile of 18 x 10 pixels staged as fg_stage does (the same LDS buffer, one-pixel border = the
+// region's); its float16 results go to LDS in place of the input tile (zero outside the grid: the second convolution's
+// zero padding) and the second convolution (leaky, clamp, residual fma(1, input, v): res 2, the input read from memory
+// as for any residual) runs on the interior from there and stores. Both convolutions are fg_conv_tile and fg_post8 as in
+// the single-layer launches: every chunk, every rounding and every post-op is the same computation on the same data,
+// the intermediate tensor just never goes to memory. The other launch parameters of the pair (cin = cout = FG_C, no pool,
+// leaky 1, clamp from 0, residual multiplier 1, channel strides FG_C) are constants of the kernel.
+// Arguments: x (input, also the residual), wf, b (first layer), wf2, b2 (second), y, H, W, tiles_x, tiles_y.
+//
 // Work split: workgroup = 16 x FG_TH conv pixels (tile tx, ty; FG_TH = 2 rows per wave) and FG_MT output tiles of 16
 // weight outputs (group mg); a wave owns two rows of 16 pixels (two B fragments per chunk), so a pooled 2 x 2 cell sits
 // in one wave (lanes n, n ^ 1). A fragments: wf [cout / 16][9 taps][FG_NB blocks][32 lanes][8] float16
@@ -37,6 +58,10 @@
 // wave whose rows are all past the grid) is on a wave-uniform value, after the LDS barrier. Built only when --only
 // names the kernels.
 //
+// @wg-kernel fg_net2_mpair_res_c64 co=- entry=fg_net2_mconv block=128 wave=32 args=p,p,p,p,p,p,u,u,u,u defines=FG_MT=4,FG_NB=4,FG_PAIR=1,FG_C=64
+// @wg-kernel fg_net2_mpair_res_c32 co=- entry=fg_net2_mconv block=128 wave=32 args=p,p,p,p,p,p,u,u,u,u defines=FG_MT=2,FG_NB=2,FG_PAIR=1,FG_C=32
+// @wg-kernel fg_net2_mconv_m1b2_uw co=fg_net2_mma.co entry=fg_net2_mconv block=256 wave=32 args=p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,p,p,p,p,p,p,p,p,p,u defines=FG_MT=1,FG_NB=2,FG_UPWARP_STAGE=1
+// @wg-kernel fg_net2_mconv_m1b2s_uw co=fg_net2_mma.co entry=fg_net2_mconv block=128 wave=32 args=p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,p,p,p,p,p,p,p,p,p,u defines=FG_MT=1,FG_NB=2,FG_UPWARP_STAGE=1
 // @wg-kernel fg_net2_mconv_m1b1 co=fg_net2_mma.co entry=fg_net2_mconv block=256 wave=32 args=p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_MT=1,FG_NB=1
 // @wg-kernel fg_net2_mconv_m1b2 co=fg_net2_mma.co entry=fg_net2_mconv block=256 wave=32 args=p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_MT=1,FG_NB=2
 // @wg-kernel fg_net2_mconv_m2b1 co=fg_net2_mma.co entry=fg_net2_mconv block=256 wave=32 args=p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_MT=2,FG_NB=1
@@ -64,21 +89,54 @@
 #ifndef FG_UP
 #define FG_UP 0
 #endif
+#ifndef FG_UPWARP_STAGE
+#define FG_UPWARP_STAGE 0
+#endif
+#ifndef FG_PAIR
+#define FG_PAIR 0
+#endif
 #define FG_TH (2 * (WG_BLOCK / 32))          // conv rows per workgroup
 
+#if FG_PAIR
+WG_ARGS_BEGIN
+    uint x, wf, b, wf2, b2, y;    // pointers (arena byte offsets)
+    int H, W, tiles_x, tiles_y;
+WG_ARGS_END
+// the single-layer launch parameters of the pair (see the header), as constants, so that fg_stage, fg_conv_tile, fg_post8
+// and fg_store8 below are the single-layer kernels' code
+static const int in_cs = FG_C, cin = FG_C, co_lo = 0, co_n = FG_C, out_cs = FG_C, out_co = 0, pool = 0, leaky = 1;
+static const int clamp_from = 0, skip_cs = FG_C, skip_co = 0, heads = 0;
+static const uint res_mul = 0x3C00u;
+static int res;                          // 1 in the first layer, 2 in the second (wave-uniform)
+static uint skip, y1, y2, skip1, skip2;  // set at the start: the residual is the input, one output
+static uint fg_wf_cur, fg_b_cur;         // the layer's weights and bias
+#define FG_WF fg_wf_cur
+#define FG_B fg_b_cur
+#define FG_WF_SET(w, bias) fg_wf_cur = (w); fg_b_cur = (bias);
+#else
 WG_ARGS_BEGIN
     uint x, wf, b, y, skip, y1, y2, skip1, skip2;    // pointers (arena byte offsets)
     int in_cs, in_co, cin, H, W, co_lo, co_n, out_cs, out_co, pool, leaky, clamp_from, res;
     uint res_mul;
     int skip_cs, skip_co, tiles_x, tiles_y, heads;
+#if FG_UPWARP_STAGE
+    uint ib, ic, ia, a4, a1, a3, u4, u1, u3, fbits;
+#endif
 WG_ARGS_END
+#define FG_WF wf
+#define FG_B b
+#endif
 #ifndef FG_FUSED_HEADS
 #define FG_FUSED_HEADS 0
 #endif
 #ifndef FG_STAGE_ALL
 #define FG_STAGE_ALL 0
 #endif
+#if FG_UPWARP_STAGE
+#define FG_NATIVE_UP 1                       // the upwarp's wave operations (fg_net2_upwarp.hlsl declares it so too)
+#else
 #define FG_NATIVE_UP FG_UP
+#endif
 #define FG_NATIVE_POST ((!FG_UP && (FG_NB == 2 || FG_MT == 2 || FG_NB == 4)) || (FG_UP && FG_NB == 1))
 #define FG_NATIVE_LEAKY 1
 #define FG_JOINED_POST FG_FUSED_HEADS
@@ -96,7 +154,7 @@ uint4 fg_load_input8(uint off, int ico)
     return wg_ld128(x, off);
 }
 
-#define FG_STAGE (FG_UP || FG_NB == 2 || (FG_MT == 2 && FG_NB == 1) || (FG_MT == 1 && FG_NB == 4))
+#define FG_STAGE (FG_UP || FG_NB == 2 || (FG_MT == 2 && FG_NB == 1) || (FG_MT == 1 && FG_NB == 4) || FG_PAIR)
 #if FG_STAGE
 #define FG_TG (FG_NB * 2)
 #define FG_TILE_PIXELS ((FG_TH + 2) * 18)
@@ -327,6 +385,46 @@ void fg_stage_heads(int x0, int y0)
 }
 #endif
 #elif FG_STAGE
+#if FG_UPWARP_STAGE
+#include "fg_net2_upwarp.hlsli"
+
+// The staged tile of L14's input built from fg_upwarp_eval (see the header): tile pixel pp is (x0 + pp % 18 - 1,
+// y0 + pp / 18 - 1); its four groups are the channels 0..7, 8..15, 16..23 (16 and 17 only) and 24..31 (none) of y.
+void fg_stage_upwarp(int x0, int y0)
+{
+    const int items = FG_TILE_PIXELS;
+    const int rounds = (items + WG_BLOCK - 1) / WG_BLOCK + (int)fg_opq0();
+    const uint hf = wg_f2h(asfloat(fbits));
+    for (int round = 0; round < rounds; ++round) {
+        // Lanes past the end still take part in the wave's conversions (they evaluate the last tile pixel).
+        const int it = round * WG_BLOCK + (int)wg_lane_id(), pp = min(it, items - 1);
+        const int sx = x0 + pp % 18 - 1, sy = y0 + pp / 18 - 1;
+        const bool inside = and(and(sx >= 0, sx < W), and(sy >= 0, sy < H));
+        const int p = select(inside, sy * W + sx, 0);
+        uint4 U, val;
+        fg_upwarp_eval(p, U, val);
+        const uint iav = wg_ld16(ia, (uint)p * 2u);
+        const uint4 m = select(inside, ~0u, 0u).xxxx;
+        if (it < items) {
+            fg_tile[fg_tile_index(pp, 0)] = val & m;
+            fg_tile[fg_tile_index(pp, 1)] = uint4(U.x, U.y, fg_half(U, 4u) | (iav << 16),
+                                                  fg_half(U, 5u) | (fg_half(U, 6u) << 16)) & m;
+            fg_tile[fg_tile_index(pp, 2)] = uint4(fg_half(U, 7u) | (hf << 16), 0u, 0u, 0u) & m;
+            fg_tile[fg_tile_index(pp, 3)] = uint4(0u, 0u, 0u, 0u);
+            // the pixels of this workgroup's own area keep U4 / U1 / U3 for L25's residuals
+            const int cx = pp % 18, cy = pp / 18;
+            if (inside && cx >= 1 && cx <= 16 && cy >= 1 && cy <= FG_TH) {
+                wg_st64(u4, (uint)p * 8u, U.xy);
+                wg_st16(u1, (uint)p * 2u, fg_half(U, 4u));
+                wg_st16(u3, (uint)(p * 3) * 2u, fg_half(U, 5u));
+                wg_st16(u3, (uint)(p * 3 + 1) * 2u, fg_half(U, 6u));
+                wg_st16(u3, (uint)(p * 3 + 2) * 2u, fg_half(U, 7u));
+            }
+        }
+    }
+    wg_barrier_lds();
+}
+#else
 void fg_stage(int x0, int y0, int ico)
 {
     const uint items = FG_TILE_PIXELS * FG_TG;
@@ -340,6 +438,7 @@ void fg_stage(int x0, int y0, int ico)
     }
     wg_barrier_lds();
 }
+#endif
 #endif
 
 FgOut fg_output(int hj)
@@ -360,7 +459,7 @@ void fg_conv_tile(int px, int py0, int wrow, int n, int hh, uint lane, int wt, i
 {
     [unroll] for (int mt = 0; mt < FG_MT; ++mt) {
         const int o0 = (wt * FG_MT + mt) * 16 + 8 * hh;
-        h16[mt][0] = fg_load_aligned8(b, (uint)o0 * 2u);
+        h16[mt][0] = fg_load_aligned8(FG_B, (uint)o0 * 2u);
         h16[mt][1] = h16[mt][0];
     }
 #if !FG_STAGE
@@ -378,7 +477,7 @@ void fg_conv_tile(int px, int py0, int wrow, int n, int hh, uint lane, int wt, i
         }
         [unroll] for (int mt = 0; mt < FG_MT; ++mt)
             [unroll] for (int cb = 0; cb < FG_NB; ++cb)
-                fa[mt][cb] = fg_load_aligned8(wf, (uint)(((((wt * FG_MT + mt) * 9) * FG_NB + cb) * 32 + (int)lane) * 16));
+                fa[mt][cb] = fg_load_aligned8(FG_WF, (uint)(((((wt * FG_MT + mt) * 9) * FG_NB + cb) * 32 + (int)lane) * 16));
     }
     [unroll] for (int t = 0; t < 9; ++t) {
         uint4 fb_n[2][FG_NB], fa_n[FG_MT][FG_NB];
@@ -391,7 +490,7 @@ void fg_conv_tile(int px, int py0, int wrow, int n, int hh, uint lane, int wt, i
             }
             [unroll] for (int mt = 0; mt < FG_MT; ++mt)
                 [unroll] for (int cb = 0; cb < FG_NB; ++cb)
-                    fa_n[mt][cb] = fg_load_aligned8(wf, (uint)(((((wt * FG_MT + mt) * 9 + tn) * FG_NB + cb) * 32 + (int)lane) * 16));
+                    fa_n[mt][cb] = fg_load_aligned8(FG_WF, (uint)(((((wt * FG_MT + mt) * 9 + tn) * FG_NB + cb) * 32 + (int)lane) * 16));
         }
         {
             const int N = FG_NB * FG_MT * 2;
@@ -447,7 +546,7 @@ void fg_conv_tile(int px, int py0, int wrow, int n, int hh, uint lane, int wt, i
         }
         [unroll] for (int mt = 0; mt < FG_MT; ++mt)
             [unroll] for (int cb = 0; cb < FG_NB; ++cb)
-                fa[mt][cb] = fg_load_aligned8(wf, (uint)(((((wt * FG_MT + mt) * 9 + t) * FG_NB + cb) * 32 + (int)lane) * 16));
+                fa[mt][cb] = fg_load_aligned8(FG_WF, (uint)(((((wt * FG_MT + mt) * 9 + t) * FG_NB + cb) * 32 + (int)lane) * 16));
         // Software-pipelined Tier B chunks across (cb, mt, nt): overlaps both fg_widen (8x v_cvt_f32_f16)
         // and wg_to_f16_ags (8x v_cvt_f16_f32) directly with independent wg_wmma_f16 ops (only 2 v8f live; bit-identical).
         {
@@ -517,6 +616,60 @@ uint4 fg_joined_post(uint4 v, int px, int cy, int hh, bool live)
 }
 #endif
 
+#if FG_PAIR
+WG_KERNEL(fg_net2_mconv)
+{
+    WG_SETUP();
+    skip = x;
+    y1 = y;
+    y2 = y;
+    skip1 = 0u;
+    skip2 = 0u;
+    const uint lane = wg_lane_id() & 31u;
+    const int blk = (int)wg_block_id();
+    const int tx = blk % tiles_x, ty = blk / tiles_x;
+    const int n = (int)(lane & 15u), hh = (int)(lane >> 4);
+    const int wave = wg_uniform((int)(wg_lane_id() >> 5));
+    const int wrow = 2 * wave;                         // the wave's first row of the 16 x 8 region
+    const int ix = tx * 14, iy = ty * 6;               // the interior's first pixel
+
+    // first layer on the region (pixel (n, wrow + nt) of the region is conv pixel (ix - 1 + n, iy - 1 + wrow + nt))
+    res = 1;
+    fg_stage(ix - 1, iy - 1, 0);                       // the tile starts at (ix - 2, iy - 2)
+    uint4 h1[FG_MT][2];
+    FG_WF_SET(wf, b)
+    fg_conv_tile(ix - 1 + n, iy - 1 + wrow, wrow, n, hh, lane, 0, 0, h1);
+    wg_barrier_lds();                                  // every wave has read the input tile
+    [unroll] for (int mt = 0; mt < FG_MT; ++mt) {
+        const int o0 = mt * 16 + 8 * hh;
+        [unroll] for (int nt = 0; nt < 2; ++nt) {
+            const int gx = ix - 1 + n, gy = iy - 1 + wrow + nt;
+            const bool inside = and(and(gx >= 0, gx < W), and(gy >= 0, gy < H));
+            const uint4 r = fg_adjust8(h1[mt][nt], o0);
+            fg_tile[fg_tile_index((wrow + nt) * 18 + n, 2 * mt + hh)] = r & select(inside, ~0u, 0u).xxxx;
+        }
+    }
+    wg_barrier_lds();
+
+    // second layer on the interior (waves 0 .. 2 hold its six rows)
+    res = 2;
+    if (wave < 3) {
+        uint4 h2[FG_MT][2];
+        FG_WF_SET(wf2, b2)
+        fg_conv_tile(ix + n, iy + wrow, wrow, n, hh, lane, 0, 0, h2);
+        const FgOut q = fg_output(0);
+        [unroll] for (int mt2 = 0; mt2 < FG_MT; ++mt2) {
+            const int o0 = mt2 * 16 + 8 * hh;
+            [unroll] for (int nt2 = 0; nt2 < 2; ++nt2) {
+                const int cx = ix + n, cy = iy + wrow + nt2;
+                const bool live = and(and(n < 14, cx < W), cy < H);
+                const uint4 r = fg_post8(q, h2[mt2][nt2], o0, cy, cx, live);
+                if (live) fg_store8(q, cy * W + cx, o0, r);
+            }
+        }
+    }
+}
+#else
 WG_KERNEL(fg_net2_mconv)
 {
     WG_SETUP();
@@ -565,7 +718,9 @@ WG_KERNEL(fg_net2_mconv)
     const FgOut q = fg_output(hj);
     const int ico = in_co + hj * cin;
 
-#if FG_STAGE
+#if FG_UPWARP_STAGE
+    fg_stage_upwarp(tx * 16, ty * FG_TH);
+#elif FG_STAGE
     fg_stage(tx * 16, ty * FG_TH, ico);
 #endif
     if (py0 >= H) return;                            // wave-uniform: both rows of this wave are past the grid
@@ -598,3 +753,4 @@ WG_KERNEL(fg_net2_mconv)
     }
 #endif
 }
+#endif

@@ -8,12 +8,22 @@
 // chunk before its first matrix call and keep store pointers uniform (clean/dx12/README.md).
 // Built only when --only names the kernels (fg_ kernels are in no model's set).
 //
+// FG_CELLS (fg_mconv2_mid_cells, net1_01 only: k = 3, order 1): the input is not the cell tensor read from memory but the
+// cells built in LDS by this workgroup: every cell of its 18 x (FG_TH + 2) halo (zero outside the W x H cell grid) is made
+// as fg_lite_net1_input makes it (fg_net1_pixel.hlsli: the ten values of each of the cell's four image pixels, packed to
+// float16, transposed over the quad of lanes into the six 8-channel vectors of the HWC cell: channels 4 v + 2 dy + dx,
+// 40..47 zero), in the six uint4 planes the channel blocks read; the convolution is fg_accumulate_halo's with the three
+// blocks staged at once. The pixels of the workgroup's own 16 x FG_TH cells also write Qc and Om (what fg_lite_net1_input
+// writes besides the cells), once each. The cell tensor is never written. Extra arguments after the 15 of the plain
+// kernel: ld, dc, dp, fin, mv, eimg, hc, hp, qp, mimg, qc, om (arena offsets), wd, hd, w1, h1, pad_l, pad_t.
+//
 // @wg-kernel fg_mconv1 co=fg_net1_mma.co entry=fg_mconv block=256 wave=32 args=p,p,p,p,p,u,u,u,u,u,u,u,u,u,u defines=FG_MT=1,WG_LD_A16=1
 // @wg-kernel fg_mconv2 co=fg_net1_mma.co entry=fg_mconv block=256 wave=32 args=p,p,p,p,p,u,u,u,u,u,u,u,u,u,u defines=FG_MT=2,WG_LD_A16=1,FG_HALO=1
 // @wg-kernel fg_mconv4 co=fg_net1_mma.co entry=fg_mconv block=256 wave=32 args=p,p,p,p,p,u,u,u,u,u,u,u,u,u,u defines=FG_MT=4,WG_LD_A16=1
 // @wg-kernel fg_mconv2_narrow co=fg_net1_mma.co entry=fg_mconv block=64 wave=32 args=p,p,p,p,p,u,u,u,u,u,u,u,u,u,u defines=FG_MT=2,WG_LD_A16=1,FG_HALO=1
 // @wg-kernel fg_mconv1_late co=fg_net1_mma.co entry=fg_mconv block=64 wave=32 args=p,p,p,p,p,u,u,u,u,u,u,u,u,u,u defines=FG_MT=1,WG_LD_A16=1,FG_HALO=1
 // @wg-kernel fg_mconv2_mid co=fg_net1_mma.co entry=fg_mconv block=128 wave=32 args=p,p,p,p,p,u,u,u,u,u,u,u,u,u,u defines=FG_MT=2,WG_LD_A16=1,FG_HALO=1
+// @wg-kernel fg_mconv2_mid_cells co=- entry=fg_mconv block=128 wave=32 args=p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,p,p,p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u defines=FG_MT=2,WG_LD_A16=1,FG_HALO=1,FG_CELLS=1
 #include "wg_platform.hlsli"
 
 #define FG_FN
@@ -28,6 +38,9 @@
 #ifndef FG_HALO
 #define FG_HALO 0
 #endif
+#ifndef FG_CELLS
+#define FG_CELLS 0
+#endif
 #if FG_HALO
 #define FG_HALO_PX (18 * (FG_TH + 2))
 groupshared uint4 fg_halo[2 * FG_HALO_PX];
@@ -36,7 +49,15 @@ groupshared uint4 fg_halo[2 * FG_HALO_PX];
 WG_ARGS_BEGIN
     uint x, wf, b, y, p;  // pointers (arena byte offsets)
     int cin, cout, H, W, k, order, act, pool, tiles_x, tiles_y;
+#if FG_CELLS
+    uint ld, dc, dp, fin, mv, eimg, hc, hp, qp, mimg, qc, om;
+    uint wd, hd, w1, h1, pad_l, pad_t;
+#endif
 WG_ARGS_END
+#if FG_CELLS
+#include "fg_lite_common.hlsli"
+#include "fg_net1_pixel.hlsli"
+#endif
 
 uint fg_opq0() { return wg_grid_ >> 31; }      // an opaque zero (the grid size is below 2^31)
 
@@ -112,6 +133,84 @@ void fg_accumulate_halo(int tx, int ty, int mg, int n, int hh, int wy, uint lane
                 const int ppn = pixel + 18 * (nt % 3) + nt / 3;
                 fb_n[0] = fg_halo[ppn];
                 fb_n[1] = fg_halo[ppn + 18];
+                [unroll] for (int mt = 0; mt < FG_MT; ++mt)
+                    fa_n[mt] = wg_ld128(wf, (uint)((((mg * FG_MT + mt) * nq + qn) * 32 + (int)lane) * 16));
+            }
+            fg_chunk_b_pipe(fa, fb, h16);
+            if (tap + 1 < 9) {
+                fb[0] = fb_n[0]; fb[1] = fb_n[1];
+                [unroll] for (int mt2 = 0; mt2 < FG_MT; ++mt2) fa[mt2] = fa_n[mt2];
+            }
+        }
+    }
+}
+#endif
+
+#if FG_CELLS
+// Six planes (the 8-channel vectors of the 48-channel cell: plane j = channels 8 j .. 8 j + 7) of the halo cells.
+groupshared uint4 fg_cells[6 * FG_HALO_PX];
+
+// The workgroup's halo cells (halo cell p = cell (tx * 16 + p % 18 - 1, ty * FG_TH + p / 18 - 1)), one lane per (cell,
+// pixel q of the cell) -- the lanes of a quad are the four pixels of one cell, q = lane & 3: the pixel is
+// (2 X + (q & 1) - 2 pad_l, 2 Y + (q >> 1) - 2 pad_t).
+void fg_stage_cells(int tx, int ty)
+{
+    const int items = FG_HALO_PX * 4;
+    const int rounds = (items + WG_BLOCK - 1) / WG_BLOCK + (int)fg_opq0();
+    for (int round = 0; round < rounds; ++round) {
+        // Lanes past the end still take part in the wave's conversions and quad reads (they redo the last cell).
+        const int it = round * WG_BLOCK + (int)wg_lane_id(), e = min(it, items - 1);
+        const int pc = e >> 2, q = e & 3;
+        const int cx = pc % 18, cy = pc / 18;
+        const int X = tx * 16 + cx - 1, Y = ty * FG_TH + cy - 1;
+        const bool inside = X >= 0 && X < W && Y >= 0 && Y < H;
+        const bool own = inside && cx >= 1 && cx <= 16 && cy >= 1 && cy <= FG_TH && it < items;
+        const int px = 2 * X + (q & 1) - 2 * (int)pad_l, py = 2 * Y + (q >> 1) - 2 * (int)pad_t;
+        float vals[10];
+        fg_net1_pixel(px, py, inside, own, vals);
+        uint pr[5];
+        [unroll] for (int j = 0; j < 5; ++j) pr[j] = fg_pack_h2(vals[2 * j], vals[2 * j + 1]);
+        // the vector j of the cell: halves (k = 2 j, 2 j + 1) of the four pixels, in channel order
+        uint4 vec[5];
+        [unroll] for (int j2 = 0; j2 < 5; ++j2) {
+            const uint a = QuadReadLaneAt(pr[j2], 0), bq = QuadReadLaneAt(pr[j2], 1);
+            const uint c = QuadReadLaneAt(pr[j2], 2), d = QuadReadLaneAt(pr[j2], 3);
+            vec[j2] = uint4((a & 0xffffu) | (bq << 16), (c & 0xffffu) | (d << 16),
+                            (a >> 16) | (bq & 0xffff0000u), (c >> 16) | (d & 0xffff0000u));
+        }
+        if (it < items) {
+            const uint4 mine = q == 0 ? vec[0] : (q == 1 ? vec[1] : (q == 2 ? vec[2] : vec[3]));
+            fg_cells[q * FG_HALO_PX + pc] = mine;
+            if (q == 0) fg_cells[4 * FG_HALO_PX + pc] = vec[4];
+            if (q == 1) fg_cells[5 * FG_HALO_PX + pc] = uint4(0u, 0u, 0u, 0u);
+        }
+    }
+    wg_barrier_lds();
+}
+
+// fg_accumulate_halo (k = 3, order 1) on the staged cells: block cb reads planes 2 cb and 2 cb + 1
+void fg_accumulate_cells(int mg, int n, int hh, int wy, uint lane, inout uint4 h16[FG_MT][2])
+{
+    const int nb = cin / 16;
+    const int nq = nb * 9;
+    const int pixel = hh * FG_HALO_PX + wy * 18 + n;
+    for (int cb = 0; cb < nb; ++cb) {
+        const int at = cb * 2 * FG_HALO_PX + pixel;
+        uint4 fb[2], fa[FG_MT];
+        {
+            fb[0] = fg_cells[at];
+            fb[1] = fg_cells[at + 18];
+            [unroll] for (int mt = 0; mt < FG_MT; ++mt)
+                fa[mt] = wg_ld128(wf, (uint)((((mg * FG_MT + mt) * nq + cb * 9) * 32 + (int)lane) * 16));
+        }
+        [unroll] for (int tap = 0; tap < 9; ++tap) {
+            uint4 fb_n[2], fa_n[FG_MT];
+            if (tap + 1 < 9) {
+                const int nt = tap + 1;
+                const int qn = cb * 9 + nt;
+                const int ppn = at + 18 * (nt % 3) + nt / 3;
+                fb_n[0] = fg_cells[ppn];
+                fb_n[1] = fg_cells[ppn + 18];
                 [unroll] for (int mt = 0; mt < FG_MT; ++mt)
                     fa_n[mt] = wg_ld128(wf, (uint)((((mg * FG_MT + mt) * nq + qn) * 32 + (int)lane) * 16));
             }
@@ -211,7 +310,11 @@ uint fg_pool4(uint a, uint b, uint c, uint d)
 
 WG_KERNEL(fg_mconv)
 {
+#if FG_CELLS
+    FG_SETUP();
+#else
     WG_SETUP();
+#endif
     const uint lane = wg_lane_id() & 31u, wave = wg_lane_id() >> 5;
     const int blk = (int)wg_block_id();
     const int tx = blk % tiles_x, rest = blk / tiles_x;
@@ -227,6 +330,10 @@ WG_KERNEL(fg_mconv)
         h16[mt][0] = wg_ld128(b, (uint)o0 * 2u);
         h16[mt][1] = h16[mt][0];
     }
+#if FG_CELLS
+    fg_stage_cells(tx, ty);
+    fg_accumulate_cells(mg, n, hh, wy, lane, h16);
+#else
 #if FG_HALO
     if (k == 3 && order == 1) {
 #if WG_BLOCK <= 128
@@ -239,6 +346,7 @@ WG_KERNEL(fg_mconv)
     {
         fg_accumulate(tx, ty, mg, n, hh, wy, lane, false, h16);
     }
+#endif
     [unroll] for (int mt4 = 0; mt4 < FG_MT; ++mt4) {
         const int o0 = (mg * FG_MT + mt4) * 16 + 8 * hh;
         const uint4 r0 = act == 1 ? fg_leaky8(h16[mt4][0]) : h16[mt4][0];

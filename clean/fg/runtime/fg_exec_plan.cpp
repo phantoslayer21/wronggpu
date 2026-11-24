@@ -388,7 +388,10 @@ void FgExecHost::IndexOps(float t, bool hudless_now, bool ui4_now, bool out_subr
         o.op = FgOp::Interm;
         o.t = t;
         ops->push_back(o);
-        simple(FgOp::Weights, ops);
+        FgExecOp w;
+        w.op = FgOp::Weights;
+        w.lite_blend = lite_;
+        ops->push_back(w);
         if (out_subrect) simple(FgOp::Prefill, ops);
         if (lite_) {
             FgExecOp b;

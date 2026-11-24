@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -45,7 +46,19 @@ enum Kernel : uint32_t {
     kLiteBlendPack, kFullBlendMerge,
     // Turbo v2: exact fused / retiled kernels, used only when their DXIL is present and the fuse lever is on
     kFineMask, kInpaintTiled, kInterm2, kN2h3b1uS3,
+    // Turbo v2 Wave 1B (the fuse2 levers, FgD3d12ExecutorDesc::fuse2): each is used only when its DXIL is present
+    kLiteBlendW, kLiteBlendPackW,                                                       // A13: W built in the blend
+    kFullBlendW, kFullBlendMergeW, kFullBlendX3, kFullBlendMergeX3, kFullBlendWX3, kFullBlendMergeWX3,
+    kOutPullX3, kOutPullPackX3,                                                         // A12: X0 / X1 as RGB
+    kN2m1b2Uw, kN2m1b2sUw,                                                              // A9: upwarp in L14's staging
+    kPairC64, kPairC32,                                                                 // A7: net2 residual pairs
+    kOutTail, kFineL1, kFinePackL1,                                                     // A14: output pyramid tail
+    kMConv2MidCells,                                                                    // A6: net1_01 builds its cells
     kKernelCount,
+};
+// the Wave 1B levers (bits of FgD3d12ExecutorDesc::fuse2 when it is a mask)
+enum Fuse2Bit : uint32_t {
+    kF2Cells = 1, kF2Pair = 2, kF2Upwarp = 4, kF2Weights = 8, kF2Tail = 16, kF2X3 = 32, kF2All = 63,
 };
 constexpr uint32_t kFirstTurbo = kFineMask;  // a pipeline of these that the device refuses is dropped, not fatal
 constexpr uint32_t kFirstFull = kFullBlend;
@@ -67,6 +80,8 @@ constexpr uint32_t kMTile = 16;
 
 bool KernelNeeded(uint32_t k, bool full, FgNet2Path path) {
     if (k == kOutPullPack || k == kOutPushFinePack || k == kFullBlendMerge) return full;  // Full path only
+    if ((k >= kFullBlendW && k <= kOutPullPackX3) || k == kOutTail || k == kFineL1 || k == kFinePackL1) return full;
+    if (k == kN2m1b2Uw || k == kN2m1b2sUw || k == kPairC64 || k == kPairC32) return full && path == FgNet2Path::Fast;
     if (k < kFirstFull || k >= kFirstOptional) return true;
     if (!full) return false;
     if (k == kNet2Conv || k == kNet2Up2 || k == kNet2Warp) return path == FgNet2Path::Exact;
@@ -115,6 +130,14 @@ const char* const kKernelNames[kKernelCount] = {
     "fg_out_pull_pack", "fg_out_push_fine_pack", "fg_lite_blend_pack",
     "fg_full_blend_merge",
     "fg_lite_p2c_fine_mask", "fg_lite_p2c_inpaint_tiled", "fg_lite_interm_both", "fg_net2_mconv_h3b1u_s3",
+    "fg_lite_blend_w", "fg_lite_blend_pack_w",
+    "fg_full_blend_w", "fg_full_blend_merge_w", "fg_full_blend_x3", "fg_full_blend_merge_x3", "fg_full_blend_w_x3",
+    "fg_full_blend_merge_w_x3",
+    "fg_out_pull_x3", "fg_out_pull_pack_x3",
+    "fg_net2_mconv_m1b2_uw", "fg_net2_mconv_m1b2s_uw",
+    "fg_net2_mpair_res_c64", "fg_net2_mpair_res_c32",
+    "fg_out_tail", "fg_out_push_fine_l1", "fg_out_push_fine_pack_l1",
+    "fg_mconv2_mid_cells",
 };
 static_assert(sizeof(kKernelNames) / sizeof(*kKernelNames) == kKernelCount, "one name per kernel");
 
@@ -611,6 +634,17 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
     // Turbo v2 levers (fg_d3d12_executor.h FgD3d12ExecutorDesc): wanted at construction, active after Configure.
     bool want_batch = true, want_hoist = true, want_dualq = true, want_fuse = true;
     bool batch_on = false, hoist_on = false, dualq_on = false;
+    // Wave 1B (fuse2 bits wanted; the *_on flags are decided in Layout from the kernels that are present)
+    uint32_t want_fuse2 = kF2All;
+    bool Fused2(uint32_t bit, uint32_t k) const { return (want_fuse2 & bit) != 0 && pso[k] != nullptr; }
+    bool cells_on = false;          // A6: net1_01 builds its cells in LDS (the net1 input launch is dropped)
+    bool pair64_on = false, pair32_on = false;   // A7: net2's residual pairs (64- / 32-channel) in one launch
+    bool uw_on = false;             // A9: the upwarp is computed in L14's staging (y is never written)
+    bool lite_weights_on = false;   // A13: the light blend builds W
+    bool full_weights_on = false;   // A13: the Full blend builds W
+    bool x3_on = false;             // A12: X0 / X1 hold r, g, b only
+    bool tail_on = false;           // A14: the pyramid's coarse pushes in one workgroup
+    bool l1_on = false;             // A14: level 1 is pushed inside the fine pass
     bool hole_fused = false;  // the fine pass already ran the hole mask of this frame (the HoleMask op is then empty)
     // the fused / retiled kernels (kFineMask, kInpaintTiled, kInterm2) are used when present
     bool Fused(uint32_t k) const { return want_fuse && pso[k] != nullptr; }
@@ -860,12 +894,12 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         bump += align(bytes ? bytes : 4, 4);
         return static_cast<uint32_t>(at);
     }
-    Net2Buf N2(uint32_t div, uint32_t c) {
+    Net2Buf N2(uint32_t div, uint32_t c, bool alloc = true) {
         Net2Buf b;
         b.h = g.H2 / div;
         b.w = g.W2 / div;
         b.c = c;
-        b.off = Alloc(2ull * b.h * b.w * c);
+        b.off = alloc ? Alloc(2ull * b.h * b.w * c) : 0u;
         return b;
     }
 
@@ -901,9 +935,30 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         return (batch_on || hoist_on) && index >= 1 && index <= sc_banks ? index - 1 : 0;
     }
 
+    // Wave 1B: a lever runs when its bit is wanted and every kernel it needs is present (else the Wave 1 kernels run)
+    void DecideFuse2() {
+        const bool full = desc.enable_full;
+        pair64_on = full && fast() && Fused2(kF2Pair, kPairC64);
+        pair32_on = full && fast() && Fused2(kF2Pair, kPairC32);
+        uw_on = full && fast() && Fused2(kF2Upwarp, kN2m1b2Uw) && pso[kN2m1b2sUw];
+        lite_weights_on = Fused2(kF2Weights, kLiteBlendW) && pso[kLiteBlendPackW];
+        full_weights_on = full && Fused2(kF2Weights, kFullBlendW) && pso[kFullBlendMergeW];
+        x3_on = full && (want_fuse2 & kF2X3) && pso[kOutPullX3] && pso[kOutPullPackX3] && pso[kFullBlendX3] &&
+                pso[kFullBlendMergeX3] && (!full_weights_on || (pso[kFullBlendWX3] && pso[kFullBlendMergeWX3]));
+        tail_on = full && Fused2(kF2Tail, kOutTail);
+        l1_on = full && Fused2(kF2Tail, kFineL1) && pso[kFinePackL1];
+    }
+    // The Full blend kernel for (merged input, W built in, X0 / X1 as RGB)
+    uint32_t FullBlendKernel(bool merged) const {
+        const bool w = full_weights_on, x = x3_on;
+        if (merged) return w ? (x ? kFullBlendMergeWX3 : kFullBlendMergeW) : (x ? kFullBlendMergeX3 : kFullBlendMerge);
+        return w ? (x ? kFullBlendWX3 : kFullBlendW) : (x ? kFullBlendX3 : kFullBlend);
+    }
+
     FgExecResult Layout(uint32_t banks) {
         bump = 256;  // offset 0 is the null pointer
         sc_bank = 0;
+        DecideFuse2();
         for (uint32_t r = 0; r < kRoleCount; ++r) {
             if (r == kRoleMA || r == kRoleMB || r == kRoleW) continue;  // per-index: the scratch block below
             const uint64_t n = FgRoleBytes(g, r);
@@ -929,6 +984,13 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         n1arena.region_base[0] = Alloc(n1plan.region_bytes[0]);
         n1arena.region_base[2] = Alloc(n1plan.region_bytes[2]);
         n1_cells = static_cast<uint32_t>(n1arena.region_base[0] + n1plan.buffers[n1plan.Find("cells")].offset);
+        {
+            // A6: net1_01 (the one step that reads the cells) is the 3 x 3 block-first convolution of 48 channels
+            const FgNet1Step* s0 = n1plan.steps.empty() ? nullptr : &n1plan.steps[0];
+            cells_on = s0 && Fused2(kF2Cells, kMConv2MidCells) && s0->kernel == FgNet1Kernel::MConv2 &&
+                       s0->args[0].buffer && s0->args[5].value == kFgCellChannels && s0->args[9].value == 3 &&
+                       s0->args[10].value == 1 && s0->args[6].value % 32 == 0 && s0->grid <= kFgMaxGroupsPerDispatch;
+        }
         n1_out = static_cast<uint32_t>(n1arena.region_base[2] + n1plan.buffers[n1plan.Find("out")].offset);
         // The two coarse pairs run in sequence and can share the first convolution's output buffer.
         const bool split_b = pso[kMPairBFirst] && pso[kMPairBSecond];
@@ -949,8 +1011,8 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         pack_off = Alloc(static_cast<uint64_t>(pack_pitch) * g.ho, 512);
         if (desc.enable_full) {
             const uint64_t fr = static_cast<uint64_t>(g.wo) * g.ho, n2 = static_cast<uint64_t>(g.W2) * g.H2;
-            x0 = Alloc(fr * 8);
-            x1 = Alloc(fr * 8);
+            x0 = Alloc(fr * (x3_on ? 6 : 8));
+            x1 = Alloc(fr * (x3_on ? 6 : 8));
             xw = Alloc(fr * 2);
             ib = Alloc(n2 * 8);
             ic = Alloc(n2 * 8);
@@ -966,7 +1028,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
             nb_a2 = N2(4, 32);
             nb_r0 = N2(8, 64);
             for (int u = 0; u < 4; ++u) {
-                nb_t[u] = N2(8, 64);
+                nb_t[u] = N2(8, 64, !pair64_on);   // the pair kernels keep the first layer's output in LDS
                 nb_r[u] = N2(8, 64);
             }
             if (!fast()) nb_r4u = N2(4, 64);   // the fast path stages the upsamples inside the convolutions
@@ -978,11 +1040,11 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
             nb_U4 = N2(1, 4);
             nb_U1 = N2(1, 1);
             nb_U3 = N2(1, 3);
-            nb_y = N2(1, 18);
+            nb_y = N2(1, 18, !uw_on);   // with the upwarp in L14's staging y is never written
             nb_b1 = N2(2, 16);
             nb_s0 = N2(4, 32);
             for (int u = 0; u < 4; ++u) {
-                nb_tb[u] = N2(4, 32);
+                nb_tb[u] = N2(4, 32, !pair32_on);
                 nb_s[u] = N2(4, 32);
             }
             if (!fast()) nb_s4u = N2(2, 32);
@@ -1578,6 +1640,20 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                 return;
             }
 
+            if (cells_on && kernel == FgNet1Kernel::MConv2 && args[0] == n1_cells) {
+                // net1_01 with its cells built in LDS from the images net1's input launch would have packed
+                uint32_t a[kFgNet1Args + 18];
+                std::copy_n(args, kFgNet1Args, a);
+                a[14] = cdiv(a[7], 8);
+                const uint32_t groups = a[13] * a[14] * (a[6] / 32);
+                uint32_t n = kFgNet1Args;
+                for (uint32_t x : {R(kRoleLd), R(kRoleDc), R(kRoleDp), R(kRoleF), R(kRoleMv), R(kRoleE), R(kRoleHc),
+                                   R(kRoleHp), R(kRoleQp), R(kRoleM), R(kRoleQc), R(kRoleOm), g.wd, g.hd, g.w1, g.h1,
+                                   g.pad_l, g.pad_t})
+                    a[n++] = x;
+                Dispatch(*cur, kMConv2MidCells, groups, a, n, false);
+                return;
+            }
             Kernel tuned = kKernelCount;
             uint32_t tiles_per_wave = 0;
             uint32_t tile_h = 4;
@@ -1840,6 +1916,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                   {R(kRoleDc), R(kRoleQc), g.wd * g.hd}, false);
                 return true;
             case FgOp::Net1Input:
+                if (cells_on) return true;   // net1_01 builds its cells in LDS from the same images
                 D(r, kNet1Input, groups_for(4ull * g.W0 * g.H0),
                   {R(kRoleLd), R(kRoleDc), R(kRoleDp), R(kRoleF), R(kRoleMv), R(kRoleE), R(kRoleHc), R(kRoleHp),
                    R(kRoleQp), R(kRoleM), n1_cells, R(kRoleQc), R(kRoleOm), g.wd, g.hd, g.w1, g.h1, g.W0, g.H0,
@@ -1883,6 +1960,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                 return true;
             }
             case FgOp::Weights:
+                if (op.lite_blend ? lite_weights_on : full_weights_on) return true;   // the blend computes W in LDS
                 D(r, kWeights, groups_for(nsc),
                   {R(kRoleMA), R(kRoleMB), R(kRoleNA), R(kRoleNB), R(kRoleW), g.w1, g.h1, g.wd, g.hd});
                 return true;
@@ -1905,6 +1983,17 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                                         g.w1, g.h1, fb(op.t), op.flag1 ? 1u : 0u, op.flag2 ? 1u : 0u};
                 for (uint32_t x : h) a[n++] = x;
                 for (uint32_t x : rg) a[n++] = x;
+                if (lite_weights_on) {
+                    // W is built in the blend: 32 x 8 pixel tiles; net1's logit pairs and grid at the end
+                    uint32_t w[34];
+                    std::copy_n(a, n, w);
+                    w[n++] = R(kRoleNA);
+                    w[n++] = R(kRoleNB);
+                    w[n++] = g.wd;
+                    w[n++] = g.hd;
+                    Dispatch(r, packed ? kLiteBlendPackW : kLiteBlendW, cdiv(g.wo, 32) * cdiv(g.ho, 8), w, n);
+                    return true;
+                }
                 Dispatch(r, packed ? kLiteBlendPack : kLiteBlend, groups_for(static_cast<uint64_t>(g.wo) * g.ho), a, n);
                 return true;
             }
@@ -1915,7 +2004,14 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                                         op.ui ? R(kRoleUp) : 0u, op.ui ? R(kRoleUc) : 0u, x0, x1, xw, ib, ic, ia,
                                         g.wo, g.ho, g.w1, g.h1, g.wd, g.hd, g.k, g.Wp / 16, op.ui ? 1u : 0u,
                                         nb_x.off, fb(op.t)};
-                Dispatch(r, merged ? kFullBlendMerge : kFullBlend, (g.Wp / 16) * (g.Hp / 16), a, merged ? 25u : 23u);
+                uint32_t n = merged ? 25u : 23u;
+                uint32_t av[27];
+                std::copy_n(a, n, av);
+                if (full_weights_on) {
+                    av[n++] = R(kRoleNA);
+                    av[n++] = R(kRoleNB);
+                }
+                Dispatch(r, FullBlendKernel(merged), (g.Wp / 16) * (g.Hp / 16), av, n);
                 net2_input_merged = merged;
                 return true;
             }
@@ -2036,6 +2132,8 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         const Net2Buf* y2 = nullptr;
         const Net2Buf* skip1 = nullptr;
         const Net2Buf* skip2 = nullptr;
+        bool upwarp = false;        // L14 with the upwarp in its staging (uw_on): fbits = f's bits
+        uint32_t fbits = 0;
     };
     uint32_t mconv_half_last = 0;  // Net2SelfTest negative control: the next MConv on half its workgroups
     // One fg_net2_mconv launch: layer n from x into y, cin input channels, conv grid H x W.
@@ -2069,10 +2167,27 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
             mconv_half_last = 0;
         }
         auto off = [](const Net2Buf* b) { return b ? b->off : 0u; };
+        if (o.upwarp) {
+            // L14: the same launch as m1b2 / m1b2s, input y built from the heads and the means in the staging
+            const uint32_t uw = v.kernel == kN2m1b2 ? kN2m1b2Uw : kN2m1b2sUw;
+            uint32_t a[38] = {x.off, n2fw[n - 1], n2fb[n - 1], y.off, off(o.skip), off(o.y1), off(o.y2), off(o.skip1),
+                              off(o.skip2), x.c, 0u, cin, H, W, 0u, co_n, out_cs, 0u, o.pool, o.leaky, o.clamp_from,
+                              o.res, o.res_mul, o.skip_cs, 0u, tx, ty, o.heads,
+                              ib, ic, ia, nb_hA4.off, nb_hA1.off, nb_hA3.off, nb_U4.off, nb_U1.off, nb_U3.off,
+                              o.fbits};
+            Dispatch(r, uw, wg, a, 38);
+            return;
+        }
         D(r, v.kernel, wg,
           {x.off, n2fw[n - 1], n2fb[n - 1], y.off, off(o.skip), off(o.y1), off(o.y2), off(o.skip1), off(o.skip2), x.c,
            0u, cin, H, W, 0u, co_n, out_cs, 0u, o.pool, o.leaky, o.clamp_from, o.res, o.res_mul, o.skip_cs, 0u, tx, ty,
            o.heads});
+    }
+
+    // net2's residual pair (layers n, n + 1: both 3 x 3, C channels, the second adds its input) in one launch
+    void MPair(Rec& r, uint32_t kernel, uint32_t n, const Net2Buf& x, const Net2Buf& y) {
+        const uint32_t tx = cdiv(x.w, 14), ty = cdiv(x.h, 6);
+        D(r, kernel, tx * ty, {x.off, n2fw[n - 1], n2fb[n - 1], n2fw[n], n2fb[n], y.off, x.h, x.w, tx, ty});
     }
 
     void RecordNet2Fast(Rec& r, float f, bool half_last) {
@@ -2085,6 +2200,11 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         MConv(r, 3, nb_a2, nb_r0, 32, nb_a2.h, nb_a2.w, pool);
         const Net2Buf* src = &nb_r0;
         for (uint32_t u = 0; u < 4; ++u) {
+            if (pair64_on) {
+                MPair(r, kPairC64, 4 + 2 * u, *src, nb_r[u]);
+                src = &nb_r[u];
+                continue;
+            }
             MOpt a;
             a.res = 1;
             MConv(r, 4 + 2 * u, *src, nb_t[u], 64, src->h, src->w, a);
@@ -2109,13 +2229,25 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         l13.y1 = &nb_hA1;
         l13.y2 = &nb_hA3;
         MConv(r, 13, nb_g, nb_hA4, 32, nb_hA4.h, nb_hA4.w, l13);
-        D(r, kNet2Upwarp, std::max<uint32_t>(1, cdiv(npx, 256)),
-          {ib, ic, ia, nb_hA4.off, nb_hA1.off, nb_hA3.off, nb_U4.off, nb_U1.off, nb_U3.off, nb_y.off, g.W2, g.H2,
-           fb(f)});
-        MConv(r, 14, nb_y, nb_b1, 18, g.H2, g.W2, pool);
+        if (uw_on) {
+            MOpt l14 = pool;
+            l14.upwarp = true;
+            l14.fbits = fb(f);
+            MConv(r, 14, nb_y, nb_b1, 18, g.H2, g.W2, l14);   // y is built in the staging (U4, U1, U3 written there)
+        } else {
+            D(r, kNet2Upwarp, std::max<uint32_t>(1, cdiv(npx, 256)),
+              {ib, ic, ia, nb_hA4.off, nb_hA1.off, nb_hA3.off, nb_U4.off, nb_U1.off, nb_U3.off, nb_y.off, g.W2, g.H2,
+               fb(f)});
+            MConv(r, 14, nb_y, nb_b1, 18, g.H2, g.W2, pool);
+        }
         MConv(r, 15, nb_b1, nb_s0, 16, nb_b1.h, nb_b1.w, pool);
         src = &nb_s0;
         for (uint32_t u = 0; u < 4; ++u) {
+            if (pair32_on) {
+                MPair(r, kPairC32, 16 + 2 * u, *src, nb_s[u]);
+                src = &nb_s[u];
+                continue;
+            }
             MOpt a;
             a.res = 1;
             MConv(r, 16 + 2 * u, *src, nb_tb[u], 32, src->h, src->w, a);
@@ -2154,7 +2286,8 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         // fuse_pack: the pull and push-fine kernels write the slot's packed rows (pack_off, pack_pitch bytes, format
         // code in the out_x argument) instead of the float16 image
         const bool packed = fuse_pack != 0;
-        D(r, packed ? kOutPullPack : kOutPull, tx * ty,
+        const uint32_t pull = packed ? (x3_on ? kOutPullPackX3 : kOutPullPack) : (x3_on ? kOutPullX3 : kOutPull);
+        D(r, pull, tx * ty,
           {x0, x1, xw, nb_out.off, sig, packed ? pack_off : out_off, fine, lv[1], lv[2], lv[3], lv[4], g.wo, g.ho,
            g.W2, g.H2, g.k, tx, packed ? pack_pitch : out_stride, packed ? fuse_pack : 0u, 0u, fb(rk)});
         const uint32_t lc = g.out_coarsest;
@@ -2163,16 +2296,48 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
             FgExecOutLevelSize(g, 4, &w4, &h4);
             D(r, kOutPullMid, cdiv(w4, 16) * cdiv(h4, 16), {lv[4], lv[5], lv[6], lv[7], lv[8], w4, h4, cdiv(w4, 16), g.wo, g.ho});
         }
-        for (uint32_t l = lc - 1; l >= 1; --l) {
+        int first = static_cast<int>(lc) - 1;   // the first level a separate launch pushes
+        if (tail_on) {
+            // the coarsest levels (as many as fit in the tail kernel's LDS, none below level 2) pushed by one workgroup
+            uint32_t cells = 0, nlev = 0;
+            for (uint32_t l = lc; l >= 2 && nlev < 8; --l) {
+                uint32_t w, h;
+                FgExecOutLevelSize(g, l, &w, &h);
+                cells += w * h;
+                if (cells > 3584) break;
+                nlev = lc - l + 1;
+            }
+            if (nlev >= 2) {
+                uint32_t a[25] = {nlev};
+                for (uint32_t j = 0; j < 8; ++j) {
+                    uint32_t w = 0, h = 0;
+                    if (j < nlev) FgExecOutLevelSize(g, lc - j, &w, &h);
+                    a[1 + j] = j < nlev ? lv[lc - j] : 0u;
+                    a[9 + j] = w;
+                    a[17 + j] = h;
+                }
+                Dispatch(r, kOutTail, 1, a, 25);
+                first = static_cast<int>(lc - nlev);
+            }
+        }
+        for (int l = first; l >= (l1_on ? 2 : 1); --l) {
             uint32_t wf, hf, wc, hc;
-            FgExecOutLevelSize(g, l, &wf, &hf);
-            FgExecOutLevelSize(g, l + 1, &wc, &hc);
+            FgExecOutLevelSize(g, static_cast<uint32_t>(l), &wf, &hf);
+            FgExecOutLevelSize(g, static_cast<uint32_t>(l) + 1, &wc, &hc);
             D(r, kOutPush, groups_for(static_cast<uint64_t>(wf) * hf),
               {lv[l], lv[l + 1], lv[l], wf, hf, wc, hc});
-            if (l == 1) break;
         }
         uint32_t w1o, h1o;
         FgExecOutLevelSize(g, 1, &w1o, &h1o);
+        if (l1_on) {
+            // level 1 is pushed on the fly for the holes: the fine pass takes the filled level 2 as well
+            uint32_t w2o, h2o;
+            FgExecOutLevelSize(g, 2, &w2o, &h2o);
+            D(r, packed ? kFinePackL1 : kFineL1, groups_for(static_cast<uint64_t>(g.wo) * g.ho),
+              {fine, lv[1], packed ? pack_off : out_off, g.wo, g.ho, w1o, h1o, packed ? pack_pitch : out_stride,
+               packed ? fuse_pack : 0u, 0u, lv[2], w2o, h2o});
+            return;
+        }
         D(r, packed ? kOutPushFinePack : kOutPushFine, groups_for(static_cast<uint64_t>(g.wo) * g.ho),
           {fine, lv[1], packed ? pack_off : out_off, g.wo, g.ho, w1o, h1o, packed ? pack_pitch : out_stride,
            packed ? fuse_pack : 0u, 0u});
@@ -2562,6 +2727,17 @@ FgD3d12Executor::FgD3d12Executor(const FgD3d12ExecutorDesc& desc) : impl_(new Im
     impl_->want_hoist = lever(desc.hoist, "WG_FG_HOIST");
     impl_->want_dualq = lever(desc.dualq, "WG_FG_DUALQ");
     impl_->want_fuse = lever(desc.fuse, "WG_FG_FUSE");
+    // Wave 1B: 0 off, 1 (or unset) every lever, any other value a mask of the levers (1 net1 cells, 2 net2 pairs, 4 upwarp
+    // in L14, 8 W in the blends, 16 pyramid tail, 32 X0 / X1 as RGB)
+    {
+        int v = desc.fuse2;
+        if (v < 0) {
+            char e[16] = {};
+            v = GetEnvironmentVariableA("WG_FG_FUSE2", e, sizeof(e)) > 0 ? static_cast<int>(std::strtol(e, nullptr, 0)) : 1;
+            if (v < 0) v = 1;
+        }
+        impl_->want_fuse2 = v == 0 ? 0u : (v == 1 ? static_cast<uint32_t>(kF2All) : static_cast<uint32_t>(v) & kF2All);
+    }
     if (desc.weights) {
         impl_->weights = *desc.weights;
         impl_->have_weights = true;
@@ -3035,6 +3211,12 @@ FgExecResult FgD3d12Executor::RecordGeneratedIndex(const FgIndexDispatchDesc& d,
 }
 
 bool FgD3d12Executor::BatchesGenerated() const { return impl_->batch_on; }
+uint32_t FgD3d12Executor::Fuse2Active() const {
+    const Impl& m = *impl_;
+    return (m.cells_on ? kF2Cells : 0u) | (m.pair64_on || m.pair32_on ? kF2Pair : 0u) | (m.uw_on ? kF2Upwarp : 0u) |
+           (m.lite_weights_on || m.full_weights_on ? kF2Weights : 0u) | (m.tail_on || m.l1_on ? kF2Tail : 0u) |
+           (m.x3_on ? kF2X3 : 0u);
+}
 bool FgD3d12Executor::BatchActive() const { return impl_->batch_on; }
 bool FgD3d12Executor::HoistActive() const { return impl_->hoist_on; }
 bool FgD3d12Executor::DualQueueActive() const { return impl_->dualq_on; }
