@@ -257,6 +257,30 @@ float hw_hi(uint t, float w) { return mad(f16tof32(t >> 16), w, asfloat(g_z)); }
 // post.hip framebuffer_half: v clamped to +-65504 by compares (a NaN passes), then (_Float16) (v_cvt_f16_f32, RNE: the
 // driver's conversion, cvt3_f16).
 float fb_clamp(float v) { return select(v > 65504.0f, 65504.0f, select(v < -65504.0f, -65504.0f, v)); }
+#if POST_OUT == 0
+// native_scale (native_helpers.hlsl: the staged route's scale_rgb) of one value: the product, plus the exact repair of a
+// tiny product that the driver flushes to zero although its RNE result is the smallest normal (needs a zero product of a
+// normal a, so only such lanes run it; every other lane's result is the product itself)
+float m1_scale_ref(float a, float b)
+{
+    const float r = a * b;
+    const uint ua = asuint(a), ub = asuint(b);
+    const uint ea = (ua >> 23u) & 255u, eb = (ub >> 23u) & 255u;
+    if ((asuint(r) & 0x7fffffffu) == 0u && ea != 0u && eb != 0u && ea + eb == 127u) {
+        const uint64_t product = (uint64_t)((ua & 0x7fffffu) | 0x800000u) * (uint64_t)((ub & 0x7fffffu) | 0x800000u);
+        const uint64_t normal = (uint64_t)1u << 47u;
+        if (product >= normal - ((uint64_t)1u << 23u) && product < normal)
+            return asfloat(((ua ^ ub) & 0x80000000u) | 0x00800000u);
+    }
+    return r;
+}
+float m1_scale(float a, float b)
+{
+    float r = a * b;
+    [branch] if (and(abs(r) == 0.0f, abs(a) >= asfloat(0x00800000u))) r = m1_scale_ref(a, b);
+    return r;
+}
+#endif
 #if POST_OUT == 3
 // The direct form's stored value. RGBA16F output with output_copy (nd_output_rne16): the HIP output-copy bytes,
 // framebuffer_half (clamp, RNE16; NaN passes), since typed RGBA16F stores round toward zero on this driver; the typed
@@ -1423,7 +1447,17 @@ WG_KERNEL(post_tf_p12_diet_vsit)
             }
 #if POST_OUT == 0
             const uint o = mul24((uint)y, (uint)ow * 12u) + mul24((uint)xg, 12u);
-            wg_mem.Store3(out_p + o, uint3(asuint(vo[0] * dec_scale), asuint(vo[1] * dec_scale), asuint(vo[2] * dec_scale)));
+            [branch] if (pi_arg == 1.0f) {
+                wg_mem.Store3(out_p + o, uint3(asuint(vo[0] * dec_scale), asuint(vo[1] * dec_scale), asuint(vo[2] * dec_scale)));
+            } else {
+                // The runtime's scale_rgb folded in (native D3D12 only; pi_arg = the frame's pre-exposure, 1 otherwise):
+                // native_scale(v dec_scale, pi) per channel, the stored FP32 value of the staged route. mul_nz keeps the
+                // first product's rounding (the driver would regroup v (dec_scale pi)); the repair of a flushed tiny
+                // product runs only on the lanes whose product is zero (as native_direct_scale).
+                const float3 res = float3(mul_nz(vo[0], dec_scale), mul_nz(vo[1], dec_scale), mul_nz(vo[2], dec_scale));
+                const float3 so = float3(m1_scale(res.x, pi_arg), m1_scale(res.y, pi_arg), m1_scale(res.z, pi_arg));
+                wg_mem.Store3(out_p + o, uint3(asuint(so.x), asuint(so.y), asuint(so.z)));
+            }
 #else
             // framebuffer_half((v dec_scale) pi): clamp to +-65504 (NaN passes), round to FP16 to nearest even; alpha 1. opq:
             // the driver would otherwise regroup the two uniform factors into v (dec_scale pi)

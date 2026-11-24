@@ -484,6 +484,9 @@ struct Runtime {
   // True fusion (post_tf*, runtime option post_tf / WG_POST_TF, default 1): frames of the default banded pack12 path
   // whose size post_tf takes run one post_tf launch instead of the banded reconstruction + filter sequence.
   bool post_tf = true;
+  // Staged native D3D12 route (backend 3, buffer resources) with a pre-exposure other than 1: the output scale (scale_rgb) is
+  // done by the true-fusion post kernel's store (WG_SCALE_FOLD / option scale_fold, default on): the same bytes, one launch fewer
+  bool scale_fold = true;
   bool output_quality9 = false;  // private Model M final-resampling quality profile; histories/weights unchanged
   // output_filter=quality5: the 5-tap output filter with WrongGPU's quality5 weights. The post kernels come from
   // post_w64__q5.co (post.hip built with WG_LZ_PROFILE=1: the same kernels with other filter constants), so every
@@ -1428,6 +1431,7 @@ struct Runtime {
       if (k == "stream_priority") high_priority = v == "high";
       if (k == "post_bands") post_bands = std::max(1, std::atoi(v.c_str()));
       if (k == "post_tf") post_tf = !(v == "0" || v == "off" || v == "false");
+      if (k == "scale_fold") scale_fold = !(v == "0" || v == "off" || v == "false");
       if (k == "output_filter") {
         if (v != "default" && v != "original" && v != "analytic" && v != "quality5" && v != "quality9")
           return fail("output_filter must be original, analytic, quality5 or quality9 (or default; Model M)");
@@ -1466,6 +1470,7 @@ struct Runtime {
     if (const char* nb = std::getenv("WG_POST_BANDS")) post_bands = std::max(1, std::atoi(nb));
     if (const char* sr = std::getenv("WG_SWIN_RESIDENT")) swin_resident = std::max(0, std::atoi(sr));
     if (const char* t = std::getenv("WG_POST_TF")) post_tf = !(std::string(t) == "0" || std::string(t) == "off");
+    if (const char* t = std::getenv("WG_SCALE_FOLD")) scale_fold = !(std::string(t) == "0" || std::string(t) == "off");
     // The output filter (spec 06 draft 4, spec 10 section 5 step 6): the original's weights from the model file by
     // default, the analytic set when the model file has none (noted for the log) or when it is selected.
     output_quality9 = output_filter_opt == "quality9";
@@ -2930,6 +2935,11 @@ struct Runtime {
       p.e_prev = e;
       p.ratio = 1.0f;
       DevPtr w = wdev["post"];
+      // scale_fold: the staged true-fusion post (the HLSL ports of post_tf_f32_p12_diet_vsit, post_tf4_dl_*, pmo/post_tf_*_mo)
+      // applies the scale_rgb multiply itself when its pi argument is not 1. Never raw / direct / Model L / interop output copy.
+      const bool fold_scale =
+          scale_fold && d3d12_native && !native_direct_io && !raw && !model_l && hp <= 0 && pi != 1.0f &&
+          (tf_mo || (tf_kernel && (tf_name == "post_tf_f32_p12_diet_vsit" || tf_name == "post_tf4_dl_f32_p12_diet_vsit")));
       if (post_fused) {  // reconstruction + output filter in one launch, straight into the output buffer
         if (!fused_supported(rw, rh, dw, dh))
           return fail(post_kernel + ": render size " + std::to_string(rw) + "x" + std::to_string(rh) +
@@ -2950,7 +2960,8 @@ struct Runtime {
       } else if (tf_mo) {  // reconstruction + output filter in one kernel, motion at output resolution
         int ow_i = ow, oh_i = oh, hpitch = hp > 0 ? hp : 12 * ow, cp = post_tf_cpairs, k1 = 0, c2 = 0;
         const int nch = tf_chunks(ow, oh, cp, &k1, &c2);
-        float dec_scale = (float)(0.01 / (fr.exposure == 0.0f ? 1.0 : (double)fr.exposure)), p_h = hp > 0 ? pi : 1.0f;
+        float dec_scale = (float)(0.01 / (fr.exposure == 0.0f ? 1.0 : (double)fr.exposure)),
+              p_h = hp > 0 || fold_scale ? pi : 1.0f;
         post_last = tf_mo4 ? "post_tf4_dl_f32_p12_mo" : hp > 0 ? "post_tf_p12_mo" : "post_tf_f32_p12_mo";
         if (native_direct_io) post_last += "_direct";  // typed colour input and output texture (dx12/kernels/post.hlsl)
         filter_last = "fused";
@@ -2964,7 +2975,7 @@ struct Runtime {
                                &expo, &ow_i, &oh_i, &dec_scale, &p_h, &hpitch, &cp, &k1, &c2, &mop})))
           return false;
         // spec 10 draft 2: the filter's result times pi (folded in with the copy; direct shader stores include it)
-        if (!native_direct_io && hp <= 0 && pi != 1.0f) {
+        if (!native_direct_io && hp <= 0 && pi != 1.0f && !fold_scale) {
           int n3 = 3 * ow * oh;
           float p_ = pi;
           if (!launch("scale_rgb", cdiv(n3, 256), 256, {&outp, &p_, &n3})) return false;
@@ -2977,7 +2988,8 @@ struct Runtime {
       } else if (tf_kernel) {  // reconstruction + output filter in one kernel (kernels/post.hip, post_tf*)
         int ow_i = ow, oh_i = oh, hpitch = hp > 0 ? hp : 12 * ow, cp = post_tf_cpairs, k1 = 0, c2 = 0;
         const int nch = tf_chunks(ow, oh, cp, &k1, &c2);
-        float dec_scale = (float)(0.01 / (fr.exposure == 0.0f ? 1.0 : (double)fr.exposure)), p_h = hp > 0 ? pi : 1.0f;
+        float dec_scale = (float)(0.01 / (fr.exposure == 0.0f ? 1.0 : (double)fr.exposure)),
+              p_h = hp > 0 || fold_scale ? pi : 1.0f;
         post_last = tf_kernel;
         filter_last = "fused";
 #ifdef WG_DEV_DIAGNOSTICS
@@ -2989,7 +3001,7 @@ struct Runtime {
                     with_taps({&cnet, &A, &B, &C, &hist[cur], &mnear[nxt], &mcenter, &mfar, &w, &hist[nxt], &reduced,
                                &outp, &p, &expo, &ow_i, &oh_i, &dec_scale, &p_h, &hpitch, &cp, &k1, &c2})))
           return false;
-        if (!native_direct_io && hp <= 0 && pi != 1.0f) {  // direct shader stores already include this final multiply
+        if (!native_direct_io && hp <= 0 && pi != 1.0f && !fold_scale) {  // direct / folded stores already include this multiply
           int n3 = 3 * ow * oh;
           float p_ = pi;
           if (!launch("scale_rgb", cdiv(n3, 256), 256, {&outp, &p_, &n3})) return false;

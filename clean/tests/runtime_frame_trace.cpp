@@ -15,6 +15,7 @@
 //   --geo=<key>=<n>   a Swin / GEMM launch-geometry override in WgRtConfig (nt, gemm_threads, swin_threads, wpw64,
 //                     wpw96, wpw128, wpg0 .. wpg4 = block_wpg[k]); repeatable
 //   --hdr=<0|1>       WgRtConfig.hdr (default 0)
+//   --pre-exposure=<x> WgRtFrame.pre_exposure of every frame (default 1)
 //   --guard-timeout=<frame>  the frame guard (Device::guard_begin, the hybrid bottleneck's wait timeout): in that frame
 //                     the bottleneck "times out" (at the guard's second reading of that frame, the words a timed-out wait
 //                     writes are set first: sync words 12 and 15 + 1). The device models the guard: "guard_begin
@@ -357,6 +358,7 @@ int main(int argc, char** argv) {
   std::string options, map_path, fail;
   bool fail_hyb = false;
   int guard_timeout = -1;
+  float pre_exposure = 1.0f;
   std::vector<std::pair<int, int>> sizes;
   std::set<int> resets;
   for (int a = 8; a < argc; ++a) {
@@ -377,6 +379,8 @@ int main(int argc, char** argv) {
       for (const std::string& f : split(s.substr(8), ',')) resets.insert(std::atoi(f.c_str()));
     } else if (s.compare(0, 6, "--hdr=") == 0) {
       cfg.hdr = std::atoi(s.c_str() + 6);
+    } else if (s.compare(0, 15, "--pre-exposure=") == 0) {
+      pre_exposure = (float)std::atof(s.c_str() + 15);
     } else if (s.compare(0, 7, "--fail=") == 0) {
       fail = s.substr(7);
     } else if (s == "--fail-hyb-tables") {
@@ -432,7 +436,7 @@ int main(int argc, char** argv) {
     fr.rh = rh;
     fr.mv_scale[0] = fr.mv_scale[1] = 1.0f;
     fr.exposure = 1.0f;
-    fr.pre_exposure = 1.0f;
+    fr.pre_exposure = pre_exposure;
     fr.reset = resets.count(f) ? 1 : 0;
     const bool ok = runtime_frame(rt, fr, nullptr);
     WgRtFrameInfo info = WgRtFrameInfo();
