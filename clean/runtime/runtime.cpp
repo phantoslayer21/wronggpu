@@ -1058,7 +1058,7 @@ struct Runtime {
     if (!mid_setup(c)) return false;
     if (!bneck_setup(c)) return false;
     if (c.backend == 3 && !hyb_d3d12() && !m_q7 && !model_l && bneck_variant.empty() && mid_variant.empty() &&
-        !manifest_missing({"swin_block_c128_nc"}).empty())
+        choose(c.swin_bneck, "WG_SWIN_BNECK", "") == "none" && !manifest_missing({"swin_block_c128_nc"}).empty())
       return fail("native D3D12 m_mode=fast has no standalone swin_block_c128_nc port "
                   "(bneck=none requires --backend hip for m_mode=fast, or m_mode=exact/hybrid on d3d12)");
 #ifdef WG_MODEL_L
@@ -2207,10 +2207,8 @@ struct Runtime {
                   {&l_wide, &A, &B, &C, &latent[nxt], &wc, &p});
   }
 
-  // Model L's kernels on native D3D12 that <build_dir>/dx12/manifest.json lacks, comma-separated ("" = all there):
-  // its encoder (the direct form on the direct-resource route), linears, clamp-free blocks (the only D3D12 forms),
-  // projections and pack12 coefficient store, and dec1's own block with its expand (Model M runs dec1 inside its fused
-  // decoder there; Model L's decoder reads dec1's map). Model M's other kernels are its native frame's.
+#endif  // WG_MODEL_L
+
   // The kernel names of <build_dir>/dx12/manifest.json (none if it is missing or unreadable).
   std::vector<std::string> manifest_kernels() const {
     std::string text, error;
@@ -2227,6 +2225,20 @@ struct Runtime {
     return have;
   }
 
+  // The kernels of `need` that <build_dir>/dx12/manifest.json lacks, comma-separated ("" = all there).
+  std::string manifest_missing(const std::vector<std::string>& need) const {
+    std::string missing;
+    const std::vector<std::string> have = manifest_kernels();
+    for (const std::string& k : need)
+      if (std::find(have.begin(), have.end(), k) == have.end()) missing += (missing.empty() ? "" : ", ") + k;
+    return missing;
+  }
+
+#ifdef WG_MODEL_L
+  // Model L's kernels on native D3D12 that <build_dir>/dx12/manifest.json lacks, comma-separated ("" = all there):
+  // its encoder (the direct form on the direct-resource route), linears, clamp-free blocks (the only D3D12 forms),
+  // projections and pack12 coefficient store, and dec1's own block with its expand (Model M runs dec1 inside its fused
+  // decoder there; Model L's decoder reads dec1's map). Model M's other kernels are its native frame's.
   std::string l_native_missing() const {
     if (l_q7)  // the FP16-form blocks (clean/dx12/kernels/l_q7.hlsl, l_q7w.hlsl) in place of the l_swin / Model M blocks
       return manifest_missing({native_direct_io ? "lev/input_encoder_direct" : "lev/input_encoder",
@@ -2243,15 +2255,6 @@ struct Runtime {
                              "l_swin_block_c32_enc_nc", "l_project_gather",
                              "swin_block_c64_add_ex_nc", "l_dec_project",
                              "l_swin_block_c32_dec_nc", "l_coef_pack12"});
-  }
-
-  // The kernels of `need` that <build_dir>/dx12/manifest.json lacks, comma-separated ("" = all there).
-  std::string manifest_missing(const std::vector<std::string>& need) const {
-    std::string missing;
-    const std::vector<std::string> have = manifest_kernels();
-    for (const std::string& k : need)
-      if (std::find(have.begin(), have.end(), k) == have.end()) missing += (missing.empty() ? "" : ", ") + k;
-    return missing;
   }
 
   // Model L with LDR colour: its output stage is l_post_filter_ldr (the default filter's geometry, post_filter_c1_s4:

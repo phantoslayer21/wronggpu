@@ -1234,7 +1234,7 @@ class ReleaseDefault(unittest.TestCase):
                 got = self.d3d12(full_ports(), env=env)
                 self.assertEqual(got[0], "create ok model L")
                 text = self.kernels_text(got)
-                ntwins = sum(k.endswith("_hyb") for k, _ in full_ports())
+                ntwins = sum(k.endswith("_hyb") and not k.endswith("_q7c_hyb") for k, _ in full_ports())
                 for want in ("l_form=hybrid", "l_hyb_d3d12=on", "l_post_c12=on", "hyb_twins=%d" % ntwins,
                              "swin_fused=none", "hyb_tables=on"):
                     self.assertIn(want, text)
