@@ -43,8 +43,11 @@ enum Kernel : uint32_t {
     kDown2Srv, kDown4Srv, kMvecSrv, kIntermTiled, kPackPairs, kPullTiled, kPushTail, kDown2HudTile,
     kMConv2Mid, kN2h3b1u, kNet2MergePixels, kOutPullPack, kOutPushFinePack,
     kLiteBlendPack, kFullBlendMerge,
+    // Turbo v2: exact fused / retiled kernels, used only when their DXIL is present and the fuse lever is on
+    kFineMask, kInpaintTiled, kInterm2, kN2h3b1uS3,
     kKernelCount,
 };
+constexpr uint32_t kFirstTurbo = kFineMask;  // a pipeline of these that the device refuses is dropped, not fatal
 constexpr uint32_t kFirstFull = kFullBlend;
 constexpr uint32_t kFirstOptional = kMConv2Narrow;
 
@@ -111,7 +114,9 @@ const char* const kKernelNames[kKernelCount] = {
     "fg_mconv2_mid", "fg_net2_mconv_h3b1u", "fg_net2_merge_pixels",
     "fg_out_pull_pack", "fg_out_push_fine_pack", "fg_lite_blend_pack",
     "fg_full_blend_merge",
+    "fg_lite_p2c_fine_mask", "fg_lite_p2c_inpaint_tiled", "fg_lite_interm_both", "fg_net2_mconv_h3b1u_s3",
 };
+static_assert(sizeof(kKernelNames) / sizeof(*kKernelNames) == kKernelCount, "one name per kernel");
 
 constexpr uint32_t kRootConstants = 59;  // 2 runtime constants + up to 57 argument DWORDs
 constexpr uint32_t kMaxArgs = kRootConstants - 2;
@@ -604,8 +609,11 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
     std::map<std::pair<uint32_t, uint32_t>, size_t> prof_index;
 
     // Turbo v2 levers (fg_d3d12_executor.h FgD3d12ExecutorDesc): wanted at construction, active after Configure.
-    bool want_batch = true, want_hoist = true, want_dualq = true;
+    bool want_batch = true, want_hoist = true, want_dualq = true, want_fuse = true;
     bool batch_on = false, hoist_on = false, dualq_on = false;
+    bool hole_fused = false;  // the fine pass already ran the hole mask of this frame (the HoleMask op is then empty)
+    // the fused / retiled kernels (kFineMask, kInpaintTiled, kInterm2) are used when present
+    bool Fused(uint32_t k) const { return want_fuse && pso[k] != nullptr; }
     ComPtr<ID3D12CommandQueue> aux_queue;   // the second compute queue (hoisted MA / MB work)
     ComPtr<ID3D12Fence> aux_fence;
     uint64_t aux_value = 0, aux_joined = 0;
@@ -833,8 +841,14 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
             pd.pRootSignature = root.Get();
             pd.CS.pShaderBytecode = code[k].data();
             pd.CS.BytecodeLength = code[k].size();
-            if (FAILED(device->CreateComputePipelineState(&pd, IID_PPV_ARGS(&pso[k]))))
+            if (FAILED(device->CreateComputePipelineState(&pd, IID_PPV_ARGS(&pso[k])))) {
+                if (k >= kFirstTurbo) {  // e.g. a device without 64-bit atomics on shared memory: the lever stays off
+                    code[k].clear();
+                    pso[k].Reset();
+                    continue;
+                }
                 return Fail(FgExecRefusal::PipelineFailed, std::string("pipeline ") + kKernelNames[k]);
+            }
         }
         pipelines_built = true;
         return FgExecResult::Ok;
@@ -1739,7 +1753,10 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                 return true;
             }
             case FgOp::P2cInpaint:
-                D(r, kInpaint, groups_for(nsc), {R(kRoleFl), R(kRoleG), g.w1, g.h1});
+                if (Fused(kInpaintTiled))
+                    D(r, kInpaintTiled, cdiv(g.w1, 32) * cdiv(g.h1, 8), {R(kRoleFl), R(kRoleG), g.w1, g.h1});
+                else
+                    D(r, kInpaint, groups_for(nsc), {R(kRoleFl), R(kRoleG), g.w1, g.h1});
                 return true;
             case FgOp::P2cPull:
                 if (pso[kPullTiled]) {
@@ -1795,10 +1812,23 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                       {R(kRoleP1 + l), g.lw[l + 1], g.lh[l + 1], R(kRoleP1 + l - 1), g.lw[l], g.lh[l]});
                     if (l == 1) break;
                 }
+                if (Fused(kFineMask) && g.wd == g.w1 && g.hd == g.h1) {
+                    // the net1 grid is the scatter grid: the fine pass also runs the hole mask (Hc := 1 first)
+                    const uint32_t p[4] = {0x3C00u, 0, 0, 0};
+                    Fill16(r, R(kRoleHc), FgRoleBytes(g, kRoleHc), p, 1, false);
+                    D(r, kFineMask, groups_for(nsc),
+                      {R(kRoleP1), g.lw[1], g.lh[1], R(kRoleG), R(kRoleF), g.w1, g.h1, R(kRoleHc)});
+                    hole_fused = true;
+                    return true;
+                }
                 D(r, kFine, groups_for(nsc), {R(kRoleP1), g.lw[1], g.lh[1], R(kRoleG), R(kRoleF), g.w1, g.h1});
                 return true;
             }
             case FgOp::HoleMask: {
+                if (hole_fused) {
+                    hole_fused = false;
+                    return true;
+                }
                 const uint32_t p[4] = {0x3C00u, 0, 0, 0};
                 Fill16(r, R(kRoleHc), FgRoleBytes(g, kRoleHc), p, 1, false);
                 D(r, kHoleMask, groups_for(static_cast<uint64_t>(g.wd) * g.hd),
@@ -1836,6 +1866,13 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                    g.pad_l, g.pad_t, g.W0, g.H0, 1u, 16u, op.ui_forcing ? 1u : 0u});
                 return true;
             case FgOp::Interm: {
+                if (Fused(kInterm2)) {
+                    // both passes in one launch: A (Mv, Zc -> MA) and B (F, Zp -> MB)
+                    D(r, kInterm2, cdiv(g.w1, 16) * cdiv(g.h1, 16),
+                      {R(kRoleMv), R(kRoleZc), R(kRoleMA), R(kRoleF), R(kRoleZp), R(kRoleMB), g.w1, g.h1, fb(op.t),
+                       fb(st.s_k), inv, fb(t2), fb(st.tau)});
+                    return true;
+                }
                 const uint32_t kernel = pso[kIntermTiled] ? kIntermTiled : kInterm;
                 const uint32_t groups = kernel == kIntermTiled ? cdiv(g.w1, 16) * cdiv(g.h1, 16) : groups_for(nsc);
                 D(r, kernel, groups,
@@ -2016,7 +2053,8 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         }
         if (o.heads) {
             if (n == 25 && pso[kN2h3b1u]) {
-                v.kernel = kN2h3b1u;
+                // the three heads staged in one pass (same arithmetic) when that kernel is there
+                v.kernel = Fused(kN2h3b1uS3) ? kN2h3b1uS3 : kN2h3b1u;
                 groups = 1;
             } else {
                 groups = 3;
@@ -2440,27 +2478,14 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         EmitDispatch(r, d.kernel, d.groups, d.args, d.n, barrier);
     }
 
-    // Records the deferred launches of several frames (one list per frame). When every frame runs the same plan
-    // (same kernels and barrier needs at every position) the frames are interleaved: launch j of every frame back to
-    // back, the barrier only before the first of them. The frames write disjoint banks and read only the game
-    // frame's shared state, so the one barrier before launch j of frame 0 (which waits for every earlier launch of
-    // every frame) is all the dependencies of launch j need. Otherwise the frames are recorded one after the other
-    // with their own barriers.
+    // Records the deferred launches of several frames (one list per frame) in the order of FgInterleaveLaunches.
     void EmitFrames(Rec& r, const std::vector<std::vector<Deferred>>& lists) {
-        if (lists.empty()) return;
-        bool same = true;
-        for (size_t f = 1; f < lists.size() && same; ++f) {
-            same = lists[f].size() == lists[0].size();
-            for (size_t j = 0; same && j < lists[0].size(); ++j)
-                same = lists[f][j].kernel == lists[0][j].kernel && lists[f][j].barrier == lists[0][j].barrier;
-        }
-        if (!same) {
-            for (const auto& list : lists)
-                for (const Deferred& d : list) EmitDeferred(r, d, d.barrier, true);
-            return;
-        }
-        for (size_t j = 0; j < lists[0].size(); ++j)
-            for (size_t f = 0; f < lists.size(); ++f) EmitDeferred(r, lists[f][j], f == 0 && lists[0][j].barrier, f == 0);
+        std::vector<std::vector<FgLaunchKey>> keys(lists.size());
+        for (size_t f = 0; f < lists.size(); ++f)
+            for (const Deferred& d : lists[f]) keys[f].push_back({d.kernel, d.barrier});
+        std::vector<FgLaunchSlot> order;
+        FgInterleaveLaunches(keys, &order);   // the rule (fg_exec_plan.h) is tested on its own
+        for (const FgLaunchSlot& s : order) EmitDeferred(r, lists[s.frame][s.index], s.barrier, s.mark_stage);
     }
 
     static bool SameBits(float a, float b) { return FgExecFloatBits(a) == FgExecFloatBits(b); }
@@ -2536,6 +2561,7 @@ FgD3d12Executor::FgD3d12Executor(const FgD3d12ExecutorDesc& desc) : impl_(new Im
     impl_->want_batch = lever(desc.batch, "WG_FG_BATCH");
     impl_->want_hoist = lever(desc.hoist, "WG_FG_HOIST");
     impl_->want_dualq = lever(desc.dualq, "WG_FG_DUALQ");
+    impl_->want_fuse = lever(desc.fuse, "WG_FG_FUSE");
     if (desc.weights) {
         impl_->weights = *desc.weights;
         impl_->have_weights = true;
@@ -2793,6 +2819,7 @@ FgExecResult FgD3d12Executor::RecordSharedGameFrame(const FgSharedDispatchDesc& 
     const bool reset = !d.has_previous || (p.flags & kFgFlagReset) != 0;
     m.host.BeginFrame(f.lite, d.preset == FgPreset::B, f.hud, f.ui4, f.ui1, reset, &ops);
     m.frame = f;
+    m.hole_fused = false;
     if (f.lite)
         ++m.counters.lite_frames;
     else

@@ -12,6 +12,15 @@
 //   from a level's float16 elements; writes the level's sums (when sums_out != 0) and its float16 x 3 elements.
 // fg_lite_p2c_push: fills one level in place from its filled parent (9/16, 3/16, 3/16, 1/16 taps).
 // fg_lite_p2c_fine: F := v_up from level 1 at every pixel with G bit 0.
+// fg_lite_p2c_fine_mask (the net1 grid is the scatter grid: d = dp): the fine pass and the hole mask in one launch. The lane
+//   that finishes F at its pixel (v_up, or the unpack pass's value where G bit 0 is clear) continues with
+//   fg_lite_hole_mask's work on that value: the mask reads F at the pixel centre of the same grid, which is its own pixel
+//   (the nearest-index product of a centre and the grid size is within 1e-3 of x + 0.5), and writes zeros only. Hc := 1
+//   must be filled before the launch (the hole mask's zeros land in it).
+// fg_lite_p2c_inpaint_tiled: the same hole rule on 32 x 8 pixel tiles. Each wave gathers one row of the tile (and the two rows
+//   above and below with the first four waves) as bit masks with ballots, so a pixel's 5 x 5 neighbourhood costs 1.7 loads
+//   instead of 5; the rule (every 3 x 3 window of the neighbourhood holds a flagged pixel = erosion of the 3 x 3 dilation of
+//   the flag-bit-1 image, zero outside the image) runs on the masks.
 //
 // @wg-kernel fg_lite_p2c_scatter co=- block=256 wave=32 args=p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_K=1
 // @wg-kernel fg_lite_p2c_unpack co=- block=256 wave=32 args=p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_K=2
@@ -22,6 +31,8 @@
 // @wg-kernel fg_lite_p2c_pull_tiled co=- entry=fg_lite_p2c_pull block=256 wave=32 args=u,p,p,p,p,u,u,u,u,u,p,p,p,u defines=FG_K=4,FG_PULL_TILE=1
 // @wg-kernel fg_lite_p2c_push_tail co=- block=256 wave=32 args=u,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_K=7
 // @wg-kernel fg_lite_p2c_fine co=- block=256 wave=32 args=p,u,u,p,p,u,u defines=FG_K=6
+// @wg-kernel fg_lite_p2c_fine_mask co=- entry=fg_lite_p2c_fine block=256 wave=32 args=p,u,u,p,p,u,u,p defines=FG_K=6,FG_MASK=1
+// @wg-kernel fg_lite_p2c_inpaint_tiled co=- entry=fg_lite_p2c_inpaint block=256 wave=32 args=p,p,u,u defines=FG_K=3,FG_IP_TILE=1
 #include "wg_platform.hlsli"
 #include "fg_lite_common.hlsli"
 
@@ -118,6 +129,61 @@ WG_ARGS_BEGIN
     uint fl, gout, w1, h1;
 WG_ARGS_END
 
+#if FG_IP_TILE
+// Tile row r (0 .. 11) is pixel row y0 - 2 + r, bit c (0 .. 35) is pixel column x0 - 2 + c: the flag-bit-1 image, 0 outside.
+groupshared uint64_t fg_ip_row[12];
+groupshared uint64_t fg_ip_dil[12];   // bit c (0 .. 33): OR of the 3 x 3 flags around centre (x0 - 1 + c, y0 - 1 + r)
+groupshared uint64_t fg_ip_dv[10];    // the same ORed over three rows
+
+bool fg_ip_flag(int x, int y)
+{
+    return x >= 0 && x < (int)w1 && y >= 0 && y < (int)h1 &&
+           (wg_ld32(fl, ((uint)y * w1 + (uint)x) * 4u) & 2u) != 0u;
+}
+
+// the 36-bit mask of pixel row y of the tile (columns x0 - 2 .. x0 + 33); the wave's lanes are the 32 tile columns, lanes 0 .. 3
+// also the four halo columns
+uint64_t fg_ip_row_mask(int x0, int y, uint lane)
+{
+    const int x = x0 + (int)lane;
+    const bool own = fg_ip_flag(x, y);
+    const int xh = lane < 2u ? x0 - 2 + (int)lane : x0 + 32 + (int)lane - 2;
+    const bool halo = lane < 4u && fg_ip_flag(xh, y);
+    const uint m = WaveActiveBallot(own).x, hb = WaveActiveBallot(halo).x;
+    return (uint64_t)(hb & 3u) | ((uint64_t)m << 2) | ((uint64_t)((hb >> 2) & 3u) << 34);
+}
+
+WG_KERNEL(fg_lite_p2c_inpaint)
+{
+    FG_SETUP();
+    const uint l = wg_lane_id(), lane = l & 31u, wave = l >> 5u;
+    const uint tiles_x = (w1 + 31u) >> 5u, tile = wg_block_id();
+    const int x0 = (int)((tile % tiles_x) * 32u), y0 = (int)((tile / tiles_x) * 8u);
+    const int x = x0 + (int)lane, y = y0 + (int)wave;
+    const bool live = x < (int)w1 && y < (int)h1;
+    const uint fw = wg_ld32(fl, select(live, ((uint)y * w1 + (uint)x) * 4u, 0u));
+    const uint64_t main_row = fg_ip_row_mask(x0, y, lane);
+    if (lane == 0u) fg_ip_row[2u + wave] = main_row;
+    if (wave < 4u) {   // wave-uniform: the rows y0 - 2, y0 - 1, y0 + 8, y0 + 9
+        const int ey = wave < 2u ? y0 - 2 + (int)wave : y0 + 8 + (int)wave - 2;
+        const uint64_t extra = fg_ip_row_mask(x0, ey, lane);
+        if (lane == 0u) fg_ip_row[wave < 2u ? wave : wave + 8u] = extra;
+    }
+    wg_barrier_lds();
+    if (l < 12u) {
+        const uint64_t b = fg_ip_row[l];
+        fg_ip_dil[l] = b | (b >> 1) | (b >> 2);
+    }
+    wg_barrier_lds();
+    if (l < 10u) fg_ip_dv[l] = fg_ip_dil[l] | fg_ip_dil[l + 1u] | fg_ip_dil[l + 2u];
+    wg_barrier_lds();
+    if (!live) return;
+    const uint64_t e = fg_ip_dv[wave] & fg_ip_dv[wave + 1u] & fg_ip_dv[wave + 2u];
+    const bool inp = ((e >> lane) & 7ull) == 7ull;
+    const bool dyn = (fw & 1u) != 0u;
+    wg_st32(gout, ((uint)y * w1 + (uint)x) * 4u, ((dyn && !inp) ? 2u : 0u) | (inp ? 1u : 0u));
+}
+#else
 // Each row holds the 256 centers and the two horizontal halo pixels on either side.
 // A row is addressed in the flat grid, then trimmed at the center pixel's image edges.
 groupshared uint fg_inpaint_flags[5][9];
@@ -171,6 +237,7 @@ WG_KERNEL(fg_lite_p2c_inpaint)
     const bool dyn = (wg_ld32(fl, idx * 4u) & 1u) != 0u;
     wg_st32(gout, idx * 4u, ((dyn && !inp) ? 2u : 0u) | (inp ? 1u : 0u));
 }
+#endif
 #endif
 
 #if FG_K == 4
@@ -359,6 +426,9 @@ WG_KERNEL(fg_lite_p2c_push_tail)
 #if FG_K == 6
 WG_ARGS_BEGIN
     uint parent, pw, ph, gin, fio, w1, h1;
+#if FG_MASK
+    uint hc;
+#endif
 WG_ARGS_END
 
 WG_KERNEL(fg_lite_p2c_fine)
@@ -366,8 +436,30 @@ WG_KERNEL(fg_lite_p2c_fine)
     FG_SETUP();
     const uint idx = wg_block_id() * 256u + wg_lane_id();
     if (idx >= w1 * h1) return;
+#if FG_MASK
+    // F at this pixel as the next pass reads it (float16 x 2): v_up where G bit 0 is set, else the unpack pass's value
+    uint fw;
+    if ((wg_ld32(gin, idx * 4u) & 1u) != 0u) {
+        const float3 up = fg_upsample(parent, (int)pw, (int)ph, (int)(idx % w1), (int)(idx / w1));
+        fw = fg_pack_h2(up.x, up.y);
+        wg_st32(fio, idx * 4u, fw);
+    } else {
+        fw = wg_ld32(fio, idx * 4u);
+    }
+    // fg_lite_hole_mask on the same grid (wd = w1, hd = h1): Hc := 0 at the four targets of this pixel's vector
+    const int x = (int)(idx % w1), y = (int)(idx / w1);
+    const float mx = fg_mul(fg_adiv(f16tof32(fw), (float)w1), (float)w1);
+    const float my = fg_mul(fg_adiv(f16tof32(fw >> 16), (float)h1), (float)h1);
+    const int bx = x + (int)mx, by = y + (int)my, sx = fg_sgn(mx), sy = fg_sgn(my);
+    [unroll] for (uint e = 0u; e < 4u; ++e)
+    {
+        const int tx = bx + (int)(e >> 1) * sx, ty = by + (int)(e & 1u) * sy;
+        if (tx >= 0 && tx < (int)w1 && ty >= 0 && ty < (int)h1) wg_st16(hc, (uint)(ty * (int)w1 + tx) * 2u, 0u);
+    }
+#else
     if ((wg_ld32(gin, idx * 4u) & 1u) == 0u) return;
     const float3 up = fg_upsample(parent, (int)pw, (int)ph, (int)(idx % w1), (int)(idx / w1));
     fg_st_h2(fio, idx, up.x, up.y);
+#endif
 }
 #endif

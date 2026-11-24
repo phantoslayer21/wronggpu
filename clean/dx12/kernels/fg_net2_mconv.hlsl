@@ -23,6 +23,11 @@
 // one workgroup per spatial tile. They reuse the LDS tile across heads and join a shared eight-channel output
 // before the residual and store.
 //
+// FG_STAGE_ALL = 1 (fused heads only, fg_net2_mconv_h3b1u_s3): the three heads' tiles are staged in one pass (one loop over
+// the three heads' items, one LDS barrier, a tile of three head blocks) instead of three passes with a barrier each, so
+// the staging rounds are full (972 items over 256 lanes: 3.8 rounds instead of 3 x 1.27) and no barrier separates the heads.
+// Every staged value and every convolution is the same computation on the same data as the three-pass kernel.
+//
 // Work split: workgroup = 16 x FG_TH conv pixels (tile tx, ty; FG_TH = 2 rows per wave) and FG_MT output tiles of 16
 // weight outputs (group mg); a wave owns two rows of 16 pixels (two B fragments per chunk), so a pooled 2 x 2 cell sits
 // in one wave (lanes n, n ^ 1). A fragments: wf [cout / 16][9 taps][FG_NB blocks][32 lanes][8] float16
@@ -45,6 +50,7 @@
 // @wg-kernel fg_net2_mconv_m3b2u co=fg_net2_mma.co entry=fg_net2_mconv block=256 wave=32 args=p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_MT=3,FG_NB=2,FG_UP=1
 // @wg-kernel fg_net2_mconv_m3b4u co=fg_net2_mma.co entry=fg_net2_mconv block=128 wave=32 args=p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_MT=3,FG_NB=4,FG_UP=1
 // @wg-kernel fg_net2_mconv_h3b1u co=fg_net2_mma.co entry=fg_net2_mconv block=256 wave=32 args=p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_MT=1,FG_NB=1,FG_UP=1,FG_FUSED_HEADS=1
+// @wg-kernel fg_net2_mconv_h3b1u_s3 co=fg_net2_mma.co entry=fg_net2_mconv block=256 wave=32 args=p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_MT=1,FG_NB=1,FG_UP=1,FG_FUSED_HEADS=1,FG_STAGE_ALL=1
 // @wg-kernel fg_net2_mconv_h3b2u co=fg_net2_mma.co entry=fg_net2_mconv block=256 wave=32 args=p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_MT=1,FG_NB=2,FG_UP=1,FG_FUSED_HEADS=1
 #include "wg_platform.hlsli"
 #include "fg_net2.hlsli"
@@ -69,6 +75,9 @@ WG_ARGS_END
 #ifndef FG_FUSED_HEADS
 #define FG_FUSED_HEADS 0
 #endif
+#ifndef FG_STAGE_ALL
+#define FG_STAGE_ALL 0
+#endif
 #define FG_NATIVE_UP FG_UP
 #define FG_NATIVE_POST ((!FG_UP && (FG_NB == 2 || FG_MT == 2 || FG_NB == 4)) || (FG_UP && FG_NB == 1))
 #define FG_NATIVE_LEAKY 1
@@ -91,9 +100,16 @@ uint4 fg_load_input8(uint off, int ico)
 #if FG_STAGE
 #define FG_TG (FG_NB * 2)
 #define FG_TILE_PIXELS ((FG_TH + 2) * 18)
+#if FG_STAGE_ALL
+groupshared uint4 fg_tile[FG_TILE_PIXELS * FG_TG * 3];
+static uint fg_tile_head;   // the head whose block of the tile the convolution reads (wave-uniform)
+
+uint fg_tile_index(uint p, uint g) { return (fg_tile_head * FG_TG + g) * FG_TILE_PIXELS + p; }
+#else
 groupshared uint4 fg_tile[FG_TILE_PIXELS * FG_TG];
 
 uint fg_tile_index(uint p, uint g) { return g * FG_TILE_PIXELS + p; }
+#endif
 #endif
 
 // 8 packed float16 values -> the float32 accumulator fragment (exact; mask-free low halves via f16tof32)
@@ -273,6 +289,43 @@ void fg_stage(int x0, int y0, int ico)
     }
     wg_barrier_lds();
 }
+#if FG_STAGE_ALL
+// fg_stage for the three heads (head hj reads the channels in_co + hj cin ..), one pass and one barrier
+void fg_stage_heads(int x0, int y0)
+{
+    const int hi = H / 2, wi = W / 2;
+    const int items1 = (FG_TH / 2 + 1) * 18 * FG_TG;
+    const int items = 3 * items1;
+    const int rounds = (items + WG_BLOCK - 1) / WG_BLOCK + (int)fg_opq0();
+    for (int round = 0; round < rounds; ++round) {
+        // Lanes past the end still participate in the wave's conversion.
+        const int it = round * WG_BLOCK + (int)wg_lane_id(), elem = min(it, items - 1);
+        const int hj = elem / items1, e1 = elem - hj * items1;
+        const int ico = in_co + hj * cin;
+        const int g = e1 % FG_TG, p = e1 / FG_TG;
+        const int cy = y0 - 1 + 2 * (p / 18), cx = x0 - 1 + p % 18;
+        const Fg2Tap tx = fg_stage_tap(clamp(cx, 0, W - 1), wi);
+        const Fg2Tap ty0 = fg_stage_tap(clamp(cy, 0, H - 1), hi);
+        const Fg2Tap ty1 = fg_stage_tap(clamp(cy + 1, 0, H - 1), hi);
+        const int row0 = ty0.i0 * wi, row1 = ty0.i1 * wi, c0 = ico + 8 * g;
+        const uint4 q00 = fg_load_input8((uint)(((row0 + tx.i0) * in_cs + c0) * 2), ico);
+        const uint4 q01 = fg_load_input8((uint)(((row0 + tx.i1) * in_cs + c0) * 2), ico);
+        const uint4 q10 = fg_load_input8((uint)(((row1 + tx.i0) * in_cs + c0) * 2), ico);
+        const uint4 q11 = fg_load_input8((uint)(((row1 + tx.i1) * in_cs + c0) * 2), ico);
+        const uint4 top = fg_up_axis8(tx, q00, q01), bot = fg_up_axis8(tx, q10, q11);
+        const uint4 mask = fg_cmask(8 * g);
+        const bool inside_x = cx >= 0 && cx < W;
+        const uint4 v0 = fg_up_axis8(ty0, top, bot) & mask & select(inside_x && cy >= 0 && cy < H, ~0u, 0u);
+        const uint4 v1 = fg_up_axis8(ty1, top, bot) & mask & select(inside_x && cy + 1 >= 0 && cy + 1 < H, ~0u, 0u);
+        if (it < items) {
+            const int dst = p + p / 18 * 18;
+            fg_tile[(hj * FG_TG + g) * FG_TILE_PIXELS + dst] = v0;
+            fg_tile[(hj * FG_TG + g) * FG_TILE_PIXELS + dst + 18] = v1;
+        }
+    }
+    wg_barrier_lds();
+}
+#endif
 #elif FG_STAGE
 void fg_stage(int x0, int y0, int ico)
 {
@@ -479,10 +532,18 @@ WG_KERNEL(fg_net2_mconv)
 #if FG_FUSED_HEADS
     uint4 packed[2] = {uint4(0u, 0u, 0u, 0u), uint4(0u, 0u, 0u, 0u)};
     // Each head consumes the same weights and bias on its own input channel slice.
+#if FG_STAGE_ALL
+    fg_stage_heads(tx * 16, ty * FG_TH);
+#endif
     for (int hj = 0; hj < 3 + (int)fg_opq0(); ++hj) {
+#if FG_STAGE_ALL
+        const int ico = in_co + hj * cin;
+        fg_tile_head = (uint)hj;
+#else
         if (hj > 0) wg_barrier_lds();
         const int ico = in_co + hj * cin;
         fg_stage(tx * 16, ty * FG_TH, ico);
+#endif
         if (py0 < H) {
             uint4 h16[1][2];
             fg_conv_tile(px, py0, wrow, n, hh, lane, 0, ico, h16);

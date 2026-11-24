@@ -164,6 +164,85 @@ void TestSigTable() {
     CHECK(std::memcmp(d.data(), want, 32) == 0);
 }
 
+// Turbo v2: the order in which the launches of several indices sharing one command list are recorded, and the shape of an
+// index's ops that the hoisted work (the first three) and the batch rely on.
+void TestInterleave() {
+    g_case = "interleave";
+    using Key = FgLaunchKey;
+    std::vector<FgLaunchSlot> out;
+    FgInterleaveLaunches({}, &out);
+    CHECK(out.empty());
+    // one frame: its own order and barrier flags
+    const std::vector<Key> plan = {{1, true}, {2, false}, {3, true}, {4, true}};
+    FgInterleaveLaunches({plan}, &out);
+    CHECK(out.size() == 4);
+    for (uint32_t j = 0; j < out.size(); ++j)
+        CHECK(out[j].frame == 0 && out[j].index == j && out[j].barrier == plan[j].barrier && out[j].mark_stage);
+    // three frames of the same plan: launch j of every frame in turn, one barrier only before frame 0's launch j and
+    // only where the plan needs one; the stage mark only on frame 0
+    FgInterleaveLaunches({plan, plan, plan}, &out);
+    CHECK(out.size() == 12);
+    bool order = true;
+    for (uint32_t j = 0; j < 4; ++j)
+        for (uint32_t f = 0; f < 3; ++f) {
+            const FgLaunchSlot& x = out[j * 3 + f];
+            order = order && x.frame == f && x.index == j && x.mark_stage == (f == 0) &&
+                    x.barrier == (f == 0 && plan[j].barrier);
+        }
+    CHECK(order);
+    // every launch of every frame appears exactly once
+    int seen[3][4] = {};
+    for (const FgLaunchSlot& x : out) ++seen[x.frame][x.index];
+    bool once = true;
+    for (auto& row : seen)
+        for (int n : row) once = once && n == 1;
+    CHECK(once);
+    // frames of different plans (a different kernel, a different barrier need, a different length) are not interleaved:
+    // frame after frame with the frame's own barrier flags
+    const std::vector<Key> other_kernel = {{1, true}, {2, false}, {9, true}, {4, true}};
+    const std::vector<Key> other_barrier = {{1, true}, {2, true}, {3, true}, {4, true}};
+    const std::vector<Key> shorter = {{1, true}, {2, false}};
+    for (const auto& frames : {std::vector<std::vector<Key>>{plan, other_kernel},
+                               std::vector<std::vector<Key>>{plan, other_barrier},
+                               std::vector<std::vector<Key>>{plan, shorter}}) {
+        FgInterleaveLaunches(frames, &out);
+        size_t total = 0, at = 0;
+        for (const auto& f : frames) total += f.size();
+        CHECK(out.size() == total);
+        bool sequential = out.size() == total;
+        for (uint32_t f = 0; f < frames.size(); ++f)
+            for (uint32_t j = 0; sequential && j < frames[f].size(); ++j, ++at)
+                sequential = out[at].frame == f && out[at].index == j && out[at].barrier == frames[f][j].barrier &&
+                             out[at].mark_stage;
+        CHECK(sequential);
+    }
+    // the hoisted work is the first three ops of an index with history (fills of MA / MB, then the intermediate-time
+    // scatters), for every index and preset; a game frame without history has none
+    for (const bool lite : {true, false}) {
+        FgExecSettings st;
+        FgExecGeometry g;
+        std::string why;
+        FgExecMakeGeometry(160, 90, &g, &why);
+        FgExecHost h;
+        h.Configure(st, g);
+        std::vector<FgExecOp> ops;
+        h.BeginFrame(lite, false, true, false, false, true, &ops);
+        std::vector<uint32_t> pairs;
+        h.EndFrame(&pairs);
+        ops.clear();
+        h.BeginFrame(lite, false, true, false, false, false, &ops);
+        CHECK(h.Frame().history);
+        for (uint32_t i = 1; i <= 5; ++i) {
+            std::vector<FgExecOp> idx;
+            h.IndexOps(FgIndexTime(i, 5), true, false, false, &idx);
+            CHECK(idx.size() >= 5 && idx[0].op == FgOp::Fill64 && idx[0].role == kRoleMA && idx[1].op == FgOp::Fill64 &&
+                  idx[1].role == kRoleMB && idx[2].op == FgOp::Interm && idx[3].op == FgOp::Weights);
+            const float t = FgIndexTime(i, 5);
+            CHECK(std::memcmp(&idx[2].t, &t, sizeof(float)) == 0);
+        }
+    }
+}
+
 void TestSchedule() {
     g_case = "schedule";
     FgExecSettings st;
@@ -1600,7 +1679,7 @@ bool UploadFixture(Gpu& gpu, ID3D12Resource* tex, FixtureRole role, uint32_t fra
     return gpu.Wait();
 }
 
-bool SlotsMatch(Gpu& gpu, const ExecutorSlots& actual, const ExecutorSlots& expected) {
+bool SlotsMatch(Gpu& gpu, const ExecutorSlots& actual, const ExecutorSlots& expected, uint32_t count = 2) {
     // Read both sets of textures through identical footprints and compare only the texel bytes.
     D3D12_RESOURCE_DESC bd = {};
     bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
@@ -1609,10 +1688,10 @@ bool SlotsMatch(Gpu& gpu, const ExecutorSlots& actual, const ExecutorSlots& expe
     bd.MipLevels = 1;
     bd.SampleDesc.Count = 1;
     bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp[2][2] = {};
-    UINT64 row_bytes[2] = {};
-    UINT rows[2] = {};
-    for (uint32_t i = 0; i < 2; ++i) {
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp[8][2] = {};
+    UINT64 row_bytes[8] = {};
+    UINT rows[8] = {};
+    for (uint32_t i = 0; i < count; ++i) {
         const auto d = actual.textures[i]->GetDesc();
         for (auto& dest : fp[i]) {
             UINT64 size = 0;
@@ -1628,7 +1707,7 @@ bool SlotsMatch(Gpu& gpu, const ExecutorSlots& actual, const ExecutorSlots& expe
                                                    nullptr, IID_PPV_ARGS(&readback))) ||
         FAILED(gpu.alloc->Reset()) || FAILED(gpu.list->Reset(gpu.alloc.Get(), nullptr)))
         return false;
-    for (uint32_t i = 0; i < 2; ++i) {
+    for (uint32_t i = 0; i < count; ++i) {
         ID3D12Resource* srcs[] = {actual.textures[i].Get(), expected.textures[i].Get()};
         for (uint32_t j = 0; j < 2; ++j) {
             D3D12_TEXTURE_COPY_LOCATION src = {}, dst = {};
@@ -1648,7 +1727,7 @@ bool SlotsMatch(Gpu& gpu, const ExecutorSlots& actual, const ExecutorSlots& expe
     if (FAILED(readback->Map(0, nullptr, &mapped))) return false;
     const auto* bytes = static_cast<const uint8_t*>(mapped);
     bool exact = true;
-    for (uint32_t i = 0; i < 2; ++i)
+    for (uint32_t i = 0; i < count; ++i)
         for (uint32_t y = 0; y < rows[i] && exact; ++y)
             exact = std::memcmp(bytes + fp[i][0].Offset + y * fp[i][0].Footprint.RowPitch,
                                 bytes + fp[i][1].Offset + y * fp[i][1].Footprint.RowPitch,
@@ -1797,6 +1876,129 @@ void TestInputSrvPaths(Gpu& gpu, const std::string& dxil, const std::string& ref
                             c.colour, c.alpha, c.motion, c.slot, static_cast<unsigned long long>(token));
             CHECK(exact);
         }
+    }
+    const int64_t errors = gpu.DebugErrors();
+    if (errors >= 0) CHECK(errors == 0);
+}
+
+// Turbo v2: every lever on (batched indices, hoisted per-index work on the second queue, the split shared work, the fused
+// and retiled kernels) must give the same bytes as every lever off, in every generated slot and the real one, over several
+// game frames (history, swaps), the presets A / B / C and N = 1 .. 5. Both executors read the same game textures and run
+// the same kernel folder (`dxil`: the Turbo kernels sit beside the ones they replace).
+void TestTurboExact(Gpu& gpu, const std::string& dxil, const FgExecWeights& weights) {
+    g_case = "gpu-turbo-exact";
+    {
+        std::ifstream probe(dxil + "/fg_lite_interm_both.dxil", std::ios::binary);
+        if (!probe) std::printf("  turbo: the Turbo v2 kernels are not in %s (batching, hoisting and the split only)\n", dxil.c_str());
+    }
+    struct Case {
+        FgPreset preset;
+        uint32_t n, width, height;
+        DXGI_FORMAT colour;
+    };
+    const Case cases[] = {
+        {FgPreset::C, 1, kW, kH, DXGI_FORMAT_B8G8R8A8_UNORM},   {FgPreset::C, 2, 131, 89, DXGI_FORMAT_B8G8R8A8_UNORM},
+        {FgPreset::C, 5, kW, kH, DXGI_FORMAT_R16G16B16A16_FLOAT}, {FgPreset::A, 1, kW, kH, DXGI_FORMAT_B8G8R8A8_UNORM},
+        {FgPreset::A, 3, 131, 89, DXGI_FORMAT_B8G8R8A8_UNORM},   {FgPreset::A, 5, kW, kH, DXGI_FORMAT_B8G8R8A8_UNORM},
+        {FgPreset::B, 2, kW, kH, DXGI_FORMAT_R16G16B16A16_FLOAT},
+    };
+    for (const Case& c : cases) {
+        char name[96];
+        std::snprintf(name, sizeof(name), "preset %c N=%u %ux%u", c.preset == FgPreset::A ? 'A' : c.preset == FgPreset::B ? 'B' : 'C',
+                      c.n, c.width, c.height);
+        Game game;
+        const bool ready = game.Init(&gpu, c.colour, c.width, c.height) && game.Upload(1, false, true);
+        CHECK(ready);
+        if (!ready) return;
+        FgD3d12ExecutorDesc ed;
+        ed.dxil_dir = dxil;
+        ed.weights = &weights;
+        ed.enable_full = c.preset != FgPreset::C;
+        ed.batch = ed.hoist = ed.dualq = ed.fuse = 1;
+        FgD3d12Executor test(ed);
+        ed.batch = ed.hoist = ed.dualq = ed.fuse = 0;
+        FgD3d12Executor ref(ed);
+        FgCreateDesc create = CpuCreate(c.width, c.height);
+        create.device = gpu.device.Get();
+        create.queue = gpu.queue.Get();
+        create.preset = c.preset;
+        create.max_generated = c.n;
+        const auto ok = [&](FgD3d12Executor& exec, FgExecResult status) {
+            if (status != FgExecResult::Ok) std::printf("    turbo %s: %s (%s)\n", name, FgExecRefusalName(exec.LastRefusal()), exec.LastWhy().c_str());
+            CHECK(status == FgExecResult::Ok);
+            return status == FgExecResult::Ok;
+        };
+        ExecutorSlots test_slots, ref_slots;
+        for (uint32_t i = 0; i <= c.n; ++i) {
+            test_slots.textures[i] = game.Tex(c.colour);
+            ref_slots.textures[i] = game.Tex(c.colour);
+        }
+        if (!ok(test, test.Configure(create, 3)) || !ok(ref, ref.Configure(create, 3))) return;
+        if (!test.BindSlotTarget(&test_slots) || !ref.BindSlotTarget(&ref_slots)) {
+            CHECK(false);
+            return;
+        }
+        std::printf("  turbo %s: batch %d hoist %d dualq %d banks %u (reference: batch %d hoist %d dualq %d)\n", name,
+                    test.BatchActive(), test.HoistActive(), test.DualQueueActive(), test.ScratchBanks(),
+                    ref.BatchActive(), ref.HoistActive(), ref.DualQueueActive());
+        CHECK(!ref.BatchActive() && !ref.HoistActive() && !ref.DualQueueActive());
+        bool exact_all = true;
+        for (uint64_t token = 1; token <= 4; ++token) {
+            if (!game.Upload(static_cast<uint32_t>(token), false, token == 1)) {
+                CHECK(false);
+                return;
+            }
+            FgFramePacket packet = game.Packet();
+            packet.frame_token = token;
+            packet.motion_scale_x = 8.0f;
+            packet.motion_scale_y = 8.0f;
+            FgSharedDispatchDesc shared;
+            shared.frame_token = token;
+            shared.preset = c.preset;
+            shared.has_previous = token > 1;
+            shared.generated_count = c.n;
+            shared.generates = token > 1;
+            shared.packet = &packet;
+            FgSharedResult result;
+            if (!ok(test, test.RecordSharedGameFrame(shared, &result)) ||
+                !ok(ref, ref.RecordSharedGameFrame(shared, &result)))
+                return;
+            FgReadyFence fences[kFgMaxGenerated + 1];
+            if (token > 1) {
+                FgIndexDispatchDesc gens[kFgMaxGenerated];
+                for (uint32_t k = 0; k < c.n; ++k) {
+                    gens[k].frame_token = token;
+                    gens[k].index = k + 1;
+                    gens[k].generated_count = c.n;
+                    gens[k].is_last_index = k + 1 == c.n;
+                    gens[k].preset = c.preset;
+                    gens[k].t = FgIndexTime(k + 1, c.n);
+                    gens[k].slot.slot = k;
+                    gens[k].slot.reserved = true;
+                }
+                uint32_t done = 0;
+                const FgExecResult batched = c.n > 1 ? test.RecordGeneratedBatch(gens, c.n, fences, &done)
+                                                     : test.RecordGeneratedIndex(gens[0], &fences[0]);
+                if (!ok(test, batched)) return;
+                for (uint32_t k = 0; k < c.n; ++k)
+                    if (!ok(ref, ref.RecordGeneratedIndex(gens[k], &fences[k]))) return;
+            }
+            FgRealDispatchDesc real;
+            real.frame_token = token;
+            real.slot.slot = c.n;
+            real.slot.reserved = true;
+            if (!ok(test, test.RecordRealEndpoint(real, &fences[c.n])) ||
+                !ok(ref, ref.RecordRealEndpoint(real, &fences[c.n])))
+                return;
+            const bool idle = test.WaitIdle(30000) && ref.WaitIdle(30000);
+            CHECK(idle);
+            if (!idle) return;
+            const bool exact = SlotsMatch(gpu, test_slots, ref_slots, c.n + 1);
+            if (!exact) std::printf("    turbo %s: slots differ at game frame %llu\n", name, static_cast<unsigned long long>(token));
+            exact_all = exact_all && exact;
+            CHECK(exact);
+        }
+        if (exact_all) std::printf("    turbo %s: 4 game frames, 0 byte differences\n", name);
     }
     const int64_t errors = gpu.DebugErrors();
     if (errors >= 0) CHECK(errors == 0);
@@ -1989,6 +2191,7 @@ int main(int argc, char** argv) {
     TestHalf();
     TestSigTable();
     TestSchedule();
+    TestInterleave();
     TestNet2FastPlan();
     TestRefusals(weights);
     TestMotionFormats();
@@ -2050,6 +2253,7 @@ int main(int argc, char** argv) {
             }
             if (only.empty() || only.find("input-srv") != std::string::npos)
                 TestInputSrvPaths(g, dxil, reference_dxil, weights);
+            if (only.empty() || only.find("turbo") != std::string::npos) TestTurboExact(g, dxil, weights);
             if (only.empty()) TestBrokenKernels(g, dxil, weights, scratch);
         }
     }

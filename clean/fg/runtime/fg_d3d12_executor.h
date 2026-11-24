@@ -173,8 +173,12 @@ struct FgD3d12ExecutorDesc {
     //    sit only between dependent layers (needs one scratch bank per index: max_generated banks).
     //  - hoist (WG_FG_HOIST=0 off): the per-index MA / MB fills and the intermediate-time scatters run on the second
     //    compute queue while the game frame's net1 runs (needs the second queue and banks).
-    //  - dualq (WG_FG_DUALQ=0 off): the second compute queue; the downsample runs beside the motion / p2c chain.
-    int batch = -1, hoist = -1, dualq = -1;
+    //  - dualq (WG_FG_DUALQ=0 off): the downsample runs on the game queue beside the motion / p2c chain on the
+    //    producer queue (two recordings and a handoff each).
+    //  - fuse (WG_FG_FUSE=0 off): the fused / retiled kernels fg_lite_p2c_fine_mask (fine pass + hole mask),
+    //    fg_lite_p2c_inpaint_tiled and fg_lite_interm_both (both intermediate-time passes, LDS-binned scatters) replace
+    //    their separate kernels when their DXIL is in the kernel folder.
+    int batch = -1, hoist = -1, dualq = -1, fuse = -1;
     // Developer frame dumps (off while dump_dir is empty; the ASI sets it only in a developer build): of the game
     // frames that generate, every dump_every-th one (at most dump_max), the game frame's slot image (game_<n>.ppm) and
     // each generated slot image (gen_<n>_<i>.ppm) are copied to a readback buffer after the slot write, and written as

@@ -267,6 +267,24 @@ char FgExecR3Case(const FgExecFlags& f) {
     return f.hudless ? 'H' : '0';
 }
 
+void FgInterleaveLaunches(const std::vector<std::vector<FgLaunchKey>>& frames, std::vector<FgLaunchSlot>* out) {
+    out->clear();
+    if (frames.empty()) return;
+    bool same = true;
+    for (size_t f = 1; f < frames.size() && same; ++f) {
+        same = frames[f].size() == frames[0].size();
+        for (size_t j = 0; same && j < frames[0].size(); ++j)
+            same = frames[f][j].kernel == frames[0][j].kernel && frames[f][j].barrier == frames[0][j].barrier;
+    }
+    if (!same) {
+        for (uint32_t f = 0; f < frames.size(); ++f)
+            for (uint32_t j = 0; j < frames[f].size(); ++j) out->push_back({f, j, frames[f][j].barrier, true});
+        return;
+    }
+    for (uint32_t j = 0; j < frames[0].size(); ++j)
+        for (uint32_t f = 0; f < frames.size(); ++f) out->push_back({f, j, f == 0 && frames[0][j].barrier, f == 0});
+}
+
 const char* FgOpName(FgOp op) {
     switch (op) {
         case FgOp::Clear: return "clear";
