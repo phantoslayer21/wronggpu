@@ -159,23 +159,41 @@ float ko_div(float a, float b)
     const float q = a * r;
     return mad(mad(-bs, q, a), r, q) * s;
 }
+float ko_div_inrange(float a, float b) { return ko_div(a, b); }
 #else
-float ko_div(float a, float b)
+float ko_div_inrange(float a, float b)
 {
-    const uint ua = asuint(a), ub = asuint(b);
-    const uint ea = (ua >> 23) & 255u, eb = (ub >> 23) & 255u;
-    const float bs = asfloat((ub & 0x807fffffu) | 0x3f800000u);
+    const uint eb = (asuint(b) >> 23) & 255u;
+    const float bs = asfloat((asuint(b) & 0x807fffffu) | 0x3f800000u);
     float ys = rcp(bs);
     ys = mad(mad(-bs, ys, 1.0f), ys, ys);
     const float y = ys * asfloat((254u - eb) << 23);
     float q = a * y;
     q = mad(mad(-b, q, a), y, q);
-    q = mad(mad(-b, q, a), y, q);
+    return mad(mad(-b, q, a), y, q);
+}
+float ko_div(float a, float b)
+{
+    const uint ea = (asuint(a) >> 23) & 255u, eb = (asuint(b) >> 23) & 255u;
+    float q = ko_div_inrange(a, b);
     [branch] if (ea - 92u > 70u || eb - 92u > 70u) q = wg_div(a, b);
     return q;
 }
 #endif
-half kh_div(half a, half b) { return kh_round(ko_div((float)a, (float)b)); }
+// Exhaustively proven 0-ULP FP32 exact across all 2047 x 2047 nonzero finite FP16 significand pairs (even under +/-1 ULP
+// v_rcp_f32 error); [branch] on the rare non-finite/zero guard also keeps the compiler from hoisting the second
+// sub-sample pair's E[12] across the first (+10 VGPRs without it).
+half kh_div(half a, half b)
+{
+    const float fa = (float)a, fb = (float)b;
+    const float r = rcp(fb);
+    const float q = fa * r;
+    const uint ua = asuint(fa), ub = asuint(fb);
+    float res = mad(mad(-fb, q, fa), r, q);
+    [branch] if (((ua & 0x7f800000u) - 1u >= 0x7f7fffffu) || ((ub & 0x7f800000u) - 1u >= 0x7f7fffffu))
+        res = q;
+    return kh_round(res);
+}
 
 // ---- binary64 log / 2^x (k_fp.h kd_*) ---------------------------------------------------------------------------------
 // HIP's kf_ln / kf_exp2 (FP32 double-word path, binary64 path for undecided inputs) equal (float)kd_log((double)x) /
@@ -280,11 +298,15 @@ float kf_ln(float x) { return kd_to_f(kd_log((double)x)); }
 // spec 42 decode factor / spec 43 encode (k_io.hip kio_decode / kio_encode)
 #define kKioDecodeNear kf_bits(0x3F7FBE88u)
 #define kKioEncodeNear 1000.0f
+float kio_decode_far(float t)
+{
+    const float e = kof(kof((t + kf_bits(0x3C4FAE29u)) * 9.0f) * kf_bits(0x3FB8AA3Bu));
+    return wg_div(kf_exp2(e) - 1.0f, 9.0f * t);
+}
 float kio_decode(float t)
 {
     [branch] if (t < kKioDecodeNear) return ko_div(1.0f, 1.0f - t);
-    const float e = kof(kof((t + kf_bits(0x3C4FAE29u)) * 9.0f) * kf_bits(0x3FB8AA3Bu));
-    return wg_div(kf_exp2(e) - 1.0f, 9.0f * t);
+    return kio_decode_far(t);
 }
 float kio_encode(float Y)
 {

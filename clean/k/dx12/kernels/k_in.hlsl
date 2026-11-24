@@ -53,9 +53,9 @@
 #ifndef KI_HWMATH
 #define KI_HWMATH 0
 #endif
-// KI_SGPR (the exact direct form only): the frame's uniforms (KiHost and the direct motion factors) are computed once
-// and held in SGPRs (v_readfirstlane), not in VGPRs: kx/k_in_tiled_direct 83 -> <= 72 VGPR (5 workgroups per CU)
-#define KI_SGPR (WG_DIRECT_TEXTURES && !KI_HWMATH)
+// KI_SGPR: hoist frame-uniform motion factors (sp_x, sp_y, of_x, of_y) once per wave in SGPRs instead of
+// recomputing dfold (KIO_M16 / direct) 4x inside ki_fine.
+#define KI_SGPR (!KI_HWMATH)
 #include "k_fp.hlsli"
 #include "k_frame.hlsli"
 
@@ -119,17 +119,26 @@ float4 ki_tiled_transpose(float4 v, int lane)
 }
 
 #if KI_SGPR
-// ki_host(F) with the direct form's motion factors (sp = ki_dsp, of = ki_dmo: the values ki_fine computed per fine
-// position) and every field forced to a scalar register: all are wave-uniform (root constants and b1 only). The
-// operations and their order are unchanged, so the values are bit-identical.
-KiHost ki_host_sgpr(KFrameIn F)
+// Wave-uniform motion factors folded once per wave and held in SGPRs (same operations & order as ki_fine).
+KiHost ki_host_fold_sgpr(KFrameIn F, KiHost k)
 {
-    KiHost k = ki_host(F);
+#if WG_DIRECT_TEXTURES
     const bool mvlo = (F.flags & KIO_MVLO) != 0;
     k.sp_x = ki_dsp(F.sx, nd_msx, F.W, mvlo ? F.rw : F.W);
     k.sp_y = ki_dsp(F.sy, nd_msy, F.H, mvlo ? F.rh : F.H);
     k.of_x = ki_dmo(F.mox, nd_mox, nd_msx);
     k.of_y = ki_dmo(F.moy, nd_moy, nd_msy);
+#else
+    k.of_x = F.mox;
+    k.of_y = F.moy;
+    [branch] if ((F.flags & KIO_M16) != 0) {
+        const bool mvlo = (F.flags & KIO_MVLO) != 0;
+        k.sp_x = ki_dsp(F.sx, F.rmsx, F.W, mvlo ? F.rw : F.W);
+        k.sp_y = ki_dsp(F.sy, F.rmsy, F.H, mvlo ? F.rh : F.H);
+        k.of_x = ki_dmo(F.mox, F.rmox, F.rmsx);
+        k.of_y = ki_dmo(F.moy, F.rmoy, F.rmsy);
+    }
+#endif
     k.xi_x = WaveReadLaneFirst(k.xi_x);
     k.xi_y = WaveReadLaneFirst(k.xi_y);
     k.a_x = WaveReadLaneFirst(k.a_x);
@@ -162,22 +171,29 @@ WG_KERNEL(k_in_tiled)
     KInParams P0;
     K_LOAD_IN_PARAMS(P0)
     const KInParams P = ki_params(P0);
-    const KFrameIn F = P.f;
+    KFrameIn F = P.f;
+    F.kappa = WaveReadLaneFirst(F.kappa);
+    F.rho = WaveReadLaneFirst(F.rho);
+    F.lam = WaveReadLaneFirst(F.lam);
 #if K_UNIFORM
-    KiHost hk;
-    K_LOAD_HOST(hk)
+    KiHost hk0;
+    K_LOAD_HOST(hk0)
+#if KI_SGPR
+    const KiHost hk = ki_host_fold_sgpr(F, hk0);
+#else
+    const KiHost hk = hk0;
+#endif
 #elif KI_SGPR
-    const KiHost hk = ki_host_sgpr(F);
+    const KiHost hk = ki_host_fold_sgpr(F, ki_host(F));
 #else
     const KiHost hk = ki_host(F);
 #endif
     const int lane = (int)wg_lane_id();
     const int tiles_x = (F.Bw + 7) / 8, tile = (int)wg_block_id();
-    const int bx0 = (tile % tiles_x) * 8, by0 = (tile / tiles_x) * 8;
-    const int k = lane & 3, local = lane >> 2;
-    const int bx = bx0 + (local & 7), by = by0 + (local >> 3);
-    const bool active = bx < F.Bw && by < F.Bh;
+    const int bx0 = WaveReadLaneFirst((tile % tiles_x) * 8), by0 = WaveReadLaneFirst((tile / tiles_x) * 8);
+    const int bx = bx0 + ((lane >> 2) & 7), by = by0 + (lane >> 5);
     const int id = by * F.Bw + bx;
+    const bool active = bx < F.Bw && by < F.Bh;
     const bool hdr = (F.flags & KIO_HDR) != 0;
     const float c1e4 = kf_bits(0x38D1B717u);
     KI_TILED_CHANNEL ch0 = 0, ch1 = 0;
@@ -185,6 +201,7 @@ WG_KERNEL(k_in_tiled)
     float4 hid = 0.0f;
     if ((F.flags & KIO_RESET) != 0) {
         if (active) {
+            const int k = lane & 3;
             const int u = 2 * bx + (k & 1), v = 2 * by + (k >> 1);
             const int ofx = 2 * u + 1 - (v & 1), ofy = 2 * v + (u & 1);
             const int rx = (int)kf_R(F.jx + kf_fma((float)ofx + 0.5f, hk.a_x, -0.5f));
@@ -194,9 +211,9 @@ WG_KERNEL(k_in_tiled)
         }
         return;
     }
-    const int tx0 = ki_max(ki_min((int)kf_R(F.jx + kf_fma((float)(4 * bx0 + 1), hk.a_x, -0.5f)) - 1, F.rw - 1), 0);
-    const int ty0 = ki_max(ki_min((int)kf_R(F.jy + kf_fma((float)(4 * by0 + 1), hk.a_y, -0.5f)) - 1, F.rh - 1), 0);
-    for (int q = lane; q < 24 * 24; q += 256) {
+    const int tx0 = WaveReadLaneFirst(ki_max(ki_min((int)kf_R(F.jx + kf_fma((float)(4 * bx0 + 1), hk.a_x, -0.5f)) - 1, F.rw - 1), 0));
+    const int ty0 = WaveReadLaneFirst(ki_max(ki_min((int)kf_R(F.jy + kf_fma((float)(4 * by0 + 1), hk.a_y, -0.5f)) - 1, F.rh - 1), 0));
+    [loop] for (int q = lane; q < 24 * 24 + (int)kf_opq_z_; q += 256) {
         const int raw_x = tx0 + q % 24, raw_y = ty0 + q / 24;
         const int rx = ki_min(raw_x, F.rw - 1), ry = ki_min(raw_y, F.rh - 1);
         const KiTiledTap value = ki_tiled_tap_from_raw(F, kio_color(F, rx, ry));
@@ -205,55 +222,83 @@ WG_KERNEL(k_in_tiled)
     }
     wg_barrier_lds();
     if (active) {
-        const int u = 2 * bx + (k & 1), v = 2 * by + (k >> 1);
+        const int u = 2 * bx + (lane & 1), v = 2 * by + ((lane >> 1) & 1);
         // colour neighbourhood first, then each fine position scored as it is produced (the same per-position
         // operations and the same order of the D sum as HIP; nothing of a fine position stays live but the own
         // sample's Yh, nx, ny)
         const int cx = (int)kf_R(F.jx + kf_fma((float)(2 * u + 1), hk.a_x, -0.5f));
         const int cy = (int)kf_R(F.jy + kf_fma((float)(2 * v + 1), hk.a_y, -0.5f));
         float3 A = 0.0f, lo = 0.0f, hi = 0.0f;
-        [unroll] for (int ddy = -1; ddy <= 1; ++ddy) {
-            [unroll] for (int ddx = -1; ddx <= 1; ++ddx) {
-                const int rx = kio_tap(cx, ddx, 0, F.rw), ry = kio_tap(cy, ddy, 0, F.rh);
-                const int lx = rx - tx0, ly = ry - ty0;
-                const bool cached = (uint)lx < 24u && (uint)ly < 24u;
-                float4 cv;
-                float om;
-                [branch] if (cached) {
-                    cv = tile_cv[ly * 24 + lx];
-                    om = tile_om[ly * 24 + lx];
-                } else {  // defensive, as HIP: a footprint wider than the tile (the runtime's guard prevents it)
-                    const KiTiledTap fb = ki_tiled_tap(F, rx, ry);
-                    cv = fb.cv;
-                    om = fb.om;
+        const bool all_cached = (uint)(cx - 1 - tx0) < 22u && (uint)(cy - 1 - ty0) < 22u &&
+                                cx >= 1 && cx <= F.rw - 2 && cy >= 1 && cy <= F.rh - 2;
+        [branch] if (all_cached) {
+            const int l0 = (cy - ty0) * 24 + (cx - tx0);
+            [unroll] for (int ddy = -1; ddy <= 1; ++ddy) {
+                [unroll] for (int ddx = -1; ddx <= 1; ++ddx) {
+                    const int idx_l = l0 + ddy * 24 + ddx;
+                    const float4 cv = tile_cv[idx_l];
+                    const float om = tile_om[idx_l];
+                    A = float3(kf_fma(om, cv.x, A.x), kf_fma(om, cv.y, A.y), kf_fma(om, cv.z, A.z));
+                    const float3 val = cv.xyz * cv.w;
+                    const bool first = ddx == -1 && ddy == -1;
+                    lo = first ? val : min(lo, val);
+                    hi = first ? val : max(hi, val);
                 }
-                A = float3(kf_fma(om, cv.x, A.x), kf_fma(om, cv.y, A.y), kf_fma(om, cv.z, A.z));   // LDR: om = 1
-                const float3 val = cv.xyz * cv.w;
-                const bool first = ddx == -1 && ddy == -1;
-                lo = first ? val : min(lo, val);
-                hi = first ? val : max(hi, val);
+            }
+        } else {
+            [loop] for (int ddy = -1; ddy <= 1 + (int)kf_opq_z_; ++ddy) {
+                [loop] for (int ddx = -1; ddx <= 1 + (int)kf_opq_z_; ++ddx) {
+                    const int rx = kio_tap(cx, ddx, 0, F.rw), ry = kio_tap(cy, ddy, 0, F.rh);
+                    const int lx = rx - tx0, ly = ry - ty0;
+                    const bool cached = (uint)lx < 24u && (uint)ly < 24u;
+                    float4 cv;
+                    float om;
+                    [branch] if (cached) {
+                        cv = tile_cv[ly * 24 + lx];
+                        om = tile_om[ly * 24 + lx];
+                    } else {  // defensive, as HIP: a footprint wider than the tile (the runtime's guard prevents it)
+                        const KiTiledTap fb = ki_tiled_tap(F, rx, ry);
+                        cv = fb.cv;
+                        om = fb.om;
+                    }
+                    A = float3(kf_fma(om, cv.x, A.x), kf_fma(om, cv.y, A.y), kf_fma(om, cv.z, A.z));   // LDR: om = 1
+                    const float3 val = cv.xyz * cv.w;
+                    const bool first = ddx == -1 && ddy == -1;
+                    lo = first ? val : min(lo, val);
+                    hi = first ? val : max(hi, val);
+                }
             }
         }
         float3 mu = A * kf_bits(0x3DE38E39u);   // rounded before 1 - mu (the ISA keeps the products: no kf_opq)
         if (hdr) {
             const float den = kf_max(1.0f - mu.x, c1e4);
-            mu = float3(ki_div(mu.x, den), ki_div(mu.y, den), ki_div(mu.z, den));
+            const KfDivPrep den_p = kf_div_prep(den);
+            mu = float3(kf_div_prepared(mu.x, den_p), kf_div_prepared(mu.y, den_p), kf_div_prepared(mu.z, den_p));
         }
         const float pm = ki_phi(mu.x, hdr);
         const float3 mp = kf_opq3(mu * pm);
         const float3 eta = 0.5f * (hi - lo);
         const float3 nu = float3(kf_fma(hi.x - lo.x, 8.0f, 1.0f), kf_fma(hi.y - lo.y, 8.0f, 1.0f), kf_fma(hi.z - lo.z, 8.0f, 1.0f));
+        const bool nu_pos_fin = (((asuint(nu.x) >> 23) & 255u) - 1u < 254u) &&
+                                (((asuint(nu.y) >> 23) & 255u) - 1u < 254u) &&
+                                (((asuint(nu.z) >> 23) & 255u) - 1u < 254u) &&
+                                nu.x > 0.0f && nu.y > 0.0f && nu.z > 0.0f;
         const int oq = (1 - (v & 1)) + 2 * (u & 1);  // (2u + 1 - (v mod 2), 2v + (u mod 2)) as a fine position index
         // fine positions of the display position, in the order (2u, 2v), (2u+1, 2v), (2u, 2v+1), (2u+1, 2v+1)
         bool valid = true;
         float D = 0.0f, own_hx = 0.0f, own_nx = 0.0f, own_ny = 0.0f;
-        [unroll] for (int q = 0; q < 4; ++q) {
+        [loop] for (int q = 0; q < 4 + (int)kf_opq_z_; ++q) {
             const KiFine fq = ki_fine(P, hk, 2 * u + (q & 1), 2 * v + (q >> 1));
             valid = valid && fq.valid;
             const float ph = ki_phi(fq.h.x, hdr);
             const float3 g = max(abs(mp - kf_opq3(fq.h * ph)) - eta, 0.0f);
-            const float3 dl = float3(ki_div(g.x, nu.x), ki_div(g.y, nu.y), ki_div(g.z, nu.z));
-            const float score = kf_min(kf_fma(dl.z, 0.5f, kf_fma(dl.x, 2.0f, 0.5f * dl.y)), 1.0f);
+            float score = 0.0f;
+            [branch] if (!(g.x == 0.0f && g.y == 0.0f && g.z == 0.0f && nu_pos_fin)) {
+                const float dx = (g.x == 0.0f && nu_pos_fin) ? g.x : ki_div(g.x, nu.x);
+                const float dy = (g.y == 0.0f && nu_pos_fin) ? g.y : ki_div(g.y, nu.y);
+                const float dz = (g.z == 0.0f && nu_pos_fin) ? g.z : ki_div(g.z, nu.z);
+                score = kf_min(kf_fma(dz, 0.5f, kf_fma(dx, 2.0f, 0.5f * dy)), 1.0f);
+            }
             D = D + score;
             if (q == oq) {
                 own_hx = fq.h.x;
@@ -278,5 +323,6 @@ WG_KERNEL(k_in_tiled)
     if (!active) return;
     float hsum = (hs.x + hs.w) + (hs.y + hs.z);
     hsum = hsum * 0.25f;
-    KI_TILED_STORE(P.x0, id, k, ch0, ch1, kf_finite(hsum) ? hsum : 0.0f, ch3);
+    const int k_out = lane & 3;
+    KI_TILED_STORE(P.x0, id, k_out, ch0, ch1, kf_finite(hsum) ? hsum : 0.0f, ch3);
 }
