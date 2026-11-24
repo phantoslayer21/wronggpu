@@ -42,8 +42,9 @@ RRF = os.path.dirname(RT)
 ROOT = os.path.dirname(os.path.dirname(RRF))
 DEFAULT_OUT = os.path.join(os.environ.get("WG_BUILD_ROOT", os.path.join(ROOT, "build")), "rr-f-rt-int", "out")
 
-FAST_OUT_DEFINES = {"OF_HWRCP": 1, "OF_REPROJ_MAX": 1,   # Fast mode's output stage (clean/rr-f-s10-modes)
-                    "OF_UNIF": 1}   # clean/rr-f-lw-fold: uniform scratch words (exact, same bits; faster in output.fast.f only)
+EXACT_OUT_DEFINES = {"OFX_FUSE": 1, "OF_UNIF": 1}   # exact, same bits (output_diff PASS): fused 16-tap loop + uniform scratch words
+FAST_OUT_DEFINES = {"OF_HWRCP": 1, "OF_REPROJ_MAX": 1,   # Fast mode's output stage (clean/rr-f-s10-modes; tier B, NOT exact)
+                    "OF_UNIF": 1, "OFX_FUSE": 1, "OFX_NOCHK": 1}   # fused 16-tap loop + uniform scratch + no subnormal-band check (fast mode only)
 
 
 class _env:
@@ -203,9 +204,9 @@ def kernels(out):
     for n in ("main", "pool"):
         res.append((f"output.{n}", GO.NARGS, ck("rr_output.hlsl", f"rr_output_{n}", {"WG_BLOCK": 32, "RR_RT": 1},
                                                 tag=f"rr_output_{n}_rt")))
-    for n, (dxil, nargs) in GO.kernel_set(fast=True, names=GO.FAST_KERNELS + ("prepu",), spec=True).items():   # prep, fast, fallback, prepu
+    for n, (dxil, nargs) in GO.kernel_set(defines=EXACT_OUT_DEFINES, fast=True, names=GO.FAST_KERNELS + ("prepu",), spec=True).items():   # prep, fast, fallback, prepu
         res.append((f"output.{n}", nargs, dxil))
-    # clean/rr-f-s10-modes: Fast mode's output stage (OF_HWRCP + OF_REPROJ_MAX; tier B, NOT exact), same four kernels
+    # clean/rr-f-s10-modes: Fast mode's output stage (OF_HWRCP + OF_REPROJ_MAX + OFX_FUSE + OFX_NOCHK; tier B, NOT exact), same four kernels
     for n, (dxil, nargs) in GO.kernel_set(defines=FAST_OUT_DEFINES, fast=True, names=GO.FAST_KERNELS + ("prepu",), spec=True).items():
         res.append((f"output.{n}.f", nargs, dxil))
     for n in ("main", "pool"):
