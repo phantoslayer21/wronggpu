@@ -529,9 +529,9 @@ void TestReleaseGateForwardsEverything() {
     FgProxyConfig cfg = QualifiedConfig();
     // the shipped gate is closed (a developer build with WRONGGPU_FG_DEV_QUALIFIED opens it; the closed gate's
     // behaviour is still checked there)
-    CHECK(kFgModesQualified == (WG_FG_MODES_QUALIFIED != 0));
+    static_assert(kFgModesQualified == (WG_FG_MODES_QUALIFIED != 0), "kFgModesQualified must match macro");
 #if !WG_FG_MODES_QUALIFIED
-    CHECK(!kFgModesQualified);
+    static_assert(!kFgModesQualified, "shipped gate must be closed");
 #endif
     cfg.modes_qualified = false;
     Rig rig(cfg);
@@ -1245,9 +1245,9 @@ void TestRuntimeContractBridge() {
     CHECK(packet.generated_count == 5 && packet.preset == wgfg::FgPreset::C && packet.optional_present == 0x5);
     CHECK(packet.motion.resource == Res(1) && packet.optional[2].resource == Res(5));
     CHECK(create.max_generated == 5 && create.presenter_mode == 0);
-    CHECK(kFgModesQualified == wgfg::kFgModesQualified);
+    static_assert(kFgModesQualified == wgfg::kFgModesQualified, "proxy and runtime gate must agree");
 #if !WG_FG_MODES_QUALIFIED
-    CHECK(!wgfg::kFgModesQualified);
+    static_assert(!wgfg::kFgModesQualified, "shipped runtime gate must be closed");
 #endif
 }
 #endif
