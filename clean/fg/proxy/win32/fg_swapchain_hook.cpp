@@ -174,15 +174,14 @@ uint32_t FgSwapChain::Attach(IFgPresentCallback* callback, FgProxy* core, FgPres
     if (callback_) return WG_FG_REASON_DOUBLE_ATTACH;
     FgPresentOwners* reg = owners ? owners : &FgProcessPresentOwners();
 #if WG_FG_WIN32_MUTANT == 6
-    const uint32_t r = WG_FG_REASON_NONE;
     (void)core;
 #else
     const uint32_t r = core ? core->claim_present(id_, owner) : reg->claim(id_, owner);
-#endif
     if (r != WG_FG_REASON_NONE) {
         Log("fg swap chain: present owner not claimed (reason " + std::to_string(r) + "); the chain presents as before");
         return r;
     }
+#endif
     callback_ = callback;
     core_ = core;
     owners_ = reg;
