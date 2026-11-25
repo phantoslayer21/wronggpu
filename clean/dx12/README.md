@@ -132,7 +132,7 @@ WG_KERNEL(exposure_auto_diet) { WG_SETUP(); ... }   // entry name = HIP kernel n
   launches it in place of the base kernel with the same arguments when the build has it, so it declares the same `args`; it
   is built with `--model-l` only (`is_model_l`), has no HIP twin (`co=-`), keeps the base kernel's DXIL untouched, and the
   hybrid route never launches it. Its arithmetic is not bit-exact to the reference by design (the hybrid route is).
-  `<kernel>_fast3` (the 3 x 3 post) and `<stem>_w2_fast` / `<stem>_w2t_fast` (two windows per wave, in place of
+  `<kernel>_fast3` (the 3 x 3 post) and `<stem>_w2p_fast` / `<stem>_w2t_fast` (two windows per wave, in place of
   `<stem>_nc`; `group=128 gscale=1`, the device's launch of the same grid) are fast-mode kernels too (`build_dx12.py
   fast_base` names the kernel each one replaces).
 * Output: `<build>/dx12/<tag>__<kernel>.dxil` (`<kernel>.dxil` without a tag) and a `manifest.json` line

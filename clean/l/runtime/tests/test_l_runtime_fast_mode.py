@@ -55,8 +55,8 @@ SIZES = "--sizes=96x64,96x64,80x48,80x48,80x48,77x45"
 
 def fast_base(n):
     """The base kernel a fast-mode kernel is launched in place of (clean/dx12/build_dx12.py fast_base): "<kernel>_fast",
-    "<kernel>_fast3" -> <kernel>; "<stem>_w2_fast", "<stem>_w2t_fast" -> "<stem>_nc"; None for any other kernel."""
-    m = re.fullmatch(r"(.+)_w2t?_fast", n)
+    "<kernel>_fast3" -> <kernel>; "<stem>_w2p_fast", "<stem>_w2t_fast" -> "<stem>_nc"; None for any other kernel."""
+    m = re.fullmatch(r"(.+)_w2[pt]_fast", n)
     if m:
         return m.group(1) + "_nc"
     m = re.fullmatch(r"(.+)_fast3?", n)
@@ -67,11 +67,12 @@ def fast_base(n):
 # their lever bit (l_fast_bit); kLFastDefault
 ALTS = (("w64_lc12/l_post_tf_p12", "w64_lc12/l_post_tf_p12_fast3", 1 | 256),
         ("w64_lc12/l_post_tf_p12_pf", "w64_lc12/l_post_tf_p12_pf_fast3", 1 | 256),
-        ("l_swin_block_c32_enc_lin_nc", "l_swin_block_c32_enc_lin_w2_fast", 512 | 4096),
+        ("l_swin_block_c32_enc_lin_nc", "l_swin_block_c32_enc_lin_w2p_fast", 512 | 4096),
         ("l_swin_block_c32_enc_lin_nc", "l_swin_block_c32_enc_lin_w2t_fast", 512),
-        ("l_swin_block_c32_dec_coef12_add_nc", "l_swin_block_c32_dec_coef12_add_w2_fast", 1024 | 4096),
+        ("l_swin_block_c32_dec_coef12_add_nc", "l_swin_block_c32_dec_coef12_add_w2p_fast", 1024 | 4096),
         ("l_swin_block_c32_dec_coef12_add_nc", "l_swin_block_c32_dec_coef12_add_w2t_fast", 1024))
-DEFAULT_MASK = 8191 & ~128 & ~2048
+ALL_MASK = 16383
+DEFAULT_MASK = ALL_MASK & ~128 & ~256 & ~2048
 
 
 def lever_bit(base):
@@ -81,7 +82,11 @@ def lever_bit(base):
         return 2
     if base.startswith("l_swin_block_c32_"):
         return 4
-    if base.startswith("swin_block_") or base.startswith("bneck/swin_bneck"):
+    if base.startswith("swin_block_c96"):
+        return 8192
+    if base.startswith("bneck/swin_bneck"):
+        return 2048
+    if base.startswith("swin_block_"):
         return 8
     return 32 if base.startswith("lev/input_encoder_q2") else 0
 
@@ -453,12 +458,16 @@ class FastKernels(unittest.TestCase):
             self.assertIn(k, selection()[0])
         for k in t:
             self.assertIn(fast_base(k), [x for x, _ in F.full_ports()], k)   # every fast kernel replaces a base kernel
-        # the default selection: the 3 x 3 post, the two-windows-per-wave width-32 blocks with quick GELU, the c64 twins
+        # the default selection: the 4 x 4 post (lever 256, the 3 x 3 gather, is off), the two-windows-per-wave width-32
+        # blocks with the clamped-cubic GELU, the c64 twins, the c96 twins of the build
         alt = selection()[0]
-        self.assertEqual(alt["w64_lc12/l_post_tf_p12"], "w64_lc12/l_post_tf_p12_fast3")
-        self.assertEqual(alt[ENC_LIN], "l_swin_block_c32_enc_lin_w2_fast")
-        self.assertEqual(alt[FOLD_ADD], "l_swin_block_c32_dec_coef12_add_w2_fast")
+        self.assertEqual(alt["w64_lc12/l_post_tf_p12"], "w64_lc12/l_post_tf_p12_fast")
+        self.assertEqual(alt[ENC_LIN], "l_swin_block_c32_enc_lin_w2p_fast")
+        self.assertEqual(alt[FOLD_ADD], "l_swin_block_c32_dec_coef12_add_w2p_fast")
         self.assertEqual(alt["swin_block_c64_nc"], "swin_block_c64_nc_fast")
+        self.assertEqual(alt["swin_block_c96_add_ex_nc"], "swin_block_c96_add_ex_nc_fast")
+        self.assertEqual(alt["swin_block_c96_pm_rev_nc"], "swin_block_c96_pm_rev_nc_fast")
+        self.assertNotIn("bneck/swin_bneck6_mb_nc", alt)   # (lever 2048: no bottleneck twin)
 
     def test_launched_in_place_of_the_base_kernel(self):
         a = FastTrace(l_run("model=L,l_mode=fast", frames=3, tf_default=True))
@@ -478,19 +487,20 @@ class FastKernels(unittest.TestCase):
     def test_pre_exposure_post_twin(self):
         t = FastTrace(l_run("model=L,l_mode=fast", frames=2, tf_default=True, flags=("--pre-exposure=2.0",)))
         for f in t.frames:
-            self.assertIn("w64_lc12/l_post_tf_p12_pf_fast3", f["fast"])
-            self.assertNotIn("w64_lc12/l_post_tf_p12_fast3", f["fast"])
+            self.assertIn("w64_lc12/l_post_tf_p12_pf_fast", f["fast"])
+            self.assertNotIn("w64_lc12/l_post_tf_p12_fast", f["fast"])
 
     def test_post3_footprint_fallback(self):
         """A frame whose step footprint the 3 x 3 post's staging (448 texels) does not take, but the 4 x 4 one's (512) does,
         runs the 4 x 4 twin (render 96 x 48 for D 180 x 108: (33 + 5) 12 = 456 > 448, (33 + 6) 12 = 468 <= 512); the
         same frames at 80 x 48 run the 3 x 3 kernel."""
-        t = FastTrace(l_run("model=L,l_mode=fast", frames=2, tf_default=True, rw=96, rh=48))
+        dev = {"exe": dev_exe(), "env": {"WG_L_FAST_MASK": str(DEFAULT_MASK | 256)}}   # (256 is off by default)
+        t = FastTrace(l_run("model=L,l_mode=fast", frames=2, tf_default=True, rw=96, rh=48, **dev))
         self.assertEqual(t.create, "create ok model L")
         for f in t.frames:
             self.assertIn("w64_lc12/l_post_tf_p12_fast", f["fast"])
             self.assertNotIn("w64_lc12/l_post_tf_p12_fast3", f["fast"])
-        t = FastTrace(l_run("model=L,l_mode=fast", frames=2, tf_default=True, rw=80, rh=48))
+        t = FastTrace(l_run("model=L,l_mode=fast", frames=2, tf_default=True, rw=80, rh=48, **dev))
         for f in t.frames:
             self.assertIn("w64_lc12/l_post_tf_p12_fast3", f["fast"])
 
@@ -526,12 +536,13 @@ class FastMask(unittest.TestCase):
     POST3 = {"w64_lc12/l_post_tf_p12_fast3"}
     PROJECT = {"l_project_gather_fast", "l_dec_project_fast"}
     ENC = {"l_swin_block_c32_enc_lin_nc_fast"}
-    ENC_W2 = {"l_swin_block_c32_enc_lin_w2_fast"}
+    ENC_W2 = {"l_swin_block_c32_enc_lin_w2p_fast"}
     ENC_W2T = {"l_swin_block_c32_enc_lin_w2t_fast"}
-    DEC_W2 = {"l_swin_block_c32_dec_coef12_add_w2_fast"}
+    DEC_W2 = {"l_swin_block_c32_dec_coef12_add_w2p_fast"}
     DEC_W2T = {"l_swin_block_c32_dec_coef12_add_w2t_fast"}
     MID = {"swin_block_c64_nc_fast", "swin_block_c64_add_ex_nc_fast"}
-    DEFAULT = POST3 | PROJECT | ENC_W2 | DEC_W2 | MID
+    C96 = {"swin_block_c96_add_ex_nc_fast", "swin_block_c96_pm_rev_nc_fast"}
+    DEFAULT = POST | PROJECT | ENC_W2 | DEC_W2 | MID | C96
 
     def launched(self, mask, exe, **kw):
         t = FastTrace(l_run("model=L,l_mode=fast", frames=2, tf_default=True, exe=exe, env={"WG_L_FAST_MASK": str(mask)},
@@ -543,7 +554,8 @@ class FastMask(unittest.TestCase):
 
     def test_developer_mask(self):
         exe = dev_exe()
-        for mask, want in ((DEFAULT_MASK, self.DEFAULT), (8191, self.DEFAULT), (127, self.POST | self.PROJECT | self.ENC | self.MID),
+        for mask, want in ((DEFAULT_MASK, self.DEFAULT), (ALL_MASK, (self.DEFAULT - self.POST) | self.POST3),
+                           (127, self.POST | self.PROJECT | self.ENC | self.MID), (8192, self.C96), (2048, set()),
                            (0, set()), (1, self.POST), (1 | 256, self.POST3), (256, set()), (2, self.PROJECT), (4, self.ENC),
                            (4 | 512, self.ENC_W2T), (512 | 4096, self.ENC_W2), (1024, self.DEC_W2T), (1024 | 4096, self.DEC_W2),
                            (4096, set()), (8, self.MID), (16 | 64 | 128, set())):

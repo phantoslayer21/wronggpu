@@ -128,12 +128,12 @@ const char* kinds_of(const std::string& kernel) {
   const size_t slash = kernel.find('/');
   std::string k = slash == std::string::npos ? kernel : kernel.substr(slash + 1);
   // a fast-mode kernel (l_mode=fast, launched in place of its base kernel) has the base kernel's arguments:
-  // "<kernel>_fast", "<kernel>_fast3" -> <kernel>; "<stem>_w2_fast", "<stem>_w2t_fast" -> "<stem>_nc" (build_dx12.py fast_base)
+  // "<kernel>_fast", "<kernel>_fast3" -> <kernel>; "<stem>_w2p_fast", "<stem>_w2t_fast" -> "<stem>_nc" (build_dx12.py fast_base)
   const auto ends = [&](const char* suf) {
     const size_t n = std::strlen(suf);
     return k.size() > n && k.compare(k.size() - n, n, suf) == 0;
   };
-  if (ends("_w2_fast")) k.replace(k.size() - 8, 8, "_nc");
+  if (ends("_w2p_fast")) k.replace(k.size() - 9, 9, "_nc");
   else if (ends("_w2t_fast")) k.replace(k.size() - 9, 9, "_nc");
   else if (ends("_fast3")) k.resize(k.size() - 6);
   else if (ends("_fast")) k.resize(k.size() - 5);

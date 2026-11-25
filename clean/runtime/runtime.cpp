@@ -336,33 +336,39 @@ struct Runtime {
   // The levers of l_mode=fast (native D3D12): kernels of the build launched in place of a base kernel with the same grid,
   // block and arguments (l_fast_alt: base name -> the kernel launched). A "<kernel>_fast" twin replaces <kernel> when its
   // group's bit is set (l_fast_bit); the alternatives of kLFastAlts (in their order, the first one in the build whose bits
-  // are all set) come before it. All on by default but bit 128; a developer build reads the selection from WG_L_FAST_MASK
-  // (an A/B of each lever, below).
+  // are all set) come before it. All on by default but bits 128, 256 and 2048; a developer build reads the selection from
+  // WG_L_FAST_MASK (an A/B of each lever, below).
   //    1  l_post_tf_p12[_pf]       the true-fusion output kernel without the bit-exactness guards (l_post_tf_fast.hlsl)
   //    2  l_project_gather, l_dec_project   the K blocks accumulated in FP32 and rounded once, in the FP8 pack
   //    4  the width-32 Swin blocks' "_fast" twins (the encoder block with the linears, its prologue in FP32)
-  //    8  the middle Swin blocks' "_fast" twins (swin_block_c64_nc_fast, swin_block_c64_add_ex_nc_fast when the build has
-  //       them: l_swin_c64_fast.hlsl; c96 and the bottleneck: no twin)
+  //    8  the width-64 Swin blocks' "_fast" twins (swin_block_c64_nc_fast, swin_block_c64_add_ex_nc_fast when the build has
+  //       them: l_swin_c64_fast.hlsl, two windows per wave with the clamped-cubic GELU)
   //   16  the weaker history candidate as a 4-tap bilinear (inside the kernel of lever 1: pitch_bytes bit 0)
   //   32  the q20 input encoder (no twin yet)
   //   64  a weaker history candidate with the first one's motion (within 0.01 render pixel) is not read twice (lever 1: bit 1)
   //  128  a weaker history candidate of weight below 0.05 (the hybrid route: 1 / 255) is dropped (lever 1: bit 2; off by
   //       default: a quality / speed trade-off for the A/B)
   //  256  with lever 1: the centred 3 x 3 gather (l_post_tf_p12[_pf]_fast3) for every frame whose step footprint fits its
-  //       staging (l_tf3_supported; a frame that does not runs the 4 x 4 twin, which the build must then have)
+  //       staging (l_tf3_supported; a frame that does not runs the 4 x 4 twin, which the build must then have); off by
+  //       default: RX 9070 XT (2B-3) 38.7 dB / SSIM 0.955 HDR against the hybrid route (4 x 4: 53.2 dB / 0.998)
   //  512  the encoder block with the linears: two windows per wave (l_swin_block_c32_enc_lin_w2[t]_fast, l_swin_c32_fast.hlsl)
   //       in place of lever 4's twin
   // 1024  the decoder block with the coefficient store: two windows per wave (l_swin_block_c32_dec_coef12_add_w2[t]_fast)
   // 2048  (reserved: the bottleneck's fast twin; none built)
-  // 4096  the quick GELU in the kernels of 512 / 1024 ("_w2_fast"); off: their table form "_w2t_fast" (the model's GELU bytes)
-  static constexpr unsigned kLFastAll = 8191u, kLFastDefault = 8191u & ~128u & ~2048u;
+  // 4096  the clamped-cubic GELU in the kernels of 512 / 1024 ("_w2p_fast": no table load, no exponential); off: their
+  //       table form "_w2t_fast" (the model's GELU bytes)
+  // 8192  the width-96 Swin blocks' "_fast" twins (swin_block_c96_pm_rev_nc_fast, swin_block_c96_add_ex_nc_fast:
+  //       l_swin_c96_fast.hlsl, the clamped-cubic GELU and the softmax without the maximum, no groupshared table)
+  static constexpr unsigned kLFastAll = 16383u, kLFastDefault = 16383u & ~128u & ~256u & ~2048u;
   unsigned l_fast_mask = kLFastDefault;
   std::map<std::string, std::string> l_fast_alt;
   static unsigned l_fast_bit(const std::string& n) {
     if (n.compare(0, 22, "w64_lc12/l_post_tf_p12") == 0) return 1u;
     if (n == "l_project_gather" || n == "l_dec_project") return 2u;
     if (n.compare(0, 17, "l_swin_block_c32_") == 0) return 4u;
-    if (n.compare(0, 11, "swin_block_") == 0 || n.compare(0, 16, "bneck/swin_bneck") == 0) return 8u;
+    if (n.compare(0, 14, "swin_block_c96") == 0) return 8192u;
+    if (n.compare(0, 16, "bneck/swin_bneck") == 0) return 2048u;
+    if (n.compare(0, 11, "swin_block_") == 0) return 8u;
     if (n.compare(0, 20, "lev/input_encoder_q2") == 0) return 32u;
     return 0u;
   }
@@ -370,9 +376,9 @@ struct Runtime {
   static constexpr LFastAlt kLFastAlts[] = {
       {"w64_lc12/l_post_tf_p12", "w64_lc12/l_post_tf_p12_fast3", 1u | 256u},
       {"w64_lc12/l_post_tf_p12_pf", "w64_lc12/l_post_tf_p12_pf_fast3", 1u | 256u},
-      {"l_swin_block_c32_enc_lin_nc", "l_swin_block_c32_enc_lin_w2_fast", 512u | 4096u},
+      {"l_swin_block_c32_enc_lin_nc", "l_swin_block_c32_enc_lin_w2p_fast", 512u | 4096u},
       {"l_swin_block_c32_enc_lin_nc", "l_swin_block_c32_enc_lin_w2t_fast", 512u},
-      {"l_swin_block_c32_dec_coef12_add_nc", "l_swin_block_c32_dec_coef12_add_w2_fast", 1024u | 4096u},
+      {"l_swin_block_c32_dec_coef12_add_nc", "l_swin_block_c32_dec_coef12_add_w2p_fast", 1024u | 4096u},
       {"l_swin_block_c32_dec_coef12_add_nc", "l_swin_block_c32_dec_coef12_add_w2t_fast", 1024u},
   };
   // the 4 x 4 twin of a selected 3 x 3 post (l_fast_alt's value "<base>_fast3" -> "<base>_fast"): the frames whose

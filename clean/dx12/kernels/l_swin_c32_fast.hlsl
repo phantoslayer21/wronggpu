@@ -11,14 +11,22 @@
 //
 // The arithmetic is swin_block.hlsl's M-form chain (WMMA FP8 / FP16, the same packs, norms, soft cap and order of the
 // products) except where fast mode drops the reference's bit-exactness:
-//   - GELU (LF_GELU): 1 = x sigma(k x) = x / (1 + 2^(-2.53 x)) ("quick GELU" with its constant fitted to the model's GELU,
-//     k = 1.7537: three VALU operations, an exponential and a reciprocal per value, no table load; |error| <= 0.016,
-//     RMS 0.009 for N(0, 1.5) inputs against the model's GELU, test_l_fast_numerics.py);
+//   - GELU (LF_GELU): 1 = the clamped cubic GELU(x) = (x + |x| sat(P(|x|))) / 2, P(t) = c0 + c1 t + c2 t^2 + c3 t^3
+//     fitted (weighted minimax) to the model's GELU E(t) = 2 GELU(t) / t - 1, evaluated in packed FP16 (per pair of
+//     values: one v_cvt_pk_rtz_f16_f32 of |x|, three v_pk_fma_f16, the last one saturated; then per value one
+//     v_fma_mix_f32 2 GELU = |x| sat(P) + x in FP32): three full-rate VALU operations per value, no exponential, no
+//     reciprocal, no table load. The halving is not an operation: the W2 products accumulate onto 2 x the residual
+//     (the accumulator doubled with b2, halved at the output: exact power-of-two scalings; FP8(2 g) = 2 FP8(g) for
+//     every normal FP8 value). |error| <= 0.0031, RMS 0.0014 for N(0, 1.5) inputs against the model's GELU (FP32
+//     evaluation of the same cubic: 0.0020), 85 % of the FP8 codes unchanged (test_l_fast_numerics.py PolyGelu).
+//     P >= 1 from t = 3.3 on and never falls back below 1, so GELU(x) = x for x >= 3.3 and 0 for x <= -3.3.
+//     RX 9070 XT (2B-3): the earlier quick GELU x / (1 + 2^(-2.53 x)) (an exponential and a reciprocal per value: the
+//     quarter-rate transcendental unit) was 44 / 56 us slower than the table form, hence the polynomial.
 //     2 = the model's GELU bytes by the arena table (swin_block.hlsl's sw_gelu_pre / sw_gelu_fin with SW_GELU_PAT 13333,
 //     the base kernels' form: no exponential, one 8-byte table load per value; both windows' loads issued before either
 //     window's fmas); 0 = HIP's transcendental chain (the same bytes, two exponential-unit operations per value; not
-//     declared: the table form is the exact A/B of quick GELU).
-//   (the "_w2t_fast" kernels are the "_w2_fast" ones with LF_GELU 2: the A/B of the GELU approximation alone)
+//     declared: the table form is the exact A/B of the polynomial).
+//   (the "_w2t_fast" kernels are the "_w2p_fast" ones with LF_GELU 2: the A/B of the GELU approximation alone)
 //   - softmax: the scores are clamped by the soft cap (|c| <= 32.37, t = c - c^3 / (3 cap^2) in [-21.6, 21.6], times
 //     tau log2(e) = 0.51: exponents in [-11, 11]), so 2^z needs no maximum subtracted (no overflow: the sum of 16 terms
 //     is below 2^15; no underflow): the max reduction, its swizzle and the negated product are gone. The weights are
@@ -29,9 +37,9 @@
 //     block's FP32 output (no FP16 rounding of y2, no RN16 of the sigmas, tanh as 1 - 2 / (2^(2 t log2 e) + 1) for
 //     every t: no polynomial branch), the FP16 products by the native conversion with the scale folded in.
 //
-// @wg-kernel l_swin_block_c32_enc_lin_w2_fast co=- block=256 group=128 gscale=1 wave=32 args=p,p,p,p,u,u,u,u,p,p defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_SRC=3,WG_LD_A16=1,WG_REV_ORDER=1,LF_NAME=l_swin_block_c32_enc_lin_w2_fast,LF_GELU=1
+// @wg-kernel l_swin_block_c32_enc_lin_w2p_fast co=- block=256 group=128 gscale=1 wave=32 args=p,p,p,p,u,u,u,u,p,p defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_SRC=3,WG_LD_A16=1,WG_REV_ORDER=1,LF_NAME=l_swin_block_c32_enc_lin_w2p_fast,LF_GELU=1
 // @wg-kernel l_swin_block_c32_enc_lin_w2t_fast co=- block=256 group=128 gscale=1 wave=32 args=p,p,p,p,u,u,u,u,p,p defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_SRC=3,WG_LD_A16=1,WG_REV_ORDER=1,LF_NAME=l_swin_block_c32_enc_lin_w2t_fast,LF_GELU=2,SW_GELU_PAT=13333
-// @wg-kernel l_swin_block_c32_dec_coef12_add_w2_fast co=- block=256 group=128 gscale=1 wave=32 args=p,p,p,p,u,u,u,u,p,p,p,p,u,u defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=1,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_SRC=2,SW_OUT_F16=1,SW_OUT_COEF12=1,WG_LD_A16=1,LF_NAME=l_swin_block_c32_dec_coef12_add_w2_fast,LF_GELU=1
+// @wg-kernel l_swin_block_c32_dec_coef12_add_w2p_fast co=- block=256 group=128 gscale=1 wave=32 args=p,p,p,p,u,u,u,u,p,p,p,p,u,u defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=1,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_SRC=2,SW_OUT_F16=1,SW_OUT_COEF12=1,WG_LD_A16=1,LF_NAME=l_swin_block_c32_dec_coef12_add_w2p_fast,LF_GELU=1
 // @wg-kernel l_swin_block_c32_dec_coef12_add_w2t_fast co=- block=256 group=128 gscale=1 wave=32 args=p,p,p,p,u,u,u,u,p,p,p,p,u,u defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=1,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_SRC=2,SW_OUT_F16=1,SW_OUT_COEF12=1,WG_LD_A16=1,LF_NAME=l_swin_block_c32_dec_coef12_add_w2t_fast,LF_GELU=2,SW_GELU_PAT=13333
 //
 // Arguments as the kernels they replace: l_swin_block_c32_enc_lin_nc (x = the FP8 q halo map in its 20-byte form, xadd and
@@ -50,16 +58,51 @@
 #endif
 #include "swin_block.hlsl"
 
-#if THREADS != 128 || SW_HYB || SW_MEGA || !SW_SAFE || (SW_OUT_F16 && !SW_OUT_COEF12) || (SW_SRC != 0 && SW_SRC != 2 && SW_SRC != 3) || (SW_ECL > 0 && SW_SRC != 0)
-#error "l_swin_c32_fast.hlsl: 128 lanes, the M-form inner packs; output q8 or the coefficient store; source 0 (with or without the fused expand), 2 or 3"
+#if (THREADS != 128 && THREADS != 256) || SW_HYB || SW_MEGA || !SW_SAFE || (SW_OUT_F16 && !SW_OUT_COEF12) || (SW_SRC != 0 && SW_SRC != 2 && SW_SRC != 3) || (SW_ECL > 0 && SW_SRC != 0)
+#error "l_swin_c32_fast.hlsl: 128 or 256 lanes, the M-form inner packs; output q8 or the coefficient store; source 0 (with or without the fused expand), 2 or 3"
+#endif
+#if THREADS == 256 && (SW_C != 96 || SW_OUT_COEF12)
+#error "l_swin_c32_fast.hlsl: one window per wave (256 lanes) is the width-96 form (l_swin_c96_fast.hlsl)"
 #endif
 #if SW_OUT_COEF12 && (SW_C != 32 || !SW_ADD || SW_SRC != 2)
 #error "l_swin_c32_fast.hlsl: the coefficient store is Model L's decoder block (C = 32, the skip, the coarse source)"
 #endif
-#define NWW 2   // windows per wave
+#ifndef LF_PM
+#define LF_PM 0
+#endif
+#if LF_PM && (SW_C != 96 || SW_SRC != 0 || SW_ADD || SW_ECL > 0 || !defined(LF_PM_ARGS))
+#error "LF_PM: enc2's block with enc1's patch merge (C = 96, source 0; aux and aux2 appended to the arguments: l_swin_c96_fast.hlsl)"
+#endif
+#define LF_LIN (SW_SRC == 3)   // the encoder block's input linears (Model L's enc0)
+#if LF_PM
+#define LF_PM_W (16 * 6 * 256)   // the 24 KB of merge fragments: both staging buffers
+#if LF_PM_W > 2 * MAXU
+#error "LF_PM: the merge fragments must fit the staging buffers"
+#endif
+// fused_swin.hlsl fz_stage_w: the 24 KB of fragments at src into LDS byte 0 (6 16-byte chunks per lane), then a barrier
+void lf_stage_w(uint src, uint tid)
+{
+    uint4 v[6];
+    [unroll] for (uint i = 0; i < 6; ++i) v[i] = wg_ld128(src, (tid + i * 256u) * 16u);
+    [unroll] for (uint i2 = 0; i2 < 6; ++i2) sw_lds_st128((tid + i2 * 256u) * 16u, v[i2]);
+    wg_barrier_lds();
+}
+#endif
+#if THREADS == 128
+#define NWW 2   // windows per wave: 128-lane workgroups (the launch shape of swin_c64w2.hlsl)
+#else
+#define NWW 1   // 256-lane workgroups, one window per wave (the launch shape of the width-96 base kernels)
+#endif
 
 // ---- GELU: q8 of one 16-row tile (8 values per lane) ----------------------------------------------------------------
-static const float kLfQg = asfloat(0xc021eb85u);   // -2.53 = -1.7537 log2(e): the fitted constant (test_l_fast_numerics.py)
+// P(t) of the clamped cubic (test_l_fast_numerics.py PolyGelu.C: the same float32 values)
+#if LF_GELU == 1
+static const float kLfP0 = asfloat(0xbd6c7ea1u), kLfP1 = asfloat(0x3f878bedu), kLfP2 = asfloat(0xbeb6e5c7u),
+                   kLfP3 = asfloat(0x3d25ab15u);   // -0.05773795, 1.0589577, -0.35722181, 0.040446360
+#define LF_G2 1   // the MLP's W2 products accumulate onto 2 x the residual (q8 of 2 GELU)
+#else
+#define LF_G2 0
+#endif
 #if LF_GELU == 2 && (SW_GELU != 3 || SW_GELU_PAT != 13333 || SW_GL_LDS)
 #error "LF_GELU 2: swin_block.hlsl's arena table for every tile (SW_GELU 3, SW_GELU_PAT 13333)"
 #endif
@@ -67,12 +110,17 @@ uint2 lf_gelu_q8(v8f h)
 {
     v8f y;
 #if LF_GELU == 1
-    float t[8];
-    [unroll] for (uint i = 0; i < 8; ++i) t[i] = h.v[i] * kLfQg;
-    [unroll] for (uint i1 = 0; i1 < 8; ++i1) t[i1] = wg_exp2(t[i1]);
-    [unroll] for (uint i2 = 0; i2 < 8; ++i2) t[i2] = 1.0f + t[i2];
-    [unroll] for (uint i3 = 0; i3 < 8; ++i3) t[i3] = wg_rcp(t[i3]);
-    [unroll] for (uint i4 = 0; i4 < 8; ++i4) y.v[i4] = h.v[i4] * t[i4];
+    // q8(2 GELU(h)) (LF_G2) in operations the driver can pair (VOPD): |h| by an AND with an opaque mask (an abs source
+    // modifier would make every operation VOP3), the Horner steps as v_fmaak (one shared literal per step), the clamp as
+    // v_min (P < 0 only below t = 0.055, where GELU's error stays under 0.0013 without the lower clamp), 2 GELU by v_fmac.
+    // Written stage by stage: the 8 independent chains interleave.
+    const uint am = 0x7fffffffu ^ (wg_grid_ >> 31);
+    float t[8], p[8];
+    [unroll] for (uint i = 0; i < 8; ++i) t[i] = asfloat(asuint(h.v[i]) & am);
+    [unroll] for (uint i1 = 0; i1 < 8; ++i1) p[i1] = mad(kLfP3, t[i1], kLfP2);
+    [unroll] for (uint i2 = 0; i2 < 8; ++i2) p[i2] = mad(p[i2], t[i2], kLfP1);
+    [unroll] for (uint i3 = 0; i3 < 8; ++i3) p[i3] = min(mad(p[i3], t[i3], kLfP0), 1.0f);
+    [unroll] for (uint i4 = 0; i4 < 8; ++i4) y.v[i4] = mad(t[i4], p[i4], h.v[i4]);
 #else
     float t[8];   // HIP's chain (swin_block.hlsl gelu_group / sw_gelu_fin digit 0)
     [unroll] for (uint i = 0; i < 8; ++i) t[i] = h.v[i] * h.v[i];
@@ -104,7 +152,7 @@ uint4 lf_softmax(v8f s, v8f bias)
     return wg_to_f16_ags(pm);
 }
 
-#if SW_SRC == 3
+#if LF_LIN
 // sw_load_halo_lin's TT_LINF32 form (swin_block.hlsl: the two input linears in FP32, x1 = FP8(relu(b + W q)),
 // x2 = b2 + W2 x1) with the linears' weights loaded once per wave for both windows (lin_blob outside)
 void lf_halo_lin(uint base, int pr, int pc, uint hh, v8f b1[2], uint2 f1[2][2], v8f b2[2], uint2 f2[2][2], out v8f f[KC])
@@ -176,7 +224,7 @@ WG_KERNEL(LF_NAME)
     int prw[NWW], pcw[NWW];
 #endif
     v8f acc[NWW][KC];
-#if SW_SRC == 3
+#if LF_LIN
     v8f lb1[2], lb2[2];
     uint2 lf1[2][2], lf2[2][2];
     lin_blob(linW1, lane, hh, lb1, lf1);
@@ -208,8 +256,28 @@ WG_KERNEL(LF_NAME)
         const uint lpw = WaveReadLaneAt(lowp, wb);
         const int low = ((mr >> 1) - (int)(lpw & 0xffffu)) * 2 + ((mc >> 1) - (int)(lpw >> 16));
         eslot[i] = wb * 16u + (uint)low * 4u + (uint)(((mr & 1) << 1) | (mc & 1));
-#elif SW_SRC == 3
+#elif LF_LIN
         lf_halo_lin(x, pr, pc, hh, lb1, lf1, lb2, lf2, acc[i]);
+#elif LF_PM
+        {   // fused_swin.hlsl SW_PM (FZ_PMT 1): enc1's patch merge of this lane's (mirrored) token, the bias as the first
+            // accumulator, the 16 K groups in order, the clamping FP8 pack (patch_merge_c64's bytes)
+            uint2 zf[16];
+            const uint zo = (uint)((2 * mr + (int)hh) * (2 * W) + 2 * mc) * 64u;
+            [unroll] for (uint q = 0; q < 8; ++q) {
+                const uint4 v = wg_ld128(x, zo + 16u * q);
+                zf[2 * q] = v.xy; zf[2 * q + 1] = v.zw;
+            }
+            lf_stage_w(aux + 4u * 96u, tid);
+            const uint bm = aux + hh * 32u, fbm = sw_lane_base(0u, lane);
+            [unroll] for (uint mp = 0; mp < KC; ++mp) {
+                uint2 fa[16];
+                [unroll] for (uint g = 0; g < 16; ++g) fa[g] = sw_lfrag_b(fbm, mp * 16u + g);
+                v8f m = wg_load8f(bm, mp * 64u);
+                [unroll] for (uint g2 = 0; g2 < 16; ++g2) m = wg_wmma_fp8(fa[g2], zf[g2], m);
+                xa[i][mp] = sw_pack_q8_v2(m);
+            }
+            wg_barrier_lds();   // every wave is done with the merge fragments before unit 0 overwrites them
+        }
 #elif SW_SRC == 2
         load_frags_g(x, sw_coarse_src(pr, pc, H, W, hh), xa[i]);
 #else
@@ -239,7 +307,7 @@ WG_KERNEL(LF_NAME)
     // Steps 1-2: a = q8(RMSNorm(x; gamma1)); the residual accumulator starts as x + bp.
     uint2 af[NWW][KC];
     [unroll] for (uint i1 = 0; i1 < NWW; ++i1) {
-#if SW_SRC != 3
+#if !LF_LIN
         [unroll] for (uint k = 0; k < KC; ++k) {
             acc[i1][k] = sw_unpack_fp8(xa[i1][k]);
 #if SW_ADD
@@ -315,11 +383,18 @@ WG_KERNEL(LF_NAME)
         [unroll] for (uint i = 0; i < NWW; ++i) r[i] = norm_r(acc[i]);
         [unroll] for (uint k = 0; k < KC; ++k) {
             const v8f g = wg_load8f(g2, 32u * k), b = wg_load8f(b2, 64u * k);
+#if LF_G2
+            const v8f b2x = sw_add8(b, b);   // 2 (x1 + b2): once for both windows
+#endif
             [unroll] for (uint i1 = 0; i1 < NWW; ++i1) {
                 v8f d;
                 [unroll] for (uint v = 0; v < 8; ++v) d.v[v] = acc[i1][k].v[v] * r[i1] * g.v[v];
                 mf[i1][k] = pack_in(d);
+#if LF_G2
+                [unroll] for (uint v2 = 0; v2 < 8; ++v2) acc[i1][k].v[v2] = mad(acc[i1][k].v[v2], 2.0f, b2x.v[v2]);
+#else
                 acc[i1][k] = sw_add8(acc[i1][k], b);
+#endif
             }
         }
     }
@@ -377,6 +452,9 @@ WG_KERNEL(LF_NAME)
             const float own = acc[0][ch[q] >> 3].v[ch[q] & 7u];
             const float other = wg_xor16(acc[1][ch[q] >> 3].v[ch[q] & 7u]);
             a[q] = hh != 0u ? other : own;
+#if LF_G2
+            a[q] = a[q] * 0.5f;   // the doubled accumulator (exact)
+#endif
         }
         const float S = wg_ldf(coefW, 320u), T = wg_ldf(coefW, 324u);
         const float S2 = S * S * 1.00034f;   // the truncating FP16 pack: x (1 + 2^-11.7) has the nearest rounding's mean error
@@ -389,6 +467,10 @@ WG_KERNEL(LF_NAME)
 #else
     // Output q8(x2), real window members only.
     [unroll] for (uint io = 0; io < NWW; ++io) {
+#if LF_G2
+        [unroll] for (uint kh = 0; kh < KC; ++kh)
+            [unroll] for (uint vh = 0; vh < 8; ++vh) acc[io][kh].v[vh] = acc[io][kh].v[vh] * 0.5f;   // exact
+#endif
         uint2 o[KC];
         float am = 0.0f;
         [unroll] for (uint k0 = 0; k0 < KC; ++k0) am = sw_absmax8(am, acc[io][k0]);

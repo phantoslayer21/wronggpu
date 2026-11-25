@@ -92,7 +92,7 @@ class TestKernelSets(unittest.TestCase):
 
 
     def test_fast_twins_take_their_base_kernels_arguments(self):
-        """A fast-mode kernel (Model L's l_mode=fast: "<kernel>_fast", "<kernel>_fast3", "<stem>_w2[t]_fast" in place of
+        """A fast-mode kernel (Model L's l_mode=fast: "<kernel>_fast", "<kernel>_fast3", "<stem>_w2p_fast" / "<stem>_w2t_fast" in place of
         "<stem>_nc", build_dx12.py fast_base) is launched by the runtime in place of its base kernel with the same grid, block
         and arguments: the declarations agree in block, wave and args, and in group unless the fast kernel is a
         two-windows-per-wave one (its own 128-lane workgroup per launched workgroup, gscale 1: the device's launch of the
@@ -104,7 +104,7 @@ class TestKernelSets(unittest.TestCase):
                     decls.setdefault(d["name"], []).append(d)
         twins = [n for n in decls if B.fast_base(n) is not None]
         self.assertTrue(twins)
-        self.assertTrue([n for n in twins if n.endswith("_w2_fast")])
+        self.assertTrue([n for n in twins if n.endswith("_w2p_fast")])
         self.assertTrue([n for n in twins if n.endswith("_fast3")])
         full, m = set(B.kernel_set(True)), set(B.kernel_set(False))
         for n in twins:

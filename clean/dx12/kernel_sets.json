@@ -347,7 +347,7 @@
    "-"
   ],
   [
-   "l_swin_block_c32_dec_coef12_add_w2_fast",
+   "l_swin_block_c32_dec_coef12_add_w2p_fast",
    "-"
   ],
   [
@@ -387,7 +387,7 @@
    "-"
   ],
   [
-   "l_swin_block_c32_enc_lin_w2_fast",
+   "l_swin_block_c32_enc_lin_w2p_fast",
    "-"
   ],
   [
@@ -503,6 +503,10 @@
    "-"
   ],
   [
+   "swin_block_c96_add_ex_nc_fast",
+   "-"
+  ],
+  [
    "swin_block_c96_add_hyb",
    "-"
   ],
@@ -512,6 +516,10 @@
   ],
   [
    "swin_block_c96_hyb",
+   "-"
+  ],
+  [
+   "swin_block_c96_pm_rev_nc_fast",
    "-"
   ],
   [

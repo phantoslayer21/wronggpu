@@ -103,19 +103,21 @@ kernel). They drop the bit-exactness of the hybrid route where it costs instruct
 | 16 | (option of lever 1) | the weaker history candidate (weight at most 1/2) is a 4-tap bilinear of the previous history instead of the 12-tap Catmull-Rom |
 | 64 | (option of lever 1) | a weaker history candidate whose motion is within 0.01 render pixel of the first one's is the same sample and is not read twice |
 | 128 | (option of lever 1, off by default) | a weaker history candidate of weight below 0.05 is dropped (the hybrid route drops it below 1 / 255) |
-| 8 | `swin_block_c64_nc_fast`, `swin_block_c64_add_ex_nc_fast` | enc1's and dec1's blocks (`l_swin_c64_fast.hlsl`): the two-windows-per-wave body below at C = 64 with quick GELU (no table load) and the softmax without the maximum |
-| 256 | `w64_lc12/l_post_tf_p12[_pf]_fast3` (with lever 1) | the gather over the 3 x 3 render texels centred on each D pixel (`LP_WIN3`; every tap within 1.5 render pixels, each row of a pair with its own centred rows) instead of the 4 x 4 window: 18 taps per row pair instead of 32; staging cap 448 texels, a frame whose step footprint does not fit (`l_tf3_supported`) runs the 4 x 4 twin |
-| 512 | `l_swin_block_c32_enc_lin_w2[t]_fast` | the encoder block with the linears, two windows per wave in 128-lane workgroups (`l_swin_c32_fast.hlsl`, the launch shape of `swin_c64w2.hlsl`): weight fragments, biases and the linears' weights loaded once for both windows, a barrier waits for 4 waves; the softmax without the maximum (the soft cap bounds the exponents to +-11) |
-| 1024 | `l_swin_block_c32_dec_coef12_add_w2[t]_fast` | the decoder block with the coefficient store, the same two-windows-per-wave body; the coefficient epilogue one pixel per lane (the hh = 1 lanes take the second window's channels by `v_permlanex16`) in FP32 from the block's FP32 output (no FP16 rounding of y2, tanh as `1 - 2 / (2^(2 t log2 e) + 1)`) |
-| 4096 | (option of 512 / 1024) | quick GELU `x / (1 + 2^(-2.53 x))` in the two-windows kernels (`_w2_fast`: no table load; max error 0.016, RMS 0.009 against the model's GELU); off: their table form `_w2t_fast` (the model's GELU bytes by the arena table) |
+| 8 | `swin_block_c64_nc_fast`, `swin_block_c64_add_ex_nc_fast` | enc1's and dec1's blocks (`l_swin_c64_fast.hlsl`): the two-windows-per-wave body below at C = 64 with the clamped-cubic GELU (no table load, no exponential) and the softmax without the maximum |
+| 256 | `w64_lc12/l_post_tf_p12[_pf]_fast3` (with lever 1; off by default: RX 9070 XT 38.7 dB / SSIM 0.955 HDR against the hybrid route, the 4 x 4 gather 53.2 dB / 0.998) | the gather over the 3 x 3 render texels centred on each D pixel (`LP_WIN3`; every tap within 1.5 render pixels, each row of a pair with its own centred rows) instead of the 4 x 4 window: 18 taps per row pair instead of 32; staging cap 448 texels, a frame whose step footprint does not fit (`l_tf3_supported`) runs the 4 x 4 twin |
+| 512 | `l_swin_block_c32_enc_lin_w2p_fast` / `_w2t_fast` | the encoder block with the linears, two windows per wave in 128-lane workgroups (`l_swin_c32_fast.hlsl`, the launch shape of `swin_c64w2.hlsl`): weight fragments, biases and the linears' weights loaded once for both windows, a barrier waits for 4 waves; the softmax without the maximum (the soft cap bounds the exponents to +-11) |
+| 1024 | `l_swin_block_c32_dec_coef12_add_w2p_fast` / `_w2t_fast` | the decoder block with the coefficient store, the same two-windows-per-wave body; the coefficient epilogue one pixel per lane (the hh = 1 lanes take the second window's channels by `v_permlanex16`) in FP32 from the block's FP32 output (no FP16 rounding of y2, tanh as `1 - 2 / (2^(2 t log2 e) + 1)`) |
+| 4096 | (option of 512 / 1024) | the clamped-cubic GELU `(x + abs(x) min(P(abs(x)), 1)) / 2` in the two-windows kernels (`_w2p_fast`: six full-rate operations per value the driver pairs as VOPD, no table load, no exponential; the W2 products accumulate onto twice the residual, so the halving costs nothing per value; max error 0.002, RMS 0.0014 against the model's GELU, 85 % of the FP8 codes unchanged); off: their table form `_w2t_fast` (the model's GELU bytes by the arena table) |
+| 8192 | `swin_block_c96_pm_rev_nc_fast`, `swin_block_c96_add_ex_nc_fast` | enc2's block with enc1's patch merge and dec2's block with the fused expand (`l_swin_c96_fast.hlsl`): the same body in the base kernels' launch shape (one window per wave), the clamped-cubic GELU (no groupshared table: LDS 26 624 / 28 672 -> 24 576 bytes) and the softmax without the maximum |
+| 2048 | (reserved) | the bottleneck's fast twin: none built (the persistent bottleneck kernel keeps its base form) |
 
 A developer build (`dev_diagnostics`) reads the selection of levers from `WG_L_FAST_MASK` (the sum of the lever values
-above; the default is 6015 = every lever and option but 128 and 2048, the latter reserved for a bottleneck twin that does
-not exist yet; the earlier default 127 is the set without 256, 512, 1024 and 4096) for an A/B of each; a release build has
-no such variable. The arithmetic choices are bounded on the CPU by `clean/l/tests/test_l_fast_numerics.py` (the quality
-gate itself is measured on the GPU against `l_mode=hybrid`: tone-mapped PSNR / SSIM and temporal stability). Lever 256 is
+above; the default is 13951 = every lever and option but 128, 256 and 2048: 256 failed the GPU quality gate, 2048 is
+reserved for a bottleneck twin that does not exist yet; earlier defaults: 127, then 6015 with 256 and the quick GELU)
+for an A/B of each; a release build has no such variable. The arithmetic choices are bounded on the CPU by
+`clean/l/tests/test_l_fast_numerics.py` (the quality gate itself is measured on the GPU against `l_mode=hybrid`: tone-mapped PSNR / SSIM and temporal stability). Lever 256 is
 the one whose difference depends on the model's kernel widths (CPU bound: 52.9 dB on texel noise at sigma 0.5 render
-pixel, 30.6 dB at sigma 1): it is the first one to check in that A/B.
+pixel, 30.6 dB at sigma 1): on the RX 9070 XT it measured 38.7 dB / SSIM 0.955 HDR and is off by default.
 
 ## Building Model L
 

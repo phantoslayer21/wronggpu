@@ -13,17 +13,20 @@ arithmetic as the instructions give it) and bounds its error against the exact f
   * the MLP GELU forms (the arithmetic chain of the M-form kernels and the plain tanh form) against the erf GELU;
   * the FP32 accumulation of the projections' K blocks against the stepwise FP16-rounded sum;
   * the centred 3 x 3 gather of l_post_tf_p12[_pf]_fast3 (LP_WIN3) against the 4 x 4 window, by kernel width;
-  * the two-windows-per-wave Swin blocks (l_swin_c32_fast.hlsl): quick GELU x / (1 + 2^(-2.53 x)) against the model's GELU
-    (and its FP8 codes), the softmax without the maximum against the max-subtracted one, and the coefficient store in FP32
+  * the two-windows-per-wave Swin blocks (l_swin_c32_fast.hlsl, also the c64 / c96 twins): the clamped-cubic GELU
+    (x + |x| min(P(|x|), 1)) / 2 against the model's GELU (and its FP8 codes, the doubled residual accumulator), the softmax
+    without the maximum against the max-subtracted one, and the coefficient store in FP32
     (tanh as 1 - 2 / (2^(2 t log2 e) + 1), no RN16 points, the truncating FP16 pack with the kRn fold) against
     l_coef_px.hlsli's arithmetic.
 Numbers are printed with -v; the bounds are the ones the fast route is gated on (tone-mapped PSNR >= 48 dB per choice).
 """
 import math
+import os
 import unittest
 
 import numpy as np
 
+KERNELS = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "dx12", "kernels")
 f32 = np.float32
 f16 = np.float16
 
@@ -268,44 +271,84 @@ def fp8_e4m3(x):
     return np.sign(x) * np.round(np.abs(x) / step) * step
 
 
-class QuickGelu(unittest.TestCase):
-    K = from_bits(0xc021eb85)   # -2.53 (l_swin_c32_fast.hlsl kLfQg)
+class PolyGelu(unittest.TestCase):
+    """The clamped-cubic GELU of l_swin_c32_fast.hlsl (LF_GELU 1: the "_w2p_fast" width-32 blocks, the c64 / c96 twins):
+    2 GELU(x) = x + |x| min(P(|x|), 1), P(t) = c0 + c1 t + c2 t^2 + c3 t^3, in the kernel's float32 operations (|x| by an
+    AND, three fmas, the min, one fma; the halving is the doubled residual accumulator's, exact)."""
+    C = (0xbd6c7ea1, 0x3f878bed, 0xbeb6e5c7, 0x3d25ab15)   # kLfP0 ... kLfP3
+    K_QUICK = from_bits(0xc021eb85)                        # 2B-3's quick GELU constant, for comparison
 
-    def quick(self, x):
+    def setUp(self):
+        self.c = [from_bits(v) for v in self.C]
+
+    def g2(self, x):
+        """2 GELU(x) as the kernel computes it (float32, fused multiply-adds)."""
         x = np.asarray(x, dtype=f32)
-        return x * (f32(1.0) / (f32(1.0) + np.exp2(x * self.K)))
+        t = np.abs(x)
+        c0, c1, c2, c3 = (np.float64(v) for v in self.c)
+        fma = lambda a, b, c: (np.asarray(a, np.float64) * np.asarray(b, np.float64) + c).astype(f32)
+        p = fma(c3, t, c2)
+        p = fma(p, t, c1)
+        p = np.minimum(fma(p, t, c0), f32(1.0))
+        return fma(t, p, x)
+
+    def poly(self, x):
+        return self.g2(x).astype(np.float64) * 0.5
+
+    def test_constants_are_the_kernels(self):
+        src = open(os.path.join(KERNELS, "l_swin_c32_fast.hlsl"), encoding="utf-8").read()
+        for i, v in enumerate(self.C):
+            self.assertIn("kLfP%d = asfloat(0x%08xu)" % (i, v), src)
 
     def test_error_bounds(self):
         x = np.linspace(-12, 12, 2400001, dtype=f32)
-        err = np.abs(self.quick(x).astype(np.float64) - gelu_chain(x))
+        err = np.abs(self.poly(x) - gelu_chain(x))
         rng = np.random.default_rng(11)
         xs = rng.normal(0, 1.5, 2000000).astype(f32)
-        rms = np.sqrt(np.mean((self.quick(xs).astype(np.float64) - gelu_chain(xs)) ** 2))
-        # the plain 1.702 constant for comparison: the fitted one has the smaller maximum and RMS
-        k0 = f32(-1.702 * math.log2(math.e))
-        q0 = xs * (f32(1.0) / (f32(1.0) + np.exp2(xs * k0)))
-        rms0 = np.sqrt(np.mean((q0.astype(np.float64) - gelu_chain(xs)) ** 2))
-        print("quick GELU (k = 2.53): max abs err %.4f, RMS %.4f on N(0, 1.5) (k = 1.702 log2 e: RMS %.4f)" %
-              (err.max(), rms, rms0))
-        self.assertLess(err.max(), 0.016)
-        self.assertLess(rms, 0.0095)
-        self.assertLess(rms, rms0)
-        with np.errstate(over="ignore"):
-            ends = self.quick(np.array([-1e30, 1e30], dtype=f32))
-        self.assertEqual(float(abs(ends[0])), 0.0)
-        self.assertEqual(float(ends[1]), float(f32(1e30)))
+        rms = np.sqrt(np.mean((self.poly(xs) - gelu_chain(xs)) ** 2))
+        quick = xs * (f32(1.0) / (f32(1.0) + np.exp2(xs * self.K_QUICK)))
+        rms_q = np.sqrt(np.mean((quick.astype(np.float64) - gelu_chain(xs)) ** 2))
+        print("clamped-cubic GELU: max abs err %.5f, RMS %.5f on N(0, 1.5) (quick GELU RMS %.4f)" % (err.max(), rms, rms_q))
+        self.assertLess(err.max(), 0.0021)
+        self.assertLess(rms, 0.0015)
+        self.assertLess(rms * 5, rms_q)
+        # far out: GELU(x) = x for large x, 0 for large negative x (P stays >= 1, the min keeps it at 1)
+        big = np.array([3.5, 10.0, 200.0, -3.5, -10.0, -200.0], dtype=f32)
+        np.testing.assert_array_equal(self.g2(big), np.array([7.0, 20.0, 400.0, 0.0, 0.0, 0.0], dtype=f32))
+
+    def test_polynomial_shape(self):
+        # P' > 0 everywhere (no real root of c1 + 2 c2 t + 3 c3 t^2): P crosses 1 once (the knee) and never comes back;
+        # P < 0 only below t = 0.06, where the missing lower clamp costs less than the bound above
+        c0, c1, c2, c3 = (float(v) for v in self.c)
+        self.assertLess(4 * c2 * c2 - 12 * c1 * c3, 0.0)
+        t = np.linspace(0, 1000, 2000001)
+        p = ((c3 * t + c2) * t + c1) * t + c0
+        knee = t[np.argmax(p >= 1.0)]
+        print("knee t = %.3f, P(0) = %.4f" % (knee, c0))
+        self.assertTrue(3.0 < knee < 3.6)
+        self.assertTrue(np.all(p[t >= knee] >= 1.0))
+        self.assertLess(t[np.argmax(p >= 0.0)], 0.06)
+
+    def test_doubled_accumulator_is_exact(self):
+        # q8(2 g) = 2 q8(g) for every g whose FP8 code is normal on both sides: the W2 products accumulate onto 2 x the
+        # residual and the output halves it, both exact power-of-two scalings
+        rng = np.random.default_rng(14)
+        g = rng.normal(0, 2.0, 200000)
+        g = g[(np.abs(g) >= 2.0 ** -6) & (np.abs(g) <= 200.0)]
+        np.testing.assert_array_equal(fp8_e4m3(2 * g), 2 * fp8_e4m3(g))
 
     def test_fp8_codes(self):
         # the W2 input is the FP8 code of GELU(h): the share of codes that change, and the mean signed error
         rng = np.random.default_rng(12)
         h = rng.normal(0, 1.5, 1000000).astype(f32)
-        a, b = fp8_e4m3(gelu_chain(h)), fp8_e4m3(self.quick(h))
+        a = fp8_e4m3(gelu_chain(h))
+        b = fp8_e4m3(self.g2(h)) * 0.5   # the kernel packs 2 GELU
         same = np.mean(a == b)
         bias = np.mean(b - a)
-        print("quick GELU FP8 codes: %.1f%% unchanged, 99%% of the changes within %.4f absolute, mean signed error %.2e "
-              "(mean |GELU| %.3f)" % (100 * same, np.quantile(np.abs(a - b)[a != b], 0.99), bias, np.mean(np.abs(a))))
-        self.assertGreater(same, 0.55)
-        self.assertLess(abs(bias), 0.004)
+        print("clamped-cubic GELU FP8 codes: %.1f%% unchanged, mean signed error %.2e (mean |GELU| %.3f)" %
+              (100 * same, bias, np.mean(np.abs(a))))
+        self.assertGreater(same, 0.84)
+        self.assertLess(abs(bias), 0.0005)
 
 
 class SoftmaxNoMax(unittest.TestCase):

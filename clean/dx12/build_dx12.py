@@ -229,9 +229,9 @@ MODEL_L_ONLY = {"swin_block_c64_add_ex_nc", "lev/input_encoder_q20", "lev/input_
 
 def fast_base(name):
     """The kernel a fast-mode kernel of Model L's l_mode=fast is launched in place of (same grid, block and arguments), or
-    None: "<kernel>_fast" and "<kernel>_fast3" (the 3 x 3 post) replace <kernel>; "<stem>_w2_fast" / "<stem>_w2t_fast" (the
+    None: "<kernel>_fast" and "<kernel>_fast3" (the 3 x 3 post) replace <kernel>; "<stem>_w2p_fast" / "<stem>_w2t_fast" (the
     two-windows-per-wave Swin blocks, l_swin_c32_fast.hlsl) replace "<stem>_nc"."""
-    m = re.fullmatch(r"(.+)_w2t?_fast", name)
+    m = re.fullmatch(r"(.+)_w2[pt]_fast", name)
     if m:
         return m.group(1) + "_nc"
     m = re.fullmatch(r"(.+)_fast3?", name)
