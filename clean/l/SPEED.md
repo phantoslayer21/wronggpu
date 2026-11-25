@@ -90,6 +90,24 @@ reason where a kernel it needs is missing from the build (a build made with `--m
 build's `variants.json` and `swin__bmegahg.co`). No timing is published for it yet: a figure goes on this page only
 with its measurement record.
 
+The levers of the preset (each a kernel of the build named `<kernel>_fast`, launched in place of its base kernel with the
+same arguments; the base kernels and everything `l_mode=hybrid` runs are untouched, and a build without a twin simply runs
+the base kernel). They drop the bit-exactness of the hybrid route where it costs instructions and keeps the model's values:
+
+| lever | kernel | what it changes |
+|---|---|---|
+| 1 | `w64_lc12/l_post_tf_p12[_pf]_fast` | the fused reconstruction + output filter without the driver intrinsic channel and the opaque-zero guards; native FP16 packs with the round-to-nearest bias folded in; the gather's weight is one `v_exp_f16` of the FP16 exponent and the total weight is summed in FP16 from the same weights as the nine features; no 1 KB code table; `Dec` as `exp2(q k) - 1` for every lane; the horizontal filter ring in FP16 pairs (LDS 26 752 -> 23 040 bytes) |
+| 2 | `l_project_gather_fast`, `l_dec_project_fast` | the K blocks accumulate in FP32 and round once, in the FP8 pack (no FP16 rounding after every 32 inputs) |
+| 4 | `l_swin_block_c32_enc_lin_nc_fast` | the two input linears of the encoder block keep their results in FP32 (no FP16 rounding of x1, x2) |
+| 16 | (option of lever 1) | the weaker history candidate (weight at most 1/2) is a 4-tap bilinear of the previous history instead of the 12-tap Catmull-Rom |
+| 64 | (option of lever 1) | a weaker history candidate whose motion is within 0.01 render pixel of the first one's is the same sample and is not read twice |
+| 128 | (option of lever 1, off by default) | a weaker history candidate of weight below 0.05 is dropped (the hybrid route drops it below 1 / 255) |
+
+A developer build (`dev_diagnostics`) reads the selection of levers from `WG_L_FAST_MASK` (the sum of the lever values
+above; the default is 127: every lever and option but 128) for an A/B of each; a release build has no such variable. The arithmetic choices are bounded
+on the CPU by `clean/l/tests/test_l_fast_numerics.py` (the quality gate itself is measured on the GPU against
+`l_mode=hybrid`: tone-mapped PSNR / SSIM and temporal stability).
+
 ## Building Model L
 
 Model L is off in a default build. It is built with the `--model-l` option of the two build scripts:

@@ -9,6 +9,7 @@
 #include <cstring>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -324,6 +325,29 @@ struct Runtime {
   //     hybrid form is the bit-exact one); the history, the reset and the temporal logic are the same code.
   std::string l_mode_opt;
   bool l_fast_d3d12 = false;
+  // The levers of l_mode=fast (the kernels of the build named "<kernel>_fast", native D3D12; every one is launched in place of
+  // its base kernel with the same arguments, l_fast_alt: base name -> fast name). One bit per group of kernels, all on by
+  // default; a developer build reads the selection from WG_L_FAST_MASK (an A/B of each lever, below).
+  //   1  l_post_tf_p12[_pf]       the true-fusion output kernel without the bit-exactness guards (l_post_tf_fast.hlsl)
+  //   2  l_project_gather, l_dec_project   the K blocks accumulated in FP32 and rounded once, in the FP8 pack
+  //   4  the width-32 Swin blocks (so far: the encoder block with the linears, its prologue in FP32)
+  //   8  the middle Swin blocks (c64, c96, the bottleneck: no twin yet; the build's "_fast" names decide)
+  //  16  the weaker history candidate as a 4-tap bilinear (inside the kernel of lever 1: pitch_bytes bit 0)
+  //  32  the q20 input encoder (no twin yet)
+  //  64  a weaker history candidate with the first one's motion (within 0.01 render pixel) is not read twice (lever 1: bit 1)
+  // 128  a weaker history candidate of weight below 0.05 (the hybrid route: 1 / 255) is dropped (lever 1: bit 2; off by default:
+  //      a quality / speed trade-off for the A/B)
+  static constexpr unsigned kLFastAll = 255u, kLFastDefault = 127u;
+  unsigned l_fast_mask = kLFastDefault;
+  std::map<std::string, std::string> l_fast_alt;
+  static unsigned l_fast_bit(const std::string& n) {
+    if (n.compare(0, 22, "w64_lc12/l_post_tf_p12") == 0) return 1u;
+    if (n == "l_project_gather" || n == "l_dec_project") return 2u;
+    if (n.compare(0, 17, "l_swin_block_c32_") == 0) return 4u;
+    if (n.compare(0, 11, "swin_block_") == 0 || n.compare(0, 16, "bneck/swin_bneck") == 0) return 8u;
+    if (n.compare(0, 20, "lev/input_encoder_q2") == 0) return 32u;
+    return 0u;
+  }
   // WG_L_FORM=hybrid on native D3D12 (hyb-fast, 0.6.5 L release form): Model L's M-form route (l_q7 off) with every
   // block stage packed from the hybrid values (clean/l/runtime/l_hyb_pack.h, the same blob names and layout) and every
   // Swin kernel launched as its hybrid twin from the kernel manifest (hyb-fast's names: the M-form route's name with
@@ -705,6 +729,10 @@ struct Runtime {
           return fail(from + " must be hybrid or fast (got \"" + lm + "\")");
         l_mode_opt = lm.empty() ? "hybrid" : lm;
       }
+#ifdef WG_DEV_DIAGNOSTICS
+      if (const char* fm = std::getenv("WG_L_FAST_MASK"))   // the A/B of each fast lever (bits: see l_fast_mask)
+        if (*fm) l_fast_mask = (unsigned)std::strtoul(fm, nullptr, 0) & kLFastAll;
+#endif
       const bool lfast = l_mode_opt == "fast";
       if (lfast && c.backend != 3)
         return fail("l_mode=fast runs on native D3D12 (backend 3) only (l_mode=hybrid is the default on every backend)");
@@ -1083,14 +1111,25 @@ struct Runtime {
 #ifdef WG_MODEL_L
     if (model_l && c.backend == 3) {
       // The pipeline states the native D3D12 device's warm_up compiles (every kernel of the build, selected or not): the
-      // hybrid default leaves out the two fast-only decoder blocks (and is otherwise as it was); l_mode=fast leaves out
-      // what it never launches: the hybrid twins, the FP16-form q7 blocks and the no-skip decoder blocks
+      // hybrid default leaves out the fast-only kernels (the skip-form decoder blocks and every "_fast" one) and is otherwise as
+      // it was; l_mode=fast leaves out what it never launches: the hybrid twins, the FP16-form q7 blocks, the no-skip
+      // decoder blocks, the base kernels that a fast one replaces (l_fast_alt) and the fast ones whose lever is off
       std::vector<std::string> skip;
-      for (const std::string& h : manifest_kernels()) {
+      const std::vector<std::string> mk = manifest_kernels();
+      const std::set<std::string> in_build(mk.begin(), mk.end());
+      if (l_fast_d3d12)
+        for (const std::string& h : mk) {
+          const bool fast = h.size() > 5 && h.compare(h.size() - 5, 5, "_fast") == 0;
+          const std::string base = fast ? h.substr(0, h.size() - 5) : h;
+          if (fast && in_build.count(base) && (l_fast_mask & l_fast_bit(base))) l_fast_alt[base] = h;
+        }
+      for (const std::string& h : mk) {
         const bool twin = h.size() > 4 && h.compare(h.size() - 4, 4, "_hyb") == 0;
+        const bool fast = h.size() > 5 && h.compare(h.size() - 5, 5, "_fast") == 0;
         if (l_fast_d3d12 ? (twin || h.compare(0, 5, "l_q7_") == 0 || h == "l_swin_block_c32_dec_nc" ||
-                            h == "l_swin_block_c32_dec_coef12_nc")
-                         : (h == "l_swin_block_c32_dec_add_nc" || h == "l_swin_block_c32_dec_coef12_add_nc"))
+                            h == "l_swin_block_c32_dec_coef12_nc" || l_fast_alt.count(h) != 0 ||
+                            (fast && !l_fast_alt.count(h.substr(0, h.size() - 5)) ) )
+                         : (fast || h == "l_swin_block_c32_dec_add_nc" || h == "l_swin_block_c32_dec_coef12_add_nc"))
           skip.push_back(h);
       }
       dev->warm_up_skip(skip);
@@ -2032,8 +2071,12 @@ struct Runtime {
       kernels_text += " l_hyb_d3d12=on hyb_twins=" + std::to_string(hyb_map.size() / 2) + " l_dec_skip=l_x3" +
                       // the arena tables (native D3D12; "off" on the HIP twins' route, whose device has none)
                       std::string(" hyb_tables=") + (dev->hyb_tables() ? "on" : "off");
-    if (l_fast_d3d12)   // l_mode=fast: the decoder block's skip S = the encoder block's map l_x3, in the M-form arithmetic
-      kernels_text += " l_dec_skip=l_x3";
+    if (l_fast_d3d12) {   // l_mode=fast: the decoder block's skip S = the encoder block's map l_x3, in the M-form arithmetic
+      kernels_text += " l_dec_skip=l_x3 l_fast_kernels=" + std::to_string(l_fast_alt.size());
+#ifdef WG_DEV_DIAGNOSTICS
+      kernels_text += " l_fast_mask=" + std::to_string(l_fast_mask);
+#endif
+    }
     if (m_hyb_d3d12)   // Model M on the hybrid twins: dec1's map stored, dec0 = d1p12/dec0_q7
       kernels_text += " m_form=hybrid m_hyb_d3d12=on hyb_twins=" + std::to_string(hyb_map.size() / 2) +
                       std::string(" hyb_tables=") + (dev->hyb_tables() ? "on" : "off");
@@ -2168,6 +2211,14 @@ struct Runtime {
       if (n == k) dev->unordered_next();
     for (const auto& m : ((ab_block && ksub_b) ? ksub_ab : ksub_list))
       if (m.first == k) k = m.second.c_str();
+    std::string fast_k;
+    if (!l_fast_alt.empty()) {   // l_mode=fast: the lever's kernel in place of the base one
+      const auto it = l_fast_alt.find(k);
+      if (it != l_fast_alt.end()) {
+        fast_k = it->second;
+        k = fast_k.c_str();
+      }
+    }
     std::string hyb_k;
     if (hyb_d3d12()) {
       const std::string kk = k;
@@ -3306,6 +3357,7 @@ struct Runtime {
         float dec_scale = (float)(0.01 / (fr.exposure == 0.0f ? 1.0 : (double)fr.exposure)), p_h = pi;
         if (l_fold_pidiv) std::memcpy(&p.pad0, &pi, 4);   // the pre-exposure's bits: the _pf kernel divides every colour read
         post_last = l_fold_pidiv ? "w64_lc12/l_post_tf_p12_pf" : "w64_lc12/l_post_tf_p12";
+        if (l_fast_alt.count(post_last)) hpitch = ((l_fast_mask & 16u) ? 1 : 0) | ((l_fast_mask & 64u) ? 2 : 0) | ((l_fast_mask & 128u) ? 4 : 0);   // the fast kernel's pitch_bytes is its option word
         filter_last = "fused";
         if (!launch(post_last.c_str(), cdiv(ow, 40) * nch, 512,
                     {&cnet, &A, &B, &C, &hist[cur], &mnear[nxt], &mcenter, &mfar, &w, &hist[nxt], &reduced, &outp, &p, &expo,

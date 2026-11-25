@@ -13,9 +13,22 @@
 // this kernel has no branch): RN16 = v_cvt_f16_f32 then the exact widening, the FP8 pack v_cvt_pk_fp8_f32 after the
 // clamp. The software forms were most of the kernels' instructions.
 //
+// Fast mode (l_mode=fast, PJ_FAST 1: l_project_gather_fast, l_dec_project_fast; native D3D12 only, no HIP twin): the FP32
+// accumulation runs through all KB K blocks and rounds once, in the FP8 pack, instead of rounding to FP16 after every group of
+// 32 inputs (the 128 conversions per lane of pj_rn16 were the kernel's longest chain). The result is the FP32 sum of the
+// block's products: it differs from the reference's stepwise FP16 sum (which the hybrid route reproduces bit for bit, and
+// l_ops.co's bytes follow) by the FP16 roundings of that sum, at most 3 ulp of FP16 at the largest value; the clamp and the
+// pack are unchanged.
+//
 // @wg-kernel l_project_gather co=l_ops.co block=256 wave=32 args=p,p,p,u,u defines=PJ_DEC=0,WG_LD_A16=1
 // @wg-kernel l_dec_project co=l_ops.co block=256 wave=32 args=p,p,p,u,u defines=PJ_DEC=1,WG_LD_A16=1
+// @wg-kernel l_project_gather_fast co=- entry=l_project_gather block=256 wave=32 args=p,p,p,u,u defines=PJ_DEC=0,WG_LD_A16=1,PJ_FAST=1
+// @wg-kernel l_dec_project_fast co=- entry=l_dec_project block=256 wave=32 args=p,p,p,u,u defines=PJ_DEC=1,WG_LD_A16=1,PJ_FAST=1
 #include "wg_platform.hlsli"
+
+#ifndef PJ_FAST
+#define PJ_FAST 0
+#endif
 
 WG_ARGS_BEGIN
     uint src, dst, w;   // gather: x (pixel map [2 th][2 tw][32] FP8), features [th][tw][64]; dec: z [th][tw][64], y pixel map
@@ -83,8 +96,10 @@ WG_KERNEL(l_project_gather)
             acc1 = wg_wmma_fp8(fr1[2u * g], zf[2u * g], acc1);
             acc0 = wg_wmma_fp8(fr0[2u * g + 1u], zf[2u * g + 1u], acc0);
             acc1 = wg_wmma_fp8(fr1[2u * g + 1u], zf[2u * g + 1u], acc1);
+#if !PJ_FAST
             acc0 = pj_rn16(acc0);
             acc1 = pj_rn16(acc1);
+#endif
         }
 #if PJ_DEC
         const int s = (int)(mt >> 1);

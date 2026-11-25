@@ -126,7 +126,9 @@ const Signature kSignatures[] = {
 
 const char* kinds_of(const std::string& kernel) {
   const size_t slash = kernel.find('/');
-  const std::string k = slash == std::string::npos ? kernel : kernel.substr(slash + 1);
+  std::string k = slash == std::string::npos ? kernel : kernel.substr(slash + 1);
+  // a fast twin (l_mode=fast: "<kernel>_fast", launched in place of its base kernel) has the base kernel's arguments
+  if (k.size() > 5 && k.compare(k.size() - 5, 5, "_fast") == 0) k.resize(k.size() - 5);
   // dec1's block fused with the decoder (swin_block_c64_add_dec0*): x, skip, w, H, W, ox, oy, then the decoder's
   // arguments: not the blocks' common form
   if (k.find("_add_dec0") != std::string::npos) return "pppiiii";
