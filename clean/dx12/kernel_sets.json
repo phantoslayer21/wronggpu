@@ -73,6 +73,14 @@
    "-"
   ],
   [
+   "lev/input_encoder_q20_pf_w4",
+   "-"
+  ],
+  [
+   "lev/input_encoder_q20_w4",
+   "-"
+  ],
+  [
    "native_driver_probe",
    "-"
   ],
@@ -202,6 +210,22 @@
   ],
   [
    "w64_lc12/l_post_tf_p12_pf",
+   "-"
+  ],
+  [
+   "w64_lc12/l_post_tf_p12_pf_w4",
+   "-"
+  ],
+  [
+   "w64_lc12/l_post_tf_p12_pf_w4m",
+   "-"
+  ],
+  [
+   "w64_lc12/l_post_tf_p12_w4",
+   "-"
+  ],
+  [
+   "w64_lc12/l_post_tf_p12_w4m",
    "-"
   ]
  ],

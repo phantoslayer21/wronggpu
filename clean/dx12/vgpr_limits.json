@@ -1,5 +1,5 @@
 {
- "_doc": "build_dx12.py VGPR check: the RGA (gfx1201) USED_VGPRs bound of every Swin / bottleneck kernel (a name with a swin_ part). Each bound is the largest count that keeps the kernel's present occupancy: VGPR file 1536 per SIMD lane, granule 8, a 256-lane wave32 workgroup = 4 waves on each of a CU's 2 SIMDs, so 2 workgroups per CU need <= 192, 3 need <= 128 (a 128-lane workgroup = 2 waves per SIMD: 4 per CU need <= 192). A kernel over its bound fails the build (a merge or an edit lost a workgroup per CU: swin_block_c96_add_xe_* at 215 VGPRs ran 1 per CU, +38 us per frame at 1440p Q). A new Swin / bottleneck kernel needs an entry. Model L wave 3 (the *_w3 / *_gp kernels, WG_L_W3): without LDS staging (SW_DIRECT_W) the registers alone set the occupancy: the C = 32 blocks stay within 96 (16 waves per SIMD: 4 workgroups per CU), the C = 64 blocks within 128 (3 per CU by registers; the LDS no longer limits them). WG_DX12_VGPR_CHECK=0 skips the check.",
+ "_doc": "build_dx12.py VGPR check: the RGA (gfx1201) USED_VGPRs bound of every Swin / bottleneck kernel (a name with a swin_ part). Each bound is the largest count that keeps the kernel's present occupancy: VGPR file 1536 per SIMD lane, granule 8, a 256-lane wave32 workgroup = 4 waves on each of a CU's 2 SIMDs, so 2 workgroups per CU need <= 192, 3 need <= 128 (a 128-lane workgroup = 2 waves per SIMD: 4 per CU need <= 192). A kernel over its bound fails the build (a merge or an edit lost a workgroup per CU: swin_block_c96_add_xe_* at 215 VGPRs ran 1 per CU, +38 us per frame at 1440p Q). A new Swin / bottleneck kernel needs an entry. Model L wave 3 (the *_w3 / *_gp kernels, WG_L_W3): without LDS staging (SW_DIRECT_W) the registers alone set the occupancy: the C = 32 blocks stay within 96 (16 waves per SIMD: 4 workgroups per CU), the C = 64 blocks within 128 (3 per CU by registers; the LDS no longer limits them). Model L wave 4 (WG_L_W4): the post kernels (block = 512 lanes, wave64, 26,752 bytes of LDS: 2 workgroups per CU = 8 waves64 per SIMD whatever the registers, so the bound is the 96 that keeps 8: the wave 3 post used 84) and the encoder (wave32: 96 registers = 16 waves per SIMD, the wave 3 kernels used 104 / 106 = 13-14). WG_DX12_VGPR_CHECK=0 skips the check.",
   "l_swin_block_c32_nc": 96,
   "l_swin_block_c32_enc_nc": 96,
   "l_swin_block_c32_enc_lin_nc": 96,
@@ -59,5 +59,11 @@
  "bneck/swin_bneck6_mb_nc": 192,
  "bneck/swin_bneck6_mbo_nc": 192,
  "d1p12/swin_block_c64_add_dec0_nc": 192,
- "d1p12/swin_block_c64_add_dec0_xd_nc": 192
+ "d1p12/swin_block_c64_add_dec0_xd_nc": 192,
+ "w64_lc12/l_post_tf_p12_w4": 96,
+ "w64_lc12/l_post_tf_p12_pf_w4": 96,
+ "w64_lc12/l_post_tf_p12_w4m": 96,
+ "w64_lc12/l_post_tf_p12_pf_w4m": 96,
+ "lev/input_encoder_q20_w4": 96,
+ "lev/input_encoder_q20_pf_w4": 96
 }

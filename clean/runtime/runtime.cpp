@@ -372,6 +372,10 @@ struct Runtime {
   // manifest, so each lever is switchable): see create
   std::vector<std::pair<std::string, std::string>> w3_map;
   unsigned l_w3 = 0;  // the mask in force (0 = every kernel its wave 2 form)
+  // Model L wave 4 (WG_L_W4): the same on top of wave 3: the fused post and the q20 encoder kernel as launched -> its wave 4 form
+  // (l_post_tf.hlsl LP_W4, encoder.hlsl ENC_W4: the same arguments, grids and bytes)
+  std::vector<std::pair<std::string, std::string>> w4_map;
+  unsigned l_w4 = 0;  // the mask in force (0 = the wave 3 kernels)
   DRow drow;
   int block_threads[5] = {256, 256, 256, 256, 256}, gemm_threads = 256, nt = 2, wpw[3] = {1, 1, 1};  // = variants.DEFAULT_GEOMETRY
   int block_wpg[5] = {0, 0, 0, 0, 0};  // windows per workgroup per block kernel; 0 = threads / 32 * wpw
@@ -877,6 +881,34 @@ struct Runtime {
         if (w3 & 0x10) {
           w3add("l_project_gather", "l_project_gather_w64");
           w3add("l_dec_project", "l_dec_project_w64");
+        }
+        // WG_L_W4: a mask of the wave 4 levers (default 0x3 = bits 0 and 1; 0 = the wave 3 frame), each lever its own kernels in
+        // the manifest, selected only when the manifest has them (a manifest without them runs the wave 3 kernel: the same bytes):
+        //   0x01 the fused post (w64_lc12/l_post_tf_p12, _pf) as l_post_tf_p12_w4 / _pf_w4: history_cr's loads in one burst
+        //   0x02 the q20 encoder (lev/input_encoder_q20, _pf) as _w4 / _pf_w4: 96 registers instead of 104 / 106
+        //   0x04 (with 0x01): the post as l_post_tf_p12_w4m / _pf_w4m, the motion loads issued ahead of the last gather column
+        unsigned w4 = 0x3;
+        const char* w4e = std::getenv("WG_L_W4");
+        if (w4e && *w4e) {
+          char* end = nullptr;
+          const unsigned long v = std::isdigit((unsigned char)*w4e) ? std::strtoul(w4e, &end, 0) : 0xffffffffUL;
+          if (v > 0x7 || (end && *end))
+            return fail("WG_L_W4: unknown value \"" + std::string(w4e) + "\" (a mask of 0x01 .. 0x04, 0 = off)");
+          w4 = (unsigned)v;
+        }
+        l_w4 = w4;
+        auto w4add = [&](const char* from, const std::string& to) {
+          if (std::find(have.begin(), have.end(), to) != have.end()) w4_map.push_back({from, to});
+        };
+        if (w4 & 0x01) {
+          const bool m = (w4 & 0x04) != 0 && std::find(have.begin(), have.end(), "w64_lc12/l_post_tf_p12_w4m") != have.end() &&
+                         std::find(have.begin(), have.end(), "w64_lc12/l_post_tf_p12_pf_w4m") != have.end();
+          w4add("w64_lc12/l_post_tf_p12", m ? "w64_lc12/l_post_tf_p12_w4m" : "w64_lc12/l_post_tf_p12_w4");
+          w4add("w64_lc12/l_post_tf_p12_pf", m ? "w64_lc12/l_post_tf_p12_pf_w4m" : "w64_lc12/l_post_tf_p12_pf_w4");
+        }
+        if (w4 & 0x02) {
+          w4add("lev/input_encoder_q20", "lev/input_encoder_q20_w4");
+          w4add("lev/input_encoder_q20_pf", "lev/input_encoder_q20_pf_w4");
         }
       }
     }
@@ -2013,6 +2045,7 @@ struct Runtime {
       kernels_text += " l_hyb_d3d12=on hyb_twins=" + std::to_string(hyb_map.size() / 2) + " l_dec_skip=l_x3" +
                       // Model L wave 3: the mask in force and how many launches it routes to a wave 3 kernel
                       " l_w3=" + std::to_string(l_w3) + " w3_kernels=" + std::to_string(w3_map.size()) +
+                      " l_w4=" + std::to_string(l_w4) + " w4_kernels=" + std::to_string(w4_map.size()) +
                       // the arena tables (native D3D12; "off" on the HIP twins' route, whose device has none)
                       std::string(" hyb_tables=") + (dev->hyb_tables() ? "on" : "off");
     if (m_hyb_d3d12)   // Model M on the hybrid twins: dec1's map stored, dec0 = d1p12/dec0_q7
@@ -2149,7 +2182,7 @@ struct Runtime {
       if (n == k) dev->unordered_next();
     for (const auto& m : ((ab_block && ksub_b) ? ksub_ab : ksub_list))
       if (m.first == k) k = m.second.c_str();
-    std::string hyb_k, w3_k;
+    std::string hyb_k, w3_k, w4_k;
     if (hyb_d3d12()) {
       const std::string kk = k;
       const auto it = std::find_if(hyb_map.begin(), hyb_map.end(), [&](const auto& m) { return m.first == kk; });
@@ -2171,6 +2204,12 @@ struct Runtime {
       if (m.first == k) {
         w3_k = m.second;
         k = w3_k.c_str();
+        break;
+      }
+    for (const auto& m : w4_map)   // Model L wave 4 (WG_L_W4): the fused post / q20 encoder -> its wave 4 form
+      if (m.first == k) {
+        w4_k = m.second;
+        k = w4_k.c_str();
         break;
       }
     if (pending_mark >= 0) {

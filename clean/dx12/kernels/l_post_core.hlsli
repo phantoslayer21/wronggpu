@@ -5,6 +5,9 @@
 // w_p, hist_out, reduced, P_*, expo are used here) and the LP_* switches first; every function below is moved from
 // l_post.hlsl unchanged (the DXIL of its kernels is unchanged by the move).
 #pragma once
+#ifndef LP_W4
+#define LP_W4 0   // 1: Model L wave 4 (l_post_tf_p12_w4): the knobs below; 0: wave 2 / 3 kernels, byte-identical DXIL
+#endif
 #ifndef LP_HSEQ
 #define LP_HSEQ 0   // 1: history_cr issues its loads in two dependent groups (fewer live registers)
 #endif
@@ -57,7 +60,15 @@ static const float kShapeAB = asfloat(0xbf38a8c1u);     // -0.721325f
 static const float kShapeC = asfloat(0xbfb8a8c1u);      // -1.44265f
 static const float kMinNormal = asfloat(0x00800000u);   // 2^-126
 
+#ifndef LP_W4_LDS2
+#define LP_W4_LDS2 0   // 1 (with LP_W4): the staged texels as uint2 (gather_col_w4)
+#endif
+#if LP_W4 && LP_W4_LDS2
+// wave 4: the staged texel (6 dwords) as three uint2 (8-byte aligned: one ds_load_b64 per pair of dwords)
+groupshared uint2 sh_tex2[kStageCap * 3];
+#else
 groupshared uint sh_tex[kStageCap * kTexDw];
+#endif
 
 static uint g_z;          // 0, opaque to the compiler (from the grid size)
 static float g_e, g_ep;   // exposures (0 replaced by 1)
@@ -268,14 +279,28 @@ void load_texel_hw(int idx, out uint t[kTexDw])
     pack_texel(h.x & 0xffffu, h.x >> 16, h.y & 0xffffu, a, b, kA, kB, kC, t);
 }
 
+#ifndef LP_W4_H2
+#define LP_W4_H2 0   // 1 (with LP_W4): the nine FP16 sums as four half2 and a half (an RGA ablation)
+#endif
+#if LP_W4 && LP_W4_H2
+struct LGather { float W; half2 Fp[4]; half F8; };
+#define LG_F(g, k) ((k) == 8 ? (g).F8 : (((k) & 1) ? (g).Fp[(k) >> 1].y : (g).Fp[(k) >> 1].x))
+#else
 struct LGather { float W; half F[9]; };
+#define LG_F(g, k) (g).F[k]
+#endif
 
 LGather gather_zero()
 {
     LGather g;
     g.W = 0.0f;
     const half z = h_bits(g_z);   // +0, opaque: fma(w, f, +0) keeps its addend
+#if LP_W4 && LP_W4_H2
+    [unroll] for (int p = 0; p < 4; ++p) g.Fp[p] = half2(z, z);
+    g.F8 = z;
+#else
     [unroll] for (int k = 0; k < 9; ++k) g.F[k] = z;
+#endif
     return g;
 }
 
@@ -305,10 +330,16 @@ void gather_acc(inout LGather g, uint t[kTexDw], float w, uint hwb)
 {
     g.W = g.W + w;
     const half hw = h_bits(hwb);
+#if LP_W4 && LP_W4_H2
+    const half2 hw2 = half2(hw, hw);
+    [unroll] for (int p = 0; p < 4; ++p) g.Fp[p] = mad(hw2, half2(h_bits(t[p]), h_bits(t[p] >> 16)), g.Fp[p]);
+    g.F8 = mad(hw, h_bits(t[4]), g.F8);
+#else
     [unroll] for (int k = 0; k < 9; ++k) {
         const uint d = t[k >> 1];
         g.F[k] = mad(hw, h_bits((k & 1) ? (d >> 16) : d), g.F[k]);
     }
+#endif
 }
 
 // ---- history: 12-tap Catmull-Rom of the previous full history (history_cr<false>, 8-byte RGBA16F texels) ------------
@@ -419,11 +450,11 @@ void l_post_core(LGather g, int x, int y, int fx, int fy, float mx[3], float my[
 {
     const float inv = rcp(g.W);   // rcp(0) = inf: 0 * inf = NaN features (zero total weight)
 #if LP_FBLAZY   // l_post_tf: each normalized feature from its FP16 sum where it is used (the nine floats are not live together)
-#define fbar_k(k) (inv * (float)opqh(g.F[k]))
+#define fbar_k(k) (inv * (float)opqh(LG_F(g, k)))
     const float sig0 = fbar_k(3), sig1 = fbar_k(4), sig2 = fbar_k(5);
 #else
     float fbar[9];
-    [unroll] for (int k = 0; k < 9; ++k) fbar[k] = inv * (float)opqh(g.F[k]);
+    [unroll] for (int k = 0; k < 9; ++k) fbar[k] = inv * (float)opqh(LG_F(g, k));
 #define fbar_k(k) fbar[k]
     const float sig0 = fbar[3], sig1 = fbar[4], sig2 = fbar[5];
 #endif
@@ -558,6 +589,49 @@ MotRaw motion_load(float px, float py)
     return m;
 }
 
+#if LP_W4
+// motion_load split in two for the wave 4 kernels: motion_issue = the eight loads only (six words live until motion_fin), motion_fin =
+// the coordinates (recomputed from opaque copies of px, py: the compiler must not merge them into the issue's, which would keep
+// fx, fy, wx, wy live as well). motion_fin(px, py, motion_issue(px, py)) is motion_load(px, py), operation for operation.
+struct MotW { uint mn, mf, ma, mb, mc, md; };
+
+MotW motion_issue(float px, float py)
+{
+    MotW w;
+    const int fx = clampi(floor_i(px), 0, P_rw - 1), fy = clampi(floor_i(py), 0, P_rh - 1);
+    w.mn = wg_ld32(m_near, (uint)(fy * P_rw + fx) * 4u);
+    w.mf = wg_ld32(m_far, (uint)(fy * P_rw + fx) * 4u);
+    const float tx = px - 0.5f, ty = py - 0.5f;
+    const int c0 = (int)floor(tx), r0 = (int)floor(ty);
+    const int ca = clampi(c0, 0, P_rw - 1), cb = clampi(c0 + 1, 0, P_rw - 1);
+    const int ra = clampi(r0, 0, P_rh - 1), rb = clampi(r0 + 1, 0, P_rh - 1);
+    if (ca + 1 == cb) {
+        const uint2 top = wg_ld64(m_center, (uint)(ra * P_rw + ca) * 4u);
+        const uint2 bot = wg_ld64(m_center, (uint)(rb * P_rw + ca) * 4u);
+        w.ma = top.x; w.mb = top.y;
+        w.mc = bot.x; w.md = bot.y;
+    } else {
+        w.ma = wg_ld32(m_center, (uint)(ra * P_rw + ca) * 4u);
+        w.mb = wg_ld32(m_center, (uint)(ra * P_rw + cb) * 4u);
+        w.mc = wg_ld32(m_center, (uint)(rb * P_rw + ca) * 4u);
+        w.md = wg_ld32(m_center, (uint)(rb * P_rw + cb) * 4u);
+    }
+    return w;
+}
+
+MotRaw motion_fin(float px, float py, MotW w)
+{
+    MotRaw m;
+    m.mn = w.mn; m.mf = w.mf; m.ma = w.ma; m.mb = w.mb; m.mc = w.mc; m.md = w.md;
+    m.fx = clampi(floor_i(px), 0, P_rw - 1);
+    m.fy = clampi(floor_i(py), 0, P_rh - 1);
+    const float tx = px - 0.5f, ty = py - 0.5f;
+    m.wx = tx - floor(tx);
+    m.wy = ty - floor(ty);
+    return m;
+}
+#endif
+
 // l_finish_pixel without its stores: motions, steps 3 to 5; H^ in hh, O^ in oh (the kernel converts and stores them)
 void finish_pixel(LGather g, int x, int y, MotRaw m, float s, out float hh[3], out float oh[3])
 {
@@ -590,6 +664,11 @@ void gather_col(int i, half dx, int tb0, int rstride, int b, int ax, half v0[kLW
     wv.v[6] = 0.0f;
     wv.v[7] = 0.0f;
 #endif
+#if LP_W4 && LP_W4_LDS2
+    if (STAGED) {
+        // LP_W4_LDS2 stages uint2 texels: gather_col_w4 (below) is the staged column
+    } else {
+#else
     if (STAGED) {
         // Read only kA/kB/kC (dwords 4..5) from LDS during weight evaluation so 24 texel VGPRs aren't live across exp2/cvt.
         const int col_base = tb0 + (i + 1) * kTexDw;
@@ -621,6 +700,7 @@ void gather_col(int i, half dx, int tb0, int rstride, int b, int ax, half v0[kLW
             gather_acc(g1, tf, wv.v[2 * jj + 1], hp >> 16);
         }
     } else {
+#endif
         // Rare unstaged fallback (footprint > kStageCap): avoid keeping uint t[4][6] (24 VGPRs) live across the kernel!
         [unroll] for (int j = -1; j <= kLWin - 2; ++j) {
             uint tk[kTexDw];
@@ -639,3 +719,54 @@ void gather_col(int i, half dx, int tb0, int rstride, int b, int ax, half v0[kLW
     }
 }
 
+#if LP_W4 && LP_W4_LDS2
+#if !LP_C12
+#error "LP_W4_LDS2 needs LP_C12 (the fused-sum form of tap_weight)"
+#endif
+#ifndef LP_W4_TA
+#define LP_W4_TA 1   // 1: h(uu kA) once per tap for both rows of the pair (the product does not depend on the row)
+#endif
+
+// tap_weight of the LP_C12 form with the row-independent term ta = h(uu kA) given (the same operations in the same order)
+float tap_weight_ta(half ta, half kB, half kC, half vv, half uv)
+{
+    const half s = mad(vv, kB, ta);               // C1: the row term fused into the sum
+    const half eps = mad(uv, kC, s);
+    const float w = exp2((float)opqh(eps));
+    return w >= kMinNormal ? w : 0.0f;
+}
+
+// gather_col<true> on the uint2 texels: kA kB kC (dwords 4, 5) are read once per tap as one ds_load_b64 (dword 4 kept for the
+// accumulation pass), the other four feature dwords of the tap as two more; 3 ds_load_b64 per tap instead of 7 ds_load_b32
+void gather_col_w4(int i, half dx, int tb2, int rstride2, half v0[kLWin], half v1[kLWin], half vv0[kLWin],
+                   half vv1[kLWin], inout LGather g0, inout LGather g1)
+{
+    const half u = dx + (half)(float)i;
+    const half uu = mulh(u, u);
+    v8f wv;
+    uint t4[kLWin];
+    const int col_base = tb2 + (i + 1) * 3;
+    [unroll] for (int j = -1; j <= kLWin - 2; ++j) {
+        const uint2 tk45 = sh_tex2[col_base + (j + 1) * rstride2 + 2];
+        t4[j + 1] = tk45.x;
+        const half kA = h_bits(tk45.x >> 16), kB = h_bits(tk45.y), kC = h_bits(tk45.y >> 16);
+#if LP_W4_TA
+        const half ta0 = mulh(uu, kA), ta1 = ta0;
+#else
+        const half ta0 = mulh(uu, kA), ta1 = mulh(uu, kA);
+#endif
+        wv.v[2 * (j + 1)] = tap_weight_ta(ta0, kB, kC, vv0[j + 1], mulh(u, v0[j + 1]));
+        wv.v[2 * (j + 1) + 1] = tap_weight_ta(ta1, kB, kC, vv1[j + 1], mulh(u, v1[j + 1]));
+    }
+    const uint4 hw = wg_to_f16_ags(wv);
+    [unroll] for (int jj = 0; jj < kLWin; ++jj) {
+        const int base = col_base + jj * rstride2;
+        const uint2 t01 = sh_tex2[base], t23 = sh_tex2[base + 1];
+        uint tf[kTexDw];
+        tf[0] = t01.x; tf[1] = t01.y; tf[2] = t23.x; tf[3] = t23.y; tf[4] = t4[jj]; tf[5] = 0u;
+        const uint hp = jj == 0 ? hw.x : (jj == 1 ? hw.y : (jj == 2 ? hw.z : hw.w));
+        gather_acc(g0, tf, wv.v[2 * jj], hp & 0xffffu);
+        gather_acc(g1, tf, wv.v[2 * jj + 1], hp >> 16);
+    }
+}
+#endif

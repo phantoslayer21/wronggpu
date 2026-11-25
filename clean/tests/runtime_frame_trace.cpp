@@ -86,6 +86,8 @@ const Signature kSignatures[] = {
     {"input_encoder", "ppppppppppppE"},     // Model M's encoder and Model L's values (q in place of the features)
     {"input_encoder_q20", "ppppppppppppE"},  // Model L's values, q in its 20-byte form (native D3D12, fusion le)
     {"input_encoder_q20_pf", "ppppppppppppE"},  // the same with the pre-exposure division folded in (WG_L_POST_TF, pi != 1)
+    {"input_encoder_q20_w4", "ppppppppppppE"},     // Model L wave 4 (WG_L_W4 bit 1): the same arguments
+    {"input_encoder_q20_pf_w4", "ppppppppppppE"},
     {"coef_decoder", "ppppppppD"},          // Model M's decoder (also its pack12 form)
     {"swin_block_c96_add_ex_hyb", "ppppiiiip"},  // the fused decoder blocks (WG_L_EXFUSE): the blocks' arguments, then aux
     {"swin_block_c64_add_ex_hyb", "ppppiiiip"},  // (null: unused by the expand kernels)
@@ -124,6 +126,10 @@ const Signature kSignatures[] = {
     {"l_post_recon_p12", "ppppppppppppPp"},  // the same arguments (A, C: pack12 images; B unused)
     {"l_post_tf_p12", "ppppppppppppPpiiiiiiii"},     // Model L's true fusion: the post_recon arguments, then ow, oh, dec_scale and pi
     {"l_post_tf_p12_pf", "ppppppppppppPpiiiiiiii"},  // (their bits), the row pitch (unused), post_tf's chunk plan (cpairs, k1, c2)
+    {"l_post_tf_p12_w4", "ppppppppppppPpiiiiiiii"},   // Model L wave 4 (WG_L_W4 bit 0, 0x04: _w4m): the same arguments
+    {"l_post_tf_p12_pf_w4", "ppppppppppppPpiiiiiiii"},
+    {"l_post_tf_p12_w4m", "ppppppppppppPpiiiiiiii"},
+    {"l_post_tf_p12_pf_w4m", "ppppppppppppPpiiiiiiii"},
     {"post_filter_c1_s4", "ppiiiiip"},  // display, out, dw, dh, ow, oh, dec_scale (its bits), exposure pair
     {"l_post_recon_ldr", "ppppppppppppPp"},      // the LDR forms: the same arguments (the exposure pair not read)
     {"l_post_recon_p12_ldr", "ppppppppppppPp"},

@@ -100,13 +100,14 @@ def map_path():
 
 
 def run(options="", frames=4, build_files=(), env=None, model=None, exe=None, flags=(), rw=RW, rh=RH, hdr=1,
-        manifest=None, tf_default=False, w3_default=False):
+        manifest=None, tf_default=False, w3_default=False, w4_default=False):
     """The trace program's output lines (WG_* removed from the environment, then env applied). hdr: WgRtConfig.hdr
     (Model L's reconstruction kernel is HDR; Model M does not read the flag). manifest: [(kernel, code object)] for
     <build>/dx12/manifest.json (the D3D12 ports a build has; backend 3). tf_default: leave WG_L_POST_TF unset (Model L's
     fused post, the shipped default); otherwise it is 0, the separate launches the other tests trace. w3_default: leave
     WG_L_W3 unset (the wave 3 kernels of the default mask 0x17, when the manifest has them); otherwise it is 0, the wave 2
-    kernels (the names every other test checks)."""
+    kernels (the names every other test checks). w4_default: leave WG_L_W4 unset (the wave 4 post and encoder kernels of the
+    default mask 0x3, when the manifest has them); otherwise it is 0, the wave 3 kernels."""
     build = tempfile.mkdtemp(prefix="wg_lfb_")
     for n in build_files:
         open(os.path.join(build, n), "wb").close()
@@ -119,6 +120,8 @@ def run(options="", frames=4, build_files=(), env=None, model=None, exe=None, fl
         e["WG_L_POST_TF"] = "0"
     if not w3_default:   # the wave 2 kernels (WG_L_W3=0), unless the test is of the wave 3 selection
         e["WG_L_W3"] = "0"
+    if not w4_default:   # the wave 3 post and encoder (WG_L_W4=0), unless the test is of the wave 4 selection
+        e["WG_L_W4"] = "0"
     e.update(env or {})
     try:
         r = subprocess.run([exe or trace_exe(), build, model or model_dir(), str(rw), str(rh), "120", "72", str(frames),
@@ -1679,6 +1682,124 @@ class WaveThree(unittest.TestCase):
                 got = self.d3d12(bad, frames=1)
                 self.assertEqual(len(got), 1)
                 self.assertTrue(got[0].startswith('ERR create: WG_L_W3: unknown value "%s"' % bad), got[0])
+
+
+class WaveFour(unittest.TestCase):
+    """Model L wave 4 (WG_L_W4, native D3D12 hybrid route, the fused post): a mask of levers on top of wave 3, each its own
+    kernels in the manifest (the wave 3 kernels stay), the same launches otherwise: kernel for kernel, grid, block and arguments
+    identical to the wave 3 frame (WG_L_W4=0), only the names of the routed kernels differ. Bit 0 (0x01) the fused post
+    w64_lc12/l_post_tf_p12[_pf] -> _w4 (0x04 with it: _w4m), bit 1 (0x02) the q20 encoder lev/input_encoder_q20[_pf] -> _w4;
+    default 0x3; a manifest without a lever's kernels runs the wave 3 kernel; any other value is refused at create. (The
+    kernels' bytes are the GPU verifier's: no GPU here.)"""
+    TF = "w64_lc12/l_post_tf_p12"
+    ENC = "lev/input_encoder_q20"
+
+    def d3d12(self, w4, pe=None, ports=None, frames=2, **kw):
+        env = dict(kw.pop("env", None) or {})
+        if w4 is not None:
+            env["WG_L_W4"] = w4
+        flags = ("--backend=3",) + (("--pre-exposure=%s" % pe,) if pe is not None else ())
+        return run("model=L", frames=frames, build_files=FT.SHIPPING, flags=flags,
+                   manifest=full_ports() if ports is None else ports, env=env, tf_default=True, w4_default=w4 is None, **kw)
+
+    @staticmethod
+    def frames(lines):
+        t = FT.Trace(lines)
+        assert t.create == "create ok model L", t.create
+        return t, [[(ln.kernel, ln.grid, ln.block, tuple(ln.args)) for ln in f["launches"]] for f in t.frames]
+
+    @classmethod
+    def routed(cls, mask, pf):
+        """The wave 3 -> wave 4 kernel names a mask selects for a frame with (pf) or without the folded pre-exposure division."""
+        sfx = "_pf" if pf else ""
+        out = {}
+        if mask & 0x01:
+            out[cls.TF + sfx] = cls.TF + sfx + ("_w4m" if mask & 0x04 else "_w4")
+        if mask & 0x02:
+            out[cls.ENC + sfx] = cls.ENC + sfx + "_w4"
+        return out
+
+    @staticmethod
+    def count(mask):
+        """w4_kernels: the post and the encoder, each with its _pf form."""
+        return 2 * bool(mask & 0x01) + 2 * bool(mask & 0x02)
+
+    def test_masks_route_only_the_names(self):
+        for pe in (None, 2.0):   # without and with the folded division (the _pf forms)
+            _, base = self.frames(self.d3d12("0", pe=pe))
+            for mask in (None, "0x3", "1", "2", "3", "4", "5", "6", "0x7"):
+                with self.subTest(pe=pe, mask=mask):
+                    lines = self.d3d12(mask, pe=pe)
+                    t, got = self.frames(lines)
+                    m = 0x3 if mask is None else int(mask, 0)
+                    table = self.routed(m, pe is not None)
+                    self.assertEqual(len(got), len(base))
+                    hit = set()
+                    for gf, bf in zip(got, base):
+                        self.assertEqual(len(gf), len(bf))
+                        for g, b in zip(gf, bf):
+                            self.assertEqual(g[0], table.get(b[0], b[0]), (g, b))
+                            self.assertEqual(g[1:], b[1:], (g, b))   # grid, block, arguments: unchanged
+                            if b[0] in table:
+                                hit.add(b[0])
+                    self.assertEqual(hit, set(table))   # every routed kernel is launched by the frame
+                    self.assertEqual(t.unknown(), [])
+                    text = next(ln for ln in lines if ln.startswith("kernels "))
+                    self.assertIn("l_w4=%d w4_kernels=%d" % (m, self.count(m)), text)
+
+    def test_default_is_both_levers(self):
+        t, got = self.frames(self.d3d12(None))
+        names = {k for f in got for k, *_ in f}
+        self.assertIn(self.TF + "_w4", names)
+        self.assertIn(self.ENC + "_w4", names)
+        self.assertEqual(names & {self.TF, self.ENC, self.TF + "_w4m"}, set())
+        self.assertEqual(t.kernels["post_last"], self.TF)   # the route's own name (the launch is mapped)
+
+    def test_zero_is_the_wave_3_frame(self):
+        _, a = self.frames(self.d3d12("0"))
+        names = {k for f in a for k, *_ in f}
+        self.assertTrue({self.TF, self.ENC} <= names, sorted(names))
+        self.assertEqual({n for n in names if n.endswith(("_w4", "_w4m"))}, set())
+
+    def test_missing_kernels_fall_back_to_wave_3(self):
+        """A manifest without a lever's kernels: that lever's launches keep the wave 3 kernel (same bytes), the rest are routed."""
+        for pe in (None, 2.0):
+            sfx = "_pf" if pe is not None else ""
+            _, base = self.frames(self.d3d12("0", pe=pe))
+            for drop, table in (({self.ENC + sfx + "_w4"}, {self.TF + sfx: self.TF + sfx + "_w4"}),
+                                ({self.TF + sfx + "_w4"}, {self.ENC + sfx: self.ENC + sfx + "_w4"}),
+                                ({self.TF + sfx + "_w4", self.ENC + sfx + "_w4"}, {})):
+                with self.subTest(pe=pe, drop=sorted(drop)):
+                    ports = [kc for kc in full_ports() if kc[0] not in drop]
+                    _, got = self.frames(self.d3d12(None, pe=pe, ports=ports))
+                    for gf, bf in zip(got, base):
+                        self.assertEqual([(table.get(b[0], b[0]),) + b[1:] for b in bf], gf)
+            # 0x4 asks for the _w4m post: without its kernels the _w4 post runs
+            ports = [kc for kc in full_ports() if kc[0] not in (self.TF + "_w4m", self.TF + "_pf_w4m")]
+            _, got = self.frames(self.d3d12("0x7", pe=pe, ports=ports))
+            names = {k for f in got for k, *_ in f}
+            self.assertIn(self.TF + sfx + "_w4", names)
+            self.assertEqual({n for n in names if n.endswith("_w4m")}, set())
+        none = [kc for kc in full_ports() if not kc[0].endswith(("_w4", "_w4m"))]
+        _, got = self.frames(self.d3d12(None, ports=none))
+        _, base = self.frames(self.d3d12("0"))
+        self.assertEqual(got, base)
+
+    def test_not_fused_frames_have_no_w4_post(self):
+        """WG_L_POST_TF=0 (the separate launches, no fused post): the encoder is still routed, the post kernels do not appear."""
+        lines = run("model=L", frames=2, build_files=FT.SHIPPING, flags=("--backend=3",), manifest=full_ports(),
+                    env={"WG_L_POST_TF": "0"}, tf_default=True, w4_default=True)
+        _, got = self.frames(lines)
+        names = {k for f in got for k, *_ in f}
+        self.assertEqual([n for n in names if "l_post_tf" in n], [])
+        self.assertIn(self.ENC + "_w4", names)
+
+    def test_bad_values_refused(self):
+        for bad in ("8", "0x10", "-1", "x", "1,2", "0x1g", "1.5", "0x08"):
+            with self.subTest(value=bad):
+                got = self.d3d12(bad, frames=1)
+                self.assertEqual(len(got), 1)
+                self.assertTrue(got[0].startswith('ERR create: WG_L_W4: unknown value "%s"' % bad), got[0])
 
 
 if __name__ == "__main__":

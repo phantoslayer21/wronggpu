@@ -48,7 +48,24 @@
 // the colour is divided by pi (the bits of EncParams.pad0) as color_divide stores it, so no color_divide launch runs; the
 // post's colour reads (l_post_tf_p12_pf) divide the same way.
 // @wg-kernel lev/input_encoder_q20_pf co=- entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b116 defines=WG_ENC_VALUES_OUT=1,WG_ENC_Q20=1,WG_STAGED_PIDIV=1
+// Wave 4 (WG_L_W4 bit 1): the same values and bytes; the fourth history position's loads after the first three positions' values, the
+// uniform loads through readfirstlane, slot 0's stores before slot 1's values (ENC_W4_*): RGA 96 VGPRs instead of 104 / 106 (the
+// 96-register tier: 16 waves per SIMD).
+// @wg-kernel lev/input_encoder_q20_w4 co=- entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b116 defines=WG_ENC_VALUES_OUT=1,WG_ENC_Q20=1,ENC_W4=1
+// @wg-kernel lev/input_encoder_q20_pf_w4 co=- entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b116 defines=WG_ENC_VALUES_OUT=1,WG_ENC_Q20=1,WG_STAGED_PIDIV=1,ENC_W4=1
 #include "wg_platform.hlsli"
+#ifndef ENC_W4
+#define ENC_W4 0   // Model L wave 4 (lev/input_encoder_q20_w4, _pf_w4: WG_L_W4 bit 1): the ENC_W4_* switches; 0: every other kernel unchanged
+#endif
+#ifndef ENC_W4_UNI
+#define ENC_W4_UNI 1   // wave 4: the uniform loads through readfirstlane
+#endif
+#ifndef ENC_W4_HMASK
+#define ENC_W4_HMASK 4 // wave 4: bit k set: position k + 1's history loads wait for position k's values (4: the fourth position's after the first three's; RGA: 96 VGPRs, 7 = one position at a time: 93-95 but +370 instructions)
+#endif
+#ifndef ENC_W4_ST
+#define ENC_W4_ST 1    // wave 4: slot 0's halo-map stores right after its quantization (its five words are not live over slot 1)
+#endif
 #ifndef WG_ENC_VALUES_OUT
 #define WG_ENC_VALUES_OUT 0
 #endif
@@ -138,10 +155,10 @@ Foot enc_footprint(float tx, float ty, int w_, int h_, uint tb)
 }
 
 // G(h) of one position (hist_values of encoder.hip); mode is a literal at every call (three inlined copies).
-float3 hist_values(int mode, Uni U, float px, float py, bool valid, float3 gc)
+float3 hist_values(int mode, Uni U, float px, float py, bool valid, float3 gc, uint hdz)
 {
     Foot ft = enc_footprint(px * U.shx - 0.5f, py * U.shy - 0.5f, P_hw, P_hh, 4u);
-    uint2 t0 = wg_ld64(hist, ft.off0), t1 = wg_ld64(hist, ft.off1);
+    uint2 t0 = wg_ld64(hist, ft.off0 + hdz), t1 = wg_ld64(hist, ft.off1 + hdz);   // hdz: 0 (ENC_W4_HSEQ: an opaque +0 that orders the loads)
     float kS = mode == kHistSame ? kS_SAME : kS_GEN;
     float wy1 = ft.fy * kS, wy0 = kS - wy1;
     float ifx = 1.0f - ft.fx;
@@ -211,9 +228,15 @@ void pixel_values(int mode, Uni U, int x, int y, float4 c, float2 mn, float2 mf,
         [unroll] for (uint i2 = 15; i2 < 20; ++i2) v[i2] = 0.0f;
         return;
     }
+    uint hdz = 0u;
     [unroll] for (uint k2 = 0; k2 < 4; ++k2) {
-        float3 h = hist_values(mode, U, qx[k2], qy[k2], valid[k2], gc);
+        float3 h = hist_values(mode, U, qx[k2], qy[k2], valid[k2], gc, hdz);
         v[3 + 3 * k2] = h.x; v[4 + 3 * k2] = h.y; v[5 + 3 * k2] = h.z;
+#if ENC_W4
+        // the next group of history loads after this position's values (an opaque +0 in their addresses), after the positions
+        // whose bit of ENC_W4_HMASK is set (RGA: the four positions' loads and weights together are the VGPR peak)
+        if (((ENC_W4_HMASK >> k2) & 1u) != 0u) hdz = (asuint(h.x) ^ asuint(h.y)) & ((uint)P_rw >> 31u);
+#endif
     }
 
     // Motion disagreement (value 15)
@@ -358,6 +381,14 @@ void encoder_main()
     // All loads that do not depend on other loads first (the uniform values are computed while they are in flight)
     float e0 = wg_ldf(expo, 0u), e1 = wg_ldf(expo, 4u);
     float s1 = wg_ldf(w, kOffSigma), s2 = wg_ldf(w, kOffSigma + 4u);
+#if ENC_W4 && ENC_W4_UNI
+    // the four values are loads of one address by every lane of the wave (no lane is inactive: tk is clamped): readfirstlane
+    // moves the same bits into scalar registers, so the uniform values U (and the mode tests) stop occupying vector registers
+    e0 = asfloat(WaveReadLaneFirst(asuint(e0)));
+    e1 = asfloat(WaveReadLaneFirst(asuint(e1)));
+    s1 = asfloat(WaveReadLaneFirst(asuint(s1)));
+    s2 = asfloat(WaveReadLaneFirst(asuint(s2)));
+#endif
 #if defined(WG_ENC_MO)
     // motion at output resolution: no depth neighbourhood; one raw motion texel per pixel (texel row of y)
     const uint mo_ty = enc_mo_index(y, P_jy, mo_kmy, mo_mh);
@@ -554,13 +585,23 @@ void encoder_main()
         uint qq[5];
         quantize(v, dx2 != 0u ? t2 >> 8 : t2 & 0xffu, qq);
         [unroll] for (uint i = 0; i < 5; ++i) q[dx2][i] = qq[i];
+#if ENC_W4 && ENC_W4_ST && WG_ENC_VALUES_OUT && WG_ENC_Q20
+        if (tok < ntok) {   // the stores of the block below, per slot (distinct addresses: the same bytes in any order)
+            const uint mw = (uint)(P_fw + 4);
+            const uint hp = (uint)(Y + 2) * mw + (uint)(X0 + (int)dx2 + 2);
+            wg_st128(features, hp * 16u, uint4(qq[0], qq[1], qq[2], qq[3]));
+            wg_st32(features, mw * (uint)(P_fh + 4) * 16u + hp * 4u, qq[4]);
+        }
+#endif
 #if !WG_ENC_VALUES_OUT
         x8[dx2][0] = wg_xor16_u(qq[2]);
         x8[dx2][1] = wg_xor16_u(qq[3]);
 #endif
     }
 
-#if WG_ENC_VALUES_OUT
+#if ENC_W4 && ENC_W4_ST && WG_ENC_VALUES_OUT && WG_ENC_Q20
+    // (stored per slot above)
+#elif WG_ENC_VALUES_OUT
     // pixel (X0 + dx, Y) of the halo map: 20 value bytes and 12 zero bytes
     if (tok < ntok) {
         const uint mw = (uint)(P_fw + 4);
