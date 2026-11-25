@@ -53,19 +53,68 @@ FAST_NEEDS = ("lev/input_encoder", "lev/input_encoder_q20", "l_linear_32_32_relu
 SIZES = "--sizes=96x64,96x64,80x48,80x48,80x48,77x45"
 
 
+def fast_base(n):
+    """The base kernel a fast-mode kernel is launched in place of (clean/dx12/build_dx12.py fast_base): "<kernel>_fast",
+    "<kernel>_fast3" -> <kernel>; "<stem>_w2_fast", "<stem>_w2t_fast" -> "<stem>_nc"; None for any other kernel."""
+    m = re.fullmatch(r"(.+)_w2t?_fast", n)
+    if m:
+        return m.group(1) + "_nc"
+    m = re.fullmatch(r"(.+)_fast3?", n)
+    return m.group(1) if m else None
+
+
+# runtime.cpp kLFastAlts (in order: the first one in the build whose bits are all set), then the "<kernel>_fast" twins of
+# their lever bit (l_fast_bit); kLFastDefault
+ALTS = (("w64_lc12/l_post_tf_p12", "w64_lc12/l_post_tf_p12_fast3", 1 | 256),
+        ("w64_lc12/l_post_tf_p12_pf", "w64_lc12/l_post_tf_p12_pf_fast3", 1 | 256),
+        ("l_swin_block_c32_enc_lin_nc", "l_swin_block_c32_enc_lin_w2_fast", 512 | 4096),
+        ("l_swin_block_c32_enc_lin_nc", "l_swin_block_c32_enc_lin_w2t_fast", 512),
+        ("l_swin_block_c32_dec_coef12_add_nc", "l_swin_block_c32_dec_coef12_add_w2_fast", 1024 | 4096),
+        ("l_swin_block_c32_dec_coef12_add_nc", "l_swin_block_c32_dec_coef12_add_w2t_fast", 1024))
+DEFAULT_MASK = 8191 & ~128 & ~2048
+
+
+def lever_bit(base):
+    if base.startswith("w64_lc12/l_post_tf_p12"):
+        return 1
+    if base in ("l_project_gather", "l_dec_project"):
+        return 2
+    if base.startswith("l_swin_block_c32_"):
+        return 4
+    if base.startswith("swin_block_") or base.startswith("bneck/swin_bneck"):
+        return 8
+    return 32 if base.startswith("lev/input_encoder_q2") else 0
+
+
+def selection(mask=DEFAULT_MASK, ports=None):
+    """(base -> the kernel launched in its place, the fast kernels warmed up) of runtime.cpp's l_fast_alt for this mask."""
+    have = {k for k, _ in (F.full_ports() if ports is None else ports)}
+    alt = {}
+    for b, a, bits in ALTS:
+        if b not in alt and b in have and a in have and (mask & bits) == bits and \
+                (not a.endswith("_fast3") or b + "_fast" in have):
+            alt[b] = a
+    for k in sorted(have):
+        if k.endswith("_fast") and k[:-5] in have and k[:-5] not in alt and mask & lever_bit(k[:-5]):
+            alt[k[:-5]] = k
+    warm = set(alt.values()) | {b + "_fast" for b, a in alt.items() if a.endswith("_fast3")}
+    return alt, warm
+
+
 class FastTrace(FT.Trace):
-    """FT.Trace with the "_fast" twins folded back onto their base names (the lever kernels the fast route launches in place
-    of a base kernel, same arguments): every launch reads as the base kernel; frame["fast"] lists the twins launched."""
+    """FT.Trace with the fast-mode kernels folded back onto their base names (fast_base: the lever kernels the fast route
+    launches in place of a base kernel, same arguments): every launch reads as the base kernel; frame["fast"] lists the
+    fast kernels launched."""
 
     def __init__(self, lines):
         super().__init__(lines)
         for f in self.frames:
-            f["fast"] = [ln.kernel for ln in f["launches"] if ln.kernel.endswith("_fast")]
+            f["fast"] = [ln.kernel for ln in f["launches"] if fast_base(ln.kernel)]
             for ln in f["launches"]:
-                if ln.kernel.endswith("_fast"):
-                    ln.kernel = ln.kernel[:-5]
-            if f["failed"] and f["failed"].endswith("_fast"):
-                f["failed"] = f["failed"][:-5]
+                if fast_base(ln.kernel):
+                    ln.kernel = fast_base(ln.kernel)
+            if f["failed"] and fast_base(f["failed"]):
+                f["failed"] = fast_base(f["failed"])
 
 
 def l_run(options="model=L", ports=None, frames=3, flags=(), backend=3, rw=F.RW, rh=F.RH, hdr=1, env=None,
@@ -149,7 +198,7 @@ class Mode(unittest.TestCase):
         hybrid (the default) the two fast-only decoder blocks and nothing else; fast the hybrid twins, the FP16-form q7
         blocks and the no-skip decoder blocks, none of the kernels its own route launches. Model M: nothing."""
         ports = [k for k, _ in F.full_ports()]
-        fast_twins = [k for k in ports if k.endswith("_fast")]
+        fast_twins = [k for k in ports if fast_base(k)]
         self.assertTrue(fast_twins)
         t = FastTrace(l_run("model=L", frames=1, rw=96, rh=64, variants=False, flags=("--warm-skip",)))
         self.assertEqual(sorted(t.warm_skip), sorted(FAST_ONLY + tuple(fast_twins)))
@@ -159,17 +208,21 @@ class Mode(unittest.TestCase):
         t = FastTrace(l_run("model=L,l_mode=fast", frames=1, rw=96, rh=64, flags=("--warm-skip",)))
         twins = [k for k in ports if k.endswith("_hyb")]
         self.assertTrue(twins)
-        replaced = {k[:-5] for k in fast_twins if k[:-5] in ports}   # the base kernels a fast twin replaces
+        alt, warm = selection()
+        replaced = set(alt)   # the base kernels a fast kernel replaces
         want = set(twins) | {k for k in ports if k.startswith("l_q7_")} | {"l_swin_block_c32_dec_nc",
                                                                            "l_swin_block_c32_dec_coef12_nc"} | replaced
+        want |= set(fast_twins) - warm   # the alternatives not selected (lever 4's encoder twin, the table GELU forms)
         self.assertTrue(replaced)
+        self.assertIn("l_swin_block_c32_enc_lin_nc_fast", want)
+        self.assertNotIn("w64_lc12/l_post_tf_p12_fast", want)   # the 3 x 3 post's 4 x 4 fallback stays warm
         self.assertEqual(sorted(t.warm_skip), sorted(want))
         launched = {n for f in t.frames for n in names(f)} - replaced   # (a twin is launched in place of its base kernel)
         self.assertEqual(launched & set(t.warm_skip), set())
         self.assertEqual({k for f in t.frames for k in f["fast"]} & set(t.warm_skip), set())
         # every kernel the route launches (a twin in place of its base) is warmed up: not a base that a twin replaces
         self.assertEqual(set(FAST_NEEDS) - replaced & set(t.warm_skip), set())
-        self.assertEqual({k for k in fast_twins} & set(t.warm_skip), set())
+        self.assertEqual(warm & set(t.warm_skip), set())
         t = FastTrace(F.run("", frames=1, build_files=FT.SHIPPING, flags=("--backend=3", "--warm-skip"),
                            manifest=F.full_ports()))
         self.assertEqual(t.warm_skip, [])
@@ -347,7 +400,7 @@ class Fast(unittest.TestCase):
     def test_failed_launch_stops_the_frame(self):
         for kernel, before in ((FOLD_ADD, "l_dec_project"), ("lc12/l_post_recon_p12", FOLD_ADD)):
             with self.subTest(kernel=kernel):
-                fail = kernel + "_fast" if kernel + "_fast" in twins() else kernel   # launched as its twin
+                fail = selection()[0].get(kernel, kernel)   # launched as its fast kernel
                 t = FastTrace(l_run("model=L,l_mode=fast", frames=3, flags=("--fail=%s@1" % fail,), tf_default=False))
                 ok0, bad, ok2 = t.frames
                 self.assertEqual(bad["failed"], kernel)
@@ -367,7 +420,7 @@ class Fast(unittest.TestCase):
 
 
 def twins():
-    return [k for k, _ in F.full_ports() if k.endswith("_fast")]
+    return [k for k, _ in F.full_ports() if fast_base(k)]
 
 
 def shape(t):
@@ -397,8 +450,15 @@ class FastKernels(unittest.TestCase):
         t = set(twins())
         for k in self.LEVERS:
             self.assertIn(k + "_fast", t)
+            self.assertIn(k, selection()[0])
         for k in t:
-            self.assertIn(k[:-5], [x for x, _ in F.full_ports()], k)   # every twin replaces a base kernel of the build
+            self.assertIn(fast_base(k), [x for x, _ in F.full_ports()], k)   # every fast kernel replaces a base kernel
+        # the default selection: the 3 x 3 post, the two-windows-per-wave width-32 blocks with quick GELU, the c64 twins
+        alt = selection()[0]
+        self.assertEqual(alt["w64_lc12/l_post_tf_p12"], "w64_lc12/l_post_tf_p12_fast3")
+        self.assertEqual(alt[ENC_LIN], "l_swin_block_c32_enc_lin_w2_fast")
+        self.assertEqual(alt[FOLD_ADD], "l_swin_block_c32_dec_coef12_add_w2_fast")
+        self.assertEqual(alt["swin_block_c64_nc"], "swin_block_c64_nc_fast")
 
     def test_launched_in_place_of_the_base_kernel(self):
         a = FastTrace(l_run("model=L,l_mode=fast", frames=3, tf_default=True))
@@ -406,19 +466,33 @@ class FastKernels(unittest.TestCase):
         b = FastTrace(l_run("model=L,l_mode=fast", ports=without(*twins()), frames=3, tf_default=True))
         self.assertEqual(b.create, "create ok model L")
         self.assertEqual(shape(a), shape(b))   # the same launches with the same arguments, twins or not
+        alt = selection()[0]
         for f in a.frames:
-            for k in self.LEVERS:
-                self.assertIn(k + "_fast", f["fast"], f["fast"])
+            for k in self.LEVERS + (FOLD_ADD, "swin_block_c64_nc", "swin_block_c64_add_ex_nc"):
+                self.assertIn(alt[k], f["fast"], f["fast"])
         for f in b.frames:
             self.assertEqual(f["fast"], [])
-        self.assertEqual(a.kernels.get("l_fast_kernels"), str(len(twins())))
+        self.assertEqual(a.kernels.get("l_fast_kernels"), str(len(alt)))
         self.assertEqual(b.kernels.get("l_fast_kernels"), "0")
 
     def test_pre_exposure_post_twin(self):
         t = FastTrace(l_run("model=L,l_mode=fast", frames=2, tf_default=True, flags=("--pre-exposure=2.0",)))
         for f in t.frames:
-            self.assertIn("w64_lc12/l_post_tf_p12_pf_fast", f["fast"])
-            self.assertNotIn("w64_lc12/l_post_tf_p12_fast", f["fast"])
+            self.assertIn("w64_lc12/l_post_tf_p12_pf_fast3", f["fast"])
+            self.assertNotIn("w64_lc12/l_post_tf_p12_fast3", f["fast"])
+
+    def test_post3_footprint_fallback(self):
+        """A frame whose step footprint the 3 x 3 post's staging (448 texels) does not take, but the 4 x 4 one's (512) does,
+        runs the 4 x 4 twin (render 96 x 48 for D 180 x 108: (33 + 5) 12 = 456 > 448, (33 + 6) 12 = 468 <= 512); the
+        same frames at 80 x 48 run the 3 x 3 kernel."""
+        t = FastTrace(l_run("model=L,l_mode=fast", frames=2, tf_default=True, rw=96, rh=48))
+        self.assertEqual(t.create, "create ok model L")
+        for f in t.frames:
+            self.assertIn("w64_lc12/l_post_tf_p12_fast", f["fast"])
+            self.assertNotIn("w64_lc12/l_post_tf_p12_fast3", f["fast"])
+        t = FastTrace(l_run("model=L,l_mode=fast", frames=2, tf_default=True, rw=80, rh=48))
+        for f in t.frames:
+            self.assertIn("w64_lc12/l_post_tf_p12_fast3", f["fast"])
 
     def test_every_lever_on_by_default(self):
         t = FastTrace(l_run("model=L,l_mode=fast", frames=2, tf_default=True))
@@ -447,10 +521,17 @@ def dev_exe():
 
 class FastMask(unittest.TestCase):
     """The A/B of the fast levers: WG_L_FAST_MASK in a developer build (bit values: runtime.cpp l_fast_mask); a release
-    build has no such variable (it runs every lever whatever the environment says)."""
+    build has no such variable (it runs the default levers whatever the environment says)."""
     POST = {"w64_lc12/l_post_tf_p12_fast"}
+    POST3 = {"w64_lc12/l_post_tf_p12_fast3"}
     PROJECT = {"l_project_gather_fast", "l_dec_project_fast"}
     ENC = {"l_swin_block_c32_enc_lin_nc_fast"}
+    ENC_W2 = {"l_swin_block_c32_enc_lin_w2_fast"}
+    ENC_W2T = {"l_swin_block_c32_enc_lin_w2t_fast"}
+    DEC_W2 = {"l_swin_block_c32_dec_coef12_add_w2_fast"}
+    DEC_W2T = {"l_swin_block_c32_dec_coef12_add_w2t_fast"}
+    MID = {"swin_block_c64_nc_fast", "swin_block_c64_add_ex_nc_fast"}
+    DEFAULT = POST3 | PROJECT | ENC_W2 | DEC_W2 | MID
 
     def launched(self, mask, exe, **kw):
         t = FastTrace(l_run("model=L,l_mode=fast", frames=2, tf_default=True, exe=exe, env={"WG_L_FAST_MASK": str(mask)},
@@ -462,21 +543,25 @@ class FastMask(unittest.TestCase):
 
     def test_developer_mask(self):
         exe = dev_exe()
-        for mask, want in ((127, self.POST | self.PROJECT | self.ENC), (255, self.POST | self.PROJECT | self.ENC), (0, set()), (1, self.POST), (2, self.PROJECT),
-                           (4, self.ENC), (1 | 4, self.POST | self.ENC), (16 | 64 | 128, set())):
+        for mask, want in ((DEFAULT_MASK, self.DEFAULT), (8191, self.DEFAULT), (127, self.POST | self.PROJECT | self.ENC | self.MID),
+                           (0, set()), (1, self.POST), (1 | 256, self.POST3), (256, set()), (2, self.PROJECT), (4, self.ENC),
+                           (4 | 512, self.ENC_W2T), (512 | 4096, self.ENC_W2), (1024, self.DEC_W2T), (1024 | 4096, self.DEC_W2),
+                           (4096, set()), (8, self.MID), (16 | 64 | 128, set())):
             with self.subTest(mask=mask):
                 got, t = self.launched(mask, exe)
                 self.assertEqual(got, want)
+                # (the frames run the post without the pre-exposure: its _pf kernel is selected but not launched)
+                self.assertEqual(got, {v for b, v in selection(mask)[0].items() if b != "w64_lc12/l_post_tf_p12_pf"})
                 self.assertEqual(t.kernels.get("l_fast_mask"), str(mask))
-                # a twin of a lever that is off is left out of the warm-up (and not launched)
-                skip = set(t.warm_skip)
+                # a fast kernel the mask does not select is left out of the warm-up (and not launched); the 3 x 3 post's
+                # 4 x 4 twin stays warm (the frames whose footprint the 3 x 3 kernel does not take)
+                skip, warm = set(t.warm_skip), selection(mask)[1]
                 for twin in twins():
-                    bit = 1 if twin.startswith("w64_lc12/") else (2 if "project" in twin else 4)
-                    self.assertEqual(twin in skip, not (mask & bit), twin)
+                    self.assertEqual(twin in skip, twin not in warm, twin)
 
     def test_release_build_has_no_mask(self):
         got, t = self.launched(0, None)   # the release trace program: the variable is not read
-        self.assertEqual(got, self.POST | self.PROJECT | self.ENC)
+        self.assertEqual(got, self.DEFAULT)
         self.assertNotIn("l_fast_mask", t.kernels)
 
 

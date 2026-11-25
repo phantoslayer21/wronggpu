@@ -11,7 +11,12 @@ arithmetic as the instructions give it) and bounds its error against the exact f
   * the 16-bit horizontal Lanczos ring (two FP16 per dword) against the FP32 ring;
   * the FP16 tap weight (v_exp_f16) with the total weight summed in FP16 from the same weights, against the FP32 gather;
   * the MLP GELU forms (the arithmetic chain of the M-form kernels and the plain tanh form) against the erf GELU;
-  * the FP32 accumulation of the projections' K blocks against the stepwise FP16-rounded sum.
+  * the FP32 accumulation of the projections' K blocks against the stepwise FP16-rounded sum;
+  * the centred 3 x 3 gather of l_post_tf_p12[_pf]_fast3 (LP_WIN3) against the 4 x 4 window, by kernel width;
+  * the two-windows-per-wave Swin blocks (l_swin_c32_fast.hlsl): quick GELU x / (1 + 2^(-2.53 x)) against the model's GELU
+    (and its FP8 codes), the softmax without the maximum against the max-subtracted one, and the coefficient store in FP32
+    (tanh as 1 - 2 / (2^(2 t log2 e) + 1), no RN16 points, the truncating FP16 pack with the kRn fold) against
+    l_coef_px.hlsli's arithmetic.
 Numbers are printed with -v; the bounds are the ones the fast route is gated on (tone-mapped PSNR >= 48 dB per choice).
 """
 import math
@@ -243,6 +248,205 @@ class ProjectAccumulation(unittest.TestCase):
         e32, e16 = np.abs(acc32 - exact).max(), np.abs(acc16 - exact).max()
         print("projection accumulation: FP32 max err %.3g, stepwise FP16 %.3g" % (e32, e16))
         self.assertLess(e32, e16)
+
+
+
+def gelu_chain(x):
+    """The model's GELU as the M-form kernels compute it (and the arena tables hold): x / (1 + 2^(x (b x^2 + a)))."""
+    a, b = from_bits(0xc013b8ed), from_bits(0xbdcd6502)
+    x = np.asarray(x, dtype=f32)
+    with np.errstate(over="ignore"):
+        return x / (f32(1.0) + np.exp2(x * (x * x * b + a)))
+
+
+def fp8_e4m3(x):
+    """Round to the nearest FP8 E4M3 value (v_cvt_pk_fp8_f32: nearest even; |x| <= 448 here)."""
+    x = np.asarray(x, dtype=np.float64)
+    _, e = np.frexp(np.abs(x))          # |x| = m 2^e, m in [0.5, 1)
+    e = np.maximum(e, -5)               # below 2^-6: the subnormal step 2^-9
+    step = np.ldexp(1.0, e - 4)         # 3 mantissa bits
+    return np.sign(x) * np.round(np.abs(x) / step) * step
+
+
+class QuickGelu(unittest.TestCase):
+    K = from_bits(0xc021eb85)   # -2.53 (l_swin_c32_fast.hlsl kLfQg)
+
+    def quick(self, x):
+        x = np.asarray(x, dtype=f32)
+        return x * (f32(1.0) / (f32(1.0) + np.exp2(x * self.K)))
+
+    def test_error_bounds(self):
+        x = np.linspace(-12, 12, 2400001, dtype=f32)
+        err = np.abs(self.quick(x).astype(np.float64) - gelu_chain(x))
+        rng = np.random.default_rng(11)
+        xs = rng.normal(0, 1.5, 2000000).astype(f32)
+        rms = np.sqrt(np.mean((self.quick(xs).astype(np.float64) - gelu_chain(xs)) ** 2))
+        # the plain 1.702 constant for comparison: the fitted one has the smaller maximum and RMS
+        k0 = f32(-1.702 * math.log2(math.e))
+        q0 = xs * (f32(1.0) / (f32(1.0) + np.exp2(xs * k0)))
+        rms0 = np.sqrt(np.mean((q0.astype(np.float64) - gelu_chain(xs)) ** 2))
+        print("quick GELU (k = 2.53): max abs err %.4f, RMS %.4f on N(0, 1.5) (k = 1.702 log2 e: RMS %.4f)" %
+              (err.max(), rms, rms0))
+        self.assertLess(err.max(), 0.016)
+        self.assertLess(rms, 0.0095)
+        self.assertLess(rms, rms0)
+        with np.errstate(over="ignore"):
+            ends = self.quick(np.array([-1e30, 1e30], dtype=f32))
+        self.assertEqual(float(abs(ends[0])), 0.0)
+        self.assertEqual(float(ends[1]), float(f32(1e30)))
+
+    def test_fp8_codes(self):
+        # the W2 input is the FP8 code of GELU(h): the share of codes that change, and the mean signed error
+        rng = np.random.default_rng(12)
+        h = rng.normal(0, 1.5, 1000000).astype(f32)
+        a, b = fp8_e4m3(gelu_chain(h)), fp8_e4m3(self.quick(h))
+        same = np.mean(a == b)
+        bias = np.mean(b - a)
+        print("quick GELU FP8 codes: %.1f%% unchanged, 99%% of the changes within %.4f absolute, mean signed error %.2e "
+              "(mean |GELU| %.3f)" % (100 * same, np.quantile(np.abs(a - b)[a != b], 0.99), bias, np.mean(np.abs(a))))
+        self.assertGreater(same, 0.55)
+        self.assertLess(abs(bias), 0.004)
+
+
+class SoftmaxNoMax(unittest.TestCase):
+    def test_no_max_needed(self):
+        rng = np.random.default_rng(13)
+        n = 200000
+        cap, k3, kt = from_bits(0x420179db), from_bits(0xb9a6cc38), from_bits(0x3f028297)
+        s = np.concatenate([rng.normal(0, 4, (n, 16)), rng.uniform(-80, 80, (n // 10, 16))]).astype(f32)
+        c = np.clip(s, -cap, cap)
+        t = (c * c * c * k3 + c).astype(f32)
+        # the M-form: z = t k - max(t) k; the fast form: z = t k (|z| <= 11: no overflow, no denormal)
+        z = (t * kt).astype(f32)
+        self.assertLess(np.abs(z).max(), 11.1)
+        e_fast = np.exp2(z)
+        p_fast = (e_fast * (f32(1.0) / e_fast.sum(1, dtype=f32, keepdims=True))).astype(f16)
+        e_ref = np.exp2((t * kt - (t.max(1, keepdims=True) * kt)).astype(f32))
+        p_ref = (e_ref * (f32(1.0) / e_ref.sum(1, dtype=f32, keepdims=True))).astype(f16)
+        d = np.abs(p_fast.view(np.uint16).astype(np.int32) - p_ref.view(np.uint16).astype(np.int32))
+        print("softmax without the max: FP16 weights equal %.3f%%, at most %d ulp apart" % (100 * np.mean(d == 0), d.max()))
+        self.assertLessEqual(d.max(), 2)
+        self.assertGreater(np.mean(d == 0), 0.97)
+
+
+def gather(feat, kA, kB, kC, px, py, win3):
+    """The normalized gather of the D pixels at (px, py) (render pixels, texel centres at i + 1/2) over the 4 x 4 window
+    floor(p - 1/2) - 1 ... + 2 or the centred 3 x 3 window floor(p) - 1 ... + 1, float64. feat[y, x, k], shapes per texel."""
+    if win3:
+        cx, cy, taps = np.floor(px).astype(int), np.floor(py).astype(int), range(-1, 2)
+    else:
+        cx, cy, taps = np.floor(px - 0.5).astype(int), np.floor(py - 0.5).astype(int), range(-1, 3)
+    num = np.zeros(px.shape + (feat.shape[2],))
+    den = np.zeros(px.shape)
+    for j in taps:
+        for i in taps:
+            X, Y = cx + i, cy + j
+            u, v = X + 0.5 - px, Y + 0.5 - py
+            Xc, Yc = np.clip(X, 0, feat.shape[1] - 1), np.clip(Y, 0, feat.shape[0] - 1)
+            w = 2.0 ** (kA[Yc, Xc] * u * u + kB[Yc, Xc] * v * v + kC[Yc, Xc] * u * v)
+            num += w[..., None] * feat[Yc, Xc]
+            den += w
+    return num / den[..., None]
+
+
+class CentredGather(unittest.TestCase):
+    def test_3x3_vs_4x4_by_width(self):
+        rng = np.random.default_rng(14)
+        H, W = 96, 96
+        yy, xx = np.mgrid[0:H, 0:W]
+        smooth = np.stack([0.5 + 0.4 * np.sin(xx * 0.21 + k) * np.cos(yy * 0.17 + 2 * k) for k in range(3)], -1)
+        noise = rng.uniform(0, 1, (H, W, 3))
+        r = 1707.0 / 3840.0   # render pixels per D pixel at 1440p Quality
+        dy, dx = np.mgrid[0:int((H - 8) / r), 0:int((W - 8) / r)]
+        px, py = (dx + 0.5) * r + 4.0, (dy + 0.5) * r + 4.0
+        res = []
+        for k0 in (4.0, 2.0, 1.0, 0.5):   # w = exp(-k0 u^2 / 2): sigma = 1 / sqrt(k0) render pixels
+            kA = np.full((H, W), -0.721325 * k0)
+            kB = kA * rng.uniform(0.7, 1.3, (H, W))
+            kC = -1.44265 * k0 * rng.uniform(-0.2, 0.2, (H, W))
+            out = []
+            for feat in (smooth, noise):
+                a = gather(feat, kA, kB, kC, px, py, False)
+                b = gather(feat, kA, kB, kC, px, py, True)
+                out.append(10 * math.log10(1.0 / max(np.mean((a - b) ** 2), 1e-20)))
+            res.append((k0, out[0], out[1]))
+            print("centred 3 x 3 vs 4 x 4 gather, sigma %.2f render px: PSNR %.1f dB (smooth field), %.1f dB (texel noise)" %
+                  (1 / math.sqrt(k0), out[0], out[1]))
+        # narrow kernels (sigma 0.5 render px): the dropped ring carries little weight
+        self.assertGreater(res[0][1], 45.0)
+        self.assertGreater(res[0][2], 35.0)
+        # the difference grows with the kernel width: the A/B on the GPU decides (lever 256)
+        self.assertGreater(res[0][2], res[-1][2])
+
+
+def lcoef_exact(a, S, T):
+    """l_coef_px.hlsli's values (FP32 arithmetic, the RN16 points) of one pixel's 13 channels a (FP16 inputs)."""
+    a = [np.asarray(v, dtype=f16).astype(f32) for v in a]
+    sig = lambda x: (f32(1.0) / (f32(1.0) + np.exp2(x * from_bits(0xBFB8AA3B)))).astype(f32)
+    rn = lambda x: np.asarray(x, dtype=f32).astype(f16).astype(f32)
+    unorm = lambda v: np.round(v * f32(255.0)).astype(np.int64)
+    snorm = lambda v: np.round(np.clip(v, -1, 1) * f32(127.0)).astype(np.int64)
+    tanh = lambda x: np.tanh(x.astype(np.float64)).astype(f32)
+    A = [unorm(rn(sig(a[i]))) for i in range(3)]
+    m = np.maximum(np.maximum(a[3], a[4]), a[5])
+    e = [np.exp2((a[i] - m) * from_bits(0x3FB8AA3B)) for i in (3, 4, 5)]
+    rs = f32(1.0) / (e[2] + (e[0] + e[1]))
+    B = [unorm(x * rs) for x in e]
+    g0, g1 = rn(sig(np.clip(a[6], -20, 20))), rn(sig(np.clip(a[7], -20, 20)))
+    sx, sy = S * g0, S * g1
+    C = [(sx * sx).astype(f16), (sy * sy).astype(f16), ((sx * sy) * tanh(a[8] * T)).astype(f16)]
+    L = [snorm(tanh(a[i])) for i in (9, 10, 11, 12)]
+    return A, B, C, L
+
+
+def lcoef_fast(a, S, T):
+    """l_swin_c32_fast.hlsl lf_coef_px: FP32 throughout from the block's FP32 output, the fast tanh, the truncating pack."""
+    a = [np.asarray(v, dtype=f32) for v in a]
+    sig = lambda x: (f32(1.0) / (f32(1.0) + np.exp2(x * from_bits(0xBFB8AA3B)))).astype(f32)
+    tanh = lambda x: (f32(1.0) - f32(2.0) / (np.exp2(x * from_bits(0x4038AA3B)) + f32(1.0))).astype(f32)
+    unorm = lambda v: np.floor(v * f32(255.0) + f32(0.5)).astype(np.int64)
+    snorm = lambda v: np.round(v * f32(127.0)).astype(np.int64)
+    A = [unorm(sig(a[i])) for i in range(3)]
+    m = np.maximum(np.maximum(a[3], a[4]), a[5])
+    e = [np.exp2((a[i] - m) * from_bits(0x3FB8AA3B)) for i in (3, 4, 5)]
+    rs = f32(1.0) / (e[2] + (e[0] + e[1]))
+    B = [unorm(x * rs) for x in e]
+    g0, g1 = sig(np.clip(a[6], -20, 20)), sig(np.clip(a[7], -20, 20))
+    S2 = f32(S) * f32(S) * f32(1.00034)
+    sg0 = S2 * g0
+    C = [rtz16(sg0 * g0), rtz16((S2 * g1) * g1), rtz16((sg0 * g1) * tanh(a[8] * T))]
+    L = [snorm(tanh(a[i])) for i in (9, 10, 11, 12)]
+    return A, B, C, L
+
+
+class CoefFast(unittest.TestCase):
+    def test_fast_tanh(self):
+        t = np.linspace(-20, 20, 400001, dtype=f32)
+        with np.errstate(over="ignore"):
+            fast = f32(1.0) - f32(2.0) / (np.exp2(t * from_bits(0x4038AA3B)) + f32(1.0))
+        err = np.abs(fast.astype(np.float64) - np.tanh(t.astype(np.float64)))
+        print("fast tanh: max abs err %.3g" % err.max())
+        self.assertLess(err.max(), 3e-7)
+        self.assertTrue(np.all(np.abs(fast) <= 1.0))
+
+    def test_codes_and_products(self):
+        rng = np.random.default_rng(15)
+        n = 300000
+        a = [rng.normal(0, 2.5, n).astype(f32) for _ in range(13)]
+        S, T = f32(1.7), f32(0.8)
+        with np.errstate(over="ignore"):
+            ex, fa = lcoef_exact(a, S, T), lcoef_fast(a, S, T)
+        worst = 0
+        for grp in (0, 1, 3):   # A, B, L: 8-bit codes
+            for x, y in zip(ex[grp], fa[grp]):
+                worst = max(worst, int(np.abs(x - y).max()))
+        # the FP16 products in units of their scale S^2 (the exact form rounds its inputs to FP16 first: near rho = 0 the
+        # relative difference of two tiny values says nothing)
+        rel = max(float(np.quantile(np.abs(x.astype(np.float64) - y.astype(np.float64)), 0.999)) for x, y in zip(ex[2], fa[2]))
+        rel /= float(S) * float(S)
+        print("fast coefficient store: 8-bit codes within %d LSB, FP16 products 99.9%% within %.2e of S^2" % (worst, rel))
+        self.assertLessEqual(worst, 1)
+        self.assertLess(rel, 2.0 ** -9)
 
 
 if __name__ == "__main__":

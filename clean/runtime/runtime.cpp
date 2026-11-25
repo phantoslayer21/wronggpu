@@ -176,6 +176,14 @@ bool l_tf_supported(int rw, int rh, int dw, int dh) {
   return recon2_supported(rw, rh, dw, dh) &&
          ((long long)(63.0 * rw / dw) + 6) * ((long long)(14.0 * rh / dh) + 6) <= kLTfCap;
 }
+// l_mode=fast's centred 3 x 3 gather (l_post_tf_p12[_pf]_fast3, LP_WIN3): one render column less per step (columns
+// floor(px) - 1 ... + 1: 63 r + 4 at most), the same rows (the second row of the last pair reads floor(py0) + 2: 14 r + 5),
+// a staging area of 448 texels, the same margin of one column and one row. l_tf_supported holds too (the frame's route).
+constexpr int kLTf3Cap = 448;
+bool l_tf3_supported(int rw, int rh, int dw, int dh) {
+  return l_tf_supported(rw, rh, dw, dh) &&
+         ((long long)(63.0 * rw / dw) + 5) * ((long long)(14.0 * rh / dh) + 6) <= kLTf3Cap;
+}
 // post_tf4_dl_* (D3D12 only, dx12/kernels/post.hlsl; Brief 15): the same kernel with NW = 4 row pairs per step (256 lanes)
 // and a staging cap of 448, for native AA and every ratio between 1.0 and 1.5 on the native D3D12 backend (HIP's
 // post_tf_dl_* needs 41472 bytes of LDS, more than D3D12's 32 KB). The step footprint of NW = 4 (64 D columns x 4 row
@@ -325,19 +333,29 @@ struct Runtime {
   //     hybrid form is the bit-exact one); the history, the reset and the temporal logic are the same code.
   std::string l_mode_opt;
   bool l_fast_d3d12 = false;
-  // The levers of l_mode=fast (the kernels of the build named "<kernel>_fast", native D3D12; every one is launched in place of
-  // its base kernel with the same arguments, l_fast_alt: base name -> fast name). One bit per group of kernels, all on by
-  // default; a developer build reads the selection from WG_L_FAST_MASK (an A/B of each lever, below).
-  //   1  l_post_tf_p12[_pf]       the true-fusion output kernel without the bit-exactness guards (l_post_tf_fast.hlsl)
-  //   2  l_project_gather, l_dec_project   the K blocks accumulated in FP32 and rounded once, in the FP8 pack
-  //   4  the width-32 Swin blocks (so far: the encoder block with the linears, its prologue in FP32)
-  //   8  the middle Swin blocks (c64, c96, the bottleneck: no twin yet; the build's "_fast" names decide)
-  //  16  the weaker history candidate as a 4-tap bilinear (inside the kernel of lever 1: pitch_bytes bit 0)
-  //  32  the q20 input encoder (no twin yet)
-  //  64  a weaker history candidate with the first one's motion (within 0.01 render pixel) is not read twice (lever 1: bit 1)
-  // 128  a weaker history candidate of weight below 0.05 (the hybrid route: 1 / 255) is dropped (lever 1: bit 2; off by default:
-  //      a quality / speed trade-off for the A/B)
-  static constexpr unsigned kLFastAll = 255u, kLFastDefault = 127u;
+  // The levers of l_mode=fast (native D3D12): kernels of the build launched in place of a base kernel with the same grid,
+  // block and arguments (l_fast_alt: base name -> the kernel launched). A "<kernel>_fast" twin replaces <kernel> when its
+  // group's bit is set (l_fast_bit); the alternatives of kLFastAlts (in their order, the first one in the build whose bits
+  // are all set) come before it. All on by default but bit 128; a developer build reads the selection from WG_L_FAST_MASK
+  // (an A/B of each lever, below).
+  //    1  l_post_tf_p12[_pf]       the true-fusion output kernel without the bit-exactness guards (l_post_tf_fast.hlsl)
+  //    2  l_project_gather, l_dec_project   the K blocks accumulated in FP32 and rounded once, in the FP8 pack
+  //    4  the width-32 Swin blocks' "_fast" twins (the encoder block with the linears, its prologue in FP32)
+  //    8  the middle Swin blocks' "_fast" twins (swin_block_c64_nc_fast, swin_block_c64_add_ex_nc_fast when the build has
+  //       them: l_swin_c64_fast.hlsl; c96 and the bottleneck: no twin)
+  //   16  the weaker history candidate as a 4-tap bilinear (inside the kernel of lever 1: pitch_bytes bit 0)
+  //   32  the q20 input encoder (no twin yet)
+  //   64  a weaker history candidate with the first one's motion (within 0.01 render pixel) is not read twice (lever 1: bit 1)
+  //  128  a weaker history candidate of weight below 0.05 (the hybrid route: 1 / 255) is dropped (lever 1: bit 2; off by
+  //       default: a quality / speed trade-off for the A/B)
+  //  256  with lever 1: the centred 3 x 3 gather (l_post_tf_p12[_pf]_fast3) for every frame whose step footprint fits its
+  //       staging (l_tf3_supported; a frame that does not runs the 4 x 4 twin, which the build must then have)
+  //  512  the encoder block with the linears: two windows per wave (l_swin_block_c32_enc_lin_w2[t]_fast, l_swin_c32_fast.hlsl)
+  //       in place of lever 4's twin
+  // 1024  the decoder block with the coefficient store: two windows per wave (l_swin_block_c32_dec_coef12_add_w2[t]_fast)
+  // 2048  (reserved: the bottleneck's fast twin; none built)
+  // 4096  the quick GELU in the kernels of 512 / 1024 ("_w2_fast"); off: their table form "_w2t_fast" (the model's GELU bytes)
+  static constexpr unsigned kLFastAll = 8191u, kLFastDefault = 8191u & ~128u & ~2048u;
   unsigned l_fast_mask = kLFastDefault;
   std::map<std::string, std::string> l_fast_alt;
   static unsigned l_fast_bit(const std::string& n) {
@@ -348,6 +366,18 @@ struct Runtime {
     if (n.compare(0, 20, "lev/input_encoder_q2") == 0) return 32u;
     return 0u;
   }
+  struct LFastAlt { const char* base; const char* alt; unsigned bits; };
+  static constexpr LFastAlt kLFastAlts[] = {
+      {"w64_lc12/l_post_tf_p12", "w64_lc12/l_post_tf_p12_fast3", 1u | 256u},
+      {"w64_lc12/l_post_tf_p12_pf", "w64_lc12/l_post_tf_p12_pf_fast3", 1u | 256u},
+      {"l_swin_block_c32_enc_lin_nc", "l_swin_block_c32_enc_lin_w2_fast", 512u | 4096u},
+      {"l_swin_block_c32_enc_lin_nc", "l_swin_block_c32_enc_lin_w2t_fast", 512u},
+      {"l_swin_block_c32_dec_coef12_add_nc", "l_swin_block_c32_dec_coef12_add_w2_fast", 1024u | 4096u},
+      {"l_swin_block_c32_dec_coef12_add_nc", "l_swin_block_c32_dec_coef12_add_w2t_fast", 1024u},
+  };
+  // the 4 x 4 twin of a selected 3 x 3 post (l_fast_alt's value "<base>_fast3" -> "<base>_fast"): the frames whose
+  // footprint the 3 x 3 kernel's staging does not take
+  static bool l_is_post3(const std::string& k) { return k.size() > 6 && k.compare(k.size() - 6, 6, "_fast3") == 0; }
   // WG_L_FORM=hybrid on native D3D12 (hyb-fast, 0.6.5 L release form): Model L's M-form route (l_q7 off) with every
   // block stage packed from the hybrid values (clean/l/runtime/l_hyb_pack.h, the same blob names and layout) and every
   // Swin kernel launched as its hybrid twin from the kernel manifest (hyb-fast's names: the M-form route's name with
@@ -1117,18 +1147,32 @@ struct Runtime {
       std::vector<std::string> skip;
       const std::vector<std::string> mk = manifest_kernels();
       const std::set<std::string> in_build(mk.begin(), mk.end());
-      if (l_fast_d3d12)
-        for (const std::string& h : mk) {
+      std::set<std::string> fast_kernels, warm;   // every fast-mode kernel of the build; those this mode may launch
+      for (const auto& a : kLFastAlts)
+        if (in_build.count(a.alt)) fast_kernels.insert(a.alt);
+      for (const std::string& h : mk)
+        if (h.size() > 5 && h.compare(h.size() - 5, 5, "_fast") == 0) fast_kernels.insert(h);
+      if (l_fast_d3d12) {
+        for (const auto& a : kLFastAlts)   // the table's alternatives first (the 3 x 3 post only beside its 4 x 4 twin)
+          if (!l_fast_alt.count(a.base) && in_build.count(a.base) && in_build.count(a.alt) &&
+              (l_fast_mask & a.bits) == a.bits && (!l_is_post3(a.alt) || in_build.count(std::string(a.base) + "_fast")))
+            l_fast_alt[a.base] = a.alt;
+        for (const std::string& h : mk) {   // then the "<kernel>_fast" twins of their lever bit
           const bool fast = h.size() > 5 && h.compare(h.size() - 5, 5, "_fast") == 0;
           const std::string base = fast ? h.substr(0, h.size() - 5) : h;
-          if (fast && in_build.count(base) && (l_fast_mask & l_fast_bit(base))) l_fast_alt[base] = h;
+          if (fast && in_build.count(base) && !l_fast_alt.count(base) && (l_fast_mask & l_fast_bit(base)))
+            l_fast_alt[base] = h;
         }
+        for (const auto& m : l_fast_alt) {
+          warm.insert(m.second);
+          if (l_is_post3(m.second)) warm.insert(m.first + "_fast");   // its fallback for a footprint over the cap
+        }
+      }
       for (const std::string& h : mk) {
         const bool twin = h.size() > 4 && h.compare(h.size() - 4, 4, "_hyb") == 0;
-        const bool fast = h.size() > 5 && h.compare(h.size() - 5, 5, "_fast") == 0;
+        const bool fast = fast_kernels.count(h) != 0;
         if (l_fast_d3d12 ? (twin || h.compare(0, 5, "l_q7_") == 0 || h == "l_swin_block_c32_dec_nc" ||
-                            h == "l_swin_block_c32_dec_coef12_nc" || l_fast_alt.count(h) != 0 ||
-                            (fast && !l_fast_alt.count(h.substr(0, h.size() - 5)) ) )
+                            h == "l_swin_block_c32_dec_coef12_nc" || l_fast_alt.count(h) != 0 || (fast && !warm.count(h)))
                          : (fast || h == "l_swin_block_c32_dec_add_nc" || h == "l_swin_block_c32_dec_coef12_add_nc"))
           skip.push_back(h);
       }
@@ -3357,9 +3401,13 @@ struct Runtime {
         float dec_scale = (float)(0.01 / (fr.exposure == 0.0f ? 1.0 : (double)fr.exposure)), p_h = pi;
         if (l_fold_pidiv) std::memcpy(&p.pad0, &pi, 4);   // the pre-exposure's bits: the _pf kernel divides every colour read
         post_last = l_fold_pidiv ? "w64_lc12/l_post_tf_p12_pf" : "w64_lc12/l_post_tf_p12";
-        if (l_fast_alt.count(post_last)) hpitch = ((l_fast_mask & 16u) ? 1 : 0) | ((l_fast_mask & 64u) ? 2 : 0) | ((l_fast_mask & 128u) ? 4 : 0);   // the fast kernel's pitch_bytes is its option word
+        std::string post_k = post_last;
+        if (l_fast_alt.count(post_last)) {
+          hpitch = ((l_fast_mask & 16u) ? 1 : 0) | ((l_fast_mask & 64u) ? 2 : 0) | ((l_fast_mask & 128u) ? 4 : 0);   // the fast kernel's pitch_bytes is its option word
+          if (l_is_post3(l_fast_alt[post_last]) && !l_tf3_supported(rw, rh, dw, dh)) post_k = post_last + "_fast";   // the 4 x 4 twin
+        }
         filter_last = "fused";
-        if (!launch(post_last.c_str(), cdiv(ow, 40) * nch, 512,
+        if (!launch(post_k.c_str(), cdiv(ow, 40) * nch, 512,
                     {&cnet, &A, &B, &C, &hist[cur], &mnear[nxt], &mcenter, &mfar, &w, &hist[nxt], &reduced, &outp, &p, &expo,
                      &ow_i, &oh_i, &dec_scale, &p_h, &hpitch, &cp, &k1, &c2}))
           return false;

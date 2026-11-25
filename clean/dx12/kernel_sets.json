@@ -347,6 +347,14 @@
    "-"
   ],
   [
+   "l_swin_block_c32_dec_coef12_add_w2_fast",
+   "-"
+  ],
+  [
+   "l_swin_block_c32_dec_coef12_add_w2t_fast",
+   "-"
+  ],
+  [
    "l_swin_block_c32_dec_coef12_hyb",
    "-"
   ],
@@ -376,6 +384,14 @@
   ],
   [
    "l_swin_block_c32_enc_lin_nc_fast",
+   "-"
+  ],
+  [
+   "l_swin_block_c32_enc_lin_w2_fast",
+   "-"
+  ],
+  [
+   "l_swin_block_c32_enc_lin_w2t_fast",
    "-"
   ],
   [
@@ -459,6 +475,10 @@
    "swin.co"
   ],
   [
+   "swin_block_c64_add_ex_nc_fast",
+   "-"
+  ],
+  [
    "swin_block_c64_add_hyb",
    "-"
   ],
@@ -468,6 +488,10 @@
   ],
   [
    "swin_block_c64_hyb",
+   "-"
+  ],
+  [
+   "swin_block_c64_nc_fast",
    "-"
   ],
   [
@@ -523,7 +547,15 @@
    "-"
   ],
   [
+   "w64_lc12/l_post_tf_p12_fast3",
+   "-"
+  ],
+  [
    "w64_lc12/l_post_tf_p12_pf_fast",
+   "-"
+  ],
+  [
+   "w64_lc12/l_post_tf_p12_pf_fast3",
    "-"
   ]
  ],

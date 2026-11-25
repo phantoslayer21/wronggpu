@@ -33,7 +33,7 @@ and rcp() (fdiv 1.0, x) is the hardware v_rcp_f32; it is reassembled (dxil_asm.c
 dxv. Any other float division ('/', which would be an IEEE division) or float remainder is refused: use wg_div.
 
 VGPR check: every Swin / bottleneck kernel built (a name with a swin_ or l_swin_ part, and Model L's fused post
-w64_lc12/l_post_tf_p12[_pf][_fast]) is run through RGA (gfx1201) and its
+w64_lc12/l_post_tf_p12[_pf][_fast|_fast3]) is run through RGA (gfx1201) and its
 USED_VGPRs compared with its bound in clean/dx12/vgpr_limits.json (the count that keeps its present workgroups per CU);
 over the bound, or no bound listed, fails the build. WG_DX12_VGPR_CHECK=0 skips it.
 ISA rules of the hybrid kernels: every hybrid kernel built (a name with a _hyb part) is checked in the same RGA run by
@@ -227,13 +227,24 @@ def kernel_decls(path):
 MODEL_L_ONLY = {"swin_block_c64_add_ex_nc", "lev/input_encoder_q20", "lev/input_encoder_direct_q20"}
 
 
+def fast_base(name):
+    """The kernel a fast-mode kernel of Model L's l_mode=fast is launched in place of (same grid, block and arguments), or
+    None: "<kernel>_fast" and "<kernel>_fast3" (the 3 x 3 post) replace <kernel>; "<stem>_w2_fast" / "<stem>_w2t_fast" (the
+    two-windows-per-wave Swin blocks, l_swin_c32_fast.hlsl) replace "<stem>_nc"."""
+    m = re.fullmatch(r"(.+)_w2t?_fast", name)
+    if m:
+        return m.group(1) + "_nc"
+    m = re.fullmatch(r"(.+)_fast3?", name)
+    return m.group(1) if m else None
+
+
 def is_model_l(decl):
     """A port of one of Model L's code objects (#89: l_swin.co, l_ops.co, l_post.co, l_enc_values.co), a Model L kernel
     of the direct route with no code object (co "-", named l_*), a kernel only Model L launches (MODEL_L_ONLY), a kernel
-    of the hybrid form (named *_hyb: WG_L_FORM = hybrid, Model L's route only so far), or a fast-mode twin (named *_fast:
-    Model L's l_mode=fast, launched in place of the kernel it is named after)."""
+    of the hybrid form (named *_hyb: WG_L_FORM = hybrid, Model L's route only so far), or a fast-mode kernel (fast_base:
+    Model L's l_mode=fast, launched in place of the kernel it names)."""
     return (decl["co"].startswith("l_") or decl["name"].startswith("l_") or decl["name"] in MODEL_L_ONLY
-            or decl["name"].endswith("_hyb") or decl["name"].endswith("_fast"))
+            or decl["name"].endswith("_hyb") or fast_base(decl["name"]) is not None)
 
 
 def is_frame_gen(decl):
@@ -332,8 +343,8 @@ VGPR_LIMITS = os.path.join(HERE, "vgpr_limits.json")
 
 
 def vgpr_checked(name):
-    # l_swin_*: Model L's blocks (#89); l_post_tf_p12[_pf][_fast]: Model L's fused post (bound = 96-register tier)
-    return re.search(r"(^|/|l_)swin_|/l_post_tf_p12(_pf)?(_fast)?$", name) is not None
+    # l_swin_*: Model L's blocks (#89); l_post_tf_p12[_pf][_fast|_fast3]: Model L's fused post (bound = 96-register tier)
+    return re.search(r"(^|/|l_)swin_|/l_post_tf_p12(_pf)?(_fast3?)?$", name) is not None
 
 
 def rga_vgprs(dxil, isa=False):

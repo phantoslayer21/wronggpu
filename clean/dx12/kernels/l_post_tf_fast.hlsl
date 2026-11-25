@@ -24,9 +24,23 @@
 // route stays the bit-exact one; this kernel is selected only by l_mode=fast.
 // @wg-kernel w64_lc12/l_post_tf_p12_fast co=- entry=l_post_tf_p12_fast block=512 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u defines=LP_W64=1,LP_FAST=1
 // @wg-kernel w64_lc12/l_post_tf_p12_pf_fast co=- entry=l_post_tf_p12_fast block=512 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u defines=LP_W64=1,LP_FAST=1,LP_PIDIV=1
+//
+// LP_WIN3 (w64_lc12/l_post_tf_p12[_pf]_fast3; runtime lever bit 256 of WG_L_FAST_MASK, inside lever 1): the gather of every
+// D pixel over the 3 x 3 render texels CENTRED on it (columns floor(px) - 1 ... + 1, rows floor(py) - 1 ... + 1: every tap
+// within 1.5 render pixels on both axes; the outer ring of the 4 x 4 window floor(p - 1/2) - 1 ... + 2 that lies 1.5 to 2
+// pixels out on one side is dropped, where the anisotropic weight 2^(u^2 kA + v^2 kB + u v kC) is small). The two rows of
+// a pair keep their own centred rows: the wave reads the pair's rows n0 - 1 ... n0 + 1 and, when the second row's nearest
+// texel row is n0 + 1 (wave-uniform), the row n0 + 2 too: 18 taps per row pair instead of 32, 9 or 12 staged texels read
+// instead of 16. One column less per step footprint: staging cap 448 texels (10 752 bytes; LDS 21 504 bytes, a third of
+// the CU's 64 KB); host check l_tf3_supported (a footprint over the cap runs the 4 x 4 kernel).
+// @wg-kernel w64_lc12/l_post_tf_p12_fast3 co=- entry=l_post_tf_p12_fast block=512 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u defines=LP_W64=1,LP_FAST=1,LP_WIN3=1
+// @wg-kernel w64_lc12/l_post_tf_p12_pf_fast3 co=- entry=l_post_tf_p12_fast block=512 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u defines=LP_W64=1,LP_FAST=1,LP_PIDIV=1,LP_WIN3=1
 #include "wg_platform.hlsli"
 #ifndef LP_PIDIV
 #define LP_PIDIV 0
+#endif
+#ifndef LP_WIN3
+#define LP_WIN3 0
 #endif
 #if WG_WAVE != 64 || WG_BLOCK != 512
 #error "l_post_tf_fast.hlsl: wave64, 512 lanes"
@@ -42,9 +56,17 @@ WG_ARGS_BEGIN
     int pitch_bytes, cpairs, k1, c2;
 WG_ARGS_END
 
+#if LP_WIN3
+#define kStageCap 448   // staged render texels per step (6 dwords each: 10752 bytes); lanes 448 ... 511 stage none
+#else
 #define kStageCap 512   // staged render texels per step (6 dwords each: 12288 bytes); one per lane
+#endif
 #define kTexDw 6        // staged texel: f0 f1 | f2 f3 | f4 f5 | f6 f7 | f8 kA | kB kC (FP16 bits)
+#if LP_WIN3
+#define kLWin 3         // the centred window: taps -1, 0, +1
+#else
 #define kLWin 4
+#endif
 #define kTfCols 64
 #define kTfOwn 60
 #define kTfOutX 40
@@ -140,8 +162,14 @@ float lpy(int yy) { return mad(P_ry, (float)yy + 0.5f, P_jy); }
 int step_rows(int ys, int r_need, out int r0)
 {
     const int yl = mini(ys + 2 * (kNW - 1), r_need) & ~1;
+#if LP_WIN3
+    // rows floor(py0) - 1 of the first pair ... floor(py0) + 2 of the last (its second row's centred rows end there)
+    r0 = floor_i(lpy(ys)) - 1;
+    return floor_i(lpy(yl)) + 2 - r0 + 1;
+#else
     r0 = floor_i(lpy(ys) - 0.5f) - 1;
     return floor_i(lpy(yl) - 0.5f) + 2 - r0 + 1;
+#endif
 }
 
 // ---- the gather: nine FP16 feature sums and the FP16 total weight, per pixel ----------------------------------------------
@@ -181,6 +209,38 @@ void gather_col(int i, half dx, int tb0, int rstride, half v0[kLWin], half v1[kL
         tap_acc(g1, t, w1);
     }
 }
+
+#if LP_WIN3
+// one column i of the centred 3 x 3 gathers of both rows: the staged rows n0 - 1 + jj; row 0 takes jj = 0, 1, 2, row 1
+// jj = d1, d1 + 1, d1 + 2 (d1 = n1 - n0, 0 or 1, wave-uniform): rows jj = 0 ... 2 for both (row 1's weight at jj = 0 is 0
+// when d1), then with d1 the row n0 + 2 for row 1 alone (a uniform branch: with d1 = 0 it is not read)
+void gather_col3(int i, half dx, int tb0, int rstride, bool d1, half v0[4], half v1[4], half vv0[4], half vv1[4],
+                 inout LGather g0, inout LGather g1)
+{
+    const half u = dx + (half)(float)i;
+    const half uu = u * u;
+    const int col_base = tb0 + (i + 1) * kTexDw;
+    [unroll] for (int jj = 0; jj < 3; ++jj) {
+        const int base = col_base + jj * rstride;
+        uint t[kTexDw];
+        [unroll] for (int d = 0; d < kTexDw; ++d) t[d] = sh_tex[base + d];
+        const half kA = h_bits(t[4] >> 16), kB = h_bits(t[5]), kC = h_bits(t[5] >> 16);
+        const half ta = uu * kA;
+        const half w0 = exp2(mad(u * v0[jj], kC, mad(vv0[jj], kB, ta)));
+        half w1 = exp2(mad(u * v1[jj], kC, mad(vv1[jj], kB, ta)));
+        if (jj == 0 && d1) w1 = (half)0.0f;
+        tap_acc(g0, t, w0);
+        tap_acc(g1, t, w1);
+    }
+    [branch] if (d1) {
+        const int base = col_base + 3 * rstride;
+        uint t[kTexDw];
+        [unroll] for (int d = 0; d < kTexDw; ++d) t[d] = sh_tex[base + d];
+        const half kA = h_bits(t[4] >> 16), kB = h_bits(t[5]), kC = h_bits(t[5] >> 16);
+        tap_acc(g1, t, exp2(mad(u * v1[3], kC, mad(vv1[3], kB, uu * kA))));
+    }
+}
+#endif
 
 // ---- history: 12-tap Catmull-Rom of the previous full history (8-byte RGBA16F texels) --------------------------------
 float4 cr_weights(float f)   // Catmull-Rom (a = -1/2) in Horner form: 12 operations (the weights sum to 1)
@@ -433,8 +493,13 @@ WG_KERNEL(l_post_tf_p12_fast)
     const float s = wg_ldf(w_p, 0u);
 
     // the strip's render columns c0 ... c1 (taps ax - 1 ... ax + 2 of its first and last D column)
+#if LP_WIN3
+    const int c0 = floor_i(lpx(clampi(X0 - 2, 0, P_dw - 1))) - 1;
+    const int c1 = floor_i(lpx(clampi(X0 + kTfCols - 3, 0, P_dw - 1))) + 1;
+#else
     const int c0 = floor_i(lpx(clampi(X0 - 2, 0, P_dw - 1)) - 0.5f) - 1;
     const int c1 = floor_i(lpx(clampi(X0 + kTfCols - 3, 0, P_dw - 1)) - 0.5f) + (kLWin - 2);
+#endif
     const int ncol = c1 - c0 + 1;
     const float inv_ncol = unif(rcp((float)ncol));
 
@@ -456,7 +521,11 @@ WG_KERNEL(l_post_tf_p12_fast)
     const int x = clampi(xv, 0, P_dw - 1);
     const bool own_x = and(and(xv >= X0, xv < X0 + kTfOwn), xv < P_dw);
     const float px = lpx(x);
+#if LP_WIN3
+    const int ax = floor_i(px);   // the nearest texel column (centre ax + 1/2 within 1/2 of px)
+#else
     const int ax = floor_i(px - 0.5f);
+#endif
     const uint wlu = (uint)wl;
 
     int base_slot = 0;
@@ -479,6 +548,25 @@ WG_KERNEL(l_post_tf_p12_fast)
             const int y0 = yv;
             const bool has1 = y0 + 1 < P_dh;
             const float py0 = unif(lpy(y0)), py1 = unif(lpy(y0 + 1));   // wave-uniform (y0 is)
+#if LP_WIN3
+            // centred windows: n0 = floor(py0), n1 = floor(py1) in {n0, n0 + 1}; v of the staged row n0 - 1 + jj for
+            // both rows: v0 = (n0 + 1/2 - py0) + jj - 1, v1 = (n0 + 1/2 - py1) + jj - 1
+            const int n0 = wg_uniform(floor_i(py0)), n1 = wg_uniform(floor_i(py1));
+            const bool d1 = n1 != n0;
+            const half dx = (half)rn16(((float)ax + 0.5f) - px), dy0 = (half)rn16(((float)n0 + 0.5f) - py0);
+            const half dy1 = (half)rn16(((float)n0 + 0.5f) - py1);
+            half v0[4], v1[4], vv0[4], vv1[4];
+            [unroll] for (int jj = 0; jj < 4; ++jj) {
+                v0[jj] = dy0 + (half)(float)(jj - 1);
+                v1[jj] = dy1 + (half)(float)(jj - 1);
+                vv0[jj] = v0[jj] * v0[jj];
+                vv1[jj] = v1[jj] * v1[jj];
+            }
+            LGather g0 = gather_zero(), g1 = gather_zero();
+            const int tb0 = ((n0 - 1 - r0c) * ncol + (ax - 1 - c0)) * kTexDw, rstride = ncol * kTexDw;
+            [loop] for (int i = -1; i <= 1; ++i)
+                gather_col3(i, dx, tb0, rstride, d1, v0, v1, vv0, vv1, g0, g1);
+#else
             const int b = wg_uniform(floor_i(py0 - 0.5f));
             const int b1 = wg_uniform(floor_i(py1 - 0.5f));
             // gather offsets: dx = h((ax + 1/2) - px), d_y = h((b_y + 1/2) - py(y)) minus 1 (FP16) when the row's own b_y
@@ -498,6 +586,7 @@ WG_KERNEL(l_post_tf_p12_fast)
             const int tb0 = ((b - 1 - r0c) * ncol + (ax - 1 - c0)) * kTexDw, rstride = ncol * kTexDw;
             [loop] for (int i = -1; i <= (kLWin - 2); ++i)
                 gather_col(i, dx, tb0, rstride, v0, v1, vv0, vv1, g0, g1);
+#endif
 
             float r[3] = {0.0f, 0.0f, 0.0f};
             [loop] for (int row = 0; row < 2; ++row) {
