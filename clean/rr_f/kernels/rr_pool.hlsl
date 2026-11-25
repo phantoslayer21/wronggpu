@@ -24,6 +24,9 @@ WG_ARGS_END
 #ifndef RR_POOL_TPL
 #define RR_POOL_TPL 4          // PH2 texels per lane (the tables are staged once per workgroup)
 #endif
+#ifndef RR_POOL_W5
+#define RR_POOL_W5 0           // clean/rr-f-wave5c (Fast mode only, VG_OUT): hardware f32 mad / mul with the exact tables (0 FP64)
+#endif
 
 uint PU(uint i) { return WaveReadLaneFirst(wg_ld32(prm, i * 4u)); }
 float PF(uint i) { return asfloat(PU(i)); }
@@ -127,6 +130,27 @@ WG_KERNEL(rr_pool_main)
     [unroll] for (uint r = 0; r < RR_POOL_TPL; ++r) {
         const uint idx = (wg_block_id() * RR_POOL_TPL + r) * WG_BLOCK + wg_lane_id();
         if (idx >= w2 * h2) break;
+#if RR_POOL_W5
+        const uint yu = idx / w2, xu = idx - yu * w2;
+        const int x = (int)xu, y = (int)yu;
+        float3 acc = 0.0f;
+        uint cnt = 0u;
+        [unroll] for (uint t = 0; t < 4u; ++t) {
+            const int tx = 2 * x + (int)(t & 1u), ty = 2 * y + (int)(t >> 1);
+            if (tx < (int)ph.w && ty < (int)ph.h) {
+                const uint2 cw = wg_ld64(ph.off, (((uint)ty & 0xffffffu) * (ph.pitch & 0xffffffu) + (uint)tx) * 8u);
+                acc.x = mad(gs_term[cw.x & 1023u], K12, acc.x);
+                acc.y = mad(gs_term[(cw.x >> 16) & 1023u], K12, acc.y);
+                acc.z = mad(gs_term[cw.y & 1023u], K12, acc.z);
+                cnt += 1u;
+            }
+        }
+        const float rn = cnt == 4u ? 0.25f : (cnt == 2u ? 0.5f : 1.0f);
+        const uint c0 = table_code(rn * acc.x, inc, cnan), c1 = table_code(rn * acc.y, inc, cnan);
+        const uint c2 = table_code(rn * acc.z, inc, cnan);
+        if (x < (int)pq.w && y < (int)pq.h)
+            wg_st64(pq.off, (((uint)y & 0xffffffu) * (pq.pitch & 0xffffffu) + (uint)x) * 8u, uint2(c0 | (c1 << 16), c2 | (3u << 16)));
+#else
         const int x = (int)(idx % w2), y = (int)(idx / w2);
         float3 acc = 0.0f;
         uint cnt = 0u;
@@ -146,6 +170,7 @@ WG_KERNEL(rr_pool_main)
         const uint c2 = table_code(M(rn, acc.z), inc, cnan);
         if (x < (int)pq.w && y < (int)pq.h)
             wg_st64(pq.off, ((uint)y * pq.pitch + (uint)x) * 8u, uint2(c0 | (c1 << 16), c2 | (3u << 16)));
+#endif
     }
 }
 

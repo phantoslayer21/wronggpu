@@ -42,8 +42,9 @@ def scratch_bytes(wr,hr,wh,hh):
     return lst+wr*hr*16+(wr*hr*4+15)//16*16+wr*hr*8+64
 
 
-def kernel_set(defines=None,fast=True,names=None,spec=False):
-    """{name: (dxil, NARGS)} of the output stage's kernels (fast path or rr_output_main)."""
+def kernel_set(defines=None,fast=True,names=None,spec=False,fast_only=None):
+    """{name: (dxil, NARGS)} of the output stage's kernels (fast path or rr_output_main). fast_only: extra defines of the
+    'fast' kernel alone (clean/rr-f-wave4 R4.3: the prep / fallback DXIL stay the same bytes)."""
     defines=dict(defines or {})
     # spec: the runtime's fixed fast-path flags (kOutFastFlags) at compile time (OFX_SPEC, rr_output_fast.hlsli; same bits)
     if spec and fast:
@@ -61,6 +62,7 @@ def kernel_set(defines=None,fast=True,names=None,spec=False):
             d['WG_BLOCK']=PREP_BLOCK; d['OF_PREPU']=1
         if name=='fast':
             d['WG_WAVE']=int(d.pop('OF_FAST_WAVE',FAST_WAVE))
+            d.update(fast_only or {})
         else:
             d.pop('OF_FAST_WAVE',None)
         out[name]=(build.compile_kernel('rr_output.hlsl','rr_output_'+('prep' if name=='prepu' else name),d),NARGS)

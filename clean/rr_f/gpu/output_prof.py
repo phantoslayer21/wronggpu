@@ -22,7 +22,7 @@ def main():
     ap.add_argument("--defines", default="")
     a = ap.parse_args()
     from . import sequence as SQ
-    c = SQ.model_from_file(SQ.DEFAULT_MODEL, SQ.DEFAULT_MAP).osym
+    c = (SQ.model_from_file(SQ.DEFAULT_MODEL, SQ.DEFAULT_MAP) if SQ.DEFAULT_MODEL else SQ.model_synthetic()).osym   # no model file: synthetic constants
     r, o = a.size.split(":")
     render = tuple(int(v) for v in r.split("x"))
     output = tuple(int(v) for v in o.split("x"))
