@@ -105,7 +105,9 @@
 #define SW_GELU_LATE0 0
 #endif
 #endif
-#if SW_HYB && (SW_GELU != 0 || SW_ECL > 0 || SW_NORM_R2 || SW_SMAX_STAGED || SW_SMAX_ADDST || SW_REV_PHI || SW_CLAMP_SKIP || SW_N2_BATCH)
+// SW_ECL > 0 with SW_HYB (the hybrid decoder blocks with their expand fused in: swin_block_c96_add_ex_hyb,
+// swin_block_c64_add_ex_hyb): SW_ADD only, plain FP8 (no q7c chunks), see hyb_fused_expand below
+#if SW_HYB && (SW_GELU != 0 || (SW_ECL > 0 && (!SW_ADD || SW_Q7_CHUNK)) || SW_NORM_R2 || SW_SMAX_STAGED || SW_SMAX_ADDST || SW_REV_PHI || SW_CLAMP_SKIP || SW_N2_BATCH)
 #error "SW_HYB: unsupported M-form knob enabled"
 #endif
 #if SW_HYB && SW_OUT_COEF12 && !COEF_CVT_HW
@@ -766,6 +768,10 @@ void fused_expand(uint tail, uint e_lds, int nwx, int nwin, uint tid, int blk, u
             acc1 = wg_wmma_fp8(fa[it2][kc2], yf[1][kc2], acc1);
         }
         uint2 q0, q1;
+#if SW_HYB
+        // the hybrid expand's FP8 point (expand_c96_hyb / expand_c128_hyb): E = FP8(RN16(be + We y)), hyb_q8_of_chain
+        q0 = hyb_q8_of_chain(acc0); q1 = hyb_q8_of_chain(acc1);
+#else
 #if SW_CLAMP_SKIP
         if (sw_in448(sw_absmax8(sw_absmax8(0.0f, acc0), acc1))) {
             q0 = wg_pack_q8_nc_ags(acc0); q1 = wg_pack_q8_nc_ags(acc1);
@@ -774,11 +780,36 @@ void fused_expand(uint tail, uint e_lds, int nwx, int nwin, uint tid, int blk, u
         {
             q0 = sw_pack_q8_v2(acc0); q1 = sw_pack_q8_v2(acc1);
         }
+#endif
         uint slot0 = (0u + (t >> 2)) * 16u + (t & 3u) * 4u + k, slot1 = (4u + (t >> 2)) * 16u + (t & 3u) * 4u + k;
         sw_lds_st64(e_lds + slot0 * SW_C + hh * (SW_C / 2) + 8u * g, q0);
         sw_lds_st64(e_lds + slot1 * SW_C + hh * (SW_C / 2) + 8u * g, q1);
     }
 }
+#endif
+
+#if SW_ECL > 0 && SW_HYB
+// hyb_fused_expand (SW_HYB with SW_ECL): the hybrid decoder blocks read their expanded input E (the coarse mirror of the
+// table's shared_dec_border, sw_coarse_src: the 2 x 2 group index mirrored, the sub-pixel kept) from the records the
+// fused expand wrote, so a window's records cover the mirrored groups of its rows / columns (p0 even: the groups
+// p0 / 2 and p0 / 2 + 1, whose mirrors are adjacent). sw_low0c(p0, n) = the smaller of the two mirrored groups of the
+// window's first row / column p0 = 4 w - o of a map of n pixels (o even: the fused launches' offsets); sw_win_low0c =
+// diet_c96.hlsli's sw_win_low0 with it (row base | column base << 16).
+int sw_low0c(int p0, int n)
+{
+    const int g = p0 >> 1, nc = n >> 1;
+    return min(sw_mirror(g, nc), sw_mirror(g + 1, nc));
+}
+uint sw_win_low0c(int nwx, int nwin, uint lane, int blk)
+{
+    int win = blk * 8 + (int)(lane & 7u);
+    win = win < nwin ? win : nwin - 1;
+    const int wy = win / nwx, wx = win - wy * nwx;
+    return (uint)sw_low0c(4 * wy - oy, H) | ((uint)sw_low0c(4 * wx - ox, W) << 16);
+}
+#define SW_WIN_LOW0 sw_win_low0c
+#else
+#define SW_WIN_LOW0 sw_win_low0
 #endif
 
 #if SW_ECL > 0
@@ -836,11 +867,17 @@ WG_KERNEL(SW_ENTRY)
     uint2 xb[KC];
 #endif
 #if SW_ECL > 0
-    const uint lowp = sw_win_low0(nwx, nwin, lane, (int)wg_block_id());
+    const uint lowp = SW_WIN_LOW0(nwx, nwin, lane, (int)wg_block_id());
     fused_expand(w + L_TAIL, MAXU, nwx, nwin, tid, (int)wg_block_id(), lowp);
     const uint lpw = WaveReadLaneAt(lowp, wave_id);   // this wave's window (win: the same clamp)
-    const int low = ((mr >> 1) - (int)(lpw & 0xffffu)) * 2 + ((mc >> 1) - (int)(lpw >> 16));
-    const uint eslot = (tid >> 5) * 16u + (uint)low * 4u + (uint)(((mr & 1) << 1) | (mc & 1));
+#if SW_HYB
+    // the coarse source position of E (sw_coarse_src): the mirrored group, the member's own sub-pixel
+    const int mre = 2 * sw_mirror(pr >> 1, H >> 1) + (pr & 1), mce = 2 * sw_mirror(pc >> 1, W >> 1) + (pc & 1);
+#else
+    const int mre = mr, mce = mc;
+#endif
+    const int low = ((mre >> 1) - (int)(lpw & 0xffffu)) * 2 + ((mce >> 1) - (int)(lpw >> 16));
+    const uint eslot = (tid >> 5) * 16u + (uint)low * 4u + (uint)(((mre & 1) << 1) | (mce & 1));
 #elif SW_SRC == 1
     v8f xf[KC];
     sw_load_halo_f16(x, pr, pc, W, hh, xf);

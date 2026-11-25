@@ -331,6 +331,16 @@ struct Runtime {
   // outputs not kept), on bneck_tmp / bneck_sync; the HIP twins (hybrid_twin) keep the six launches
   bool hyb_mega = false;
   int hyb_mega_groups = 128;
+  // Model L hybrid on native D3D12 (WG_L_EXFUSE, default 1 when the kernels are in the manifest; 0 = the unfused route):
+  // dec2 and dec1 as swin_block_c96_add_ex_hyb / swin_block_c64_add_ex_hyb (hyb_swin.hlsl: the expand fused into the
+  // decoder block, the same bytes as expand_c128_hyb + swin_block_c96_add_hyb / expand_c96_hyb + swin_block_c64_add_hyb;
+  // the expanded map is never stored). Launched through the M-form names swin_block_c<C>_add_ex_nc and hyb_map.
+  bool l_exfuse = false;
+  bool l_exfuse_env = true;   // WG_L_EXFUSE (not "0")
+  // WG_L_POST_W64 (native D3D12, Model L, default 0; 1 = on): the reconstruction as w64_lc12/l_post_recon[_p12][_ldr]
+  // (l_post.hlsl LP_W64: 64-lane waves, the driver's conversions as the software RNE ones: the same bytes; RGA gfx1201:
+  // +70 % instructions against lc12, so it is not the default: a measurement switch for the GPU A/B).
+  bool l_post_w64 = false;
   // swin_bneck6_hyb's frame guard (hyb_bneck.hlsl): the wait-timeout count (sync word 15) last seen in the device's
   // copy, and whether the abort word (sync word 12) is to be cleared before the next frame
   uint32_t bneck_seen = 0;
@@ -759,6 +769,15 @@ struct Runtime {
         const std::string miss = manifest_missing({"lc12/l_post_recon", "lc12/l_post_recon_p12", "lc12/l_post_recon_ldr",
                                                    "lc12/l_post_recon_p12_ldr"});
         if (!miss.empty()) return fail("WG_L_POST=c12 on native D3D12: not in the kernel manifest: " + miss);
+        const char* w64 = std::getenv("WG_L_POST_W64");
+        if (w64 && std::string(w64) != "0" && std::string(w64) != "1")
+          return fail("WG_L_POST_W64: unknown value \"" + std::string(w64) + "\" (0 or 1)");
+        if (w64 && std::string(w64) == "1") {
+          const std::string m64 = manifest_missing({"w64_lc12/l_post_recon", "w64_lc12/l_post_recon_p12",
+                                                    "w64_lc12/l_post_recon_ldr", "w64_lc12/l_post_recon_p12_ldr"});
+          if (!m64.empty()) return fail("WG_L_POST_W64=1 on native D3D12: not in the kernel manifest: " + m64);
+          l_post_w64 = true;
+        }
       }
       if (l_hyb_d3d12) {
         for (const std::string& h : have)
@@ -779,6 +798,12 @@ struct Runtime {
              "l_swin_block_c32_dec_coef12_hyb", "lev/input_encoder_q20", "lev/input_encoder_direct_q20",
              "swin_bneck6_hyb"});
         if (!miss.empty()) return fail(l_form_label + " on native D3D12: hybrid kernels not in the manifest: " + miss);
+        const char* ef = std::getenv("WG_L_EXFUSE");
+        if (ef && std::string(ef) != "0" && std::string(ef) != "1")
+          return fail("WG_L_EXFUSE: unknown value \"" + std::string(ef) + "\" (0 or 1)");
+        l_exfuse_env = !(ef && std::string(ef) == "0");
+        l_exfuse = l_exfuse_env &&
+                   manifest_missing({"swin_block_c96_add_ex_hyb", "swin_block_c64_add_ex_hyb"}).empty();
       }
     }
     if (m_hyb_d3d12) {   // Model M on the hybrid twins (c.backend == 3, set above); each kernel refused by name when missing
@@ -1024,6 +1049,8 @@ struct Runtime {
 #endif
     if (model_l && l_post_c12 && !dev->load_module_tagged(build_dir + "/l_post__lc12.co", "lc12"))
       return fail(dev->err() + " (WG_L_POST=c12: l_post__lc12.co)");
+    if (model_l && l_post_w64 && !dev->load_module_tagged(build_dir + "/l_post__lc12.co", "w64_lc12"))
+      return fail(dev->err() + " (WG_L_POST_W64=1: l_post__lc12.co as w64_lc12)");
 #ifdef WG_MODEL_L
     if (m_q7 &&  // every backend (native D3D12 maps its l_q7_* ports by these code-object names)
         (!dev->load_module(build_dir + "/l_q7.co") ||
@@ -1191,8 +1218,10 @@ struct Runtime {
     // (WG_L_FORM=hybrid on native D3D12: the unfused route, default none; the setup above cleared the list, and this
     // later read must not bring the fused decoder stages back: no hybrid twin of swin_block_c96_add_ex / _c64_add_ex)
     fuse_stages_text = choose(c.swin_fuse_stages, "WG_SWIN_FUSE_STAGES",
-                              swin_co == "swin.co" && !hyb_d3d12() ? "dec1,dec2" : "none");
-    if (hyb_d3d12() && fuse_stages_text != "none")
+                              swin_co == "swin.co" && !hyb_d3d12() ? "dec1,dec2" : (l_exfuse ? "dec1,dec2" : "none"));
+    // Model L hybrid (WG_L_EXFUSE): the fused decoder blocks with the hybrid expand, exactly "dec1,dec2" or none
+    l_exfuse = l_exfuse && fuse_stages_text == "dec1,dec2";
+    if (hyb_d3d12() && fuse_stages_text != "none" && !l_exfuse)
       return fail(l_form_label + " on native D3D12: the unfused route; swin fuse stages must be none");
     if (fuse_stages_text != "none") {
       for (size_t a = 0; a <= fuse_stages_text.size();) {
@@ -1644,7 +1673,7 @@ struct Runtime {
     // launches, standalone merges and expands, no fused dec1 / dec2), set up in create; its Swin launches read and write
     // arena maps only, independent of the direct resources, so it is accepted here in place of the bmegahg / fused-dec2
     // requirement (without this, a native-direct frame fell back to the HIP executor's scalar reference kernels)
-    const bool hyb_route = hyb_d3d12() && bneck_variant.empty() && mid_variant.empty() && fuse_stages.empty() && !fuse;
+    const bool hyb_route = hyb_d3d12() && bneck_variant.empty() && mid_variant.empty() && (fuse_stages.empty() || l_exfuse) && !fuse;
     if ((!d1d0_p12 && !model_l && !m_fast_hyb()) || !dec_div.empty() || dec1_dec0 ||
         (!hyb_route && (bneck_variant != "bmegahg" || bneck_threads != 256 || bneck_groups != 128)) ||
         !mid_variant.empty() || swin_resident || force_clamp || fuse)
@@ -1860,6 +1889,8 @@ struct Runtime {
       if (on && si->kind != 'b') fz += (fz.empty() ? "" : ",") + std::string(st);
     }
     kernels_text += " swin_fused=" + (fz.empty() ? std::string("none") : fz);
+    if (l_hyb_d3d12) kernels_text += std::string(" l_exfuse=") + (l_exfuse ? "on" : "off");
+    if (l_hyb_d3d12) kernels_text += std::string(" l_post_w64=") + (l_post_w64 ? "on" : "off");
     kernels_text += " swin_bneck=" + (bneck_variant.empty() ? std::string(hyb_mega ? "hyb6" : "none") : bneck_variant);
     if (diag_hooks_ignored) kernels_text += " diag_hooks=ignored";
     kernels_text += " swin_resident=" + std::to_string(swin_resident);
@@ -2282,7 +2313,7 @@ struct Runtime {
   // w64/post_filter_c1_s4, the analytic build, as Model L's file has no output-filter weights; LDR: l_post_filter_ldr).
   // The kernels Model L's route needs on native D3D12 (HDR or LDR colour; the direct route's two more).
   std::vector<std::string> l_own_post_kernels(bool ldr) const {
-    const std::string rc = l_post_c12 ? "lc12/l_post_recon" : "l_post_recon";  // C1/C2: the lc12 ports in their place
+    const std::string rc = l_post_c12 ? (l_post_w64 ? "w64_lc12/l_post_recon" : "lc12/l_post_recon") : "l_post_recon";  // C1/C2: the lc12 ports in their place
     std::vector<std::string> need = ldr ? std::vector<std::string>{rc + "_p12_ldr", rc + "_ldr", "l_coef",
                                                                     "l_post_filter_ldr"}
                                         : std::vector<std::string>{rc + "_p12", rc, "l_coef", "w64/post_filter_c1_s4"};
@@ -2482,7 +2513,7 @@ struct Runtime {
       // (native D3D12: l_post_recon_p12 on the frames whose coefficients l_coef_pack12 stored; LDR colour: the _ldr
       // form)
       post_last = std::string(p12_frame ? "l_post_recon_p12" : "l_post_recon") + (l_ldr ? "_ldr" : "");
-      if (l_post_c12) post_last = "lc12/" + post_last;   // l_post__lc12.co (C1 machine form, C2), tag lc12
+      if (l_post_c12) post_last = (l_post_w64 ? "w64_lc12/" : "lc12/") + post_last;   // l_post__lc12.co (C1 machine form, C2), tag lc12 / w64_lc12
       return launch(post_last.c_str(), grid, 256,
                     {&cnet, &A, &B, &C, &hist[cur], &mnear[nxt], &mcenter, &mfar, &w, &hist[nxt], &reduced, &display,
                      &p, &expo});

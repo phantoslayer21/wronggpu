@@ -187,9 +187,14 @@ NO_FOLD = {"WG_D3D12_FUSION": "pm,xe,mb,rv,xo,xd"}
 NO_LIN = {"WG_D3D12_FUSION": "pm,xe,mb,rv,xo,xd,lc"}
 NO_ENCLIN = {"WG_D3D12_FUSION": "pm,xe,mb,rv,xo,xd,lc,ll"}
 # the D3D12 route's ten shared stages: the twins in launch order (unfused: dec2's and dec1's own blocks and expands)
+TWIN_STAGES_UNFUSED = ("swin_block_c64_hyb", "patch_merge_c64_hyb", "swin_block_c96_hyb", "patch_merge_c96_hyb",
+                       "swin_bneck6_hyb", "expand_c128_hyb", "swin_block_c96_add_hyb", "expand_c96_hyb",
+                       "swin_block_c64_add_hyb")
+# WG_L_EXFUSE (default on when the manifest has the kernels): dec2 and dec1 with their expands fused into the block
+# (hyb_swin.hlsl swin_block_c96_add_ex_hyb / swin_block_c64_add_ex_hyb; the expanded map is never stored)
+EX_HYB = ("swin_block_c96_add_ex_hyb", "swin_block_c64_add_ex_hyb")
 TWIN_STAGES = ("swin_block_c64_hyb", "patch_merge_c64_hyb", "swin_block_c96_hyb", "patch_merge_c96_hyb",
-               "swin_bneck6_hyb", "expand_c128_hyb", "swin_block_c96_add_hyb", "expand_c96_hyb",
-               "swin_block_c64_add_hyb")
+               "swin_bneck6_hyb") + EX_HYB
 
 
 def same_frames(lines):
@@ -390,10 +395,15 @@ def shared_stages(t, f, route, digests=None):
         # sync words: the runtime's scratch, not named), the six blobs, the even (b0) and odd (b1) blocks' offsets
         want.append((BNECK_HYB, 128, 256, [n["enc2.merged"], bouts[5], None, None] + [w("b%d" % i) for i in range(6)] +
                      [str(H8), str(W8)] + off("b0") + off("b1") + ["128"]))
-        want += [("expand_c128_hyb", None, None, None),
-                 blk("swin_block_c96_add_hyb", None, n["enc2.skip"], n["dec2.out"], "dec2", H4, W4),
-                 ("expand_c96_hyb", None, None, None),
-                 blk("swin_block_c64_add_hyb", None, n["enc1.skip"], n["dec1.out"], "dec1", H2, W2)]
+        if EX_HYB[0] in names:   # the fused decoder blocks (WG_L_EXFUSE): x = the low-resolution map, aux null
+            want += [blk(EX_HYB[0], bouts[5], n["enc2.skip"], n["dec2.out"], "dec2", H4, W4),
+                     blk(EX_HYB[1], n["dec2.out"], n["enc1.skip"], n["dec1.out"], "dec1", H2, W2)]
+            want = [(k, g, b_, a_ + ["0"] if k in EX_HYB else a_) for k, g, b_, a_ in want]
+        else:
+            want += [("expand_c128_hyb", None, None, None),
+                     blk("swin_block_c96_add_hyb", None, n["enc2.skip"], n["dec2.out"], "dec2", H4, W4),
+                     ("expand_c96_hyb", None, None, None),
+                     blk("swin_block_c64_add_hyb", None, n["enc1.skip"], n["dec1.out"], "dec1", H2, W2)]
     bad = []
     if [ln.kernel for ln in got] != [k for k, _, _, _ in want]:
         raise AssertionError("shared stages: %s, expected %s" % ([ln.kernel for ln in got], [k for k, *_ in want]))
@@ -406,7 +416,7 @@ def shared_stages(t, f, route, digests=None):
                 continue
             bad += ["%s (launch %d) argument %d: %s, expected %s" % (k, i, j, a_, e) for j, (a_, e) in
                     enumerate(zip(ln.args, args)) if e is not None and a_ != e]
-    if route == "d3d12":   # the maps the twin expansions write (no name, arguments not recorded): new maps
+    if route == "d3d12" and EX_HYB[0] not in names:   # the maps the twin expansions write (no name, arguments not recorded)
         e2, e1 = got[6].args[0], got[8].args[0]
         if e2 == e1 or {e2, e1} & ({"0"} | set(n.values())):
             bad.append("the expanded maps: %s, %s" % (e2, e1))
@@ -583,7 +593,7 @@ class Arguments(unittest.TestCase):
         self.assertEqual(ls[gi + 1].kernel, "swin_block_c64_hyb")
         self.assertEqual(ls[gi + 1].args[0], feat)
         dec1 = ls[di - 1]
-        self.assertEqual(dec1.kernel, "swin_block_c64_add_hyb")
+        self.assertIn(dec1.kernel, ("swin_block_c64_add_hyb", EX_HYB[1]))
         y = dproj.args[1]
         self.assertEqual(dproj.args[0], dec1.args[2])
         fold = "l_dec_block_coef" in k
@@ -662,7 +672,7 @@ class Arguments(unittest.TestCase):
         self.assertEqual(ls[gi + 1].kernel, "l_q7_block_c64" if route == "hip" else "swin_block_c64_hyb")
         self.assertEqual(ls[gi + 1].args[0], feat)  # enc1 reads Model L's features
         dec1 = ls[di - 1]   # dec1's block, right before the decoder
-        self.assertEqual(dec1.kernel, "l_q7_block_c64_dec" if route == "hip" else "swin_block_c64_add_hyb")
+        self.assertIn(dec1.kernel, ("l_q7_block_c64_dec",) if route == "hip" else ("swin_block_c64_add_hyb", EX_HYB[1]))
         y, y2 = dproj.args[1], dec.args[2]
         self.assertEqual(dproj.args[0], dec1.args[2])  # the decoder reads dec1's output
         self.assertEqual(dec.args[0], y)
@@ -932,7 +942,8 @@ class D3D12(unittest.TestCase):
         self.assertNotIn("l_coef_pack12", names)   # (the native route folds every pack12 store)
         self.assertTrue(all(not n.startswith(("d1p12/", "d0p12/")) and n != "input_encoder" for n in names), names)
         stages = [n for n in names if n.split("/")[-1].startswith(("swin_", "l_swin_", "patch_merge", "expand"))]
-        self.assertEqual(stages, [ENC_LIN_HYB] + list(TWIN_STAGES) + [DEC_COEF_HYB if fold else "l_swin_block_c32_dec_hyb"])
+        twins = TWIN_STAGES if EX_HYB[0] in names else TWIN_STAGES_UNFUSED   # (WG_L_EXFUSE on / off)
+        self.assertEqual(stages, [ENC_LIN_HYB] + list(twins) + [DEC_COEF_HYB if fold else "l_swin_block_c32_dec_hyb"])
         self.assertEqual([n for n in names if "l_q7" in n], [])
         lev, coef = Arguments.check_frame(self, t, f)
         if p12:
@@ -952,7 +963,7 @@ class D3D12(unittest.TestCase):
         t = FT.Trace(lines)
         self.assertEqual(t.create, "create ok model L")
         self.assertEqual(t.unknown(), [])
-        self.assertEqual(t.kernels.get("swin_fused"), "none")
+        self.assertEqual(t.kernels.get("swin_fused"), "dec2,dec1")   # WG_L_EXFUSE (default on): dec2, dec1 with expands fused
         self.assertEqual([f["info"]["reset"] for f in t.frames], [1, 0, 1, 0, 1, 1])
         self.assertEqual(len({f["info"]["parity"] for f in t.frames}), 2)
         prev = None
@@ -1228,6 +1239,24 @@ class ReleaseDefault(unittest.TestCase):
     def kernels_text(lines):
         return next(ln for ln in lines if ln.startswith("kernels "))
 
+    def test_exfuse_toggle(self):
+        """WG_L_EXFUSE=0, or a manifest without the fused decoder blocks: the unfused route (standalone expands and decoder
+        blocks, swin_fused=none); any other value is refused at create."""
+        unfused = {"expand_c128_hyb", "expand_c96_hyb", "swin_block_c96_add_hyb", "swin_block_c64_add_hyb"}
+        for label, got in (("env 0", self.d3d12(full_ports(), env={"WG_L_EXFUSE": "0"})),
+                           ("no ports", self.d3d12([kc for kc in full_ports() if kc[0] not in EX_HYB]))):
+            with self.subTest(case=label):
+                self.assertEqual(got[0], "create ok model L")
+                text = self.kernels_text(got)
+                self.assertIn("swin_fused=none", text)
+                self.assertIn("l_exfuse=off", text)
+                names = self.launched(got)
+                self.assertTrue(unfused <= names, sorted(unfused - names))
+                self.assertEqual(set(EX_HYB) & names, set())
+        got = self.d3d12(full_ports(), env={"WG_L_EXFUSE": "2"})
+        self.assertEqual(len(got), 1)
+        self.assertTrue(got[0].startswith("ERR create: WG_L_EXFUSE"), got[0])
+
     def test_default_is_hybrid_full_on_d3d12(self):
         for env in (None, {"WG_L_FORM": "hybrid"}):
             with self.subTest(env=env):
@@ -1236,11 +1265,12 @@ class ReleaseDefault(unittest.TestCase):
                 text = self.kernels_text(got)
                 ntwins = sum(k.endswith("_hyb") and not k.endswith("_q7c_hyb") for k, _ in full_ports())
                 for want in ("l_form=hybrid", "l_hyb_d3d12=on", "l_post_c12=on", "hyb_twins=%d" % ntwins,
-                             "swin_fused=none", "hyb_tables=on"):
+                             "swin_fused=dec2,dec1", "l_exfuse=on", "hyb_tables=on"):
                     self.assertIn(want, text)
                 names = self.launched(got)
                 used = set(HYB_TWINS) - {"l_swin_block_c32_enc_hyb", "l_swin_block_c32_dec_hyb",
-                                         "swin_block_c128_hyb"} | {ENC_LIN_HYB, DEC_COEF_HYB, BNECK_HYB}
+                                         "swin_block_c128_hyb", "swin_block_c96_add_hyb", "swin_block_c64_add_hyb",
+                                         "expand_c128_hyb", "expand_c96_hyb"} | {ENC_LIN_HYB, DEC_COEF_HYB, BNECK_HYB} | set(EX_HYB)
                 self.assertTrue(used <= names, sorted(used - names))
                 self.assertIn("lc12/l_post_recon_p12", names)
                 blocks = [n for n in names if n.split("/")[-1].startswith(("swin_", "l_swin_", "patch_merge", "expand"))]

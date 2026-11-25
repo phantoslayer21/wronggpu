@@ -419,6 +419,10 @@
    "-"
   ],
   [
+   "swin_block_c64_add_ex_hyb",
+   "-"
+  ],
+  [
    "swin_block_c64_add_ex_nc",
    "swin.co"
   ],
@@ -436,6 +440,10 @@
   ],
   [
    "swin_block_c64_q7c_hyb",
+   "-"
+  ],
+  [
+   "swin_block_c96_add_ex_hyb",
    "-"
   ],
   [
@@ -461,6 +469,22 @@
   [
    "swin_bneck6_q7c_hyb",
    "-"
+  ],
+  [
+   "w64_lc12/l_post_recon",
+   "l_post__lc12.co"
+  ],
+  [
+   "w64_lc12/l_post_recon_ldr",
+   "l_post__lc12.co"
+  ],
+  [
+   "w64_lc12/l_post_recon_p12",
+   "l_post__lc12.co"
+  ],
+  [
+   "w64_lc12/l_post_recon_p12_ldr",
+   "l_post__lc12.co"
   ]
  ],
  "model_k": [

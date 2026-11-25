@@ -85,6 +85,8 @@ const Signature kSignatures[] = {
     {"input_encoder", "ppppppppppppE"},     // Model M's encoder and Model L's values (q in place of the features)
     {"input_encoder_q20", "ppppppppppppE"},  // Model L's values, q in its 20-byte form (native D3D12, fusion le)
     {"coef_decoder", "ppppppppD"},          // Model M's decoder (also its pack12 form)
+    {"swin_block_c96_add_ex_hyb", "ppppiiiip"},  // the fused decoder blocks (WG_L_EXFUSE): the blocks' arguments, then aux
+    {"swin_block_c64_add_ex_hyb", "ppppiiiip"},  // (null: unused by the expand kernels)
     {"swin_block_*", "ppppiiii"},           // Model M's blocks: x, skip, out, w, H, W, ox, oy
     {"swin_bneck6_hyb", "ppppppppppiiiiiii"},  // the hybrid bottleneck in one launch (speed lever 4): x, out, tmp,
                                                // sync, b0 ... b5's blobs, H, W, even / odd offsets, workgroups

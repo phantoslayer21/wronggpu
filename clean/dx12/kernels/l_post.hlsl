@@ -45,6 +45,21 @@
 // @wg-kernel lc12/l_post_recon_ldr co=l_post__lc12.co entry=l_post_recon_ldr block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_LDR=1,LP_C12=1
 // @wg-kernel lc12/l_post_recon_p12_ldr co=l_post__lc12.co entry=l_post_recon_p12_ldr block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1,LP_LDR=1,LP_C12=1
 //
+// The wave64 form (LP_W64 = 1; runtime WG_L_POST_W64, default on, 0 = the lc12 entries above): the same kernel (the same
+// operations on the same values in the same order, every FP16 rounding kept) in 64-lane waves, tag w64_lc12 (the same
+// code object l_post__lc12.co as lc12: the tag only selects the port). The 256-lane workgroup is unchanged (lane (l, k):
+// column l & 31 of the row pair lane >> 5), so a wave holds two row pairs. Differences against the lc12 entries, each
+// value-preserving: LP_CODE 1 (the FP16 code table is built from one multiplication by the FP32 1 / 255 and the driver's
+// conversion instead of an IEEE division per lane: f16(f32(k) f32(1 / 255)) = f16(RN32(k / 255)) for k = 0 ... 255,
+// checked for all 256 codes against the division), LP_RPUNI 1 (r_prev = 1 / e_prev is one IEEE division read from the first
+// lane: the operand is wave-uniform, so every lane's quotient is the same value), LP_QX 1 (the lane x + 1 of the 2 x 2 block
+// is the quad neighbour: QuadReadAcrossX is the lane ^ 1 exchange of wg_xor(v, 1), DPP instead of ds_bpermute), LP_WTEX
+// (the wave's first lane of the staging rounds: the wave size in place of 32).
+// @wg-kernel w64_lc12/l_post_recon co=l_post__lc12.co entry=l_post_recon block=256 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_C12=1,LP_W64=1,LP_CODE=1,LP_RPUNI=1,LP_QX=1
+// @wg-kernel w64_lc12/l_post_recon_p12 co=l_post__lc12.co entry=l_post_recon_p12 block=256 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1,LP_C12=1,LP_W64=1,LP_CODE=1,LP_RPUNI=1,LP_QX=1
+// @wg-kernel w64_lc12/l_post_recon_ldr co=l_post__lc12.co entry=l_post_recon_ldr block=256 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_LDR=1,LP_C12=1,LP_W64=1,LP_CODE=1,LP_RPUNI=1,LP_QX=1
+// @wg-kernel w64_lc12/l_post_recon_p12_ldr co=l_post__lc12.co entry=l_post_recon_p12_ldr block=256 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_P12=1,LP_LDR=1,LP_C12=1,LP_W64=1,LP_CODE=1,LP_RPUNI=1,LP_QX=1
+//
 // LP_MORIG = 1 (WG_M_POST=orig on native D3D12: Model M's original reconstruction, 3 x 3 gather + encoded-domain
 // history candidates, with C1/C2 machine-code forms; port of l_post__morig.co = l_post.hip with WG_LP_M, WG_LP_C1, WG_CR_C2).
 // @wg-kernel morig/l_post_recon co=l_post__morig.co entry=l_post_recon block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p defines=LP_C12=1,LP_MORIG=1
@@ -62,6 +77,28 @@
 #ifndef LP_MORIG
 #define LP_MORIG 0
 #endif
+#ifndef LP_W64
+#define LP_W64 0   // 1: the wave64 form (see the header)
+#endif
+#ifndef LP_CODE
+#define LP_CODE 0   // 1: the FP16 code table from f32(k) f32(1 / 255) (exact for the 256 codes); 0: the IEEE division
+#endif
+#ifndef LP_RPUNI
+#define LP_RPUNI 0   // 1: r_prev's division from the first lane's operand
+#endif
+#ifndef LP_QX
+#define LP_QX 0   // 1: the 2 x 2 block's neighbour lane by QuadReadAcrossX
+#endif
+#if LP_W64 != (WG_WAVE == 64)
+#error "l_post.hlsl: LP_W64 and the wave size (wave=) must agree"
+#endif
+#if LP_W64
+// The driver's matrix intrinsics (wg_ags.hlsli) are wave32 fragments only (RGA: the same intrinsic compiled in a wave64
+// kernel gives another conversion sequence: 112 instead of 182 v_cvt_f16_f32, no packs; not validated, not used): in 64-lane
+// waves every "driver conversion" is the software RNE one (wg_to_f16: wg_f2h, the same bits as v_cvt_f16_f32, NaN
+// payloads included; wg_math.hlsli)
+uint4 wg_to_f16_ags(v8f d) { return wg_to_f16(d); }
+#endif
 
 WG_ARGS_BEGIN
     uint color, A, B, C, hist_prev, m_near, m_center, m_far, w_p, hist_out, reduced, display;   // pointers
@@ -75,7 +112,7 @@ WG_ARGS_END
 #define kTilePairs 8
 #define kStageCap 512
 #define kLWin (LP_MORIG ? 3 : 4)
-#define kTexWave 32
+#define kTexWave WG_WAVE   // the wave's first lane of the staging rounds (LP_WTEX)
 #define kTexDw 6   // staged texel: f0 f1 | f2 f3 | f4 f5 | f6 f7 | f8 kA | kB kC (FP16 bits)
 
 static const float kEncK = asfloat(0x3dddf184u);        // 0.36f * 0.30102999566398120f
@@ -179,7 +216,11 @@ uint code16(uint v, uint i) { return sh_code[(v >> (8u * i)) & 0xffu]; }
 void code16_build(int lane)
 {
     v8f cv;
+#if LP_CODE
+    cv.v[0] = opq((float)lane * kInv255);   // f16(f32(k) f32(1 / 255)) = f16(RN32(k / 255)), all 256 codes (header)
+#else
     cv.v[0] = opq(wg_div((float)lane, 255.0f));
+#endif
     [unroll] for (int i = 1; i < 8; ++i) cv.v[i] = 0.0f;
     sh_code[lane] = wg_to_f16_ags(cv).x & 0xffffu;
 }
@@ -620,7 +661,12 @@ WG_KERNEL(l_post_recon)
         g_e = e0 == 0.0f ? 1.0f : e0;
         g_ep = e1 == 0.0f ? 1.0f : e1;
     }
+#if LP_RPUNI
+    // g_ep is wave-uniform (a root constant or one loaded word): every lane's quotient is the first lane's
+    g_rp = asfloat(WaveReadLaneFirst(asuint(wg_div(1.0f, g_ep))));
+#else
     g_rp = wg_div(1.0f, g_ep);
+#endif
 #endif
     const int lane = (int)wg_lane_id();
     const int tiles_x = (P_dw + kTileX - 1) / kTileX;
@@ -761,7 +807,11 @@ WG_KERNEL(l_post_recon)
     }
     // lane x + 1 is lane ^ 1 (same wave)
     float o[3];
+#if LP_QX
+    [unroll] for (int i = 0; i < 3; ++i) o[i] = QuadReadAcrossX(r[i]);   // lane ^ 1
+#else
     [unroll] for (int i = 0; i < 3; ++i) o[i] = wg_xor(r[i], 1u);
+#endif
     if (active && has1 && (x & 1) == 0 && x + 1 < P_dw) {
         uint code = 0u;
         [unroll] for (int i = 0; i < 3; ++i) {
