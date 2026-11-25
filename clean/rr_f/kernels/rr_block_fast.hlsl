@@ -41,7 +41,11 @@ WG_ARGS_END
 // Defaults with the relaxed body (RR_B32: modes accurate and fast; the exact body's kernels keep their DXIL):
 // L01_MRGU 4, L01_UNRALL 28, L01_MDPF 28, L01_FPF 8 (cap8 + cap48 byte-identical in accurate and fast; game_bench
 // 1440p Q accurate -0.059 / fast -0.056 ms, 6 interleaved rounds); L01_HPF and L01_MLPDEF stay opt-in (no gain).
-#if defined(RR_B32) && RR_B32
+// clean/rr-mp2-level1 round 3 (exact body, same levers): the exact step-E body (RR_Z 2, RR_STEP 0: stageex.* / stagedx.*)
+// takes the same loop-shape / issue-order defaults. They are structural (the same operations in the same order, so the
+// output bits cannot change) and E1 / D1-F / D1-R sit at 112-120 VGPRs, far from the 192 bound. L01_MDPF is a no-op
+// there (it needs RR_WIL, which is relaxed-body only). The step X / Z / XF kernels keep their DXIL.
+#if (defined(RR_B32) && RR_B32) || (RR_Z == 2 && RR_STEP == 0)
 #define RR_L1R2 1
 #else
 #define RR_L1R2 0
@@ -154,6 +158,17 @@ uint64_t rr_2q(uint2 v) { return (uint64_t)v.x | ((uint64_t)v.y << 32); }
 #error "RR_QV1 needs RR_WSRC 1 and H = 2"
 #endif
 // ---- LDS --------------------------------------------------------------------------------------------------------------
+// clean/rr-f-wave4 R4.2b RR_OVL: the exact body's LDS overlays (MY in head 0's exchange buffer, UP in head 1's; round-11)
+// for the relaxed body (RR_B32) too. The lifetime argument below does not mention the row-sum mode: both bodies run the
+// same head loop (one barrier per head, head h writes buffer h & 1) and no deferred rerun (RR_DEFER / RR_QV1 are 0 with
+// L01_ACC 0). RR_OVL 0 = the relaxed body's kernels as before (A/B; the runtime's WG_RR_W4 bit 1). Not with the dataflow form.
+#ifndef RR_OVL
+#if (RR_Z == 2 || (defined(RR_B32) && RR_B32 && !L01_ACC && !RR_DFLOW))
+#define RR_OVL 1
+#else
+#define RR_OVL 0
+#endif
+#endif
 groupshared uint64_t rr_xq[1024];                    // q / v exchange, two head buffers: q [wave][ft][lane], v^T after
 #define XB(h) (((h) & 1u) * 512u)
 #if RR_WSRC == 0
@@ -161,7 +176,7 @@ groupshared uint64_t rr_wb[2 * UNIT / 8];
 #define MY(i) rr_wb[i]
 #define UP(i) rr_wb[UNIT / 8 + (i)]
 #else
-#if RR_CN > 0 && RR_Z == 2 && RH == 2 && 64 * RC / 8 <= 512 && !RR_QV1
+#if RR_CN > 0 && RR_OVL && RH == 2 && 64 * RC / 8 <= 512 && !RR_QV1
 // clean/rr-f-s13x-x-l01 (exact body only; round-11 item 5): the merge buffer lives in head 0's exchange buffer (head 1
 // uses buffer 1). Its last reader is head 0's PV, and every wave passes head 1's barrier only after those reads. Same
 // operations and bits; LDS 12288 -> 8192 B (E1).
@@ -170,7 +185,7 @@ groupshared uint64_t rr_wb[2 * UNIT / 8];
 groupshared uint64_t rr_my[64 * RC / 8];
 #define MY(i) rr_my[i]
 #endif
-#if RR_KIND == 2 && RR_Z == 2 && RH == 2 && 16 * HID / 8 <= 512 && !RR_QV1
+#if RR_KIND == 2 && RR_OVL && RH == 2 && 16 * HID / 8 <= 512 && !RR_QV1
 // clean/rr-f-s13x-x-l01 (exact body only): the fusion up-projections live in head 1's exchange buffer. They are
 // written and read before the head loop, and head 1 first writes its buffer after head 0's barrier, which every wave
 // reaches only after its last UP read. Same operations and bits; LDS 12288 -> 8192 B (D1-F).
@@ -845,7 +860,7 @@ WG_KERNEL(rr_block)
         st_sync();
     }
 #ifndef L01_UNR2MASK
-#if defined(RR_B32) && RR_B32   // a14 default (relaxed body): 2x MLP chunk loop on E1, D1-F, D1-R
+#if RR_L1R2   // a14 default (relaxed body, and since round 3 the exact step-E body): 2x MLP chunk loop on E1, D1-F, D1-R
 #define L01_UNR2MASK 28
 #else
 #define L01_UNR2MASK 0
