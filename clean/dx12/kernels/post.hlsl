@@ -544,14 +544,18 @@ float3 history_cr_span(float qx, float qy)
     const float fx0 = floor(tx), fy0 = floor(ty);
     const int ix = (int)fx0, iy = (int)fy0;
     const uint pitch = (uint)P_dw * 8u;
+    // pitch & 0xfffff8 == pitch & 0xffffff (pitch is a multiple of 8): the same 24-bit multiplicand, but a mask whose
+    // low three bits are clear, so that a product with it is visibly a multiple of 8 to the driver (the Linux compiler
+    // otherwise cannot prove 8-byte alignment of the history addresses and splits the 16-byte loads)
+    const uint pitch24 = pitch & 0xfffff8u;
     [branch] if (WaveActiveAllTrue(and((uint)(ix - 1) <= (uint)(P_dw - 4), (uint)(iy - 1) <= (uint)(P_dh - 4)))) {
         // O1: hist_prev + (ix - 1) 8 + (iy - 1) pitch == ix 8 + iy pitch + (hist_prev - 8 - pitch) mod 2^32, one
         // lshl_add + one mad_u24 (iy in [1, P_dh - 3] and pitch = 8 P_dw < 2^24, so the 24-bit product is the full one)
         // (the constant opaque, g_z: the driver would otherwise split it again into its parts, one add each)
 #if WG_POST_CUTS
-        uint b0 = mul24((uint)iy, pitch) + (uint)ix * 8u + ((((hist_prev & ~7u) - 8u - pitch) ^ g_z) & ~7u);
+        uint b0 = mul24((uint)iy, pitch24) + (uint)ix * 8u + ((((hist_prev & ~7u) - 8u - pitch) ^ g_z) & ~7u);
 #else
-        uint b0 = (hist_prev & ~7u) + (uint)(ix - 1) * 8u + mul24((uint)(iy - 1), pitch);
+        uint b0 = (hist_prev & ~7u) + (uint)(ix - 1) * 8u + mul24((uint)(iy - 1), pitch24);
 #endif
 #if defined(OP_POST_MUTANT) && OP_POST_MUTANT == 4   // test-only mutant (byte check must catch it): history base +8
         b0 += 8u;
@@ -563,8 +567,8 @@ float3 history_cr_span(float qx, float qy)
                       cr_weights(tx - fx0), cr_weights(ty - fy0));
     }
     const uint hp8 = hist_prev & ~7u;
-    const uint ro0 = mul24((uint)clampi(iy - 1, 0, P_dh - 1), pitch), ro1 = mul24((uint)clampi(iy, 0, P_dh - 1), pitch);
-    const uint ro2 = mul24((uint)clampi(iy + 1, 0, P_dh - 1), pitch), ro3 = mul24((uint)clampi(iy + 2, 0, P_dh - 1), pitch);
+    const uint ro0 = mul24((uint)clampi(iy - 1, 0, P_dh - 1), pitch24), ro1 = mul24((uint)clampi(iy, 0, P_dh - 1), pitch24);
+    const uint ro2 = mul24((uint)clampi(iy + 1, 0, P_dh - 1), pitch24), ro3 = mul24((uint)clampi(iy + 2, 0, P_dh - 1), pitch24);
     const uint c0 = hp8 + (uint)clampi(ix - 1, 0, P_dw - 1) * 8u, c1 = hp8 + (uint)clampi(ix, 0, P_dw - 1) * 8u;
     const uint c2 = hp8 + (uint)clampi(ix + 1, 0, P_dw - 1) * 8u, c3 = hp8 + (uint)clampi(ix + 2, 0, P_dw - 1) * 8u;
     return cr_sum(wg_mem.Load2(ro0 + c1), wg_mem.Load2(ro0 + c2), wg_mem.Load2(ro1 + c0), wg_mem.Load2(ro1 + c1),
