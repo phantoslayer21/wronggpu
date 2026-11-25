@@ -32,8 +32,8 @@ calls keep the driver's default (non-precise) lowering, above all mad() = one fu
 and rcp() (fdiv 1.0, x) is the hardware v_rcp_f32; it is reassembled (dxil_asm.cpp, DXC's IDxcAssembler) and signed by
 dxv. Any other float division ('/', which would be an IEEE division) or float remainder is refused: use wg_div.
 
-VGPR check: every Swin / bottleneck kernel built (a name with a swin_ or l_swin_ part, and Model L's wave 4 post and encoder kernels,
-*_w4 / *_w4m) is run through RGA (gfx1201) and its
+VGPR check: every Swin / bottleneck kernel built (a name with a swin_ or l_swin_ part, and Model L's fused post
+w64_lc12/l_post_tf_p12[_pf]) is run through RGA (gfx1201) and its
 USED_VGPRs compared with its bound in clean/dx12/vgpr_limits.json (the count that keeps its present workgroups per CU);
 over the bound, or no bound listed, fails the build. WG_DX12_VGPR_CHECK=0 skips it.
 ISA rules of the hybrid kernels: every hybrid kernel built (a name with a _hyb part) is checked in the same RGA run by
@@ -230,10 +230,9 @@ MODEL_L_ONLY = {"swin_block_c64_add_ex_nc", "lev/input_encoder_q20", "lev/input_
 def is_model_l(decl):
     """A port of one of Model L's code objects (#89: l_swin.co, l_ops.co, l_post.co, l_enc_values.co), a Model L kernel
     of the direct route with no code object (co "-", named l_*), a kernel only Model L launches (MODEL_L_ONLY), or a
-    kernel of the hybrid form (named *_hyb: WG_L_FORM = hybrid, Model L's route only so far; *_hyb_w3 / *_hyb_w3p / *_hyb_gp: its wave 3
-    variants, WG_L_W3)."""
+    kernel of the hybrid form (named *_hyb: WG_L_FORM = hybrid, Model L's route only so far)."""
     return (decl["co"].startswith("l_") or decl["name"].startswith("l_") or decl["name"] in MODEL_L_ONLY
-            or decl["name"].endswith("_hyb") or re.search(r"_hyb_(w3p?|gp)$", decl["name"]) is not None)
+            or decl["name"].endswith("_hyb"))
 
 
 def is_frame_gen(decl):
@@ -332,8 +331,8 @@ VGPR_LIMITS = os.path.join(HERE, "vgpr_limits.json")
 
 
 def vgpr_checked(name):
-    # l_swin_*: Model L's blocks (#89); the wave 4 post / encoder kernels (their bound is the 96-register tier)
-    return re.search(r"(^|/|l_)swin_|(l_post_tf_p12|input_encoder_q20)(_pf)?_w4m?$", name) is not None
+    # l_swin_*: Model L's blocks (#89); l_post_tf_p12[_pf]: Model L's fused post (bound = 96-register tier)
+    return re.search(r"(^|/|l_)swin_|/l_post_tf_p12(_pf)?$", name) is not None
 
 
 def rga_vgprs(dxil, isa=False):

@@ -70,7 +70,7 @@ WG_KERNEL(l_project_gather)
     }
 #endif
     [unroll] for (uint mt = 0; mt < MT; mt += 2u) {
-        // Pair two adjacent output tiles: overlaps weight loads, WMMAs, and RN16 conversions, and coalesces stores to 128-bit.
+        // Pair two adjacent output tiles: interleaves weight loads with WMMAs and RN16 conversions to hide VMEM latency, and coalesces stores to 128-bit.
         v8f acc0 = wg_load8f(w, (hh * 8u + mt * 16u) * 4u);
         v8f acc1 = wg_load8f(w, (hh * 8u + (mt + 1u) * 16u) * 4u);
         uint2 fr0[KB], fr1[KB];

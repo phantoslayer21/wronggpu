@@ -1,5 +1,5 @@
 {
- "_doc": "build_dx12.py ISA check: for each kernel listed, the RGA (gfx1201) ISA must contain exactly the given number of instructions whose mnemonic matches each pattern (a regular expression, matched at the start of the mnemonic). Model K's softmax weights (clean/k/dx12/hlsl/k_smx.hlsli) are exact only when the driver folds the mix form p + e into one v_fma_mixlo/hi_f16 rounding per weight: 32 weights per lane per softmax round, i.e. 32 x heads x windows per workgroup for the narrow stages (e2 / d2: 2 heads, 1 window; d1: 2 heads, 2 windows) and 32 x heads / NG for the wide stages (e3 / d3 and the NG = 2 e4 / d4: 2 rounds; NG = 4 e4 / d4: 1; m: 8 heads / NG 4 = 2; the phase-split m attention k_split_m_attn: one head per workgroup = 1). A missing fold leaves v_cvt_f16_f32 after an FP32 add (a second rounding) and fails here. The __rodd ports (round to odd) must have none. The native D3D12 runtime checks the same fold on the player's driver at create (k_mix_probe). Model L wave 3 (the hybrid *_w3 / *_w3p / *_gp blocks): the arithmetic GELU (hlsl/hyb_block.hlsli hyb_gelu_poly8) is exact only without a fused multiply-add in either step (a contracted add of 1/2 differs in 37 of the 65,536 FP16 inputs; hyb_isa_scan.py rule 1 sees squares only), so each is pinned to the FMA-family counts of its wave 2 twin, which are the softmax's fused steps alone: any extra v_pk_fma_f16 / v_fma_f16 / v_fma_mix* fails the build. WG_DX12_ISA_CHECK=0 skips the check.",
+ "_doc": "build_dx12.py ISA check: for each kernel listed, the RGA (gfx1201) ISA must contain exactly the given number of instructions whose mnemonic matches each pattern (a regular expression, matched at the start of the mnemonic). Model K's softmax weights (clean/k/dx12/hlsl/k_smx.hlsli) are exact only when the driver folds the mix form p + e into one v_fma_mixlo/hi_f16 rounding per weight: 32 weights per lane per softmax round, i.e. 32 x heads x windows per workgroup for the narrow stages (e2 / d2: 2 heads, 1 window; d1: 2 heads, 2 windows) and 32 x heads / NG for the wide stages (e3 / d3 and the NG = 2 e4 / d4: 2 rounds; NG = 4 e4 / d4: 1; m: 8 heads / NG 4 = 2; the phase-split m attention k_split_m_attn: one head per workgroup = 1). A missing fold leaves v_cvt_f16_f32 after an FP32 add (a second rounding) and fails here. The __rodd ports (round to odd) must have none. The native D3D12 runtime checks the same fold on the player's driver at create (k_mix_probe). WG_DX12_ISA_CHECK=0 skips the check.",
  "k_stage_e2": {"v_fma_mix(lo|hi)_f16": 64},
  "k_stage_d2": {"v_fma_mix(lo|hi)_f16": 64},
  "k_stage2_d1": {"v_fma_mix(lo|hi)_f16": 128},
@@ -26,16 +26,5 @@
  "k_stagew4_d4__rodd": {"v_fma_mix(lo|hi)_f16": 0},
  "k_stagew2_d4__rodd": {"v_fma_mix(lo|hi)_f16": 0},
  "k_stagew2_d3__rodd": {"v_fma_mix(lo|hi)_f16": 0},
- "k_mix_probe__rodd": {"v_fma_mix(lo|hi)_f16": 0},
- "l_swin_block_c32_enc_lin_hyb_w3": {"v_pk_fma_f16": 8, "v_fma_f16": 0, "v_fmac_f16": 0, "v_pk_fmac_f16": 0, "v_fmaak_f16": 0, "v_fma_mix": 32},
- "l_swin_block_c32_enc_lin_hyb_gp": {"v_pk_fma_f16": 8, "v_fma_f16": 0, "v_fmac_f16": 0, "v_pk_fmac_f16": 0, "v_fmaak_f16": 0, "v_fma_mix": 32},
- "l_swin_block_c32_dec_coef12_hyb_w3": {"v_pk_fma_f16": 8, "v_fma_f16": 0, "v_fmac_f16": 0, "v_pk_fmac_f16": 0, "v_fmaak_f16": 0, "v_fma_mix": 55},
- "l_swin_block_c32_dec_coef12_hyb_gp": {"v_pk_fma_f16": 8, "v_fma_f16": 0, "v_fmac_f16": 0, "v_pk_fmac_f16": 0, "v_fmaak_f16": 0, "v_fma_mix": 55},
- "swin_block_c64_hyb_w3": {"v_pk_fma_f16": 8, "v_fma_f16": 0, "v_fmac_f16": 0, "v_pk_fmac_f16": 0, "v_fmaak_f16": 0, "v_fma_mix": 48},
- "swin_block_c64_add_ex_hyb_w3": {"v_pk_fma_f16": 8, "v_fma_f16": 0, "v_fmac_f16": 0, "v_pk_fmac_f16": 0, "v_fmaak_f16": 0, "v_fma_mix": 80},
- "swin_block_c96_hyb_w3": {"v_pk_fma_f16": 4, "v_fma_f16": 0, "v_fmac_f16": 0, "v_pk_fmac_f16": 0, "v_fmaak_f16": 0, "v_fma_mix": 56},
- "swin_block_c96_add_ex_hyb_w3": {"v_pk_fma_f16": 4, "v_fma_f16": 0, "v_fmac_f16": 0, "v_pk_fmac_f16": 0, "v_fmaak_f16": 0, "v_fma_mix": 104},
- "swin_block_c96_hyb_w3p": {"v_pk_fma_f16": 4, "v_fma_f16": 0, "v_fmac_f16": 0, "v_pk_fmac_f16": 0, "v_fmaak_f16": 0, "v_fma_mix": 56},
- "swin_block_c96_add_ex_hyb_w3p": {"v_pk_fma_f16": 4, "v_fma_f16": 0, "v_fmac_f16": 0, "v_pk_fmac_f16": 0, "v_fmaak_f16": 0, "v_fma_mix": 104},
- "swin_bneck6_hyb_w3": {"v_pk_fma_f16": 4, "v_fma_f16": 0, "v_fmac_f16": 0, "v_pk_fmac_f16": 0, "v_fmaak_f16": 0, "v_fma_mix": 72}
+ "k_mix_probe__rodd": {"v_fma_mix(lo|hi)_f16": 0}
 }

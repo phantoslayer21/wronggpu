@@ -21,16 +21,7 @@
 // cpairs, k1, c2 (post_tf's chunk plan). Staged render texels per step: at most kStageCap (host check l_tf_supported).
 // @wg-kernel w64_lc12/l_post_tf_p12 co=- entry=l_post_tf_p12 block=512 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u defines=LP_P12=1,LP_C12=1,LP_W64=1,LP_CODE=1,LP_RPUNI=1,LP_QX=1,LP_TF=1
 // @wg-kernel w64_lc12/l_post_tf_p12_pf co=- entry=l_post_tf_p12 block=512 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u defines=LP_P12=1,LP_C12=1,LP_W64=1,LP_CODE=1,LP_RPUNI=1,LP_QX=1,LP_TF=1,LP_PIDIV=1
-// Wave 4 (WG_L_W4): the same operations on the same values; history_cr's six span loads in one burst (LP_HSEQ 0: RGA 86 VGPRs, the
-// LDS-capped 2 workgroups per CU hold up to 96). _w4m: the motion loads of row 0 issued before the last gather column (RGA 96 VGPRs).
-// @wg-kernel w64_lc12/l_post_tf_p12_w4 co=- entry=l_post_tf_p12 block=512 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u defines=LP_P12=1,LP_C12=1,LP_W64=1,LP_CODE=1,LP_RPUNI=1,LP_QX=1,LP_TF=1,LP_W4=1
-// @wg-kernel w64_lc12/l_post_tf_p12_pf_w4 co=- entry=l_post_tf_p12 block=512 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u defines=LP_P12=1,LP_C12=1,LP_W64=1,LP_CODE=1,LP_RPUNI=1,LP_QX=1,LP_TF=1,LP_PIDIV=1,LP_W4=1
-// @wg-kernel w64_lc12/l_post_tf_p12_w4m co=- entry=l_post_tf_p12 block=512 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u defines=LP_P12=1,LP_C12=1,LP_W64=1,LP_CODE=1,LP_RPUNI=1,LP_QX=1,LP_TF=1,LP_W4=1,LP_W4_MOT=2
-// @wg-kernel w64_lc12/l_post_tf_p12_pf_w4m co=- entry=l_post_tf_p12 block=512 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u defines=LP_P12=1,LP_C12=1,LP_W64=1,LP_CODE=1,LP_RPUNI=1,LP_QX=1,LP_TF=1,LP_PIDIV=1,LP_W4=1,LP_W4_MOT=2
 #include "wg_platform.hlsli"
-#ifndef LP_W4
-#define LP_W4 0   // 1: wave 4 (w64_lc12/l_post_tf_p12_w4, _pf_w4: WG_L_W4 bit 0): l_post_core.hlsli's LP_W4 knobs
-#endif
 #ifndef LP_P12
 #define LP_P12 1
 #endif
@@ -70,26 +61,7 @@ WG_ARGS_END
 
 #define kStageCap 512   // staged render texels per step (6 dwords each: 12288 bytes); one per lane
 #ifndef LP_HSEQ
-#if LP_W4
-#define LP_HSEQ 0       // wave 4: all six span loads in one burst (RGA: 86 VGPRs, the 8-waves-per-SIMD tier is the LDS cap anyway)
-#else
-#define LP_HSEQ 1       // history_cr: two groups of loads (RGA: the 24 live load registers of its span form halve)
-#endif
-#endif
-#ifndef LP_W4_MOT
-#define LP_W4_MOT 0     // wave 4 motion loads (they do not depend on the gather): 1 before the column loop, 2 before its last column,
-                        // 4 row 1's loads with row 0's, 8 row 1's loads after row 0's finish_pixel
-#endif
-#ifndef LP_W4_LDS2
-#define LP_W4_LDS2 0    // wave 4: 1 stages uint2 texels (gather_col_w4); RGA: the driver's ds ops are the same, +2 VGPRs
-#endif
-#ifndef LP_W4_UNR
-#define LP_W4_UNR 0         // wave 4: 1 unrolls the 4-column gather loop (an RGA ablation)
-#endif
-#if LP_W4_UNR
-#define LP_W4_LOOP [unroll]
-#else
-#define LP_W4_LOOP [loop]
+#define LP_HSEQ 0       // all six history_cr span loads in one burst (RGA: 86 VGPRs, within the LDS-capped 96-VGPR tier)
 #endif
 #ifndef LP_FBLAZY
 #define LP_FBLAZY 1     // the normalized features are not live together (RGA: -7 VGPRs)
@@ -172,14 +144,7 @@ void raw_put(LRaw r, uint dst, bool store)
     uint t[kTexDw];
     texel_make(r.c, a, b, k, t);   // wave-uniform control flow (the driver's conversion)
     if (store) {
-#if LP_W4_LDS2
-        const uint d2 = dst / 2u;   // dst = 6 lane: texel lane = three uint2
-        sh_tex2[d2] = uint2(t[0], t[1]);
-        sh_tex2[d2 + 1u] = uint2(t[2], t[3]);
-        sh_tex2[d2 + 2u] = uint2(t[4], t[5]);
-#else
         [unroll] for (int d = 0; d < kTexDw; ++d) sh_tex[dst + (uint)d] = t[d];
-#endif
     }
 }
 
@@ -297,35 +262,8 @@ WG_KERNEL(l_post_tf_p12)
             // taps column by column (i outer, j inner), both rows' gathers in one pass over the staged texels
             LGather g0 = gather_zero(), g1 = gather_zero();
             const int tb0 = ((b - 1 - r0c) * ncol + (ax - 1 - c0)) * kTexDw, rstride = ncol * kTexDw;
-#if LP_W4
-#if LP_W4_LDS2
-            const int tb2 = tb0 / 2, rstride2 = rstride / 2;   // texel offsets in uint2 (6 dwords = 3 uint2)
-#endif
-            MotW mw0, mw1;   // the motion loads, issued ahead (do not depend on the gather)
-#if (LP_W4_MOT & 1)
-            mw0 = motion_issue(px, py0);
-#endif
-#if (LP_W4_MOT & 4)
-            mw1 = motion_issue(px, py1);
-#endif
-#if LP_W4_LDS2
-#define LP_COL(ii) gather_col_w4(ii, dx, tb2, rstride2, v0, v1, vv0, vv1, g0, g1)
-#else
-#define LP_COL(ii) gather_col<true>(ii, dx, tb0, rstride, b, ax, v0, v1, vv0, vv1, g0, g1)
-#endif
-#if (LP_W4_MOT & 2)
-            LP_W4_LOOP for (int i = -1; i <= (kLWin - 3); ++i)
-                LP_COL(i);
-            mw0 = motion_issue(px, py0);
-            LP_COL(kLWin - 2);
-#else
-            LP_W4_LOOP for (int i = -1; i <= (kLWin - 2); ++i)
-                LP_COL(i);
-#endif
-#else
             [loop] for (int i = -1; i <= (kLWin - 2); ++i)
                 gather_col<true>(i, dx, tb0, rstride, b, ax, v0, v1, vv0, vv1, g0, g1);
-#endif
 
             float r[3] = {0.0f, 0.0f, 0.0f};
             [loop] for (int row = 0; row < 2; ++row) {
@@ -335,28 +273,8 @@ WG_KERNEL(l_post_tf_p12)
                 LGather g = g0;
                 if (second) g = g1;
                 float hh[3], oo[3];
-#if LP_W4 && (LP_W4_MOT)
-                MotRaw mot;
-                if (second) {
-#if (LP_W4_MOT & 12)
-                    mot = motion_fin(opq(px), opq(py1), mw1);
-#else
-                    mot = motion_fin(opq(px), opq(py1), motion_issue(px, py1));
-#endif
-                } else {
-#if (LP_W4_MOT & 3)
-                    mot = motion_fin(opq(px), opq(py0), mw0);
-#else
-                    mot = motion_fin(opq(px), opq(py0), motion_issue(px, py0));
-#endif
-                }
-#else
                 const MotRaw mot = motion_load(px, second ? py1 : py0);
-#endif
                 finish_pixel(g, x, y, mot, s, hh, oo);
-#if LP_W4 && (LP_W4_MOT & 8)
-                if (!second) mw1 = motion_issue(px, py1);
-#endif
                 v8f cv;
                 float el[3];
                 [unroll] for (int ci = 0; ci < 3; ++ci) {

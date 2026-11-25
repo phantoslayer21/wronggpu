@@ -227,29 +227,15 @@ void hyb_norm_h(uint4 xh_u[KC], v8f gp[KC], uint hh, out v8f y[KC])
 }
 
 // The attention weights of the lane's 8 keys from its 8 scores s (float32 chain values started at B):
-// RN16(s), e = hyb_softmax_e8, the row sum in the original's order (a_t = e_2t + e_8+2t, b_t = e_2t+1 + e_9+2t;
-// a = (a0 + a1) + (a2 + a3), b likewise; sum = a + b), w = RN16(rcp32(sum)), P = RN16(e w) as packed FP16.
-// Packed half2 form for u = clamp(RN16(s * c), +-c'), p = FMA16(u, t, P), e_bits = (p_bits & 0x03ff03ff) << 5;
-// t = RN16(fma(-u, u, T)) stays float32 so hyb_isa_scan rule 1 sees no FP16 square FMA. Bit-identical for all inputs.
+// RN16(s), e = hyb_softmax_e8 (float32: exact products so fused == unfused under any FMad / NoContraction lowering),
+// the row sum in the original's order (a_t = e_2t + e_8+2t, b_t = e_2t+1 + e_9+2t; a = (a0 + a1) + (a2 + a3), b
+// likewise; sum = a + b), w = RN16(rcp32(sum)), P = RN16(e w) as packed FP16. Split into hyb_softmax_pre /
+// hyb_softmax_fin so callers can hide hyb_rcp16's global LUT load latency behind independent Wv WMMAs.
 struct HybSmaxPre { hv8 e; float16_t w; };
 HybSmaxPre hyb_softmax_pre(v8f s)
 {
-    const hv8 sh = hyb_u4_to_h(hyb_rn16x8(s));
-    const h2 c2 = h2(asfloat16((uint16_t)0x2466u), asfloat16((uint16_t)0x2466u));
-    const h2 cl = h2(asfloat16((uint16_t)0x3873u), asfloat16((uint16_t)0x3873u));
-    const h2 ncl = h2(asfloat16((uint16_t)0xb873u), asfloat16((uint16_t)0xb873u));
-    hv8 uh;
-    [unroll] for (uint i = 0; i < 4; ++i) uh.p[i] = min(max(sh.p[i] * c2, ncl), cl);
-    const v8f u = hyb_to_f(uh);
-    v8f t;
-    [unroll] for (uint i2 = 0; i2 < 8; ++i2) t.v[i2] = mad(u.v[i2], -u.v[i2], WG_HYB_POLY_T);
-    const hv8 th = hyb_u4_to_h(hyb_rn16x8(t));
-    const h2 p0 = h2(asfloat16((uint16_t)0x3d80u), asfloat16((uint16_t)0x3d80u));
     HybSmaxPre r;
-    [unroll] for (uint i3 = 0; i3 < 4; ++i3) {
-        const h2 ph = mad(uh.p[i3], th.p[i3], p0);
-        r.e.p[i3] = hyb_u2h((hyb_h2u(ph) & 0x03ff03ffu) << 5);
-    }
+    r.e = hyb_to_h(hyb_softmax_e8(hyb_round16(s)));
     const hv8 ep = hyb_hxor16(r.e);
     const hv8 A = hyb_hadd(r.e, ep);
     const h2 ab = (A.p[0] + A.p[1]) + (A.p[2] + A.p[3]);                 // (a, b)
@@ -265,45 +251,3 @@ uint4 hyb_softmax_fin(HybSmaxPre r)
     return hyb_hpack(P);
 }
 uint4 hyb_softmax_p(v8f s, uint hh) { return hyb_softmax_fin(hyb_softmax_pre(s)); }
-
-// GELU16 -> the 8 FP16 values of the MLP's activation, arithmetic instead of the 128 KB table (HYB_GELU_POLY 1; Model L wave 3):
-// oracle.gelu_q7 on packed FP16 pairs, every step its own FP16 rounding (v_pk_{min,max,mul,add,sub}_f16 are single
-// correctly-rounded operations):
-//   y = min(max(h, -2), 2);  g = RN16(h * RN16(1/2 + RN16(y * RN16(a - RN16(b |y|)))))     a = 0x3698, b = 0x2d30
-// Exact for ALL 65,536 FP16 inputs (clean/l/tests/test_hyb_gelu_poly.py: byte for byte against hyb_tables.gelu16_q8 after
-// the FP8 point, +-inf, NaN and +-0 included: NaN -> y = -2, p4 = 0, NaN * 0 = NaN -> 0xff; -inf -> -inf * 0 = NaN -> 0xff;
-// +inf -> +inf * 1 -> the saturating pack's 0x7e). A FUSED multiply-add in either step is NOT exact (37 of 65,536 bytes
-// differ), so both multiplies feeding an add pass the same OR with an opaque zero as the norm's square (HYB_OPAQUE0): the
-// driver sees no multiply-add. hyb_isa_scan.py rule 1 looks at squares only; the kernels' fma counts (isa_checks.json) pin
-// this one (no v_pk_fma_f16 / v_fma_f16 / v_fma_mix beyond the softmax's).
-// Returns the values widened to float32 (v_cvt_f32_f16: hyb_isa_scan.py rule 2 sees FP16 values at the FP8 pack).
-// the contraction barrier on a packed pair without leaving the packed domain: the bits of both halves OR the same opaque zero
-// (one v_or_b32; going through hyb_h2u / hyb_u2h cost an unpack and a repack per pair)
-h2 hyb_opaque_h2(h2 v)
-{
-    const uint16_t o = (uint16_t)(HYB_OPAQUE0);
-    return asfloat16(asuint16(v) | uint16_t2(o, o));
-}
-v8f hyb_gelu_poly8(uint4 h)
-{
-    const h2 c2 = h2(asfloat16((uint16_t)0x4000u), asfloat16((uint16_t)0x4000u));    // +2
-    const h2 cn2 = h2(asfloat16((uint16_t)0xc000u), asfloat16((uint16_t)0xc000u));   // -2
-    const h2 ca = h2(asfloat16((uint16_t)0x3698u), asfloat16((uint16_t)0x3698u));    // Q7_GELU_A = 0.412109375
-    const h2 cb = h2(asfloat16((uint16_t)0x2d30u), asfloat16((uint16_t)0x2d30u));    // Q7_GELU_B = 0.0810546875
-    const h2 chf = h2(asfloat16((uint16_t)0x3800u), asfloat16((uint16_t)0x3800u));   // 1/2
-    const uint w[4] = { h.x, h.y, h.z, h.w };
-    uint go[4];
-    [unroll] for (uint i = 0; i < 4; ++i) {
-        const h2 x = hyb_u2h(w[i]);
-        const h2 y = min(max(x, cn2), c2);
-        precise h2 p1 = abs(y) * cb;
-        const h2 p1b = hyb_opaque_h2(p1);
-        const h2 p2 = ca - p1b;
-        precise h2 p3 = y * p2;
-        const h2 p3b = hyb_opaque_h2(p3);
-        const h2 p4 = chf + p3b;
-        const h2 r = x * p4;
-        go[i] = hyb_h2u(r);
-    }
-    return hyb_h2f8(uint4(go[0], go[1], go[2], go[3]));
-}

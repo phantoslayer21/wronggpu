@@ -28,10 +28,6 @@
 // @wg-kernel swin_bneck6_hyb_tmo co=- probe=1 block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u defines=SW_C=128,SW_HEADS=4,SW_MLP=512,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_MEGA=1,BNECK_SPIN_LIMIT=1u,SW_ENTRY_OVERRIDE=swin_bneck6_hyb_tmo
 // @wg-kernel swin_bneck6_q7c_hyb co=- block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u defines=SW_C=128,SW_HEADS=4,SW_MLP=512,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_Q7_CHUNK=1,SW_MEGA=1,SW_ENTRY_OVERRIDE=swin_bneck6_q7c_hyb
 // @wg-kernel swin_bneck6_q7c_hyb_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u defines=SW_C=128,SW_HEADS=4,SW_MLP=512,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_Q7_CHUNK=1,SW_MEGA=1,HYB_SCAN_MUTANT=1,SW_ENTRY_OVERRIDE=swin_bneck6_q7c_hyb_scanmut
-// Model L wave 3 (WG_L_W3 bit 2): swin_bneck6_hyb with HYB_GELU_POLY 1 (q8(GELU16) as packed FP16 arithmetic instead of the
-// table's gathers, hyb_block.hlsli hyb_gelu_poly8) and WG_LD_A16 2; its _scanmut mutant (probe=1) must fail both ISA rules
-// @wg-kernel swin_bneck6_hyb_w3 co=- block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u defines=SW_C=128,SW_HEADS=4,SW_MLP=512,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_MEGA=1,WG_LD_A16=2,HYB_GELU_POLY=1,SW_ENTRY_OVERRIDE=swin_bneck6_hyb_w3
-// @wg-kernel swin_bneck6_hyb_w3_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u defines=SW_C=128,SW_HEADS=4,SW_MLP=512,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_MEGA=1,WG_LD_A16=2,HYB_GELU_POLY=1,HYB_SCAN_MUTANT=1,SW_ENTRY_OVERRIDE=swin_bneck6_hyb_w3_scanmut
 #include "swin_block.hlsl"
 
 #define BQ_SYNC_HEAD 16

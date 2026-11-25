@@ -325,11 +325,11 @@ EPILOGUE = """#if SW_XE
 
 XLD_OLD = """            uint4 v = wg_ld128(x, off + 16u * i);"""   # fused_expand's loads of the low-resolution map
 XLD_NEW = """            uint4 v = FZ_XLD(x, off + 16u * i);"""
-EXP_OLD = """    fused_expand(w + L_TAIL, SW_E_LDS, nwx, nwin, tid, (int)wg_block_id(), lowp);"""
+EXP_OLD = """    fused_expand(w + L_TAIL, MAXU, nwx, nwin, tid, (int)wg_block_id(), lowp);"""
 EXP_NEW = """#if FZ_XO
     fz_wait_b5(nwx, nwin, tid);
 #endif
-    fused_expand(w + L_TAIL, SW_E_LDS, nwx, nwin, tid, (int)wg_block_id(), lowp);"""
+    fused_expand(w + L_TAIL, MAXU, nwx, nwin, tid, (int)wg_block_id(), lowp);"""
 
 
 def generate(text):

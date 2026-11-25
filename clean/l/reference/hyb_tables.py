@@ -37,35 +37,6 @@ def gelu16_q8():
     return out
 
 
-def _fp8_point(r):
-    """The FP8 point of FP16 values r (float64 of FP16 numbers): saturating E4M3 with every NaN -> 0xFF."""
-    out = np.asarray(fp8_encode(q8(r)), np.uint8)
-    out[np.isnan(r)] = 0xFF
-    return out
-
-
-def gelu_poly_q8(fused=False):
-    """q8(gelu_q7(h)) for every FP16 bit pattern h by the arithmetic of hlsl/hyb_block.hlsli hyb_gelu_poly8: packed FP16 steps,
-    each its own rounding (numpy float16 operations; min / max return the number for a NaN: fmin / fmax):
-        y = min(max(h, -2), 2); p1 = RN16(|y| b); p2 = RN16(a - p1); p3 = RN16(y p2); p4 = RN16(1/2 + p3); g = RN16(h p4)
-    fused=True: the contracted form (p4 = RN16(1/2 + y p2) with the product exact), the one the kernels' contraction barriers
-    (HYB_OPAQUE0) keep the driver from forming: NOT equal to the table (37 of the 65,536 bytes differ)."""
-    f = np.float16
-    a, b = f(O.Q7_GELU_A), f(O.Q7_GELU_B)
-    h = ALL16.view(np.float16)
-    with np.errstate(all="ignore"):
-        y = np.fmin(np.fmax(h, f(-2.0)), f(2.0))
-        p1 = (np.abs(y) * b).astype(f)
-        p2 = (a - p1).astype(f)
-        if fused:
-            p4 = (np.float64(f(0.5)) + y.astype(np.float64) * p2.astype(np.float64)).astype(f)
-        else:
-            p3 = (y * p2).astype(f)
-            p4 = (f(0.5) + p3).astype(f)
-        r = (h * p4).astype(f)
-        return _fp8_point(r.astype(np.float64))
-
-
 def _rsq_ref(s):
     return f16(O._rsqrt32(s))
 
