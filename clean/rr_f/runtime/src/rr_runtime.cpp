@@ -302,7 +302,12 @@ enum Kid {
   // clean/rr-f-wave4: the kernels before the wave-4 levers, for the A/B mask WG_RR_W4 (bit 0 = head R4.1, bit 1 = body R4.2,
   // bit 2 = output R4.3): head.fast.rx0, output.fast.f0, stagee0.{E1, D1-F, D0-F} (RR_OVL 0); opt-in kernels
   K_HEAD_FAST_RX0, K_OUT_FAST_F0, K_ESTAGEB0,
-  K_COUNT = K_ESTAGEB0 + 3
+  // clean/rr-f-wave4b: the wave64 forms (design D of rr_block_c32.hlsl: one wave64 = two token tiles of the same window, shared
+  // weight loads; the same bits) for the A/B mask WG_RR_W4B (default 0xf): head.fast.rx.w64 (bit 0), stagee.{D1-R, D1-F, E1}.w64
+  // (bits 1, 2, 3). Bit 0 selects the wave64 head whatever WG_RR_W4 bit 0 says (it replaces the wave32 head of both); bits 1-3 need WG_RR_W4 bit 1
+  // (the body lever); WG_RR_W4B=0 reproduces the wave-4 frame. Paired timing at 1440p Q (layer / plain): 0xf -178 / -175 us, bit 0 -71 / -71, bit 1 -45 / -44, bit 2 -42 / -39, bit 3 -25 / -23.
+  K_HEAD_FAST_RXW = K_ESTAGEB0 + 3, K_ESTAGEW0,
+  K_COUNT = K_ESTAGEW0 + 3
 };
 const char* const kKernelNames[] = {
     "stage.IN0", "stage.E1", "stage.E2", "stage.E3", "stage.E4", "stage.E5", "stage.D4-F", "stage.D4-R",
@@ -328,7 +333,8 @@ const char* const kKernelNames[] = {
     "stagedx.IN0", "stagedx.E1", "stagedx.E2", "stagedx.E3", "stagedx.E4", "stagedx.E5", "stagedx.D4-F", "stagedx.D4-R",
     "stagedx.D3-F", "stagedx.D3-R", "stagedx.D2-F", "stagedx.D2-R", "stagedx.D1-F", "stagedx.D1-R", "stagedx.D0-F",
     "rt.touch", "rt.blkcopy", "resolve.fast3", "resolve.fast3.x",
-    "head.fast.rx0", "output.fast.f0", "stagee0.E1", "stagee0.D1-F", "stagee0.D0-F"};
+    "head.fast.rx0", "output.fast.f0", "stagee0.E1", "stagee0.D1-F", "stagee0.D0-F",
+    "head.fast.rx.w64", "stagee.D1-R.w64", "stagee.D1-F.w64", "stagee.E1.w64"};
 static_assert(sizeof(kKernelNames) / sizeof(kKernelNames[0]) == K_COUNT, "kKernelNames and Kid disagree");
 // clean/rr-f-flow: kernels only the opt-in variants dispatch (exact / strict / debug head, body steps X and Z,
 // WG_RR_PATHS=verified); the default frame (head fast, body E, fast paths) never uses them
@@ -337,7 +343,7 @@ Kid input_features_kernel(int mode) { return mode == 1 ? K_IN_FEAT_LITE : (mode 
 bool kernel_opt_in(int k) {
   if (k >= K_IN0 && k <= K_D0F) return true;                  // body step X
   if (k >= K_ZSTAGE0 && k < K_ZFIX0 + 15) return true;        // body step Z and its fixup
-  if (k >= K_HEAD_FAST_RX0 && k < K_COUNT) return true;       // clean/rr-f-wave4: the A/B kernels of WG_RR_W4
+  if (k >= K_HEAD_FAST_RX0 && k < K_HEAD_FAST_RXW) return true;   // clean/rr-f-wave4: the A/B kernels of WG_RR_W4
   switch (k) {
     case K_HEAD: case K_HEAD_DEBUG: case K_HEAD_WPL: case K_HEAD_FIXUP: case K_HEAD_STRICT:
     case K_OUT_MAIN: case K_OUT_POOL: case K_RES_MAIN: case K_RES_POOL:
@@ -356,6 +362,8 @@ int variant_group(int k, bool* alt) {
   *alt = false;
   if (k == K_HEAD_FAST) return VG_HEAD;
   if (k == K_HEAD_FAST_RX) { *alt = true; return VG_HEAD; }
+  if (k == K_HEAD_FAST_RXW) { *alt = true; return VG_HEAD; }   // clean/rr-f-wave4b: the wave64 relaxed head
+  if (k >= K_ESTAGEW0 && k < K_ESTAGEW0 + 3) return VG_BODY;   // clean/rr-f-wave4b: the relaxed body's level-1 stages in wave64
   if (k >= K_ESTAGE0 && k < K_ESTAGE0 + 15) return VG_BODY;
   if (k >= K_DSTAGE0 && k < K_DSTAGE0 + 15) return VG_BODY;   // clean/rr-f-s12-dflow: the relaxed body's dataflow form
   if (k >= K_ESTAGEX0 && k < K_ESTAGEX0 + 15) { *alt = true; return VG_BODY; }
@@ -1693,6 +1701,7 @@ struct Instance {
   uint64_t hold_modes = 0;
   int deferred_logged = -1;
   unsigned w4 = 2;                 // WG_RR_W4 at creation (hex mask, default 2): clean/rr-f-wave4 levers (bit 0 head R4.1, bit 1 body R4.2, bit 2 output R4.3); 0 bits select the *0 kernels. Paired timing at 1440p Q: only bit 1 wins (-78 us layer / -83 us plain); bit 0 is neutral (+2 us), bit 2 loses (+10 us output)
+  unsigned w4b = 0xf;              // WG_RR_W4B at creation (hex mask, default 0xf): clean/rr-f-wave4b wave64 forms on (bit 0 head.fast.rx.w64, bit 1 stagee.D1-R, bit 2 stagee.D1-F, bit 3 stagee.E1); 0 bits select the wave32 kernels of WG_RR_W4
   unsigned vbits = 0;              // variant set (mode_vbits, per-knob overrides applied): head relaxed / body exact / output Fast / resolve exact
   bool infold = false;             // stagee.IN0 computes the front-end MLP itself (relaxed body in a build with kRrInFold)
   uint32_t twin = kTimingWindow;           // WG_RR_TIMING_WINDOW=N at creation: frames per timing log line (benches)
@@ -2206,6 +2215,8 @@ uint32_t create_locked(const WgRrCreate* d, void** out) {
     {
       char w4v[16] = {};
       if (GetEnvironmentVariableA("WG_RR_W4", w4v, sizeof w4v)) in->w4 = (unsigned)strtoul(w4v, nullptr, 16) & 7u;
+      char w4bv[16] = {};
+      if (GetEnvironmentVariableA("WG_RR_W4B", w4bv, sizeof w4bv)) in->w4b = (unsigned)strtoul(w4bv, nullptr, 16) & 0xfu;
     }
     in->alias = !(GetEnvironmentVariableA("WG_RR_ALIAS", av, sizeof av) && strcmp(av, "0") == 0);
     char dxv[8] = {};
@@ -2299,6 +2310,9 @@ uint32_t create_locked(const WgRrCreate* d, void** out) {
     log_line(fmt("instance %u: ingest after body stage %d", in->id, in->ringest));
     log_line(fmt("instance %u: wave-4 levers (WG_RR_W4) 0x%x: head %s, body %s, output %s", in->id, in->w4, (in->w4 & 1u) ? "on" : "off",
                  (in->w4 & 2u) ? "on" : "off", (in->w4 & 4u) ? "on" : "off"));
+    log_line(fmt("instance %u: wave-4b wave64 forms (WG_RR_W4B) 0x%x: head %s, D1-R %s, D1-F %s, E1 %s (D1-R / D1-F / E1 also need the WG_RR_W4 body lever, bit 1)", in->id,
+                 in->w4b, (in->w4b & 1u) ? "on" : "off", (in->w4b & 2u) ? "on" : "off", (in->w4b & 4u) ? "on" : "off",
+                 (in->w4b & 8u) ? "on" : "off"));
     log_line(fmt("instance %u: rr_mode=%s (%s%s): head %s, input %s, body %s, output %s, resolve %s", in->id, mode_name(in->mode),
                  msrc, vover.c_str(), (in->vbits >> VG_HEAD) & 1 ? "relaxed (RR_HVARL 7)" : "exact",
                  in->input_lite ? "lite" : (in->input_split ? "split (history exact)" : (in->input_copy ? "exact (copy)" : "exact")),
@@ -3420,7 +3434,10 @@ uint32_t evaluate_locked(Instance* in, const WgRrFrame* f, WgRrFrameResult* res)
       } else {
         // clean/rr-f-wave4 R4.2: the relaxed body's E1 / D1-F / D0-F before the LDS overlay (WG_RR_W4 bit 1 = 0)
         const int s0 = (in->w4 & 2u) || ((in->vbits >> VG_BODY) & 1) ? -1 : (s == 1 ? 0 : s == 12 ? 1 : s == 14 ? 2 : -1);
-        dispatch(l, in->body_e ? (s0 >= 0 ? (Kid)(K_ESTAGEB0 + s0) : (Kid)(((in->vbits >> VG_BODY) & 1 ? K_ESTAGEX0 : K_ESTAGE0) + s)) : d.k, nwx * nwy, a);
+        // clean/rr-f-wave4b R4b.2: the relaxed body's D1-R / D1-F / E1 in wave64 (WG_RR_W4B bits 1 / 2 / 3, with the body lever on)
+        const int sw = ((in->w4 & 2u) && !((in->vbits >> VG_BODY) & 1)) ? (s == 13 ? 0 : s == 12 ? 1 : s == 1 ? 2 : -1) : -1;
+        const bool w64 = sw >= 0 && ((in->w4b >> (sw + 1)) & 1u) != 0u;
+        dispatch(l, in->body_e ? (w64 ? (Kid)(K_ESTAGEW0 + sw) : (s0 >= 0 ? (Kid)(K_ESTAGEB0 + s0) : (Kid)(((in->vbits >> VG_BODY) & 1 ? K_ESTAGEX0 : K_ESTAGE0) + s))) : d.k, nwx * nwy, a);
       }
     }
     // clean/rr-f-s9-host: the resolve's game-input ingest (game textures -> layer / opacity / alpha copies, read
@@ -3474,7 +3491,7 @@ uint32_t evaluate_locked(Instance* in, const WgRrFrame* f, WgRrFrameResult* res)
     if (in->prepu_at < 0) rec_prepu();   // no barrier: the head does not touch its words
     if (nsk) {
     } else if (!in->head_exact) {
-      dispatch(l, in->head_debug ? K_HEAD_DEBUG : in->head_fast ? ((in->vbits >> VG_HEAD) & 1 ? ((in->w4 & 1u) ? K_HEAD_FAST_RX : K_HEAD_FAST_RX0) : K_HEAD_FAST) : K_HEAD_STRICT,
+      dispatch(l, in->head_debug ? K_HEAD_DEBUG : in->head_fast ? ((in->vbits >> VG_HEAD) & 1 ? ((in->w4b & 1u) ? K_HEAD_FAST_RXW : ((in->w4 & 1u) ? K_HEAD_FAST_RX : K_HEAD_FAST_RX0)) : K_HEAD_FAST) : K_HEAD_STRICT,
                nwx * nwy, a);
       if (!(in->dprobe2 & 4)) uav_barrier(l, A);
     } else {   // exact head: weight planes, the integer pass (marks windows it cannot take), strict fixup of those

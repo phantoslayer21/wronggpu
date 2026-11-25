@@ -105,6 +105,13 @@ original.
 ## Exact tricks of round 10 (same bits in every mode)
 
 - body (clean/rr-f-s10-body): D4-F / D4-R of the relaxed body (RR_B32) run on four groups per window (`RR_B32G4`, `WG_RR_EROUTE` build knob).
+- wave64 forms (clean/rr-f-wave4b, same bits, design D of `kernels/rr_block_c32.hlsl`: one wave64 = two token tiles of the same window,
+  every weight / bias / key-value fragment loaded once for both): `head.fast.rx.w64` (`head/dx12/rr_d0r_w64.hlsl`) and the relaxed
+  body's `stagee.D1-R.w64` / `stagee.D1-F.w64` / `stagee.E1.w64` (`kernels/rr_block_c64_w64.hlsl`). `WG_RR_W4B` at creation (hex mask,
+  default `0xf`; bit 0 head, bit 1 D1-R, bit 2 D1-F, bit 3 E1); a clear bit selects the wave32 kernel of the `WG_RR_W4` mask, so
+  `WG_RR_W4B=0` is the wave-4 frame (A/B and byte checks); bit 0 does not depend on `WG_RR_W4` bit 0, bits 1-3 need its bit 1 (the
+  default). Paired timing at 1440p Q (layer / plain, `fast`): `0xf` -178 / -175 us, bit 0 -71 / -71, bit 1 -45 / -44, bit 2 -42 / -39,
+  bit 3 -25 / -23; all four byte-identical. The exact body (mode exact) and the dataflow forms keep wave32.
 - tail (clean/rr-f-s10-tail): the resolve reads the exp2 table from the arena instead of copying it into LDS; 24-bit multiplies for
   addressing in the output stage; the main output's store is folded into resolve.fast2 / resolve.fixup (`WG_RR_FUSESTORE=0` at creation
   brings the separate store pass back). Also used by the exact-resolve (`_X`) kernels of mode exact.

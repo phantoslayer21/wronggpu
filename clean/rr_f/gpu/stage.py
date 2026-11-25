@@ -461,6 +461,25 @@ def kernel_for(name, zmode, isa=False, step="E", ldsw=1, direct=None, fold=None,
     return build.compile_kernel(src, "rr_block", d, isa=isa, tag=tag)
 
 
+# clean/rr-f-wave4b R4b.2: the level-1 stages of the relaxed body (E1, D1-F, D1-R: step E with RR_B32 in WG_RR_EDEFS) in wave64,
+# design D of rr_block_c32.hlsl (rr_block_c64_w64.hlsl: one wave64 = two token tiles of the same window, every value
+# computed by the same operation, so the outputs keep their bits). The runtime's WG_RR_W4B mask (bits 1 .. 3) selects them.
+W4B_C64_STAGES = ("D1-R", "D1-F", "E1")
+
+
+def kernel_c64_w64(name, zmode, step="E", ldsw=1, extra=None):
+    assert name in W4B_C64_STAGES and step == "E" and "RR_B32=1" in os.environ.get("WG_RR_EDEFS", "").split(",")
+    d = stage_defines(name, zmode, step, ldsw)
+    d.update({"WG_WAVE": 64})
+    if name == "E1":
+        d["RR_ADAPT"] = 2   # reads IN0's y2 directly, as stagee.E1
+    tag = "rsc64w64_" + name.replace("-", "") + "_z" + zmode + "_" + step + ("_l" if ldsw else "")
+    if extra:
+        d.update(extra)
+        tag += "_" + "_".join(f"{k}{v}" for k, v in sorted(extra.items()))
+    return build.compile_kernel("rr_block_c64_w64.hlsl", "rr_block", d, tag=tag)
+
+
 def kernel_dxil(name, zmode, step="E", ldsw=1):
     """The dxil the body uses for a stage."""
     return kernel_for(name, zmode, step=step, ldsw=ldsw)

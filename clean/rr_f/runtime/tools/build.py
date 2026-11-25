@@ -79,6 +79,9 @@ STAGES = ("IN0", "E1", "E2", "E3", "E4", "E5", "D4-F", "D4-R", "D3-F", "D3-R", "
 # invalidate the head kernels' cache keys)
 OWN_KEY_SKIP = ("rr_input.hlsl", "rr_input_mlp.hlsl", "rr_block.hlsl", "rr_block_c32.hlsl", "rr_block_fast.hlsl",
                 "rr_block_wide.hlsl", "rr_fast.hlsli", "rr_mlp_step.hlsli", "rr_dflow.hlsli",   # (s12-dflow)
+                # clean/rr-f-wave4b: the wave64 forms (the head's own file is never included by the other head kernels;
+                # listing them keeps every existing head kernel's cache key)
+                "rr_d0r_w64.hlsl", "rr_block_c64_w64.hlsl",
                 "rr_in_math.hlsli",   # a14-frame (request of track C): included by rr_input.hlsl only
                 # clean/rr-f-s10-tail: the output / resolve / pool / exposure kernels are never included by the head
                 "rr_output.hlsl", "rr_output_fast.hlsli", "rr_output_probe.hlsl", "rr_resolve.hlsl", "rr_resolve_fast.hlsl",
@@ -120,6 +123,12 @@ def kernels(out):
     # clean/rr-f-wave4 R4.2b: stagee.E1 / D1-F / D0-F share the exact body's LDS overlay (rr_block_fast.hlsl / rr_block_c32.hlsl
     # RR_OVL); stagee0.* = the same kernels without it (RR_OVL 0, the kernels of fc16c9d; runtime WG_RR_W4 bit 1 = 0)
     res += [("stagee0." + n, 37, stage.kernel_for(n, ez, step="E", ldsw=1, extra={"RR_OVL": 0})) for n in ("E1", "D1-F", "D0-F")]
+    # clean/rr-f-wave4b R4b.2: the level-1 stages in wave64 (rr_block_c64_w64.hlsl, design D; the same bits as stagee.E1 /
+    # D1-F / D1-R; runtime WG_RR_W4B bits 3 / 2 / 1). Relaxed body only (the exact body keeps wave32).
+    if b32:
+        res += [("stagee." + n + ".w64", 37, stage.kernel_c64_w64(n, ez, step="E", ldsw=1)) for n in stage.W4B_C64_STAGES]
+    else:   # (a non-relaxed library: the names stay, with stagee.<n>'s own DXIL)
+        res += [("stagee." + n + ".w64", 37, stage.kernel_for(n, ez, step="E", ldsw=1)) for n in stage.W4B_C64_STAGES]
     # clean/rr-f-s12-dflow: staged.* = stagee.* in the dataflow form (rr_dflow.hlsli: row counters instead of the UAV
     # barriers; opt-in WG_RR_DFLOW=1). Only the rr_block_wide.hlsl stages have that form; the others repeat stagee.*'s
     # DXIL (kRrDflowMask: the stages that have it)
@@ -299,6 +308,13 @@ def kernels(out):
                                                                   **json.loads(os.environ.get("WG_RR_HEADRX_W4_DEFS", "{}"))),
                                         hinc, "rr_d0r_head_zexact_oprep")))
     res.append(("head.fast.rx0", 48, own(head, "rr_d0r_head", hrx, hinc, "rr_d0r_head_zexact_oprep")))
+    # clean/rr-f-wave4b R4b.1 (same bytes as head.fast.rx; head/dx12/rr_d0r_w64.hlsl, written arguments there): the relaxed head
+    # in wave64 (design D of rr_block_c32.hlsl: one wave64 = two token tiles of the window, the weight fragments shared).
+    # Runtime WG_RR_W4B bit 0; head.fast.rx stays as it is (bit 0 = 0 selects it).
+    res.append(("head.fast.rx.w64", 48, own(os.path.join(RRF, "head", "dx12", "rr_d0r_w64.hlsl"), "rr_d0r_head",
+                                            dict(hrx, WG_WAVE=64, RR_HSTM=1, RR_HQ8S=1,
+                                                 **json.loads(os.environ.get("WG_RR_HEADRX_W4_DEFS", "{}"))),
+                                            hinc, "rr_d0r_head_w64_zexact_oprep")))
     rk = os.path.join(RT, "kernels", "rr_runtime.hlsl")
     for name, entry, blk in (("rt.ingest", "rr_rt_ingest", 64), ("rt.fill", "rr_rt_fill", 64),
                              ("rt.store", "rr_rt_store", 64), ("rt.selftest", "rr_rt_selftest", 32),
