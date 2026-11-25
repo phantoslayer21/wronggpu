@@ -331,6 +331,14 @@
    "l_q7w.co"
   ],
   [
+   "l_swin_block_c32_dec_add_nc",
+   "-"
+  ],
+  [
+   "l_swin_block_c32_dec_coef12_add_nc",
+   "-"
+  ],
+  [
    "l_swin_block_c32_dec_coef12_hyb",
    "-"
   ],

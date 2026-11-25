@@ -74,6 +74,22 @@ shape), so do not compare them with the Model L harness table above.
 Record: [`l-vs-m-shapes-main.json`](records/l-vs-m-shapes-main.json) (its Model L rows timed an earlier form of
 Model L and are not shown).
 
+## Fast mode (opt-in, `l_mode=fast`)
+
+The release form of Model L on Direct3D 12 is the hybrid form (`l_mode=hybrid`, the default: float32 chains with FP16
+rounding at each step, the form that matches the reference bit for bit). `l_mode=fast` is an opt-in preset for players
+who prefer speed: it runs Model L's network on Model M's Swin kernels (the WMMA / FP8 `_nc` forms, with Model M's
+fusions) on Model L's own weights, so its output follows the model closely but is not bit-exact to the reference. The
+structure is Model L's: the decoder block adds the encoder block's output as its skip, the reconstruction and the
+temporal history are the hybrid route's own kernels (the C1/C2 reconstruction, the fused output stage).
+
+Select it with the runtime option `l_mode=fast` (in the game's `runtime_options` line) or the environment variable
+`WG_L_MODE=fast`; the option wins over the variable, and nothing set (or `l_mode=hybrid`) is the hybrid default, whose
+kernels and launches the preset does not touch. Fast mode runs on native Direct3D 12 only and is refused with its
+reason where a kernel it needs is missing from the build (a build made with `--model-l`; the bottleneck needs the
+build's `variants.json` and `swin__bmegahg.co`). No timing is published for it yet: a figure goes on this page only
+with its measurement record.
+
 ## Building Model L
 
 Model L is off in a default build. It is built with the `--model-l` option of the two build scripts:

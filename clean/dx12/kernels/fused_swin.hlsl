@@ -627,7 +627,11 @@ void load_frags_g(uint base, uint off, out uint2 f[KC])
 #ifndef SW_OUT_F16
 #define SW_OUT_F16 0
 #endif
-#if (SW_SRC != 0 || (SW_OUT_F16 && !SW_HYB)) && (SW_ADD || SW_ECL > 0)
+// The one exception outside the hybrid decoder: Model L's fast-mode decoder block (l_mode=fast, l_swin_fast.hlsl): the
+// M-form chain (SW_HYB 0) with the skip, SW_SRC 2 (x by the token-grid mirror) + SW_ADD (xadd, the skip, by the fine one)
+// + SW_OUT_F16, without a fused expand.
+#define SW_L_FAST_DEC (SW_SRC == 2 && SW_ADD && SW_OUT_F16 && !SW_HYB && SW_ECL == 0)
+#if (SW_SRC != 0 || (SW_OUT_F16 && !SW_HYB)) && (SW_ADD || SW_ECL > 0) && !SW_L_FAST_DEC
 #error "SW_SRC / SW_OUT_F16: plain blocks only (the hybrid C32 decoder: SW_OUT_F16 with SW_ADD, the skip)"
 #endif
 #ifndef SW_OUT_COEF12

@@ -23,6 +23,8 @@
 //                     launch, copy, upload and memset is printed as "skipped <what>" and not done; guard_end copies the
 //                     16 bytes at the word for guard_read; a memset / upload of the word prints "guard_clear" /
 //                     "guard_upload <word 12> <word 15>"
+//   --warm-skip       print "warm_skip <kernel>" for every kernel the route leaves out of the device's warm-up
+//                     (Device::warm_up_skip; Model L's l_mode), before the first frame; without it nothing is printed
 //   --fail-hyb-tables the device refuses the hybrid tables (Device::hyb_reserve returns false: create must refuse a
 //                     Model L hybrid context on the native-D3D12 stand-in, --backend=3); without it the reservation
 //                     succeeds (silently: the trace lines stay those of every other device)
@@ -98,6 +100,7 @@ const Signature kSignatures[] = {
                                                     // le): x = q, then enc0.Win1, enc0.Win2
     {"l_swin_block_c32_enc_lin_hyb", "ppppiiiipp"},      // its hybrid twin (speed lever 3; the same arguments)
     {"l_swin_block_c32_dec_coef12_hyb", "ppppiiiippppii"},  // its hybrid twin (speed lever 3; the same arguments)
+    {"l_swin_block_c32_dec_coef12_add_nc", "ppppiiiippppii"},  // l_mode=fast: the same arguments, the skip S = xadd
     {"l_swin_block_c32*", "ppppiiii"},      // Model L's blocks (clean/l/FORMATS.md)
     {"l_q7_block_*", "pppppiiii"},  // the FP16-form blocks (l_q7.co / l_q7w.co, their hybrid builds): x, skip, out,
                                     // w, the tables, H, W, ox, oy
@@ -141,7 +144,7 @@ class RecordingDevice : public Device {
   std::map<DevPtr, int> index;  // allocation number of each block
   int allocs = 0, frame = -1, fail_frame = -1;
   std::string fail_kernel;
-  bool fail_hyb = false, hyb = false;
+  bool fail_hyb = false, hyb = false, print_warm_skip = false;
   DevPtr next = 0x10000;
   // the frame guard (see --guard-timeout)
   int guard_timeout = -1, guard_reads = 0;
@@ -195,6 +198,11 @@ class RecordingDevice : public Device {
     return true;
   }
   bool hyb_tables() const override { return hyb; }
+  // the kernels the route leaves out of the device's warm-up (--warm-skip prints them: "warm_skip <name>")
+  void warm_up_skip(const std::vector<std::string>& names) override {
+    if (print_warm_skip)
+      for (const std::string& n : names) log->push_back("warm_skip " + n);
+  }
   bool alloc(DevPtr* p, size_t bytes) override {
     *p = next;
     mem[next].assign(bytes ? bytes : 1, 0);
@@ -361,7 +369,7 @@ int main(int argc, char** argv) {
   cfg.auto_exposure = 0;
   const int frames = std::atoi(argv[7]);
   std::string options, map_path, fail;
-  bool fail_hyb = false;
+  bool fail_hyb = false, warm_skip = false;
   float pre_exposure = 1.0f;
   int guard_timeout = -1;
   std::vector<std::pair<int, int>> sizes;
@@ -390,6 +398,8 @@ int main(int argc, char** argv) {
       fail = s.substr(7);
     } else if (s == "--fail-hyb-tables") {
       fail_hyb = true;
+    } else if (s == "--warm-skip") {
+      warm_skip = true;
     } else if (s.compare(0, 16, "--guard-timeout=") == 0) {
       guard_timeout = std::atoi(s.c_str() + 16);
     } else if (s.compare(0, 6, "--geo=") == 0) {
@@ -416,6 +426,7 @@ int main(int argc, char** argv) {
   auto dev = std::make_unique<RecordingDevice>(&log);
   RecordingDevice* rec = dev.get();
   rec->fail_hyb = fail_hyb;
+  rec->print_warm_skip = warm_skip;
   rec->guard_timeout = guard_timeout;
   if (!fail.empty()) {
     const size_t at = fail.find('@');
