@@ -44,6 +44,10 @@
 // runtime fusion le).
 // @wg-kernel lev/input_encoder_q20 co=- entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b116 defines=WG_ENC_VALUES_OUT=1,WG_ENC_Q20=1
 // @wg-kernel lev/input_encoder_direct_q20 co=- entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b116 rs=direct defines=WG_DIRECT_TEXTURES=1,WG_ENC_VALUES_OUT=1,WG_ENC_Q20=1
+// The staged route's pre-exposure division folded in (WG_STAGED_PIDIV; wg_pidiv.hlsli; runtime WG_L_POST_TF with pi != 1):
+// the colour is divided by pi (the bits of EncParams.pad0) as color_divide stores it, so no color_divide launch runs; the
+// post's colour reads (l_post_tf_p12_pf) divide the same way.
+// @wg-kernel lev/input_encoder_q20_pf co=- entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b116 defines=WG_ENC_VALUES_OUT=1,WG_ENC_Q20=1,WG_STAGED_PIDIV=1
 #include "wg_platform.hlsli"
 #ifndef WG_ENC_VALUES_OUT
 #define WG_ENC_VALUES_OUT 0
@@ -64,6 +68,9 @@
 #endif
 #if defined(WG_ENC_MO)
 #include "wg_motion_hi.hlsli"
+#endif
+#if defined(WG_STAGED_PIDIV)
+#include "wg_pidiv.hlsli"
 #endif
 
 WG_ARGS_BEGIN
@@ -516,9 +523,15 @@ void encoder_main()
     }
 
     // Slot 0, then slot 1: the 20 values -> 5 words of FP8, values 8..15 swapped with the partner lane (lane ^ 16)
+#if defined(WG_STAGED_PIDIV)
+    const PiDiv pd = pidiv_make((uint)P_pad0);
+#endif
     uint q[2][5], x8[2][2];
     [unroll] for (uint dx2 = 0; dx2 < 2; ++dx2) {
         float4 c = cs[dx2];
+#if defined(WG_STAGED_PIDIV)
+        c = float4(asfloat(asuint(pidiv3(c.xyz, pd, (uint)P_rw >> 31u)) ^ ((uint)P_rw >> 31u)), c.w);
+#endif
         float v[20];
         if (U.mode == kHistGeneral)   // uniform
             pixel_values(kHistGeneral, U, (int)xs[dx2], y, c, mn[dx2], mf[dx2], mc[dx2], v

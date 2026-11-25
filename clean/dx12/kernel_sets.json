@@ -69,6 +69,10 @@
    "encoder.co"
   ],
   [
+   "lev/input_encoder_q20_pf",
+   "-"
+  ],
+  [
    "native_driver_probe",
    "-"
   ],
@@ -191,6 +195,14 @@
   [
    "w64/post_tf_p12_diet_vsit_tex",
    "post_w64__orig.co"
+  ],
+  [
+   "w64_lc12/l_post_tf_p12",
+   "-"
+  ],
+  [
+   "w64_lc12/l_post_tf_p12_pf",
+   "-"
   ]
  ],
  "model_l": [

@@ -29,6 +29,7 @@
 #include "model_select.h"
 #include "runtime_core.h"
 #include "wg_runtime.h"
+#include "native_direct_pi.h"
 #ifdef WG_DEV_DIAGNOSTICS
 #include "post_tf_align.h"
 #endif
@@ -165,6 +166,14 @@ bool tf_supported(int rw, int rh, int dw, int dh, int cap) {
          ((long long)(63.0 * rw / dw) + 4) * ((long long)(14.0 * rh / dh) + 5) <= cap;
 }
 constexpr int kTfCap = 352, kTfDlCap = 644;
+// l_post_tf_p12 (Model L's true fusion, dx12/kernels/l_post_tf.hlsl): the render footprint of a step (64 D columns x 8 row
+// pairs; the 4 x 4 gather: one more column than post_tf's 3 x 3) must fit its staging area, 512 texels (one per lane), with one
+// column and one row of margin against the rounding of the host's estimate, plus recon2_supported (dw >= 4, 32-bit offsets).
+constexpr int kLTfCap = 512;
+bool l_tf_supported(int rw, int rh, int dw, int dh) {
+  return recon2_supported(rw, rh, dw, dh) &&
+         ((long long)(63.0 * rw / dw) + 6) * ((long long)(14.0 * rh / dh) + 6) <= kLTfCap;
+}
 // post_tf4_dl_* (D3D12 only, dx12/kernels/post.hlsl; Brief 15): the same kernel with NW = 4 row pairs per step (256 lanes)
 // and a staging cap of 448, for native AA and every ratio between 1.0 and 1.5 on the native D3D12 backend (HIP's
 // post_tf_dl_* needs 41472 bytes of LDS, more than D3D12's 32 KB). The step footprint of NW = 4 (64 D columns x 4 row
@@ -266,6 +275,7 @@ struct Runtime {
   // kernel on the same inputs: the same bytes. l_color_done: this frame's staging already ran.
   bool l_color_early = false, l_color_done = false;
   bool l_ldr = false;     // Model L with LDR colour: the _ldr kernels
+  bool l_tf_now = false, l_fold_pidiv = false;   // this frame: Model L's fused post runs / its pre-exposure division is folded (l_post_tf)
   bool l_post_own_given = false;  // the runtime option l_post=own (accepted: Model L's only route)
 #ifdef WG_MODEL_L
   // The maps of clean/l/FORMATS.md in three buffers (no kernel works in place):
@@ -338,9 +348,17 @@ struct Runtime {
   bool l_exfuse = false;
   bool l_exfuse_env = true;   // WG_L_EXFUSE (not "0")
   // WG_L_POST_W64 (native D3D12, Model L, default 0; 1 = on): the reconstruction as w64_lc12/l_post_recon[_p12][_ldr]
-  // (l_post.hlsl LP_W64: 64-lane waves, the driver's conversions as the software RNE ones: the same bytes; RGA gfx1201:
-  // +70 % instructions against lc12, so it is not the default: a measurement switch for the GPU A/B).
+  // (l_post.hlsl LP_W64: 64-lane waves, the FP16 conversions as the driver channel's single-value hardware conversion
+  // (op 0x1C, one v_cvt_f16_f32): the same bytes; RGA gfx1201: 8443 instructions against lc12's 7599 (the software RNE
+  // conversion was 12916), so it is still not the default: a measurement switch for the GPU A/B).
   bool l_post_w64 = false;
+  // WG_L_POST_TF (native D3D12, Model L HDR, staged route; default on when the kernels are in the manifest, 0 = off): the
+  // reconstruction, the output filter and the staged route's scale_rgb in ONE kernel (w64_lc12/l_post_tf_p12, kernels/l_post_tf.hlsl:
+  // l_post_recon_p12 + w64/post_filter_c1_s4 + scale_rgb; the display image is never written), and with pi != 1 the
+  // pre-exposure division folded into the encoder and the post (lev/input_encoder_q20_pf + w64_lc12/l_post_tf_p12_pf: no
+  // color_divide launch). The same bytes as the separate launches (clean/l/runner/l_post_tf_check.py); 0 = the separate
+  // color_divide + input_encoder_q20 + l_post_recon_p12 + post_filter_c1_s4 + scale_rgb (the instant GPU byte check / ABBA).
+  bool l_post_tf = false, l_tf_built = false, l_tf_pf_built = false;
   // swin_bneck6_hyb's frame guard (hyb_bneck.hlsl): the wait-timeout count (sync word 15) last seen in the device's
   // copy, and whether the abort word (sync word 12) is to be cleared before the next frame
   uint32_t bneck_seen = 0;
@@ -778,6 +796,13 @@ struct Runtime {
           if (!m64.empty()) return fail("WG_L_POST_W64=1 on native D3D12: not in the kernel manifest: " + m64);
           l_post_w64 = true;
         }
+        const char* tfv = std::getenv("WG_L_POST_TF");
+        if (tfv && std::string(tfv) != "0" && std::string(tfv) != "1")
+          return fail("WG_L_POST_TF: unknown value \"" + std::string(tfv) + "\" (0 or 1)");
+        l_tf_built = std::find(have.begin(), have.end(), "w64_lc12/l_post_tf_p12") != have.end();
+        l_tf_pf_built = l_tf_built && std::find(have.begin(), have.end(), "w64_lc12/l_post_tf_p12_pf") != have.end() &&
+                        std::find(have.begin(), have.end(), "lev/input_encoder_q20_pf") != have.end();
+        l_post_tf = !(tfv && std::string(tfv) == "0") && l_tf_built;
       }
       if (l_hyb_d3d12) {
         for (const std::string& h : have)
@@ -1891,6 +1916,7 @@ struct Runtime {
     kernels_text += " swin_fused=" + (fz.empty() ? std::string("none") : fz);
     if (l_hyb_d3d12) kernels_text += std::string(" l_exfuse=") + (l_exfuse ? "on" : "off");
     if (l_hyb_d3d12) kernels_text += std::string(" l_post_w64=") + (l_post_w64 ? "on" : "off");
+    if (l_hyb_d3d12) kernels_text += std::string(" l_post_tf=") + (l_post_tf ? "on" : "off");
     kernels_text += " swin_bneck=" + (bneck_variant.empty() ? std::string(hyb_mega ? "hyb6" : "none") : bneck_variant);
     if (diag_hooks_ignored) kernels_text += " diag_hooks=ignored";
     kernels_text += " swin_resident=" + std::to_string(swin_resident);
@@ -2191,7 +2217,7 @@ struct Runtime {
       int ox = 0, oy = 0;
       l_offsets(false, f, &ox, &oy);
       const int nwin = ((fw + ox + 3) / 4) * ((fh + oy + 3) / 4);
-      return launch(native_direct_io ? "lev/input_encoder_direct_q20" : "lev/input_encoder_q20",
+      return launch(native_direct_io ? "lev/input_encoder_direct_q20" : (l_fold_pidiv ? "lev/input_encoder_q20_pf" : "lev/input_encoder_q20"),
                     cdiv(((fh + 4) / 2) * ((fw + 4) / 2), 128), 256,
                     {&cnet, &din, &min_, &reduced, &latent[cur], &mnear[cur], &q, &mnear[nxt], &mfar, &mcenter,
                      &expo, &wv, &p}) &&
@@ -2332,6 +2358,18 @@ struct Runtime {
     const std::string missing = manifest_missing(l_own_post_kernels(!c.hdr));
     if (!missing.empty()) return "not yet ported to D3D12: " + missing;
     return "";
+  }
+  // The q20 encoder route of fusion le (l_encoder's in_block): Model L's encoder block with the linears as its prologue.
+  bool l_in_block_route() const {
+    return !l_q7 && fz_le && l_le_built && l_nc[0] && (native_direct_io ? l_q20d_built : l_q20_built);
+  }
+  // Whether this frame runs Model L's true-fusion post (l_post_tf_p12[_pf]): the staged native D3D12 route (no direct textures,
+  // no interop input / output copy, no motion at output resolution), HDR colour, the default pack12 route with the unbanded
+  // post, post_diet (the exposure pair carries dec_scale), a footprint the kernel stages, WG_L_POST_TF not 0.
+  bool l_tf_frame_ok(int rw, int rh, bool raw, bool mo, const FrameIo* io) const {
+    return model_l && l_post_tf && l_own_post && l_hyb_d3d12 && d3d12_native && !native_direct_io && !l_ldr && !raw && !mo &&
+           p12 && post_diet && !out_f16 && !recon_output && !(io && io->out_half_pitch > 0) &&
+           l_in_block_route() && l_tf_supported(rw, rh, dw, dh);
   }
   bool l_own_post_setup(const WgRtConfig& c) {
     const std::string why = l_own_post_fits(c);
@@ -2697,6 +2735,12 @@ struct Runtime {
     }
     const bool mo = mhi != 0;
     mo_last = mo;
+#ifdef WG_MODEL_L
+    // Model L's true-fusion post (WG_L_POST_TF): this frame's choice, before the colour staging (its pi != 1 division is
+    // folded into the encoder and the post when the pre-exposure's division window is valid; the colour stays cin)
+    l_tf_now = l_tf_frame_ok(rw, rh, raw, mo, io);
+    l_fold_pidiv = l_tf_now && l_tf_pf_built && pi != 1.0f && wgrt::native_direct_pi_window(pi).hi != 0u;
+#endif
     if (raw) {  // interop input copy: the game's formats -> dense color / pi, depth, motion in render pixels
       if (!depth || !motion) return fail("raw inputs need the runtime's own depth / motion buffers");
       DevPtr c16 = cin, d32 = din, m16 = min_;
@@ -2710,7 +2754,7 @@ struct Runtime {
       cnet = cin = color_net;  // exposure then reads color / pi with 1 / pi = 1 (see FrameIo)
       din = depth;
       min_ = motion;
-    } else if (!native_direct_io && pi != 1.0f) {
+    } else if (!native_direct_io && pi != 1.0f && !l_fold_pidiv) {
       int npix = rw * rh;
       float p_ = pi;
       if (!launch("color_divide", cdiv(npix, 256), 256, {&cin, &color_net, &p_, &npix})) return false;
@@ -2788,6 +2832,7 @@ struct Runtime {
       p.idh = (float)(1.0 / dh);
       p.irw = (float)(1.0 / rw);
       p.irh = (float)(1.0 / rh);
+      if (l_fold_pidiv) std::memcpy(&p.pad0, &pi, 4);   // the pre-exposure's bits: the _pf encoder divides the colour by it
       DevPtr w = wdev["enc0"];
       const int ntok = (fh / 2) * (fw / 2);
       if (model_l) {
@@ -3177,12 +3222,23 @@ struct Runtime {
                            {&cnet, &A, &B, &C, &hist[cur], &mnear[nxt], &mcenter, &mfar, &w, &hist[nxt], &reduced,
                             &outp, &p, &dec_scale, &expo}))
           return false;
+      } else if (l_tf_now) {  // Model L: l_post_recon_p12 + the output filter + scale_rgb in one kernel (l_post_tf.hlsl)
+        int ow_i = ow, oh_i = oh, hpitch = 12 * ow, cp = post_tf_cpairs, k1 = 0, c2 = 0;
+        const int nch = tf_chunks(ow, oh, cp, &k1, &c2);
+        float dec_scale = (float)(0.01 / (fr.exposure == 0.0f ? 1.0 : (double)fr.exposure)), p_h = pi;
+        if (l_fold_pidiv) std::memcpy(&p.pad0, &pi, 4);   // the pre-exposure's bits: the _pf kernel divides every colour read
+        post_last = l_fold_pidiv ? "w64_lc12/l_post_tf_p12_pf" : "w64_lc12/l_post_tf_p12";
+        filter_last = "fused";
+        if (!launch(post_last.c_str(), cdiv(ow, 40) * nch, 512,
+                    {&cnet, &A, &B, &C, &hist[cur], &mnear[nxt], &mcenter, &mfar, &w, &hist[nxt], &reduced, &outp, &p, &expo,
+                     &ow_i, &oh_i, &dec_scale, &p_h, &hpitch, &cp, &k1, &c2}))
+          return false;
       } else if (!post_recon_stage(rw, rh, cur, nxt, p, w, cnet)) {
         return false;
       }
     }
     // 6. output filter (spec 06) into the output buffer (O, RGB f32); in the fused kernels above
-    if (!post_fused && !recon_out16 && !band_now && !tf_kernel && !tf_mo) {
+    if (!post_fused && !recon_out16 && !band_now && !tf_kernel && !tf_mo && !l_tf_now) {
       int a = dw, b = dh, c = ow, d = oh;
       float dec_scale = (float)(0.01 / (fr.exposure == 0.0f ? 1.0 : (double)fr.exposure));
       float p_h = pi;
