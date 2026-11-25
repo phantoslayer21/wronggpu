@@ -28,7 +28,9 @@
 // @wg-kernel k_split_m_wo co=k_block_wide.co block=128 wave=32 args=s184:p19.b32,p,p,p,p entry=ks_wo defines=KS_PHASE=2,KW_C=160,KW_HEADS=8,KW_IN=0,KW_CIN=160,KW_CNEXT=0,KW_NG=4
 // @wg-kernel k_split_m_w1 co=k_block_wide.co block=128 wave=32 args=s184:p19.b32,p,p,p,p entry=ks_w1 defines=KS_PHASE=3,KW_C=160,KW_HEADS=8,KW_IN=0,KW_CIN=160,KW_CNEXT=0,KW_NG=4
 // @wg-kernel k_split_m_w2 co=k_block_wide.co block=128 wave=32 args=s184:p19.b32,p,p,p,p entry=ks_w2 defines=KS_PHASE=4,KW_C=160,KW_HEADS=8,KW_IN=0,KW_CIN=160,KW_CNEXT=0,KW_NG=4
-#define KW_LD_A16 1   // 16-byte aligned loads (hlsl/k_wide.hlsli)
+#ifndef KW_LD_A16
+#define KW_LD_A16 2   // 16-byte loads, alignment proven on the scalar base only (no per-lane v_and -16; 1 = whole address, 0 = none) (hlsl/k_wide.hlsli)
+#endif
 #include "wg_platform.hlsli"
 
 WG_ARGS_BEGIN

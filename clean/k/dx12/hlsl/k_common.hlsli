@@ -67,7 +67,14 @@ uint wgk_pin(uint v) { return WaveActiveBitOr(v & wgk_zero()); }
 #ifndef KB_LD_A16
 #define KB_LD_A16 0
 #endif
+// KB_LD_A16 = 2: the low 4 bits are cleared on the scalar base only ((base & ~15) + off: the same addresses; no per-lane
+// v_and_b32 -16 on the D3D12 driver, which emits the 128-bit loads without the lane mask, RGA gfx1201). 1: the whole address
+// (RADV's ACO needs the proof), 0: none.
+#if KB_LD_A16 == 2
+uint4 wgk_ld128_a16(uint base, uint off) { return wg_mem.Load4((base & ~15u) + off); }
+#else
 uint4 wgk_ld128_a16(uint base, uint off) { return wg_mem.Load4((base + off) & (KB_LD_A16 ? ~15u : ~0u)); }
+#endif
 uint4 wgk_ld8(uint base, uint off_h) { return wgk_ld128_a16(base, off_h * 2u); }
 void wgk_st8(uint base, uint off_h, uint4 v) { wg_st128(base, off_h * 2u, v); }
 uint4 wgk_zero8() { return uint4(0u, 0u, 0u, 0u); }

@@ -172,7 +172,11 @@ uint4 kw_pin(uint4 v)
 #ifndef KW_LD_A16
 #define KW_LD_A16 0
 #endif
+#if KW_LD_A16 == 2   // as KB_LD_A16 = 2 (k_common.hlsli): the scalar base only
+uint4 kw_ld128(uint base, uint off) { return wg_mem.Load4((base & ~15u) + off); }
+#else
 uint4 kw_ld128(uint base, uint off) { return wg_mem.Load4((base + off) & (KW_LD_A16 ? ~15u : ~0u)); }
+#endif
 uint4 kw_ldg(uint p, uint e) { return kw_ld128(p, e * 2u); }
 void kw_stg(uint p, uint e, uint4 v) { wg_st128(p, e * 2u, v); }
 

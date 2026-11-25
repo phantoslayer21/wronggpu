@@ -236,7 +236,7 @@ void kio_nearest(KFrameIn F, int ix, int iy, out int odx, out int ody)
     const bool inv = (F.flags & KIO_INV) != 0;
     bool edge;
     if (inv)
-        edge = (c < 0.5f * (a + e) - kf_opq(k * c)) || (c < 0.5f * (b + d) - kf_opq(k * c));
+        edge = (c < 0.5f * (a + e) - kf_pm(k, c)) || (c < 0.5f * (b + d) - kf_pm(k, c));
     else
         edge = (c > kf_fma(c, k, 0.5f * (a + e))) || (c > kf_fma(c, k, 0.5f * (b + d)));
     int bx = 0, by = 0;
@@ -263,7 +263,7 @@ void kio_nearest(KFrameIn F, int ix, int iy, out int odx, out int ody)
 float kio_decode(float t)
 {
     if (t < K_KIO_DECODE_NEAR) return wg_div(1.0f, 1.0f - t);
-    const float e = kf_opq((t + kf_bits(0x3C4FAE29u)) * 9.0f) * kf_bits(0x3FB8AA3Bu);
+    const float e = kf_pm(t + kf_bits(0x3C4FAE29u), 9.0f) * kf_bits(0x3FB8AA3Bu);
     return wg_div(kf_exp2(e) - 1.0f, 9.0f * t);
 }
 float kio_encode(float Y)
@@ -281,7 +281,7 @@ float4 kio_texel_h4(uint img, uint idx)
 }
 float4 kio_bilinear4(uint img, int w, int h, float cx, float cy)
 {
-    const float px = kf_opq(cx * (float)w) - 0.5f, py = kf_opq(cy * (float)h) - 0.5f;
+    const float px = kf_pm(cx, (float)w) - 0.5f, py = kf_pm(cy, (float)h) - 0.5f;
     const float fx0 = floor(px), fy0 = floor(py);
     const float fx = px - fx0, fy = py - fy0;
     // HIP: finite ? (int)max(min(f, w), -1) : (+inf: w, -inf: -1, NaN: 0). The clamp already gives w / -1 for +-inf
@@ -310,7 +310,7 @@ float4 kio_bilinear4(uint img, int w, int h, float cx, float cy)
     const float4 q11 = float4(wg_h2f_lo(q11u.x), wg_h2f_hi(q11u.x), wg_h2f_lo(q11u.y), wg_h2f_hi(q11u.y));
     const float4 t0 = q00 + kf_opq4(q10 - q00) * fx;
     const float4 t1 = q01 + kf_opq4(q11 - q01) * fx;
-    return kf_opq4(t0 * omfy) + kf_opq4(t1 * fy);
+    return kf_pm4(t0, (float4)omfy) + kf_pm4(t1, (float4)fy);
 }
 
 // (Y, Co, Cg) of max(RGB, 0) scaled by kappa first (spec 42 6.2) or not (spec 43 4.2: kappa after)

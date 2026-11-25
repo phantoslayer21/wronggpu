@@ -97,7 +97,7 @@ float kf_div_prepared(float a, KfDivPrep p)
 float ki_decode(float t)
 {
     if (t < kf_bits(0x3F7FBE88u)) return ki_rcp(1.0f - t);
-    const float e = kf_opq((t + kf_bits(0x3C4FAE29u)) * 9.0f) * kf_bits(0x3FB8AA3Bu);
+    const float e = kf_pm(t + kf_bits(0x3C4FAE29u), 9.0f) * kf_bits(0x3FB8AA3Bu);
     return ki_div(ki_exp2(e) - 1.0f, 9.0f * t);
 }
 #if defined(KI_TILED_PHI_LOG2)
@@ -192,7 +192,7 @@ KiFine ki_fine(KInParams P, KiHost k, int fx, int fy)
     const float4 s = kio_bilinear4(P.Hc, W16, H16, wx * k.h_x, wy * k.h_y);
     if ((F.flags & KIO_HDR) != 0) {
         const float f = ki_decode(s.x);
-        r.h = F.rho * kf_opq3(s.xyz * f);
+        r.h = F.rho * kf_pm3(s.xyz, (float3)f);
     } else {
         r.h = s.xyz;
     }
@@ -202,7 +202,7 @@ KiFine ki_fine(KInParams P, KiHost k, int fx, int fy)
 }
 
 // kappa max(RGB, 0), each product rounded (kf_opq: no merging with the 0.25 / 0.5 factors that follow)
-float3 ki_rgb(KFrameIn F, float4 c) { return kf_opq3(F.kappa * max(c.xyz, 0.0f)); }
+float3 ki_rgb(KFrameIn F, float4 c) { return kf_pm3((float3)F.kappa, max(c.xyz, 0.0f)); }
 void ki_store_x0(uint x0, int id, int k, float c0, float c1, float c2, float c3)
 {
     wg_st64(x0, ((uint)id * 16u + 4u * (uint)k) * 2u,

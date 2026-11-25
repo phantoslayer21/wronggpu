@@ -135,7 +135,7 @@ void ki_color_tap(KFrameIn F, float4 c, out uint2 tap, out uint tT)
     const bool hdr = (F.flags & KIO_HDR) != 0;
     float Y, Co, Cg;
     kio_ycocg(max(c.x, 0.0f), max(c.y, 0.0f), max(c.z, 0.0f), Y, Co, Cg);
-    const float kY = kf_opq(F.kappa * Y), kCo = kf_opq(F.kappa * Co), kCg = kf_opq(F.kappa * Cg);
+    const float kY = kf_pm(F.kappa, Y), kCo = kf_pm(F.kappa, Co), kCg = kf_pm(F.kappa, Cg);
     uint hY, hCo, hCg;
     [branch] if (hdr) {
         const float e = kio_encode(kY);
@@ -148,7 +148,7 @@ void ki_color_tap(KFrameIn F, float4 c, out uint2 tap, out uint tT)
         hCg = ki_f2h(kCg);
     }
     tap = uint2(hY | (hCo << 16), hCg | (ki_f2h(c.w) << 16));
-    const float kL = kf_opq(F.kappa * kio_luma_fma(max(c.x, 0.0f), max(c.y, 0.0f), max(c.z, 0.0f)));
+    const float kL = kf_pm(F.kappa, kio_luma_fma(max(c.x, 0.0f), max(c.y, 0.0f), max(c.z, 0.0f)));
     float vT = kL;
     [branch] if (hdr) vT = kL * kio_encode(kL);
     tT = ki_f2h(vT);
@@ -349,7 +349,7 @@ WG_KERNEL(k_in_tiled)
             mu = float3(kf_div_prepared(mu.x, den_p), kf_div_prepared(mu.y, den_p), kf_div_prepared(mu.z, den_p));
         }
         const float pm = ki_phi(mu.x, hdr);
-        const float3 mp = kf_opq3(mu * pm);
+        const float3 mp = kf_pm3(mu, (float3)pm);
         const float3 eta = 0.5f * (hi - lo);
         const float3 nu = float3(kf_fma(hi.x - lo.x, 8.0f, 1.0f), kf_fma(hi.y - lo.y, 8.0f, 1.0f), kf_fma(hi.z - lo.z, 8.0f, 1.0f));
         const bool nu_pos_fin = (((asuint(nu.x) >> 23) & 255u) - 1u < 254u) &&
@@ -364,7 +364,7 @@ WG_KERNEL(k_in_tiled)
             const KiFine fq = ki_fine(P, hk, 2 * u + (q & 1), 2 * v + (q >> 1));
             valid = valid && fq.valid;
             const float ph = ki_phi(fq.h.x, hdr);
-            const float3 g = max(abs(mp - kf_opq3(fq.h * ph)) - eta, 0.0f);
+            const float3 g = max(abs(mp - kf_pm3(fq.h, (float3)ph)) - eta, 0.0f);
             float score = 0.0f;
             [branch] if (!(g.x == 0.0f && g.y == 0.0f && g.z == 0.0f && nu_pos_fin)) {
                 const float dx = (g.x == 0.0f && nu_pos_fin) ? g.x : ki_div(g.x, nu.x);
