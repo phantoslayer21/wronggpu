@@ -103,8 +103,8 @@ def run(options="", frames=4, build_files=(), env=None, model=None, exe=None, fl
         manifest=None, tf_default=False):
     """The trace program's output lines (WG_* removed from the environment, then env applied). hdr: WgRtConfig.hdr
     (Model L's reconstruction kernel is HDR; Model M does not read the flag). manifest: [(kernel, code object)] for
-    <build>/dx12/manifest.json (the D3D12 ports a build has; backend 3). tf_default: leave WG_L_POST_TF unset (Model L's fused
-    post, the shipped default); otherwise it is 0, the separate launches the other tests trace."""
+    <build>/dx12/manifest.json (the D3D12 ports a build has; backend 3). tf_default: leave WG_L_POST_TF unset (Model L's
+    fused post, the shipped default); otherwise it is 0, the separate launches the other tests trace."""
     build = tempfile.mkdtemp(prefix="wg_lfb_")
     for n in build_files:
         open(os.path.join(build, n), "wb").close()
@@ -113,7 +113,7 @@ def run(options="", frames=4, build_files=(), env=None, model=None, exe=None, fl
         with open(os.path.join(build, "dx12", "manifest.json"), "w") as fh:
             json.dump({"format": 1, "kernels": [{"name": k, "co": co} for k, co in manifest]}, fh)
     e = {k: v for k, v in os.environ.items() if not k.upper().startswith("WG_")}
-    if not tf_default:   # the separate recon + filter + scale_rgb launches (WG_L_POST_TF=0), unless the test is of the fused default
+    if not tf_default:   # the separate launches (WG_L_POST_TF=0: recon + filter + scale_rgb), unless the test is of the shipped defaults
         e["WG_L_POST_TF"] = "0"
     e.update(env or {})
     try:

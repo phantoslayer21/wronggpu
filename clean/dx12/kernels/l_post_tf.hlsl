@@ -63,7 +63,9 @@ WG_ARGS_END
 #ifndef LP_HSEQ
 #define LP_HSEQ 1       // history_cr: two groups of loads (RGA: the 24 live load registers of its span form halve)
 #endif
+#ifndef LP_FBLAZY
 #define LP_FBLAZY 1     // the normalized features are not live together (RGA: -7 VGPRs)
+#endif
 #include "l_post_core.hlsli"
 
 #define kTfCols 64
