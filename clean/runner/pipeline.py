@@ -351,6 +351,10 @@ class Pipeline:
 
     def check_packing(self, model_dir):
         """The C++ packers must give the same bytes as Runner.pack_weights (clean/runner/packing.py etc.)."""
+        k = self.kernels()
+        if k.get("model") in ("K", "L"):
+            return
+        m_form = k.get("m_form", "")
         tensors = logical_tensors(read_model_tensors(model_dir))
         for stage in ["enc0"] + SWIN_ORDER + ["dec0", "post"]:
             if stage == "enc0":
@@ -360,6 +364,8 @@ class Pipeline:
             elif stage == "post":
                 ref = post.pack(tensors[stage])
             else:
+                if m_form in ("hybrid", "q7c", "q7"):
+                    continue
                 ref = pack_stage(stage, tensors[stage], self.d_row)
             got = self.stage_blob(stage)
             if got != ref:
@@ -390,19 +396,35 @@ class Pipeline:
         d = {"exposure": {"e": float(pair[0]), "e_prev": float(pair[1])},
              "enc0": {"features": fp8("enc0.features", (fh // 2, fw // 2, 64)), "m_near": h2("enc0.m_near"),
                       "m_far": h2("enc0.m_far"), "m_center": h2("enc0.m_center")}}
+        k = self.kernels()
+        bneck_on = k.get("swin_bneck", "none") != "none"
+        mid_on = k.get("swin_mid", "none") != "none"
+        fz = set(k.get("d3d12_fusion", "").split(",")) if k.get("d3d12_fusion") else set()
+        m_hyb = k.get("m_form", "") in ("hybrid", "q7c", "q7")
+        d1_fused = k.get("d1d0_p12") == "1" and not m_hyb
         size = {"enc1": (fh // 2, fw // 2), "enc2": (fh // 4, fw // 4), "dec2": (fh // 4, fw // 4),
                 "dec1": (fh // 2, fw // 2)}
         for s in SWIN_ORDER:
             if s in ("enc1", "enc2"):
                 (H, W), (C, Co) = size[s], SWIN_CHANNELS[s]
-                d[s] = {"skip": fp8(s + ".skip", (H, W, C)), "merged": fp8(s + ".merged", (H // 2, W // 2, Co))}
+                no_merged = (s == "enc1" and "pm" in fz and not m_hyb and not mid_on) or (s == "enc2" and mid_on)
+                d[s] = {"skip": fp8(s + ".skip", (H, W, C)),
+                        "merged": None if no_merged else fp8(s + ".merged", (H // 2, W // 2, Co))}
             elif s in ("dec2", "dec1"):
                 (H, W), (C, _) = size[s], SWIN_CHANNELS[s]
-                d[s] = {"out": fp8(s + ".out", (H, W, C))}
+                no_out = (s == "dec2" and "xe" in fz and not m_hyb) or (s == "dec1" and d1_fused)
+                d[s] = {"out": None if no_out else fp8(s + ".out", (H, W, C))}
             else:
-                d[s] = {"out": fp8(s + ".out", (fh // 8, fw // 8, 128))}
-        if "pack12" in self.kernels()["dec0"]:   # A, C in the pack12 images (FORMATS.md), B unused
-            d["dec0"] = {"A": None, "B": None, "C": None, "latent": snorm4("dec0.latent")}
+                no_b = s != "b5" and (bneck_on or mid_on)
+                d[s] = {"out": None if no_b else fp8(s + ".out", (fh // 8, fw // 8, 128))}
+        if "pack12" in k["dec0"]:   # A8 (A0..A2, B0..B2, C2_f16) + C4 (C0_f16, C1_f16); FORMATS.md
+            a8 = self._get("dec0.A", np.uint8).reshape(rh, rw, 8)
+            c4 = np.frombuffer(self._get("dec0.C", np.uint8)[:rh * rw * 4].tobytes(), np.float16).reshape(rh, rw, 2)
+            c2 = np.frombuffer(np.ascontiguousarray(a8[..., 6:8]).tobytes(), np.float16).reshape(rh, rw, 1)
+            d["dec0"] = {"A": (a8[..., 0:3] / 255.0).astype(np.float32),
+                         "B": (a8[..., 3:6] / 255.0).astype(np.float32),
+                         "C": np.concatenate([c4, c2], axis=-1).astype(np.float32),
+                         "latent": snorm4("dec0.latent")}
         else:
             d["dec0"] = {"A": unorm3("dec0.A"), "B": unorm3("dec0.B"), "C": h4("dec0.C", rh, rw),
                          "latent": snorm4("dec0.latent")}
@@ -421,7 +443,8 @@ class Pipeline:
     # ---- internals ---------------------------------------------------------------------------------------------------
 
     def _fused(self):
-        return self.kernels()["post"].startswith("post_fused")
+        k = self.kernels()
+        return k["post"].startswith("post_fused") or k.get("filter_last") == "fused"
 
     def _output(self):
         """filter.out: 3 x f32, or RGBA16F for the post_fused*_o16 kernels -> [oh, ow, 3] float32."""

@@ -133,7 +133,7 @@ M_RECON = {"rule": "d_over_render_at_least", "ratio": 3.0, "variants": ("3/2", "
 # steps (window 3, encoded-domain combination, encoded fallback) and the gather exponent in the machine-code form
 # ("c1": "machine", PRESET-M-C1C2-machine-code.md). C2 (the Catmull-Rom weights' fused forms) is a float32 rounding
 # matter below this oracle's float64 history sample; the C1/C2 probe checks it bit for bit.
-M_RECON_ORIG = dict(M_RECON, gather="half", blend="float32", c1="machine")
+M_RECON_ORIG = dict(M_RECON, gather="half", blend="float32", c1="machine", history_round="rtz")
 
 
 def recon_size(output_w, output_h):

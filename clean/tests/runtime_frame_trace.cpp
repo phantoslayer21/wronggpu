@@ -15,6 +15,7 @@
 //   --geo=<key>=<n>   a Swin / GEMM launch-geometry override in WgRtConfig (nt, gemm_threads, swin_threads, wpw64,
 //                     wpw96, wpw128, wpg0 .. wpg4 = block_wpg[k]); repeatable
 //   --hdr=<0|1>       WgRtConfig.hdr (default 0)
+//   --pre-exposure=<f> WgRtFrame.pre_exposure of every frame (default 1)
 //   --guard-timeout=<frame>  the frame guard (Device::guard_begin, the hybrid bottleneck's wait timeout): in that frame
 //                     the bottleneck "times out" (at the guard's second reading of that frame, the words a timed-out wait
 //                     writes are set first: sync words 12 and 15 + 1). The device models the guard: "guard_begin
@@ -84,7 +85,10 @@ struct Signature {
 const Signature kSignatures[] = {
     {"input_encoder", "ppppppppppppE"},     // Model M's encoder and Model L's values (q in place of the features)
     {"input_encoder_q20", "ppppppppppppE"},  // Model L's values, q in its 20-byte form (native D3D12, fusion le)
+    {"input_encoder_q20_pf", "ppppppppppppE"},  // the same with the pre-exposure division folded in (WG_L_POST_TF, pi != 1)
     {"coef_decoder", "ppppppppD"},          // Model M's decoder (also its pack12 form)
+    {"swin_block_c96_add_ex_hyb", "ppppiiiip"},  // the fused decoder blocks (WG_L_EXFUSE): the blocks' arguments, then aux
+    {"swin_block_c64_add_ex_hyb", "ppppiiiip"},  // (null: unused by the expand kernels)
     {"swin_block_*", "ppppiiii"},           // Model M's blocks: x, skip, out, w, H, W, ox, oy
     {"swin_bneck6_hyb", "ppppppppppiiiiiii"},  // the hybrid bottleneck in one launch (speed lever 4): x, out, tmp,
                                                // sync, b0 ... b5's blobs, H, W, even / odd offsets, workgroups
@@ -108,6 +112,8 @@ const Signature kSignatures[] = {
     {"l_post_recon", "ppppppppppppPp"},  // Model M's post_recon arguments (clean/l/FORMATS.md step 5)
     {"l_coef_pack12", "ppppppD"},  // the same arguments (B unused)
     {"l_post_recon_p12", "ppppppppppppPp"},  // the same arguments (A, C: pack12 images; B unused)
+    {"l_post_tf_p12", "ppppppppppppPpiiiiiiii"},     // Model L's true fusion: the post_recon arguments, then ow, oh, dec_scale and pi
+    {"l_post_tf_p12_pf", "ppppppppppppPpiiiiiiii"},  // (their bits), the row pitch (unused), post_tf's chunk plan (cpairs, k1, c2)
     {"post_filter_c1_s4", "ppiiiiip"},  // display, out, dw, dh, ow, oh, dec_scale (its bits), exposure pair
     {"l_post_recon_ldr", "ppppppppppppPp"},      // the LDR forms: the same arguments (the exposure pair not read)
     {"l_post_recon_p12_ldr", "ppppppppppppPp"},
@@ -356,6 +362,7 @@ int main(int argc, char** argv) {
   const int frames = std::atoi(argv[7]);
   std::string options, map_path, fail;
   bool fail_hyb = false;
+  float pre_exposure = 1.0f;
   int guard_timeout = -1;
   std::vector<std::pair<int, int>> sizes;
   std::set<int> resets;
@@ -377,6 +384,8 @@ int main(int argc, char** argv) {
       for (const std::string& f : split(s.substr(8), ',')) resets.insert(std::atoi(f.c_str()));
     } else if (s.compare(0, 6, "--hdr=") == 0) {
       cfg.hdr = std::atoi(s.c_str() + 6);
+    } else if (s.compare(0, 15, "--pre-exposure=") == 0) {
+      pre_exposure = (float)std::atof(s.c_str() + 15);
     } else if (s.compare(0, 7, "--fail=") == 0) {
       fail = s.substr(7);
     } else if (s == "--fail-hyb-tables") {
@@ -432,7 +441,7 @@ int main(int argc, char** argv) {
     fr.rh = rh;
     fr.mv_scale[0] = fr.mv_scale[1] = 1.0f;
     fr.exposure = 1.0f;
-    fr.pre_exposure = 1.0f;
+    fr.pre_exposure = pre_exposure;
     fr.reset = resets.count(f) ? 1 : 0;
     const bool ok = runtime_frame(rt, fr, nullptr);
     WgRtFrameInfo info = WgRtFrameInfo();

@@ -173,6 +173,18 @@ class DumpTest(unittest.TestCase):
             self.assertEqual([m["boundary"] for m in man["missing"]], ["post.display"])
             self.assertFalse(os.path.exists(os.path.join(td, "f0000", "post.display.npy")))
 
+    def test_pipeline_fused_and_check_packing_guards(self):
+        from clean.runner.pipeline import Pipeline
+        p = Pipeline.__new__(Pipeline)
+        p.kernels = lambda: {"post": "post_recon2_r_band_p12", "filter_last": "fused"}
+        self.assertTrue(p._fused())
+        p.kernels = lambda: {"post": "post_recon2_r_p12", "filter_last": "post_filter_c1_s4"}
+        self.assertFalse(p._fused())
+        p.kernels = lambda: {"model": "K"}
+        p.check_packing("nonexistent-dir-must-not-be-read")
+        p.kernels = lambda: {"model": "L"}
+        p.check_packing("nonexistent-dir-must-not-be-read")
+
     def test_needs_full_or_tiles(self):
         with self.assertRaises(ValueError):
             M.dump(FakePipe(), frames(1), "unused")
@@ -428,8 +440,31 @@ class ConventionsTest(unittest.TestCase):
                 man = json.load(f)
             c = man["input_conventions"]
             self.assertEqual((c["mv_units"], c["mv_sign"], c["jitter_units"], c["depth"], c["auto_exposure"],
-                              c["subrect"]), ("uv", [-1.0, 1.0], "uv", "inverted", "on", [17, 9]))
+                              c["hdr"], c["subrect"]), ("uv", [-1.0, 1.0], "uv", "inverted", "on", "off", [17, 9]))
             self.assertEqual(man["frames"][0]["jitter"], [0.5 * RW, 0.25 * RH])          # converted to render px
+            # --hdr, --options and --map reach _pipeline and manifest
+            seen_args = {}
+
+            def cap_pipeline(a, conv):
+                seen_args["flags"] = conv.flags()
+                seen_args["options"] = a.options
+                seen_args["map"] = a.map
+                return FakePipe()
+
+            M._pipeline = cap_pipeline
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    rc = M.main(["dump", "--build", "b", "--model", "m", "--render", f"{RW}x{RH}", "--output",
+                                 f"{OW}x{OH}", "--inputs", ind, "--full", "--out", os.path.join(td, "d_hdr"),
+                                 "--hdr", "--options", "m_mode=exact;output_filter=original", "--map", "p.map.json"])
+                    self.assertEqual(rc, 0)
+            finally:
+                M._pipeline = orig
+            self.assertEqual(seen_args["flags"], {"depth_inverted": False, "auto_exposure": False, "hdr": True})
+            self.assertEqual(seen_args["options"], "m_mode=exact;output_filter=original")
+            self.assertEqual(seen_args["map"], "p.map.json")
+            with open(os.path.join(td, "d_hdr", "manifest.json")) as f:
+                self.assertEqual(json.load(f)["input_conventions"]["hdr"], "on")
             with self.assertRaises(ValueError):
                 M.conventions_from_args(type("A", (), dict(mv_units="frame", mv_sign="1,0", mv_bias=None,
                                                            jitter_units="render", jitter_sign="1,1", depth="normal",

@@ -280,7 +280,17 @@ WG_FN void l_finish_pixel(const LGather& g, int x, int y, float px, float py, bo
     }
     return;
   }
-  if (store) hist_store<false>(hist_out, y * p.dw + x, enc_e(hh[0]), enc_e(hh[1]), enc_e(hh[2]));
+  if (store) {
+#if WG_LP_M
+    // Spec 06 draft 6: full-history store rounds FP32 -> FP16 toward zero (RTZ; v_cvt_pkrtz_f16_f32),
+    // keeping FP16 subnormals, +-0, and NaN. Display channels and reduced history stay RNE.
+    const v2h h01 = wg_h2(enc_e(hh[0]), enc_e(hh[1]));
+    const v2h h20 = wg_h2(enc_e(hh[2]), 0.0f);
+    hist_out[y * p.dw + x] = v4h{h01[0], h01[1], h20[0], h20[1]};
+#else
+    hist_store<false>(hist_out, y * p.dw + x, enc_e(hh[0]), enc_e(hh[1]), enc_e(hh[2]));
+#endif
+  }
   if (store) {
     const int pitch = display_pitch(p.dw), plane = pitch * p.dh, di = y * pitch + x;
     display[di] = display_value(oh[0]);
