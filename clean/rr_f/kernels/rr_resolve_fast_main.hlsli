@@ -5,6 +5,12 @@
 #ifndef RFX_W5_ALU
 #define RFX_W5_ALU 0   // clean/rr-f-wave5b (Fast mode only, VG_OUT): bounded ALU fast path for RF_SPEC 2/3 (no fp64 uniforms, no slow/fixup, FP16 3x3 clamp before E, uint2 half4 taps, branchless bilinear, native half stores)
 #endif
+#ifndef RFX_W5C
+#define RFX_W5C 0      // clean/rr-f-wave5c (Fast mode only, VG_OUT): QN=28 (QO=896, wave-uniform s1==3 skip), RFX_RP=16 -> RF_RS=1 (12.8 KB LDS -> 5 WGs/CU), 32-bit MV load
+#endif
+#ifndef RFX_LLDS
+#define RFX_LLDS 0     // clean/rr-f-wave5c (Fast mode only, VG_OUT): read layer bilinear taps from LDS render tile (CPU-guarded L.w==Wr, L.h==Hr, lbx==0, lby==0, |jitter|<=0.55)
+#endif
 // rr_resolve_fast: page 54b.1-54b.4 (the work of rr_resolve_main) with the same bits for every input.
 // Included by rr_resolve_fast.hlsl after rr_resolve.hlsl (helpers of the verified kernel) and the exp2 table.
 //
@@ -60,8 +66,20 @@
 #define RF_HOIST 0
 #endif
 #define RF_T 16u                      // tile side (output pixels)
+#if RFX_W5C
+#ifndef RFX_RP
+#define RFX_RP 20
+#endif
+#define RF_QN 28u                     // Q tile side bound (proven <= 28 for every 16-px tile: ((6*15+3)>>2)+4+1 = 28)
+#if RFX_RP == 16
+#define RF_RN 16u                     // ratio-limited render tile (nrx, nry <= 16; CPU-guarded)
+#else
+#define RF_RN 20u
+#endif
+#else
 #define RF_QN 29u                     // Q tile side bound (16 output pixels need at most 28 Q texels per axis)
 #define RF_RN 20u                     // render tile side bound (render / output <= 1 needs at most 20)
+#endif
 #define RF_NR (RF_RN * RF_RN)
 #define RF_TINY asfloat(0x33800000u)  // 2^-24: smallest magnitude of an "ordinary" nonzero input
 
@@ -96,7 +114,11 @@ groupshared uint2 rf_q[RF_QN * RF_QN];
 #endif                // instead of 6 at <= 96 VGPRs); the 3x3 reads form E * widen(h) at each read with rf_slot's
                       // own operation. 0 = the old layout (E * L.rgb, L.a as f32 in two b64 per texel)
 #if RFX_TB & 1
+#if RFX_W5C
+#define RF_QO 896u                    // Q region: 28 x 32 b64 entries at pitch RF_QP (rows 0..27; waves 2..3 skip s=3)
+#else
 #define RF_QO 1024u                   // Q region: 32 x 32 b64 entries at pitch RF_QP
+#endif
 #define RF_QP 32u
 #else
 #define RF_QO (RF_QN * RF_QN)
@@ -231,6 +253,14 @@ float4 rf_h4(Res r, int x, int y)
     return float4(select(ins, v.x, 0.0f), select(ins, v.y, 0.0f), select(ins, v.z, 0.0f), select(ins, v.w, 0.0f));
 }
 float rf_h1i(Res r, int x, int y) { return f16tof32(wg_ld16(r.off, (rf_m24((uint)y, r.pitch) + (uint)x) * 2u)); }
+#if RFX_W5C
+float2 rf_h2(Res r, int x, int y)
+{
+    bool ins = and(and(x >= 0, y >= 0), and(x < (int)r.w, y < (int)r.h));
+    uint h = wg_ld32(r.off, (rf_m24((uint)clamp(y, 0, (int)r.h - 1), r.pitch) + (uint)clamp(x, 0, (int)r.w - 1)) * 8u);
+    return float2(select(ins, f16tof32(h), 0.0f), select(ins, f16tof32(h >> 16), 0.0f));
+}
+#endif
 
 // One channel ach of rf_texel (the alpha source read of 54b.4).
 float rf_texel1(Res r, int x, int y, uint ach, inout bool tiny)
@@ -653,13 +683,20 @@ void rf_rsplit(uint e, out uint q, out uint r)
 // Cross-tile prefetch (RF_SPEC): the raw words of the next tile's Q and render footprints are loaded into registers
 // while the current tile's pixels are computed, then written to groupshared at the next tile's phases 1 and 3.
 #define RF_QS 4u                      // Q texels per lane (29 x 29 <= 4 x 256)
+#if RFX_W5C && RFX_RP == 16
+#define RF_RS 1u                      // render texels per lane (16 x 16 == 256 == WG_BLOCK)
+#else
 #define RF_RS 2u                      // render texels per lane (20 x 20 <= 2 x 256)
+#endif
 struct RfPf { uint q[2u * RF_QS]; uint r[6u * RF_RS]; };
 RfPf rf_prefetch(RfG g, uint lane, Res Q, Res Pr, Res Ar, Res Gr, Res L, int lbx, int lby, bool ok)
 {
     // ok = false (the dispatch takes the verified path): the resources may be absent, every load reads arena word 0
     RfPf pf;
     [unroll] for (uint s = 0; s < RF_QS; ++s) {
+#if RFX_W5C && (RFX_TB & 1)
+        if (s < 3u || lane < 128u) {
+#endif
 #if RFX_TB & 1
         // T1 (a): slot s of lane l = Q-tile entry (row (l >> 5) + 8 s, column l & 31) = LDS index l + 256 s. Entries
         // outside nqc x nqr load a clamped texel of the footprint (never read). Screens: gx <= qc1 <= Wh - 1 < Q.w,
@@ -680,6 +717,11 @@ RfPf rf_prefetch(RfG g, uint lane, Res Q, Res Pr, Res Ar, Res Gr, Res L, int lbx
 #else
         pf.q[2u * s] = wg_ld16(a, 0u) | (wg_ld16(a, 2u) << 16);
         pf.q[2u * s + 1u] = wg_ld16(a, 4u);
+#endif
+#if RFX_W5C && (RFX_TB & 1)
+        } else {
+            pf.q[2u * s] = 0u; pf.q[2u * s + 1u] = 0u;
+        }
 #endif
     }
     [unroll] for (uint s2 = 0; s2 < RF_RS; ++s2) {
@@ -959,6 +1001,9 @@ WG_KERNEL(rr_resolve_fast)
 #if RF_SPEC
         [unroll] for (uint s1 = 0; s1 < RF_QS; ++s1) {
 #if RFX_TB & 1
+#if RFX_W5C
+            if (s1 < 3u || lane < 128u)
+#endif
             RF_QW(lane + s1 * WG_BLOCK, uint4(pf.q[2u * s1], pf.q[2u * s1 + 1u], 0u, 0u));   // T1: qin true (screens)
 #else
             uint e = lane + s1 * WG_BLOCK;
@@ -1028,6 +1073,9 @@ WG_KERNEL(rr_resolve_fast)
         if (need_r && (RF_PROF & 8) == 0) {
             const float K2n = U.K2n, K2x2n = U.K2x2n, E = U.E;
 #if RF_SPEC
+#if RFX_W5C && RFX_LLDS && RFX_LR && RFX_RP == 16 && RF_SPEC == 2
+            rf_w2[RF_QO + lane] = uint2(pf.r[4], pf.r[5]);
+#else
             [unroll] for (uint s3 = 0; s3 < RF_RS; ++s3) {
                 uint e = lane + s3 * WG_BLOCK;
 #if RFX_TB & 1
@@ -1044,6 +1092,7 @@ WG_KERNEL(rr_resolve_fast)
                 else rf_slot(e, tx, ty, w6, true, Pr, Ar, L, lbx, lby, K2n, K2x2n, E, mzv);
                 }
             }
+#endif
 #else
             for (uint e = lane; e < nrx * nry; e += WG_BLOCK) {
                 int tx = rx0 + (int)(e % nrx), ty = ry0 + (int)(e / nrx);
@@ -1143,13 +1192,16 @@ WG_KERNEL(rr_resolve_fast)
         if (ext) {                                       // the global reads first (their latency under the work below)
             kx = (int)rf_rnd(mad(xh, U.sxr, -0.5f) + U.jx); ky = (int)rf_rnd(mad(yh, U.syr, -0.5f) + U.jy);
             if (mvr.off != 0u) {
-#if RF_SPEC
+#if RFX_W5C && RF_SPEC
+                float2 mv = rf_h2(mvr, clamp(kx, 0, U.Wr - 1) + mvr.ox, clamp(ky, 0, U.Hr - 1) + mvr.oy);
+#elif RF_SPEC
                 float4 mv = rf_h4(mvr, clamp(kx, 0, U.Wr - 1) + mvr.ox, clamp(ky, 0, U.Hr - 1) + mvr.oy);
 #else
                 float4 mv = rf_texel(mvr, clamp(kx, 0, U.Wr - 1) + mvr.ox, clamp(ky, 0, U.Hr - 1) + mvr.oy, tiny);
 #endif
                 mxo = mv.x * U.sxh; myo = mv.y * U.syh;
             }
+#if !(RFX_W5_ALU && RFX_LLDS && RFX_LR)
             if (lay) {
                 const float a = xf + U.jxp, b = yf + U.jyp;
 #if RFX_W5_ALU
@@ -1170,6 +1222,7 @@ WG_KERNEL(rr_resolve_fast)
 #endif
 #endif
             }
+#endif
         }
         const float hu = ((xf + mxo) + 0.5f) * U.rWe, hv = ((yf + myo) + 0.5f) * U.rHe;
         RfBil hb = rf_bil(hu, hv, select(lay3c, TH.w, AH.w), select(lay3c, TH.h, AH.h));
@@ -1228,6 +1281,7 @@ WG_KERNEL(rr_resolve_fast)
             // T5 (intR): kx in [kxa, kxb] (the same monotone expression as rf_geom's), rx0 = min(fxa - 1, kxa - 1) > 0 and
             // rx1 = max(fxb + 2, kxb + 1) < Wr - 1 (neither clamp bound), so the clamps are identities and the window
             // lies inside the render footprint: no check
+#if !(RFX_W5C && RFX_W5_ALU && RF_SPEC == 2)
             if ((lay3c || alp3c) && !intR) {
                 int lo = clamp(kx - 1, 0, U.Wr - 1), hi = clamp(kx + 1, 0, U.Wr - 1);
                 int lo2 = clamp(ky - 1, 0, U.Hr - 1), hi2 = clamp(ky + 1, 0, U.Hr - 1);
@@ -1238,9 +1292,11 @@ WG_KERNEL(rr_resolve_fast)
                 o3x[k3] = clamp(kx + k3 - 1, 0, U.Wr - 1) - rx0;
                 o3y[k3] = (clamp(ky + k3 - 1, 0, U.Hr - 1) - ry0) * (int)rp;
             }
+#endif
         RF_TICK(4);
             // ---- alpha upscaling (54b.4), taps first: their work hides the history reads
             float ah = 0.0f, oa = 0.0f;
+#if !(RFX_W5C && RFX_W5_ALU && RF_SPEC == 2)
             if (alp && (RF_PROF & 1) == 0) {
                 const float px = mad(xh, U.sxr, U.jx), py = mad(yh, U.syr, U.jy);
                 const float fxf = floor(px + (-0.5f)), fyf = floor(py + (-0.5f));
@@ -1369,10 +1425,24 @@ WG_KERNEL(rr_resolve_fast)
                 oa = select(nanf(oa), a_up, oa);
                 if ((flags & 16u) != 0u) oaSep = oa; else alphaC = oa;
             }
+#endif
         RF_TICK(5);
             // ---- transparency layer (54b.3)
             if (lay && (RF_PROF & 2) == 0) {
 #if RFX_W5_ALU && RFX_LR
+#if RFX_LLDS
+                {
+                    const float a = xf + U.jxp, b = yf + U.jyp;
+                    const bool sflag = and(abs(round(a) - a) < 0.5f, abs(round(b) - b) < 0.5f);
+                    w = select(sflag, U.TBW, U.TBW2); w1 = select(sflag, U.w1a, U.w1b);
+                    const float u = (xh + U.jxp) * U.rWe, v = (yh + U.jyp) * U.rHe;
+                    lb = rf_bil(u, v, (uint)U.Wr, (uint)U.Hr);
+                    const uint lx0 = (uint)(lb.xa - rx0), lx1 = (uint)(lb.xb - rx0);
+                    const uint ly0 = (uint)(lb.ya - ry0) * rp, ly1 = (uint)(lb.yb - ry0) * rp;
+                    l00r = rf_w2[RF_QO + ly0 + lx0]; l10r = rf_w2[RF_QO + ly0 + lx1];
+                    l01r = rf_w2[RF_QO + ly1 + lx0]; l11r = rf_w2[RF_QO + ly1 + lx1];
+                }
+#endif
                 float4 cur = rf_bil4_raw(lb, l00r, l10r, l01r, l11r);
                 cur.xyz *= U.E;
                 float4 hist = cur;
@@ -1386,19 +1456,52 @@ WG_KERNEL(rr_resolve_fast)
 #if RFX_TB & 2
                     if (intR) {
                         const uint b3 = (uint)((ky - 1 - ry0) * (int)rp + (kx - 1 - rx0));
+#if RFX_W5C
+                        const uint j_end = 3u + (wg_grid_ >> 31);
+                        [loop] for (uint j = 0; j < j_end; ++j) {
+                            const uint rowb = RF_QO + b3 + j * rp;
+                            [unroll] for (uint i = 0; i < 3u; ++i) {
+                                const uint2 lh = rf_w2[rowb + i];
+                                const half2 h01 = wg_as_h2(lh.x), h23 = wg_as_h2(lh.y);
+                                mn01 = min(mn01, h01); mx01 = max(mx01, h01);
+                                mn23 = min(mn23, h23); mx23 = max(mx23, h23);
+                            }
+                        }
+#else
                         [unroll] for (uint j = 0; j < 3u; ++j) [unroll] for (uint i = 0; i < 3u; ++i) {
                             const uint2 lh = rf_w2[RF_QO + b3 + j * rp + i];
                             const half2 h01 = wg_as_h2(lh.x), h23 = wg_as_h2(lh.y);
                             mn01 = min(mn01, h01); mx01 = max(mx01, h01);
                             mn23 = min(mn23, h23); mx23 = max(mx23, h23);
                         }
+#endif
                     } else
 #endif
-                    [unroll] for (int j = 0; j < 3; ++j) [unroll] for (int i = 0; i < 3; ++i) {
-                        const uint2 lh = rf_w2[RF_QO + (uint)(o3y[j] + o3x[i])];
-                        const half2 h01 = wg_as_h2(lh.x), h23 = wg_as_h2(lh.y);
-                        mn01 = min(mn01, h01); mx01 = max(mx01, h01);
-                        mn23 = min(mn23, h23); mx23 = max(mx23, h23);
+                    {
+#if RFX_W5C && RFX_W5_ALU && RF_SPEC == 2
+                        int o3x[3], o3y[3];
+                        [unroll] for (int k3 = 0; k3 < 3; ++k3) {
+                            o3x[k3] = clamp(kx + k3 - 1, 0, U.Wr - 1) - rx0;
+                            o3y[k3] = (clamp(ky + k3 - 1, 0, U.Hr - 1) - ry0) * (int)rp;
+                        }
+                        const uint j_end2 = 3u + (wg_grid_ >> 31);
+                        [loop] for (uint j = 0; j < j_end2; ++j) {
+                            const int ry_j = o3y[j];
+                            [unroll] for (int i = 0; i < 3; ++i) {
+                                const uint2 lh = rf_w2[RF_QO + (uint)(ry_j + o3x[i])];
+                                const half2 h01 = wg_as_h2(lh.x), h23 = wg_as_h2(lh.y);
+                                mn01 = min(mn01, h01); mx01 = max(mx01, h01);
+                                mn23 = min(mn23, h23); mx23 = max(mx23, h23);
+                            }
+                        }
+#else
+                        [unroll] for (int j = 0; j < 3; ++j) [unroll] for (int i = 0; i < 3; ++i) {
+                            const uint2 lh = rf_w2[RF_QO + (uint)(o3y[j] + o3x[i])];
+                            const half2 h01 = wg_as_h2(lh.x), h23 = wg_as_h2(lh.y);
+                            mn01 = min(mn01, h01); mx01 = max(mx01, h01);
+                            mn23 = min(mn23, h23); mx23 = max(mx23, h23);
+                        }
+#endif
                     }
                     const float4 mn = float4((float)mn01.x * U.E, (float)mn01.y * U.E, (float)mn23.x * U.E, (float)mn23.y);
                     const float4 mx = float4((float)mx01.x * U.E, (float)mx01.y * U.E, (float)mx23.x * U.E, (float)mx23.y);

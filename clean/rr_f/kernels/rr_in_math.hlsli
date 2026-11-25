@@ -45,9 +45,6 @@ static uint in_flag = 0u;                 // fast pass: this token needs the exa
 #ifndef RR_IN_FAST
 #define RR_IN_FAST 0      // timing experiments only (gpu/input_bench.py --fast): 1 hw log2/exp2, 4 hw sqrt,
 #endif                    // 8 no zero-result repair in M/FM, 16 no fences; 2 hw rcp (opt-in WG_RR_INPUT=hw)
-#ifndef RR_IN_W5_ALU
-#define RR_IN_W5_ALU 0    // clean/rr-f-wave5b (Fast mode only, VG_OUT): bounded ALU fast path (no sw FTZ, native f16, scalar-folded history/colour/guide, register-packed codes without LDS)
-#endif
 uint in_zb() { return 0u - (wg_grid_ >> 31); }
 #if RR_IN_FAST & 16
 float FN(float x) { return x; }
@@ -57,11 +54,7 @@ float FN(float x) { return asfloat(asuint(x) & ~in_zb()); }
 #else
 float FN(float x) { return asfloat(asuint(x) ^ in_zb()); }
 #endif
-#if RR_IN_W5_ALU
-float in_ftz(float x) { return x; }
-#else
 float in_ftz(float x) { const uint u = asuint(x); return asfloat((u & 0x7f800000u) == 0u ? (u & 0x80000000u) : u); }
-#endif
 float in_nan0(float x) { return isnan(x) ? 0.0f : x; }
 
 #define IN_MN asfloat(0x00800000u)
@@ -197,11 +190,7 @@ float in_sn8(uint b)
     const float v = in_udiv((uint)abs(k), 127.0f, asfloat(0x3c010204u));
     return k < 0 ? -v : v;
 }
-#if RR_IN_W5_ALU
-uint in_zl() { return 0u; }
-#else
 uint in_zl() { return wg_grid_ >> 31; }      // an opaque 0: keeps loops rolled
-#endif
 
 // sqrt of a positive normal x: s = hardware sqrt (faithful), r = x - s^2 exact (fma remainder of a faithful root),
 // the rounding decided exactly in units of h^2 (h = half an ulp of s): sqrt(x) > s + h  <=>  r > 2 s h + h^2.

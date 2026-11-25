@@ -316,17 +316,22 @@ enum Kid {
   // bit 5 +8 / +9, all six +7 / +1; 0x19 (bits 0, 3, 4) -29 / -29 (8 of 8 rounds). Bits 1, 2 and 5 are opt-in (not wins).
   K_ESTAGEC0 = K_ESTAGEW0 + 3,
   K_IN0_W4C = K_ESTAGEC0 + 8, K_D0F_W4C, K_OUT_FAST_F_PH1W,
-  // clean/rr-f-wave5b (Fast mode only; WG_RR_W5, default 0x7f, bits 0 .. 6):
-  //   bit 0: head.fast.rx.f.w64 (RR_HFAST_ALU=2: bounded f32 ALU head tail, per-head Q8 96->84 VGPR, branchless Q8, exact Cnet history)
-  //   bit 1: output.fast.w5 (OFX_W5_ALU=1 on output.fast.f0 base, zero fallback pass/barrier when tile fits)
-  //   bit 2: resolve.fast2.w5 / resolve.fast3.w5 (RFX_W5_ALU=1, FP16 3x3 clamp before E, zero fixup pass when RF_SPEC 2/3 & fits)
-  //   bit 3: input.features.w5 (RR_IN_W5_ALU=1, wave64, 0 B LDS, vectorized tex loads, DLANE + MDD)
-  //   bits 4..6: stagef.{E2/D2, IN0/D0-F, E1/D1}.w64 (pure f32 RR_B32=1 + branchless clamped RR_Q8_FAST=1, zero narrow-EXEC WMMAs).
-  // All 13 kernels sit in VG_OUT's alternatives, so only Fast mode compiles them in Pass 1 and dispatches them; Accurate and Exact never start them.
+  // clean/rr-f-wave5b/5c (Fast mode only; WG_RR_W5, default 0xfff, bits 0 .. 11):
+  //   bit 0 (0x001): head.fast.rx.f.w64 (RR_HFAST_ALU=2: bounded f32 ALU head tail, per-head Q8 96->84 VGPR, branchless Q8, exact Cnet history)
+  //   bit 1 (0x002): output.fast.w5 (OFX_W5_ALU=1 on output.fast.f0 base, zero fallback pass/barrier when tile fits)
+  //   bit 2 (0x004): resolve.fast2.w5 / resolve.fast3.w5 (RFX_W5_ALU=1, FP16 3x3 clamp before E, zero fixup pass when RF_SPEC 2/3 & fits)
+  //   bit 3 (0x008): input.features.w5c (input.features.lite wave64 + RR_IN_SRV_ONLY=1: bit-identical to input.features.lite, CPU-guarded direct SRV)
+  //   bits 4..8 (0x010 L2, 0x020 L0, 0x040 L1, 0x080 L3, 0x100 L4/L5): stagef.* (pure f32 RR_B32=1 + branchless clamped RR_Q8_FAST=1, NAR=0, 0 spills)
+  //   bit 9 (0x200): pool.main.w5 (RR_POOL_W5=1: hardware f32 mad/mul with exact tables, 0 FP64, bit-identical to quarter_pool)
+  //   bit 10 (0x400): resolve.fast2.w5c / resolve.fast3.w5c (RFX_W5C=1: QN=28/QO=896, RFX_RP=16 -> RF_RS=1, 12.8 KB LDS, RFX_LLDS=1, RFX_QLD=1, 32-bit MV, rolled 3x3)
+  //   bit 11 (0x800): output.fast.w5c (OFX_W5_ALU=1, OFX_W5C=1, OFX_PH1W=1, OFX_LD3=1: rolled of_reproj 74->55 VGPR, 7.2 KB LDS, BAR 4->2).
+  // All 24 kernels sit in VG_OUT's alternatives, so only Fast mode compiles them in Pass 1 and dispatches them; Accurate and Exact never start them.
   K_HEAD_FAST_RXF = K_OUT_FAST_F_PH1W + 1,
-  K_OUT_FAST_W5, K_RES_FAST2_W5, K_RES_FAST3_W5, K_IN_FEAT_W5,
+  K_OUT_FAST_W5, K_RES_FAST2_W5, K_RES_FAST3_W5, K_IN_FEAT_W5C,
   K_FSTAGE0,
-  K_COUNT = K_FSTAGE0 + 8
+  K_POOL_MAIN_W5 = K_FSTAGE0 + 15,
+  K_RES_FAST2_W5C, K_RES_FAST3_W5C, K_OUT_FAST_W5C,
+  K_COUNT
 };
 const char* const kKernelNames[] = {
     "stage.IN0", "stage.E1", "stage.E2", "stage.E3", "stage.E4", "stage.E5", "stage.D4-F", "stage.D4-R",
@@ -356,9 +361,11 @@ const char* const kKernelNames[] = {
     "head.fast.rx.w64", "stagee.D1-R.w64", "stagee.D1-F.w64", "stagee.E1.w64",
     "stagee.E2.w64", "stagee.D2-F.w64", "stagee.D2-R.w64", "stagee.E3.w64", "stagee.D3-F.w64", "stagee.D3-R.w64",
     "stagee.D4-F.w64", "stagee.D4-R.w64", "stagee.IN0.w4c", "stagee.D0-F.w4c", "output.fast.f_ph1w",
-    "head.fast.rx.f.w64", "output.fast.w5", "resolve.fast2.w5", "resolve.fast3.w5", "input.features.w5",
+    "head.fast.rx.f.w64", "output.fast.w5", "resolve.fast2.w5", "resolve.fast3.w5", "input.features.w5c",
     "stagef.IN0.w64", "stagef.D0-F.w64", "stagef.E1.w64", "stagef.D1-F.w64", "stagef.D1-R.w64",
-    "stagef.E2.w64", "stagef.D2-F.w64", "stagef.D2-R.w64"};
+    "stagef.E2.w64", "stagef.D2-F.w64", "stagef.D2-R.w64",
+    "stagef.E3", "stagef.D3-F", "stagef.D3-R", "stagef.E4", "stagef.E5", "stagef.D4-F", "stagef.D4-R",
+    "pool.main.w5", "resolve.fast2.w5c", "resolve.fast3.w5c", "output.fast.w5c"};
 static_assert(sizeof(kKernelNames) / sizeof(kKernelNames[0]) == K_COUNT, "kKernelNames and Kid disagree");
 // clean/rr-f-flow: kernels only the opt-in variants dispatch (exact / strict / debug head, body steps X and Z,
 // WG_RR_PATHS=verified); the default frame (head fast, body E, fast paths) never uses them
@@ -390,7 +397,7 @@ int variant_group(int k, bool* alt) {
   if (k >= K_ESTAGEW0 && k < K_ESTAGEW0 + 3) return VG_BODY;   // clean/rr-f-wave4b: the relaxed body's level-1 stages in wave64
   if (k >= K_ESTAGEC0 && k <= K_D0F_W4C) return VG_BODY;       // clean/rr-f-wave4c: the wide stages in wave64, IN0 / D0-F .w4c
   if (k == K_OUT_FAST_F_PH1W) { *alt = true; return VG_OUT; }   // clean/rr-f-wave4c: Fast mode's output.fast.f with OFX_PH1W alone
-  // clean/rr-f-wave5b: all 13 Fast-only kernels sit in VG_OUT's alternatives (the bit only Fast mode has, rr_modes.cpp
+  // clean/rr-f-wave5b/5c: all 24 Fast-only kernels sit in VG_OUT's alternatives (the bit only Fast mode has, rr_modes.cpp
   // modes_self_check): kernel_in_default_frame() is true for them in a runtime that starts in Fast and false otherwise, so Accurate
   // and Exact compile them in the second pass (a later switch to Fast) and never in their first
   if (k >= K_HEAD_FAST_RXF && k < K_COUNT) { *alt = true; return VG_OUT; }
@@ -1759,7 +1766,7 @@ struct Instance {
   unsigned w4 = 2;                 // WG_RR_W4 at creation (hex mask, default 2): clean/rr-f-wave4 levers (bit 0 head R4.1, bit 1 body R4.2, bit 2 output R4.3); 0 bits select the *0 kernels. Paired timing at 1440p Q: only bit 1 wins (-78 us layer / -83 us plain); bit 0 is neutral (+2 us), bit 2 loses (+10 us output)
   unsigned w4b = 0xf;              // WG_RR_W4B at creation (hex mask, default 0xf): clean/rr-f-wave4b wave64 forms on (bit 0 head.fast.rx.w64, bit 1 stagee.D1-R, bit 2 stagee.D1-F, bit 3 stagee.E1); 0 bits select the wave32 kernels of WG_RR_W4
   unsigned w4c = 0x19;             // WG_RR_W4C at creation (hex mask, default 0x19 = bits 0, 3, 4): clean/rr-f-wave4c levers on (bit 0 wide stages of level 2 in wave64, bit 1 level 3, bit 2 level 4 decoder D4-F / D4-R, bit 3 stagee.IN0.w4c, bit 4 stagee.D0-F.w4c, bit 5 output.fast.f_ph1w); 0 bits select the kernels of WG_RR_W4 / WG_RR_W4B. Same bits as without (byte-identical kernels, written arguments in rr_block_wide_w64.hlsl / rr_block_c32.hlsl / rr_output_fast.hlsli)
-  unsigned w5 = 0x7f;              // WG_RR_W5 at creation (hex mask, default 0x7f): clean/rr-f-wave5b levers, rr_mode fast ONLY (forced off for exact and accurate: w5_effective()): bit 0 head.fast.rx.f.w64 (RR_HFAST_ALU=2), bit 1 output.fast.w5 (skip fallback pass when fits), bit 2 resolve.fast2.w5 / resolve.fast3.w5 (skip fixup pass when RF_SPEC 2/3 & fits), bit 3 input.features.w5 (0 B LDS, wave64), bit 4 stagef.{E2, D2-F, D2-R}.w64 (pure f32 RR_Q8_FAST), bit 5 stagef.{IN0, D0-F}.w64, bit 6 stagef.{E1, D1-F, D1-R}.w64; 0 selects the wave-4c kernels (the frame of 13a53c9). NOT byte-identical (network/tail arithmetic relaxed; temporal history logic exact)
+  unsigned w5 = 0xfff;             // WG_RR_W5 at creation (hex mask, default 0xfff): clean/rr-f-wave5b/5c levers, rr_mode fast ONLY (forced off for exact and accurate: w5_effective()): bit 0 head.fast.rx.f.w64, bit 1 output.fast.w5, bit 2 resolve.fast2/3.w5, bit 3 input.features.w5c (wave64 SRV-only, bit-identical to input.features.lite), bit 4 body L2, bit 5 body L0, bit 6 body L1, bit 7 body L3 (stagef.{E3,D3-F,D3-R}), bit 8 body L4/L5 (stagef.{E4,E5,D4-F,D4-R}, RR_B32G4=1, RR_PRE=14, 0 spills), bit 9 pool.main.w5 (0 FP64), bit 10 resolve.fast2/3.w5c (QN=28, RP=16, LLDS, QLD1, 32-bit MV, rolled 3x3), bit 11 output.fast.w5c (rolled of_reproj 55 VGPR + PH1W + LD3); 0 selects the wave-4c frame (13a53c9).
   unsigned vbits = 0;              // variant set (mode_vbits, per-knob overrides applied): head relaxed / body exact / output Fast / resolve exact
   bool infold = false;             // stagee.IN0 computes the front-end MLP itself (relaxed body in a build with kRrInFold)
   uint32_t twin = kTimingWindow;           // WG_RR_TIMING_WINDOW=N at creation: frames per timing log line (benches)
@@ -2134,7 +2141,7 @@ void plan_frame(const Instance& in, const FrameShape& f, WorkPlan* P, FrameBufs*
 // VG_OUT bit, rr_modes.cpp) and with the output variant of Fast in use; 0 for exact and accurate whatever WG_RR_W5 says, so
 // those modes dispatch exactly the kernels of wave 4c
 unsigned w5_effective(const Instance* in) {
-  return (in->mode == MODE_FAST && ((in->vbits >> VG_OUT) & 1u) != 0u) ? (in->w5 & 0x7fu) : 0u;
+  return (in->mode == MODE_FAST && ((in->vbits >> VG_OUT) & 1u) != 0u) ? (in->w5 & 0xfffu) : 0u;
 }
 std::string apply_mode(Instance* in, Mode m) {
   in->mode = m;
@@ -2284,7 +2291,7 @@ uint32_t create_locked(const WgRrCreate* d, void** out) {
       char w4cv[16] = {};
       if (GetEnvironmentVariableA("WG_RR_W4C", w4cv, sizeof w4cv)) in->w4c = (unsigned)strtoul(w4cv, nullptr, 16) & 0x3fu;
       char w5v[16] = {};
-      if (GetEnvironmentVariableA("WG_RR_W5", w5v, sizeof w5v)) in->w5 = (unsigned)strtoul(w5v, nullptr, 16) & 0x7fu;
+      if (GetEnvironmentVariableA("WG_RR_W5", w5v, sizeof w5v)) in->w5 = (unsigned)strtoul(w5v, nullptr, 16) & 0xfffu;
     }
     in->alias = !(GetEnvironmentVariableA("WG_RR_ALIAS", av, sizeof av) && strcmp(av, "0") == 0);
     char dxv[8] = {};
@@ -2386,9 +2393,11 @@ uint32_t create_locked(const WgRrCreate* d, void** out) {
                  (in->w4c & 8u) ? "on" : "off", (in->w4c & 16u) ? "on" : "off", (in->w4c & 32u) ? "on" : "off"));
     {   // clean/rr-f-wave5b: the Fast-mode-only levers (the effective mask is 0 in every other mode)
       const unsigned w5e = w5_effective(in);
-      log_line(fmt("instance %u: wave-5b levers (WG_RR_W5) 0x%x, effective 0x%x (rr_mode fast only): head %s, output %s, resolve %s, input %s, body L2 %s, L0 %s, L1 %s", in->id,
+      log_line(fmt("instance %u: wave-5c levers (WG_RR_W5) 0x%x, effective 0x%x (rr_mode fast only): head %s, out %s, res %s, in5c %s, L2 %s, L0 %s, L1 %s, L3 %s, L45 %s, pool %s, res5c %s, out5c %s", in->id,
                    in->w5, w5e, (w5e & 1u) ? "on" : "off", (w5e & 2u) ? "on" : "off", (w5e & 4u) ? "on" : "off",
-                   (w5e & 8u) ? "on" : "off", (w5e & 16u) ? "on" : "off", (w5e & 32u) ? "on" : "off", (w5e & 64u) ? "on" : "off"));
+                   (w5e & 8u) ? "on" : "off", (w5e & 0x10u) ? "on" : "off", (w5e & 0x20u) ? "on" : "off",
+                   (w5e & 0x40u) ? "on" : "off", (w5e & 0x80u) ? "on" : "off", (w5e & 0x100u) ? "on" : "off",
+                   (w5e & 0x200u) ? "on" : "off", (w5e & 0x400u) ? "on" : "off", (w5e & 0x800u) ? "on" : "off"));
     }
     log_line(fmt("instance %u: rr_mode=%s (%s%s): head %s, input %s, body %s, output %s, resolve %s", in->id, mode_name(in->mode),
                  msrc, vover.c_str(), (in->vbits >> VG_HEAD) & 1 ? "relaxed (RR_HVARL 7)" : "exact",
@@ -3236,9 +3245,10 @@ uint32_t evaluate_locked(Instance* in, const WgRrFrame* f, WgRrFrameResult* res)
   in->tail_ready = false;
   if (!hs) uav_barrier(l, A);
   // PH2 quarter pool (54b.5), non-reset frames only (rr_resolve_pool: PH1 of the previous frame -> PH2)
+  const Kid pool_k = (w5_effective(in) & 0x200u) != 0u ? K_POOL_MAIN_W5 : K_POOL_MAIN;
   if (!reset && !use_tail) {
-    if (in->fast_paths)   // through the exact tables (pool.main; the same bits as resolve.pool)
-      dispatch(l, K_POOL_MAIN, (w2 * h2 + kPoolLanes - 1) / kPoolLanes, {(uint32_t)(blk + kBlkPool), (uint32_t)lay.ptab, 0u, 0u});
+    if (in->fast_paths)   // through the exact tables (pool.main / pool.main.w5; the same bits as resolve.pool)
+      dispatch(l, pool_k, (w2 * h2 + kPoolLanes - 1) / kPoolLanes, {(uint32_t)(blk + kBlkPool), (uint32_t)lay.ptab, 0u, 0u});
     else
       dispatch(l, K_RES_POOL, (w2 * h2 + 63) / 64, {(uint32_t)(blk + kBlkPool), 0u, 0u});
     if (!hs) uav_barrier(l, A);
@@ -3345,8 +3355,11 @@ uint32_t evaluate_locked(Instance* in, const WgRrFrame* f, WgRrFrameResult* res)
   if (!nsk) {
   if (in->dflow) fill(P.off(Bf.dfcnt), (uint64_t)(15 * kDfRows + 64) * 4, 0);   // clean/rr-f-s12-dflow: row counters
   l->SetComputeRootShaderResourceView(6, ring_slot + kBlkInput);   // I1: the input block's view (RR_IN_KCB)
-  const bool inw5 = (w5_effective(in) & 8u) != 0u && in->input_lite && !in->input_copy;
-  dispatch(l, inw5 ? K_IN_FEAT_W5 : input_features_kernel(in->input_lite ? 1 : (in->input_split ? 2 : 0)), fgroups, {(uint32_t)(blk + kBlkInput)});
+  bool all_in_srv = !in->input_copy;
+  for (int r = 0; r < (int)kRoles; ++r)
+    if (ing[r].on && ing[r].copy) all_in_srv = false;
+  const bool inw5 = (w5_effective(in) & 8u) != 0u && in->input_lite && all_in_srv;
+  dispatch(l, inw5 ? K_IN_FEAT_W5C : input_features_kernel(in->input_lite ? 1 : (in->input_split ? 2 : 0)), fgroups, {(uint32_t)(blk + kBlkInput)});
   if (!(in->dprobe2 & 1)) uav_barrier(l, A);
   stamp(q0 + kTs + 1);
   // clean/rr-mp2-input I4f: input lite (input.features.lite, RR_IN_LITE 1) appends no token to the replay list, so its
@@ -3524,12 +3537,17 @@ uint32_t evaluate_locked(Instance* in, const WgRrFrame* f, WgRrFrameResult* res)
         if (rlx && wc4 >= 0 && ((in->w4c >> wc4) & 1u) != 0u) c4 = (Kid)(K_ESTAGEC0 + c4k);
         else if (rlx && s == 0 && (in->w4c & 8u)) c4 = K_IN0_W4C;
         else if (rlx && s == 14 && (in->w4c & 16u) && (in->w4 & 2u)) c4 = K_D0F_W4C;
-        // clean/rr-f-wave5b (Fast mode only, WG_RR_W5 bits 4..6: bit 4 = level 2 E2/D2-F/D2-R, bit 5 = level 0 IN0/D0-F, bit 6 = level 1 E1/D1-F/D1-R):
-        // pure-f32 RR_B32=1 + branchless clamped RR_Q8_FAST=1 stagef.* kernels replace every wave-4 form of these stages
+        // clean/rr-f-wave5b/5c (Fast mode only, WG_RR_W5 bits 4..8: bit 4 = L2 E2/D2-F/D2-R, bit 5 = L0 IN0/D0-F, bit 6 = L1 E1/D1-F/D1-R,
+        // bit 7 = L3 E3/D3-F/D3-R wave32, bit 8 = L4/L5 E4/E5/D4-F/D4-R wave32):
+        // pure-f32 RR_B32=1 + branchless clamped RR_Q8_FAST=1 stagef.* kernels (0 spills, NAR=0) replace every wave-4 form of these stages
         {
           const unsigned w5e = w5_effective(in);
-          const int f5 = (s == 0) ? 0 : (s == 14) ? 1 : (s == 1) ? 2 : (s == 12) ? 3 : (s == 13) ? 4 : (s == 2) ? 5 : (s == 10) ? 6 : (s == 11) ? 7 : -1;
-          const int f5bit = (s == 2 || s == 10 || s == 11) ? 4 : (s == 0 || s == 14) ? 5 : (s == 1 || s == 12 || s == 13) ? 6 : -1;
+          const int f5 = (s == 0) ? 0 : (s == 14) ? 1 : (s == 1) ? 2 : (s == 12) ? 3 : (s == 13) ? 4
+                       : (s == 2) ? 5 : (s == 10) ? 6 : (s == 11) ? 7
+                       : (s == 3) ? 8 : (s == 8) ? 9 : (s == 9) ? 10
+                       : (s == 4) ? 11 : (s == 5) ? 12 : (s == 6) ? 13 : (s == 7) ? 14 : -1;
+          const int f5bit = (s == 2 || s == 10 || s == 11) ? 4 : (s == 0 || s == 14) ? 5 : (s == 1 || s == 12 || s == 13) ? 6
+                          : (s == 3 || s == 8 || s == 9) ? 7 : (s >= 4 && s <= 7) ? 8 : -1;
           if (rlx && f5 >= 0 && ((w5e >> f5bit) & 1u) != 0u) c4 = (Kid)(K_FSTAGE0 + f5);
         }
         dispatch(l, in->body_e ? (c4 != K_COUNT ? c4 : (w64 ? (Kid)(K_ESTAGEW0 + sw) : (s0 >= 0 ? (Kid)(K_ESTAGEB0 + s0) : (Kid)(((in->vbits >> VG_BODY) & 1 ? K_ESTAGEX0 : K_ESTAGE0) + s)))) : d.k, nwx * nwy, a);
@@ -3614,12 +3632,15 @@ uint32_t evaluate_locked(Instance* in, const WgRrFrame* f, WgRrFrameResult* res)
         uav_barrier(l, A);
       }
       if (tail_rec && in->hiddec_early) decode1(2);   // a14 E7 f: HID is final after the head barrier
-      // clean/rr-f-wave5b bit 1 (Fast mode only): output.fast.w5 when every tile is guaranteed to fit in LDS (W <= 30, Hn <= 12);
-      // zeroes scratch[4] itself and marks no fallback quad, so output.fallback.f and its redundant UAV barrier are skipped
-      const bool outw5 = (w5_effective(in) & 2u) != 0u && ((in->vbits >> VG_OUT) & 1u) != 0u &&
-                         rw > 0u && rh > 0u && in->Wh > 0u && in->Hh > 0u &&
-                         (uint64_t)31u * rw <= (uint64_t)25u * in->Wh && (uint64_t)6u * rh <= (uint64_t)7u * in->Hh;
-      dispatch(l, outw5 ? K_OUT_FAST_W5 : ((in->vbits >> VG_OUT) & 1 ? ((in->w4 & 4u) ? K_OUT_FAST_F : ((in->w4c & 32u) ? K_OUT_FAST_F_PH1W : K_OUT_FAST_F0)) : K_OUT_FAST), ((in->Wh + 31) / 32) * ((in->Hh + 7) / 8), a);
+      // clean/rr-f-wave5b/5c bit 1 (output.fast.w5) & bit 11 (output.fast.w5c: rolled of_reproj 55 VGPR + PH1W + LD3, 7.2 KB LDS, BAR 2):
+      // when every tile is guaranteed to fit in LDS (W <= 30, Hn <= 12); zeroes scratch[4] itself and marks no fallback quad, so output.fallback.f + UAV barrier are skipped
+      const unsigned w5e_out = w5_effective(in);
+      const bool out_fits = ((in->vbits >> VG_OUT) & 1u) != 0u &&
+                            rw > 0u && rh > 0u && in->Wh > 0u && in->Hh > 0u &&
+                            (uint64_t)31u * rw <= (uint64_t)25u * in->Wh && (uint64_t)6u * rh <= (uint64_t)7u * in->Hh;
+      const bool outw5c = (w5e_out & 0x800u) != 0u && out_fits;
+      const bool outw5 = outw5c || ((w5e_out & 2u) != 0u && out_fits);
+      dispatch(l, outw5c ? K_OUT_FAST_W5C : outw5 ? K_OUT_FAST_W5 : ((in->vbits >> VG_OUT) & 1 ? ((in->w4 & 4u) ? K_OUT_FAST_F : ((in->w4c & 32u) ? K_OUT_FAST_F_PH1W : K_OUT_FAST_F0)) : K_OUT_FAST), ((in->Wh + 31) / 32) * ((in->Hh + 7) / 8), a);
       if (!(in->dprobe2 & 8)) uav_barrier(l, A);
       if (!outw5) {
         dispatch(l, (in->vbits >> VG_OUT) & 1 ? K_OUT_FALLBACK_F : K_OUT_FALLBACK, kOutFallbackGroups, a);
@@ -3645,15 +3666,25 @@ uint32_t evaluate_locked(Instance* in, const WgRrFrame* f, WgRrFrameResult* res)
     const uint32_t tiles = ((in->We + kResTile - 1) / kResTile) * ((in->He + kResTile - 1) / kResTile);
     const bool rx = (in->vbits >> VG_RES) & 1;
     if (fuse_store) l->SetComputeRootDescriptorTable(4, gpu(store_pair[0]));   // u2: the main output (rf_gout)
-    // clean/rr-f-wave5b bit 2 (Fast mode only): resolve.fast2.w5 / resolve.fast3.w5 when RF_SPEC 2/3 & tile geometry preconditions hold;
-    // marks no slow pixel, so resolve.fixup is skipped (keeping the barrier before decode1(1) when tail_rec runs pool.main)
-    const bool resw5 = (w5_effective(in) & 4u) != 0u && !rx && (res_spec2 || res_spec3) &&
-                       in->We <= 32768u && in->He <= 32768u && in->Wh < 65536u && in->Hh < 65536u &&
-                       rw < 65536u && rh < 65536u && (!res_spec2 || (rw <= in->We && rh <= in->He));
-    dispatch(l, resw5 ? (res_spec2 ? K_RES_FAST2_W5 : K_RES_FAST3_W5) : (res_spec2 ? (rx ? K_RES_FAST2_X : K_RES_FAST2) : res_spec3 ? (rx ? K_RES_FAST3_X : K_RES_FAST3) : (rx ? K_RES_FAST_X : K_RES_FAST)),
+    // clean/rr-f-wave5b/5c bit 2 (resolve.fast2/3.w5) & bit 10 (resolve.fast2/3.w5c: QN=28, RP=16, LLDS, QLD1, 32-bit MV, rolled 3x3):
+    // marks no slow pixel, so resolve.fixup is skipped (keeping the barrier before decode1(1) when tail_rec runs pool.main[.w5])
+    const unsigned w5e_res = w5_effective(in);
+    const bool res_precond = !rx && (res_spec2 || res_spec3) &&
+                             in->We <= 32768u && in->He <= 32768u && in->Wh < 65536u && in->Hh < 65536u &&
+                             rw < 65536u && rh < 65536u && (!res_spec2 || (rw <= in->We && rh <= in->He));
+    const bool resw5c2 = res_precond && (w5e_res & 0x400u) != 0u && res_spec2 &&
+                         sl.w == rw && sl.h == rh && f->layer_origin_x == 0 && f->layer_origin_y == 0 &&
+                         (uint64_t)15u * rw <= (uint64_t)11u * in->We && (uint64_t)15u * rh <= (uint64_t)11u * in->He &&
+                         fabsf(f->jitter[0]) <= 0.55f && fabsf(f->jitter[1]) <= 0.55f;
+    const bool resw5c3 = res_precond && (w5e_res & 0x400u) != 0u && res_spec3;
+    const bool resw5c = resw5c2 || resw5c3;
+    const bool resw5 = resw5c || (res_precond && (w5e_res & 4u) != 0u);
+    dispatch(l, resw5c ? (res_spec2 ? K_RES_FAST2_W5C : K_RES_FAST3_W5C)
+              : resw5  ? (res_spec2 ? K_RES_FAST2_W5 : K_RES_FAST3_W5)
+              : (res_spec2 ? (rx ? K_RES_FAST2_X : K_RES_FAST2) : res_spec3 ? (rx ? K_RES_FAST3_X : K_RES_FAST3) : (rx ? K_RES_FAST_X : K_RES_FAST)),
              std::min(tiles, in->res_groups), {(uint32_t)(blk + kBlkResolve), 0u, 0u});
     if (tail_rec) {   // the next frame's history prep: PH1 -> PH2 pool, PH1 / HID decodes (PH1, HID final here)
-      dispatch(l, K_POOL_MAIN, (w2 * h2 + kPoolLanes - 1) / kPoolLanes, {(uint32_t)(blk + kBlkPool), (uint32_t)lay.ptab, 0u, 0u});
+      dispatch(l, pool_k, (w2 * h2 + kPoolLanes - 1) / kPoolLanes, {(uint32_t)(blk + kBlkPool), (uint32_t)lay.ptab, 0u, 0u});
       decode1(0);
       if (!in->hiddec_early) decode1(2);
     }

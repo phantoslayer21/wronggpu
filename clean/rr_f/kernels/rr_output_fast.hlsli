@@ -52,6 +52,9 @@
 #ifndef OFX_W5_ALU
 #define OFX_W5_ALU 0   // clean/rr-f-wave5b (Fast mode only, VG_OUT): bounded ALU fast path (no fences, no AGS 0x1c, 3-way max for OF_REPROJ_MAX=1, no rare/fallback)
 #endif
+#ifndef OFX_W5C
+#define OFX_W5C 0      // clean/rr-f-wave5c (Fast mode only, VG_OUT): live-range reduction (<= 64 VGPR target) in of_reproj + 16-tap loop
+#endif
 #define OF_TX 32
 #define OF_TY 8
 #define OF_LW 30
@@ -437,6 +440,22 @@ float3 of_reproj(uint x, uint y, float2 mv, float3 current, float Ep, float invE
         // the five positions use three distinct x and three distinct y coordinates
         // byte offsets of the binary16 texels: column * 8, row * wh * 8 + hprev
         const uint ys = wh * 8u;
+#if OFX_W5C && OFX_W5_ALU
+        const OfAxis X0 = of_axis(An(kx, tx.w), Rwh, wh, 8u, 0u);
+        const OfAxis Y1 = of_axis(An(ky, ty.w), Rhh, hh, ys, hprev, true);
+        // Rolled 5-tap loop (opaque upper bound prevents LLVM hoisting all 20 b64 loads into one 40-VGPR batch: 74 -> 55 VGPR)
+        const uint k_end = 5u + (wg_grid_ >> 31);
+        [loop] for (uint k = 0; k < k_end; ++k) {
+            OfAxis qx = X0, qy = Y1;
+            if (k == 1u) qx = of_axis(An(kx, -1), Rwh, wh, 8u, 0u);
+            else if (k == 4u) qx = of_axis(An(kx, 2), Rwh, wh, 8u, 0u);
+            if (k == 0u) qy = of_axis(An(ky, -1), Rhh, hh, ys, hprev, true);
+            else if (k == 3u) qy = of_axis(An(ky, 2), Rhh, hh, ys, hprev, true);
+            const float3 tap = of_hist(of_taps(qx, qy));
+            const float wk = weights[k];
+            [unroll] for (uint c = 0; c < 3; c++) acc[c] = k == 0u ? tap[c] * wk : mad(tap[c], wk, acc[c]);
+        }
+#else
         const OfAxis X0 = of_axis(An(kx, tx.w), Rwh, wh, 8u, 0u), X1 = of_axis(An(kx, -1), Rwh, wh, 8u, 0u), X2 = of_axis(An(kx, 2), Rwh, wh, 8u, 0u);
         const OfAxis Y0 = of_axis(An(ky, -1), Rhh, hh, ys, hprev, true), Y1 = of_axis(An(ky, ty.w), Rhh, hh, ys, hprev, true),
                      Y2 = of_axis(An(ky, 2), Rhh, hh, ys, hprev, true);
@@ -458,6 +477,7 @@ float3 of_reproj(uint x, uint y, float2 mv, float3 current, float Ep, float invE
             }
 #endif
         }
+#endif
         float total = An(weights[4], An(weights[3], An(weights[2], An(weights[1], weights[0]))));
         float Rt = Rf(total);
 #if OFX_W5_ALU
@@ -658,6 +678,35 @@ WG_KERNEL(rr_output_fast)
     const half hx = of_hh(hxy), hy0 = of_hh(hxy >> 16);
     const half hy = cy != cya ? of_fh(hy0 + (half)-1.0) : hy0;
 #endif
+#if OFX_W5C && OFX_W5_ALU && OFX_FUSE
+    half oy[4], oyy[4];
+    [unroll] for (int m0 = 0; m0 < 4; m0++) {
+        oy[m0] = hy + (half)(m0 - 1);
+        oyy[m0] = oy[m0] * oy[m0];
+    }
+    const int Wl = fits ? W : 0, lbase = fits ? (cya - 1 - ry0) * W + (cx - 1 - rx0) : 0;
+    float total = 0;
+    half2 s0 = half2(0, 0), s1 = half2(0, 0), s2 = half2(0, 0);
+    [unroll] for (int k = 0; k < 4; k++) {
+        const half oxk = hx + (half)(k - 1);
+        const half oxxk = oxk * oxk;
+        [unroll] for (int m = 0; m < 4; m++) {
+            const int li = lbase + m * Wl + k;
+            const uint4 ra = of_ra[li];
+            const uint pb = of_rb[li];
+            const half ax = of_hh(ra.w), ay = of_hh(ra.w >> 16), axy = of_hh(pb);
+            const half t1 = oxxk * ax;
+            const half t2 = mad(oyy[m], ay, t1);
+            const half oxy = oxk * oy[m];
+            const half e = mad(oxy, axy, t2);
+            const half w = exp2(e);
+            total += (float)w;
+            const half2 ww = half2(w, w);
+            s0 = mad(ww, wg_as_h2(ra.x), s0); s1 = mad(ww, wg_as_h2(ra.y), s1); s2 = mad(ww, wg_as_h2(ra.z), s2);
+        }
+    }
+    OF_CLK(2);
+#else
     half ox[4], oy[4], oxx[4], oyy[4];
     [unroll] for (int k = 0; k < 4; k++) {
         // (a folded hx + 0 could only change the sign of a zero offset, which no product below can show)
@@ -739,6 +788,7 @@ WG_KERNEL(rr_output_fast)
         const half2 ww = half2(w, w);
         s0 = mad(ww, wg_as_h2(r.x), s0); s1 = mad(ww, wg_as_h2(r.y), s1); s2 = mad(ww, wg_as_h2(r.z), s2);
     }
+#endif
 #endif
     // A NaN payload of these sums (the only possible difference to HF) never reaches an output: sums 0-2 enter D (a
     // NaN gives D's own NaN constant), sum 3 and the total enter S / max (a NaN gives 0 / K13), sums 4-5 make alpha

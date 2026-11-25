@@ -119,16 +119,21 @@ original.
   MLP), and `output.fast.f_ph1w` (OFX_PH1W alone, no OFX_LD3 / OFX_QST). `WG_RR_W4C` at creation (hex mask, default `0x19` = bits 0, 3, 4, -29 us at 1440p Q layer and plain; bits 1, 2, 5 are opt-in, they measured +23, +6 / -1 and +8 us; bit 0
   level 2, bit 1 level 3, bit 2 level-4 decoder, bit 3 IN0, bit 4 D0-F (needs `WG_RR_W4` bit 1), bit 5 `output.fast.f_ph1w` when
   `WG_RR_W4` bit 2 is off); `WG_RR_W4C=0` is the wave-4b frame. The exact body and the dataflow forms keep wave32.
-- wave-5b levers (clean/rr-f-wave5b, **rr_mode fast only, not byte-identical**; network/tail arithmetic relaxed while keeping temporal
+- wave-5b/5c levers (clean/rr-f-wave5c, **rr_mode fast only, not byte-identical**; network/tail arithmetic relaxed while keeping temporal
   history/reprojection logic exact): `head.fast.rx.f.w64` (`head/dx12/rr_d0r_w64.hlsl`, `RR_HFAST_ALU=2`: bounded f32 ALU head tail,
   per-head Q8 cutting VGPR 96->84, branchless Q8, no dead CANDW store, exact Cnet history), `output.fast.w5` (`OFX_W5_ALU=1` on
-  `output.fast.f0` base: native f16, FMA bilinear, 16-tap half exp2, 3-comparison max, zero fallback pass/barrier when tile fits),
-  `resolve.fast2.w5` / `resolve.fast3.w5` (`RFX_W5_ALU=1`: f32 uniforms, uint2 half4 taps, FP16 3x3 clamp before E, branchless bilinear,
-  zero fixup pass when `RF_SPEC 2/3` & tile fits hold), `input.features.w5` (`RR_IN_W5_ALU=1`, wave64, 0 B LDS, vectorized tex loads,
-  `RR_IN_DLANE=1`, `RR_IN_MDD=1`), and `stagef.{IN0, D0-F, E1, D1-F, D1-R, E2, D2-F, D2-R}.w64` (pure f32 `RR_B32=1` + branchless clamped
-  `RR_Q8_FAST=1`, convergent merge guard keeping narrow-EXEC WMMAs at 0). `WG_RR_W5` at creation (hex mask, default `0x7f`: bit 0 head,
-  bit 1 output, bit 2 resolve, bit 3 input, bit 4 body level 2, bit 5 body level 0, bit 6 body level 1); effective mask is 0 for exact and
-  accurate (all 13 kernels are VG_OUT alternatives: only Fast compiles them in Pass 1), `WG_RR_W5=0` reproduces the wave-4c frame.
+  `output.fast.f0` base) & `output.fast.w5c` (`OFX_W5C=1, OFX_PH1W=1, OFX_LD3=1`: rolled `of_reproj` dropping VGPR 74->55 [+50% occ],
+  7.2 KB LDS, BAR 4->2, zero fallback pass/barrier when tile fits), `resolve.fast2/3.w5` (`RFX_W5_ALU=1`) & `resolve.fast2/3.w5c`
+  (`RFX_W5C=1`: `QN=28`/`QO=896`, wave-uniform `s1==3` skip; `fast2` adds `RFX_RP=16 -> RF_RS=1`, 12.8 KB LDS [5 WGs/CU], `RFX_LLDS=1`
+  reading layer bilinear taps from LDS, `RFX_QLD=1`, 32-bit MV load, rolled 3x3), `input.features.w5c` (`input.features.lite` wave64 +
+  `RR_IN_SRV_ONLY=1`: bit-identical to `input.features.lite`, CPU-guarded direct SRV, -17% INST / -65% VLD / -41% IMG, 57 VGPR, 5120 B LDS),
+  `stagef.{IN0, D0-F, E1, D1-F, D1-R, E2, D2-F, D2-R}.w64` & `stagef.{E3, D3-F, D3-R, E4, E5, D4-F, D4-R}` (pure f32 `RR_B32=1` +
+  branchless clamped `RR_Q8_FAST=1`, `RR_B32G4=1` + `RR_PRE=14` at L4/L5 eliminating all LDS/scratch spills, convergent merge guard
+  `NAR=0`), and `pool.main.w5` (`RR_POOL_W5=1`: hardware f32 mad/mul with exact tables, 0 FP64, -69% INST, bit-identical to `quarter_pool`).
+  `WG_RR_W5` at creation (hex mask, default `0xfff`: bit 0 head, bit 1 output.w5, bit 2 resolve.w5, bit 3 input.w5c, bit 4 body L2,
+  bit 5 body L0, bit 6 body L1, bit 7 body L3, bit 8 body L4/L5, bit 9 pool.main.w5, bit 10 resolve.w5c, bit 11 output.w5c); effective
+  mask is 0 for exact and accurate (all 24 kernels are VG_OUT alternatives: only Fast compiles them in Pass 1), `WG_RR_W5=0` reproduces
+  the wave-4c frame.
 - tail (clean/rr-f-s10-tail): the resolve reads the exp2 table from the arena instead of copying it into LDS; 24-bit multiplies for
   addressing in the output stage; the main output's store is folded into resolve.fast2 / resolve.fixup (`WG_RR_FUSESTORE=0` at creation
   brings the separate store pass back). Also used by the exact-resolve (`_X`) kernels of mode exact.

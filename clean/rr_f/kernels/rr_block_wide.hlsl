@@ -649,7 +649,14 @@ WG_KERNEL(rr_block)
             uint2 mq;
             Q8_TRY mq = q8f(acc, bad);
             Q8_ELSE mq = q8s(acc); Q8_END
+#if RR_Q8_FAST
+            // Convergent wave barrier on mq before branching on cin: prevents LLVM from hoisting
+            // `if (cin)` above the merge WMMAs (RDNA 4 v_wmma under narrow EXEC produces non-finite lanes).
+            const bool mq_ok = !WaveActiveAnyTrue(((mq.x | mq.y) & rr_zero()) != 0u);
+            if (and(mq_ok, cin)) RR_PST64(pMerged, (uint)(Yc * Mx + Xc) * RR_CN + 16u * ot + 8u * rr_hf, mq);
+#else
             if (cin && rr_zero() == 0u) RR_PST64(pMerged, (uint)(Yc * Mx + Xc) * RR_CN + 16u * ot + 8u * rr_hf, mq);
+#endif
         }
     }
 #endif

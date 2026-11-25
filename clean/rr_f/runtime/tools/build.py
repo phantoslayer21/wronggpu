@@ -344,12 +344,15 @@ def kernels(out):
     # clean/rr-f-a14-frame E24: the read-only cache warm-up pass (WG_RR_TOUCH at creation; not dispatched by default)
     res.append(("rt.touch", 24, own(os.path.join(RT, "kernels", "rr_touch.hlsl"), "rr_rt_touch", {"WG_BLOCK": 256, "WG_WAVE": 32}, [], "rr_rt_touch")))
     res.append(("rt.blkcopy", 24, own(os.path.join(RT, "kernels", "rr_touch.hlsl"), "rr_rt_blkcopy", {"WG_BLOCK": 256, "WG_WAVE": 32}, [], "rr_rt_blkcopy")))
-    # clean/rr-f-wave5b (fast mode only; runtime WG_RR_W5, default 0x7f; NOT exact, network/tail arithmetic relaxed, history logic exact):
+    # clean/rr-f-wave5b/5c (fast mode only; runtime WG_RR_W5, default 0xfff; NOT exact, network/tail arithmetic relaxed, history logic exact):
     #   bit 0 head.fast.rx.f.w64 (RR_HFAST_ALU=2: bounded f32 ALU head tail, per-head Q8 reducing VGPR 96->84, branchless Q8, no dead CANDW)
     #   bit 1 output.fast.w5 (OFX_W5_ALU=1 on output.fast.f0 base: native f16, FMA bilinear, 16-tap half exp2, 3-cmp max, no fallback pass)
     #   bit 2 resolve.fast2.w5 / resolve.fast3.w5 (RFX_W5_ALU=1: f32 uniforms, uint2 half4 taps, FP16 3x3 clamp before E, no fixup pass)
-    #   bit 3 input.features.w5 (RR_IN_W5_ALU=1, wave64, 0 B LDS, vectorized tex loads, DLANE + MDD)
-    #   bits 4..6 stagef.* (gpu/stage.py W5_KERNELS: pure f32 RR_B32=1 + branchless clamped RR_Q8_FAST=1, zero narrow-EXEC WMMAs).
+    #   bit 3 input.features.w5c (input.features.lite wave64 + RR_IN_SRV_ONLY=1: bit-identical to input.features.lite, CPU-guarded direct SRV, -17% INST / -65% VLD / -41% IMG, 57 VGPR, 5120 B LDS)
+    #   bits 4..8 stagef.* (gpu/stage.py W5_KERNELS: pure f32 RR_B32=1 + branchless clamped RR_Q8_FAST=1, zero narrow-EXEC WMMAs, L0/L1/L2 wave64 + L3/L4/L5 wave32)
+    #   bit 9 pool.main.w5 (RR_POOL_W5=1: hardware f32 mad/mul with exact tables, 0 FP64, -69% INST, bit-identical to quarter_pool)
+    #   bit 10 resolve.fast2.w5c / resolve.fast3.w5c (RFX_W5C=1: QN=28 / QO=896, wave-uniform s1==3 skip; fast2 adds RFX_RP=16 -> RF_RS=1, 12.8 KB LDS 5 WGs/CU, RFX_LLDS=1 eliminating 4x b64 L reads, RFX_QLD=1, 32-bit MV load, rolled 3x3)
+    #   bit 11 output.fast.w5c (OFX_W5_ALU=1, OFX_W5C=1, OFX_PH1W=1, OFX_LD3=1: rolled of_reproj 74->55 VGPR [+50% occ], 7.2 KB LDS, BAR 4->2).
     # Appended after every wave-4c kernel; all 172 wave-4c kernels above keep bit-identical cache keys and DXIL.
     res.append(("head.fast.rx.f.w64", 48, own(os.path.join(RRF, "head", "dx12", "rr_d0r_w64.hlsl"), "rr_d0r_head",
                                               dict(hrx, WG_WAVE=64, RR_HSTM=1, RR_HQ8S=1, RR_HFAST_ALU=2,
@@ -359,12 +362,22 @@ def kernels(out):
                 GO.kernel_set(defines=dict(FAST_OUT_DEFINES, OFX_W5_ALU=1), fast=True, names=("fast",), spec=True)["fast"][0]))
     res.append(("resolve.fast2.w5", GRF.NARGS, GRF.fast_kernel(spec=2, extra=dict(rfd, RFX_W5_ALU=1))))
     res.append(("resolve.fast3.w5", GRF.NARGS, GRF.fast_kernel(spec=3, extra=dict(rfd, RFX_W5_ALU=1))))
-    res.append(("input.features.w5", 1,
-                GI.features_kernel("lite+RR_IN_FAST=31+RR_IN_LDST=0+RR_IN_KCB=1+RR_IN_W5_ALU=1+RR_IN_M24=1+RR_IN_DLANE=1+RR_IN_MDD=1+WG_WAVE=64",
-                                   srv=1)))
+    res.append(("input.features.w5c", 1,
+                GI.features_kernel("lite+RR_IN_FAST=31+RR_IN_LDST=0+RR_IN_KCB=1+RR_IN_SRV_ONLY=1", srv=1)))
     for name, st, kind, defs in stage.W5_KERNELS:
         # (a non-relaxed library repeats stagee.<n>'s DXIL under the names, as the wave-4 kernels)
         res.append((name, 37, stage.kernel_w5(st, ez, step="E", ldsw=1) if b32 else stage.kernel_for(st, ez, step="E", ldsw=1)))
+    res.append(("pool.main.w5", GP.NARGS,
+                build.compile_kernel("rr_pool.hlsl", "rr_pool_main",
+                                     {"WG_BLOCK": GP.BLOCK, "WG_WAVE": 32, "RR_ELEM_EXACT": 1, "RR_POOL_TPL": GP.TPL, "RR_POOL_W5": 1},
+                                     tag="rr_pool_main_w5")))
+    res.append(("resolve.fast2.w5c", GRF.NARGS,
+                GRF.fast_kernel(spec=2, extra=dict(rfd, RFX_W5_ALU=1, RFX_W5C=1, RFX_RP=16, RFX_LLDS=1, RFX_QLD=1))))
+    res.append(("resolve.fast3.w5c", GRF.NARGS,
+                GRF.fast_kernel(spec=3, extra=dict(rfd, RFX_W5_ALU=1, RFX_W5C=1))))
+    res.append(("output.fast.w5c", GO.NARGS,
+                GO.kernel_set(defines=dict(FAST_OUT_DEFINES, OFX_W5_ALU=1, OFX_W5C=1, OFX_PH1W=1, OFX_LD3=1),
+                              fast=True, names=("fast",), spec=True)["fast"][0]))
     return res
 
 
