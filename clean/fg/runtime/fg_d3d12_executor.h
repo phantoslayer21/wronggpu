@@ -178,8 +178,9 @@ struct FgD3d12ExecutorDesc {
     //  - fuse (WG_FG_FUSE=0 off): the fused / retiled kernels fg_lite_p2c_fine_mask (fine pass + hole mask),
     //    fg_lite_p2c_inpaint_tiled and fg_lite_interm_both (both intermediate-time passes, LDS-binned scatters) replace
     //    their separate kernels when their DXIL is in the kernel folder.
-    //  - fuse2 (WG_FG_FUSE2=0 off; Wave 1B, each exact against the Wave 1 kernels it replaces): 0 off, 1 (the default) every
-    //    lever whose kernels are in the folder, any other value a mask of levers: 1 net1_01 builds its cells in LDS
+    //  - fuse2 (WG_FG_FUSE2=0 off; Wave 1B, each exact against the Wave 1 kernels it replaces): 0 off, 1 (the default) the levers
+    //    that won in paired timing (1 + 16: net1 cells and the pyramid tail), any other value a mask of levers (63 = every lever
+    //    whose kernels are in the folder; 2, 4, 8, 32 are exact but cost GPU time): 1 net1_01 builds its cells in LDS
     //    (fg_mconv2_mid_cells, no net1 input launch), 2 net2's residual pairs in one launch (fg_net2_mpair_res_c64 / _c32),
     //    4 the upwarp computed in L14's staging (fg_net2_mconv_m1b2_uw), 8 the blend weights built in the blends
     //    (fg_lite_blend_w / _pack_w, fg_full_blend_*_w), 16 the output pyramid's coarse pushes in one workgroup

@@ -59,6 +59,9 @@ enum Kernel : uint32_t {
 // the Wave 1B levers (bits of FgD3d12ExecutorDesc::fuse2 when it is a mask)
 enum Fuse2Bit : uint32_t {
     kF2Cells = 1, kF2Pair = 2, kF2Upwarp = 4, kF2Weights = 8, kF2Tail = 16, kF2X3 = 32, kF2All = 63,
+    // the levers that won in paired ABBA runs at 1440p (A6 net1 cells, A14 pyramid tail); the others are exact but cost GPU time
+    // (A13 weights in the blends, A7 net2 pairs, A9 upwarp in L14, A12 RGB X0 / X1) and stay opt-in (a mask, e.g. 63)
+    kF2Default = kF2Cells | kF2Tail,
 };
 constexpr uint32_t kFirstTurbo = kFineMask;  // a pipeline of these that the device refuses is dropped, not fatal
 constexpr uint32_t kFirstFull = kFullBlend;
@@ -682,7 +685,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
     bool want_batch = true, want_hoist = true, want_dualq = true, want_fuse = true;
     bool batch_on = false, hoist_on = false, dualq_on = false;
     // Wave 1B (fuse2 bits wanted; the *_on flags are decided in Layout from the kernels that are present)
-    uint32_t want_fuse2 = kF2All;
+    uint32_t want_fuse2 = kF2Default;
     bool Fused2(uint32_t bit, uint32_t k) const { return (want_fuse2 & bit) != 0 && pso[k] != nullptr; }
     bool cells_on = false;          // A6: net1_01 builds its cells in LDS (the net1 input launch is dropped)
     bool pair64_on = false, pair32_on = false;   // A7: net2's residual pairs (64- / 32-channel) in one launch
@@ -2796,8 +2799,8 @@ FgD3d12Executor::FgD3d12Executor(const FgD3d12ExecutorDesc& desc) : impl_(new Im
     impl_->want_hoist = lever(desc.hoist, "WG_FG_HOIST");
     impl_->want_dualq = lever(desc.dualq, "WG_FG_DUALQ");
     impl_->want_fuse = lever(desc.fuse, "WG_FG_FUSE");
-    // Wave 1B: 0 off, 1 (or unset) every lever, any other value a mask of the levers (1 net1 cells, 2 net2 pairs, 4 upwarp
-    // in L14, 8 W in the blends, 16 pyramid tail, 32 X0 / X1 as RGB)
+    // Wave 1B: 0 off, 1 (or unset) the default levers (net1 cells + pyramid tail), any other value a mask of the levers (1 net1
+    // cells, 2 net2 pairs, 4 upwarp in L14, 8 W in the blends, 16 pyramid tail, 32 X0 / X1 as RGB; 63 = every lever)
     {
         int v = desc.fuse2;
         if (v < 0) {
@@ -2805,7 +2808,7 @@ FgD3d12Executor::FgD3d12Executor(const FgD3d12ExecutorDesc& desc) : impl_(new Im
             v = GetEnvironmentVariableA("WG_FG_FUSE2", e, sizeof(e)) > 0 ? static_cast<int>(std::strtol(e, nullptr, 0)) : 1;
             if (v < 0) v = 1;
         }
-        impl_->want_fuse2 = v == 0 ? 0u : (v == 1 ? static_cast<uint32_t>(kF2All) : static_cast<uint32_t>(v) & kF2All);
+        impl_->want_fuse2 = v == 0 ? 0u : (v == 1 ? static_cast<uint32_t>(kF2Default) : static_cast<uint32_t>(v) & kF2All);
     }
     if (desc.weights) {
         impl_->weights = *desc.weights;

@@ -16,6 +16,7 @@
 //                       (default: on, or the environment WG_FG_BATCH / _HOIST / _DUALQ / _FUSE / _FUSE2 = 0; --fuse2 takes
 //                       a mask of the Wave 1B levers: 1 net1 cells, 2 net2 pairs, 4 upwarp in L14, 8 blend weights,
 //                       16 pyramid tail, 32 X0 / X1 as RGB)
+//       [--turbo-fuse2 MASK]  the Wave 1B mask the --only turbo legs run against all levers off (default 63: every lever)
 //       The report has the per-stage sums and the honest multi-queue numbers: the wall-clock GPU span and the busy
 //       time per game frame over the timed window (overlap between queues is counted once there, twice in the sums).
 //   --reference-dxil <dir>  compare direct-SRV output bytes against the captured path built with these kernels
@@ -567,6 +568,7 @@ struct PipelineClock {
     }
 };
 bool g_debug_layer = false;
+int g_turbo_fuse2 = 63;  // the Wave 1B mask TestTurboExact runs against all levers off (--turbo-fuse2 MASK)
 int g_log_lines = 0;
 void PrintLog(void*, const char* line) {
     if (g_log_lines++ < 40) std::printf("      log: %s\n", line);
@@ -1920,7 +1922,8 @@ void TestTurboExact(Gpu& gpu, const std::string& dxil, const FgExecWeights& weig
         ed.dxil_dir = dxil;
         ed.weights = &weights;
         ed.enable_full = c.preset != FgPreset::C;
-        ed.batch = ed.hoist = ed.dualq = ed.fuse = ed.fuse2 = 1;
+        ed.batch = ed.hoist = ed.dualq = ed.fuse = 1;
+        ed.fuse2 = g_turbo_fuse2;   // 63: every Wave 1B lever (default of the test), --turbo-fuse2 1: the executor's default levers
         FgD3d12Executor test(ed);
         ed.batch = ed.hoist = ed.dualq = ed.fuse = wave1b_only ? 1 : 0;
         ed.fuse2 = 0;
@@ -2180,6 +2183,7 @@ int main(int argc, char** argv) {
         if (std::strcmp(argv[i], "--reference-dxil") == 0 && i + 1 < argc) reference_dxil = argv[++i];
         if (std::strcmp(argv[i], "--scratch") == 0 && i + 1 < argc) scratch = argv[++i];
         if (std::strcmp(argv[i], "--debug-layer") == 0) g_debug_layer = true;
+        if (std::strcmp(argv[i], "--turbo-fuse2") == 0 && i + 1 < argc) g_turbo_fuse2 = static_cast<int>(std::strtol(argv[++i], nullptr, 0));
         if (std::strcmp(argv[i], "--only") == 0 && i + 1 < argc) only = argv[++i];
     }
     FgExecWeights weights;
