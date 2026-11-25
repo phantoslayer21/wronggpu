@@ -210,7 +210,8 @@ Model K ships in the same `wronggpu_runtime.dll` as model M; nothing changes for
    first checks that
    `dx12/manifest.json` has a port of every kernel the context can launch and refuses it, naming the missing kernels,
    before the model is loaded. `k_in_uniforms=0` (diagnostic): the tiled input kernel that computes its frame values on the
-   GPU instead of taking the host's. `k_fill=<0..255>` (test hook, changes no value a frame writes): every buffer a frame writes and both history copies start with this byte after allocation, so that a test with a different byte per backend proves first-frame and reset-only writes. Latency options of the D3D12 devices that change no value: `k_color_at=<stage>`
+   GPU instead of taking the host's. `k_color_fuse=0` (native device; changes no value): the separate `k_out_color` launch instead of the
+   exact tiled input kernel's own output colour taps (`kx/k_in_tiled_color[_uniform|_direct]`, the default). `k_fill=<0..255>` (test hook, changes no value a frame writes): every buffer a frame writes and both history copies start with this byte after allocation, so that a test with a different byte per backend proves first-frame and reset-only writes. Latency options of the D3D12 devices that change no value: `k_color_at=<stage>`
    (`k_out_color` runs unordered right after that stage; default: before the input stage, HIP's order) and `k_warm=<stage>` /
    `off` (backend 3: `k_warm`, a cache warm-up of the weight blobs of the stages after it, launched unordered after that
    stage, default `e0`; `k_warm_to`, `k_warm_line`, `k_warm_groups`). The D3D12 executor of the interop (the game's own

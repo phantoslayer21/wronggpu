@@ -252,7 +252,8 @@ class TestAlphaSources(unittest.TestCase):
         # the stored tap's A: RN16 of the colour's fourth value; the bilinear: RN16(w0 a0), then three FP16 fmas
         self.assertIn("tap = uint2(hY | (hCo << 16), hCg | (ko_f2h(c.w) << 16));", oi)
         self.assertIn("hi = q == 0 ? kp_mul_s(t.y, w[q]) : kp_fma_s(t.y, w[q], hi);", o)
-        self.assertIn("cbar3 = kp_hi(hi);", o)
+        self.assertIn("cbar_hi = kp_opq(hi);", o)
+        self.assertIn("cbar3 = kp_hi(cbar_hi);", o)
         # every output form stores cbar3 unchanged
         self.assertIn("ko_f2h(B) | (kh_u(cbar3) << 16)", o)                                   # RGBA16F rows
         self.assertIn("ko_store_out(x, y, R, G, B, cbar3);", o)                               # the direct texture

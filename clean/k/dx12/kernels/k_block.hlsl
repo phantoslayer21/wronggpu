@@ -25,7 +25,9 @@
 // @wg-kernel k_stage2_e0 co=k_block.co block=128 wave=32 args=s184:p19.b32,p defines=KB_BIAS32=1,KB_BASE_FORM=1
 // @wg-kernel k_stage2_e1 co=k_block.co block=128 wave=32 args=s184:p19.b32,p defines=KB_BIAS32=1,KB_BASE_FORM=1
 // @wg-kernel k_stage_d2 co=k_block.co block=128 wave=32 args=s184:p19.b32
-// @wg-kernel k_stage2_d1 co=k_block.co block=128 wave=32 args=s184:p19.b32,p defines=KB_BIAS32=1,KB_BASE_FORM=1
+// KB_X1LDS / KB_W2LATE / KB_W2SEQ (hlsl/k_block.hlsli): x1 waits in LDS during the MLP and each W2 tile is loaded just before its
+// own products: 231 -> 191 VGPRs (RGA gfx1201, no spill), under the 192 of four workgroups per CU; remove the three defines to undo.
+// @wg-kernel k_stage2_d1 co=k_block.co block=128 wave=32 args=s184:p19.b32,p defines=KB_BIAS32=1,KB_BASE_FORM=1,KB_X1LDS=1,KB_W2LATE=1,KB_W2SEQ=1
 // @wg-kernel k_stage_e0 co=k_block.co block=128 wave=32 args=s184:p19.b32 defines=KB_LDS_HALFS=6144
 // @wg-kernel k_stage_e1 co=k_block.co block=128 wave=32 args=s184:p19.b32 defines=KB_LDS_HALFS=4096
 // @wg-kernel k_stage_d1 co=k_block.co block=128 wave=32 args=s184:p19.b32
@@ -35,8 +37,10 @@
 // native D3D12 runtime when the mix-form probe (kernels/k_mix_probe.hlsl) fails on the adapter's driver.
 // @wg-kernel k_stage_e2__rodd co=k_block.co entry=k_stage_e2 block=128 wave=32 args=s184:p19.b32 defines=K_SMX=1
 // @wg-kernel k_stage_d2__rodd co=k_block.co entry=k_stage_d2 block=128 wave=32 args=s184:p19.b32 defines=K_SMX=1
-// @wg-kernel k_stage2_d1__rodd co=k_block.co entry=k_stage2_d1 block=128 wave=32 args=s184:p19.b32,p defines=K_SMX=1,KB_BIAS32=1,KB_BASE_FORM=1
-#define KB_LD_A16 1   // 16-byte aligned loads (hlsl/k_common.hlsli)
+// @wg-kernel k_stage2_d1__rodd co=k_block.co entry=k_stage2_d1 block=128 wave=32 args=s184:p19.b32,p defines=K_SMX=1,KB_BIAS32=1,KB_BASE_FORM=1,KB_X1LDS=1,KB_W2LATE=1,KB_W2SEQ=1
+#ifndef KB_LD_A16
+#define KB_LD_A16 1   // 16-byte aligned loads: the whole address masked (hlsl/k_common.hlsli; 2 = scalar base only: loses RADV's b128 loads)
+#endif
 #include "wg_platform.hlsli"
 #include "k_blkparams.hlsli"
 

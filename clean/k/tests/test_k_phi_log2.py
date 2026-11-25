@@ -11,7 +11,7 @@ import unittest
 
 
 K_ROOT = Path(__file__).resolve().parents[1]
-PROOF_INPUT_SHA256 = "73c7d70d22da9099f80b74c6c53ebbfb5655caae27cd2a3a40ee85344aeaa209"
+PROOF_INPUT_SHA256 = "4006deb20e730e6084c6ba42cc0014633b40ccfc3f3974526ad0400696aec176"
 
 
 def proof_input_digest(source, shader):
