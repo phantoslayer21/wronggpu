@@ -130,8 +130,9 @@ original.
   `stagef.{IN0, D0-F, E1, D1-F, D1-R, E2, D2-F, D2-R}.w64` & `stagef.{E3, D3-F, D3-R, E4, E5, D4-F, D4-R}` (pure f32 `RR_B32=1` +
   branchless clamped `RR_Q8_FAST=1`, `RR_B32G4=1` + `RR_PRE=14` at L4/L5 eliminating all LDS/scratch spills, convergent merge guard
   `NAR=0`), and `pool.main.w5` (`RR_POOL_W5=1`: hardware f32 mad/mul with exact tables, 0 FP64, -69% INST, bit-identical to `quarter_pool`).
-  `WG_RR_W5` at creation (hex mask, default `0xfff`: bit 0 head, bit 1 output.w5, bit 2 resolve.w5, bit 3 input.w5c, bit 4 body L2,
-  bit 5 body L0, bit 6 body L1, bit 7 body L3, bit 8 body L4/L5, bit 9 pool.main.w5, bit 10 resolve.w5c, bit 11 output.w5c); effective
+  `WG_RR_W5` at creation (hex mask, default `0xaff` = every bit but 8 and 10: bit 0 head, bit 1 output.w5, bit 2 resolve.w5, bit 3 input.w5c, bit 4 body L2,
+  bit 5 body L0, bit 6 body L1, bit 7 body L3, bit 8 body L4/L5 [opt-in, see "Wave 5c results"], bit 9 pool.main.w5, bit 10 resolve.w5c [opt-in],
+  bit 11 output.w5c); effective
   mask is 0 for exact and accurate (all 24 kernels are VG_OUT alternatives: only Fast compiles them in Pass 1), `WG_RR_W5=0` reproduces
   the wave-4c frame.
 - tail (clean/rr-f-s10-tail): the resolve reads the exp2 table from the arena instead of copying it into LDS; 24-bit multiplies for
@@ -141,6 +142,75 @@ original.
   (`RF_SPEC 3`: no render-size reads, no format switches; 43 / 55 VGPRs instead of resolve.fast's 162 / 191) and folds its store like
   resolve.fast2 (`WG_RR_RES3=0` at creation: resolve.fast / rt.store as before); with the store folded the fast resolve no longer also
   writes the main output's arena texels (kept for `WG_RR_ALIAS=0` test runs; `WG_RR_RESARENA=1` brings it back).
+
+## Wave 5c results (clean/rr-f-wave5c, RX 9070 XT, D3D12, rr_mode fast; GPU-verified)
+
+Default `WG_RR_W5=0xaff` (every bit but 8 and 10). Timings are the runtime's GPU time per frame (`WG_RR_TIMING_WINDOW`) on structured,
+temporally coherent synthetic scenes through `rr_test_host` (plain: `perf`; layer: `perfcap`), paired ABBA, one host process per run
+(warm-up run + measured run), no `dxc` / `clang++` running. A = the Wave 4c build (`13a53c9`), B = this build with no `WG_RR_W5` set.
+
+1440p Quality (1707x960 -> 2560x1440), 6 ABBA rounds (12 runs per side), median:
+
+| | Wave 4c | Wave 5c `0xaff` | delta | speedup |
+|---|---|---|---|---|
+| plain | 6.369 ms | **5.760 ms** | -609 us | x1.106 |
+| layer | 6.600 ms | **5.963 ms** | -637 us | x1.107 |
+
+Per-stage GPU ms at 1440p Q (mean of the measured runs; the body is one stage, the host has no per-level hook):
+
+| | pre | input | body | head | output | resolve | total |
+|---|---|---|---|---|---|---|---|
+| plain, Wave 4c | 0.044 | 0.548 | 3.817 | 1.003 | 0.730 | 0.228 | 6.370 |
+| plain, Wave 5b `0x077` | 0.043 | 0.550 | 3.558 | 0.780 | 0.666 | 0.212 | 5.810 |
+| plain, Wave 5c `0xaff` | 0.045 | 0.536 | 3.554 | 0.790 | 0.639 | 0.200 | 5.764 |
+| layer, Wave 4c | 0.044 | 0.563 | 3.829 | 1.003 | 0.727 | 0.444 | 6.610 |
+| layer, Wave 5b `0x077` | 0.045 | 0.564 | 3.570 | 0.779 | 0.661 | 0.413 | 6.034 |
+| layer, Wave 5c `0xaff` | 0.046 | 0.565 | 3.548 | 0.787 | 0.634 | 0.398 | 5.978 |
+
+Scaling (medians of 3 ABBA rounds, `WG_RR_W5=0xaff`; the 1440p Q row is the 6-round default-build figure above):
+
+| cell | plain 4c -> 5c (ms) | delta | layer 4c -> 5c (ms) | delta |
+|---|---|---|---|---|
+| 1080p Q (1280x720 -> 1920x1080) | 3.699 -> 3.343 | -356 us (x1.107) | 3.806 -> 3.446 | -360 us (x1.104) |
+| 1440p Perf (1280x720 -> 2560x1440) | 4.144 -> 3.742 | -402 us (x1.107) | 4.328 -> 3.894 | -435 us (x1.112) |
+| 1440p Q (1707x960 -> 2560x1440) | 6.369 -> 5.760 | -609 us (x1.106) | 6.600 -> 5.963 | -637 us (x1.107) |
+| 1440p DLAA (2560x1440 -> 2560x1440) | 12.727 -> 11.632 | -1095 us (x1.094) | 13.104 -> 12.014 | -1090 us (x1.091) |
+| 4K Q (2560x1440 -> 3840x2160) | 14.032 -> 12.794 | -1239 us (x1.097) | 14.609 -> 13.368 | -1241 us (x1.093) |
+
+Per-bit timing at 1440p Q (3 ABBA rounds against `WG_RR_W5=0` in the same process; single bit, then cumulative / leave-one-out), us plain / layer:
+bit 3 -12 / -2, bit 7 -40 / -41, bit 8 -52 / -43, bit 9 -4 / -9, bit 10 -15 / -1, bit 11 -96 / -96 on their own; `0x077` -537 / -562,
+`0x07f` -552 / -567, `0x0ff` -584 / -608, `0x1ff` -626 / -647, `0x3ff` -639 / -660, `0x7ff` -637 / -662, `0xfff` -649 / -672,
+`0xeff` -607 / -634, `0xaff` -607 / -635. Bit 10 is timing-neutral inside the default (`0xaff` vs `0xeff`, 6 rounds: +1.5 / +5.9 us and
+-1.9 / +0.2 us in the two orders), so it stays opt-in.
+
+Exactness against the Wave 4c build (same synthetic scenes, 12 small and medium configurations at binary16 and binary32 outputs, plus
+1440p Q and 1080p Q, plain and layer, six frames with a reset on frame 3; every output and every history / arena byte):
+- `exact`, `accurate`, and `fast` with `WG_RR_W5=0`: 0 byte differences everywhere, except one known pre-existing 4-byte difference in the
+  work (scratch) region on 1440p Q reset-frame sequences (two atomic-append slots swapped; it also appears between two runs of the
+  Wave 4c build itself, never in an output or a history buffer).
+- Bits 3, 4, 5, 6, 7 and 9 are bit-identical to the Wave 4c frame (0 byte differences; `0x008`, `0x018`, `0x020`, `0x040`, `0x080`,
+  `0x0f8` and `0x200` each checked against it on a 480x270 scene). Bit 11 writes the same bytes as bit 1 (`0xaff` vs `0x0ff`: 0 byte
+  differences on every scene above), so the output stage differs from Wave 4c only by the Wave 5b `output.fast.w5` arithmetic. Bit 10 at
+  1440p Q is bit-identical to Wave 4c on layer scenes and 81.8 dB (tone-mapped) from it on plain scenes.
+- **Bit 8 (`0x100`, `stagef.{E4, E5, D4-F, D4-R}`) is not bit-identical** and is therefore opt-in: deterministic (two runs match), but
+  34.7 .. 38.5 dB tone-mapped PSNR from the Wave 4c fast frame on a small scene, 37.0 / 36.9 dB on the 1440p Q reset frames and 37.2 dB
+  (steady minimum, plain) against `accurate`, which fails the reset (>= 72 dB) and steady (>= 38.5 dB plain) gates.
+- With no `WG_RR_W5` set, the output is byte-identical to `WG_RR_W5=0xaff`.
+
+Quality of the default against `accurate` (1440p Q, six frames, reset on frames 0 and 3; tone map `x / (1 + x)` on the RGB, negatives
+clamped to 0; PSNR over the RGB with peak 1; SSIM on the Rec. 709 luma of the tone-mapped image, 8x8 box window, L = 1, k1 = 0.01,
+k2 = 0.03). 0 NaN / Inf in every output and history buffer of every frame (also at 1440p DLAA, with `0xaff`, `0xeff` and `0xfff`):
+
+| | reset frames | steady frames (min .. max) | SSIM (steady min) |
+|---|---|---|---|
+| plain | 72.85 / 72.85 dB | 38.71 .. 38.87 dB | 0.9551 |
+| layer | 73.91 / 73.93 dB | 43.15 .. 43.54 dB | 0.9763 |
+
+Against the Wave 4c `fast` frame: plain 72.85 dB on the reset frames, 38.76 .. 38.87 steady; layer 73.91 dB, 43.12 .. 43.53. These are
+the numbers of Wave 5b `0x077` (bit 3, 7, 9, 11 add no output difference). At 1080p Q the plain steady frames are 38.4 .. 39.2 dB and
+the layer ones 42.8 .. 43.9 dB against `accurate`, the same as the Wave 4c fast frame itself (38.39 dB on one plain frame); at 1440p DLAA
+Wave 5c is 72.5 .. 72.9 dB from the Wave 4c fast frame on the reset frames and 39.9 .. 40.2 dB (plain) / 44.3 .. 45.0 dB (layer) on the
+steady ones; the Wave 4c fast frame is itself 42.8 dB (frame 0) and 38.6 .. 39.7 dB (the others) from `accurate` there, Wave 5c the same.
 
 ## Round 11, tail (clean/rr-f-s11-tail)
 

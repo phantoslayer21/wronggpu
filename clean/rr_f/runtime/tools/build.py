@@ -344,7 +344,7 @@ def kernels(out):
     # clean/rr-f-a14-frame E24: the read-only cache warm-up pass (WG_RR_TOUCH at creation; not dispatched by default)
     res.append(("rt.touch", 24, own(os.path.join(RT, "kernels", "rr_touch.hlsl"), "rr_rt_touch", {"WG_BLOCK": 256, "WG_WAVE": 32}, [], "rr_rt_touch")))
     res.append(("rt.blkcopy", 24, own(os.path.join(RT, "kernels", "rr_touch.hlsl"), "rr_rt_blkcopy", {"WG_BLOCK": 256, "WG_WAVE": 32}, [], "rr_rt_blkcopy")))
-    # clean/rr-f-wave5b/5c (fast mode only; runtime WG_RR_W5, default 0xfff; NOT exact, network/tail arithmetic relaxed, history logic exact):
+    # clean/rr-f-wave5b/5c (fast mode only; runtime WG_RR_W5, default 0xaff; NOT exact, network/tail arithmetic relaxed, history logic exact):
     #   bit 0 head.fast.rx.f.w64 (RR_HFAST_ALU=2: bounded f32 ALU head tail, per-head Q8 reducing VGPR 96->84, branchless Q8, no dead CANDW)
     #   bit 1 output.fast.w5 (OFX_W5_ALU=1 on output.fast.f0 base: native f16, FMA bilinear, 16-tap half exp2, 3-cmp max, no fallback pass)
     #   bit 2 resolve.fast2.w5 / resolve.fast3.w5 (RFX_W5_ALU=1: f32 uniforms, uint2 half4 taps, FP16 3x3 clamp before E, no fixup pass)

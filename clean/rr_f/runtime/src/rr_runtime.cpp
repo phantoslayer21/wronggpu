@@ -316,14 +316,17 @@ enum Kid {
   // bit 5 +8 / +9, all six +7 / +1; 0x19 (bits 0, 3, 4) -29 / -29 (8 of 8 rounds). Bits 1, 2 and 5 are opt-in (not wins).
   K_ESTAGEC0 = K_ESTAGEW0 + 3,
   K_IN0_W4C = K_ESTAGEC0 + 8, K_D0F_W4C, K_OUT_FAST_F_PH1W,
-  // clean/rr-f-wave5b/5c (Fast mode only; WG_RR_W5, default 0xfff, bits 0 .. 11):
+  // clean/rr-f-wave5b/5c (Fast mode only; WG_RR_W5, default 0xaff = all bits but 8 and 10, bits 0 .. 11; GPU-verified on RX 9070 XT D3D12):
   //   bit 0 (0x001): head.fast.rx.f.w64 (RR_HFAST_ALU=2: bounded f32 ALU head tail, per-head Q8 96->84 VGPR, branchless Q8, exact Cnet history)
   //   bit 1 (0x002): output.fast.w5 (OFX_W5_ALU=1 on output.fast.f0 base, zero fallback pass/barrier when tile fits)
   //   bit 2 (0x004): resolve.fast2.w5 / resolve.fast3.w5 (RFX_W5_ALU=1, FP16 3x3 clamp before E, zero fixup pass when RF_SPEC 2/3 & fits)
   //   bit 3 (0x008): input.features.w5c (input.features.lite wave64 + RR_IN_SRV_ONLY=1: bit-identical to input.features.lite, CPU-guarded direct SRV)
   //   bits 4..8 (0x010 L2, 0x020 L0, 0x040 L1, 0x080 L3, 0x100 L4/L5): stagef.* (pure f32 RR_B32=1 + branchless clamped RR_Q8_FAST=1, NAR=0, 0 spills)
+  //     bits 4..7 are byte-identical to the wave-4c frame; bit 8 (0x100) is OPT-IN, not byte-identical: 34.7 .. 38.5 dB tone-mapped PSNR vs the wave-4c
+  //     fast frame, 37 .. 41 dB on reset frames (below the 72 dB gate) and 37.2 dB steady plain (below 38.5), for -43 / -52 us at 1440p Q
   //   bit 9 (0x200): pool.main.w5 (RR_POOL_W5=1: hardware f32 mad/mul with exact tables, 0 FP64, bit-identical to quarter_pool)
   //   bit 10 (0x400): resolve.fast2.w5c / resolve.fast3.w5c (RFX_W5C=1: QN=28/QO=896, RFX_RP=16 -> RF_RS=1, 12.8 KB LDS, RFX_LLDS=1, RFX_QLD=1, 32-bit MV, rolled 3x3)
+  //     OPT-IN: clean but timing-neutral (+/-2 us paired at 1440p Q plain and layer), so not in the default
   //   bit 11 (0x800): output.fast.w5c (OFX_W5_ALU=1, OFX_W5C=1, OFX_PH1W=1, OFX_LD3=1: rolled of_reproj 74->55 VGPR, 7.2 KB LDS, BAR 4->2).
   // All 24 kernels sit in VG_OUT's alternatives, so only Fast mode compiles them in Pass 1 and dispatches them; Accurate and Exact never start them.
   K_HEAD_FAST_RXF = K_OUT_FAST_F_PH1W + 1,
@@ -1766,7 +1769,7 @@ struct Instance {
   unsigned w4 = 2;                 // WG_RR_W4 at creation (hex mask, default 2): clean/rr-f-wave4 levers (bit 0 head R4.1, bit 1 body R4.2, bit 2 output R4.3); 0 bits select the *0 kernels. Paired timing at 1440p Q: only bit 1 wins (-78 us layer / -83 us plain); bit 0 is neutral (+2 us), bit 2 loses (+10 us output)
   unsigned w4b = 0xf;              // WG_RR_W4B at creation (hex mask, default 0xf): clean/rr-f-wave4b wave64 forms on (bit 0 head.fast.rx.w64, bit 1 stagee.D1-R, bit 2 stagee.D1-F, bit 3 stagee.E1); 0 bits select the wave32 kernels of WG_RR_W4
   unsigned w4c = 0x19;             // WG_RR_W4C at creation (hex mask, default 0x19 = bits 0, 3, 4): clean/rr-f-wave4c levers on (bit 0 wide stages of level 2 in wave64, bit 1 level 3, bit 2 level 4 decoder D4-F / D4-R, bit 3 stagee.IN0.w4c, bit 4 stagee.D0-F.w4c, bit 5 output.fast.f_ph1w); 0 bits select the kernels of WG_RR_W4 / WG_RR_W4B. Same bits as without (byte-identical kernels, written arguments in rr_block_wide_w64.hlsl / rr_block_c32.hlsl / rr_output_fast.hlsli)
-  unsigned w5 = 0xfff;             // WG_RR_W5 at creation (hex mask, default 0xfff): clean/rr-f-wave5b/5c levers, rr_mode fast ONLY (forced off for exact and accurate: w5_effective()): bit 0 head.fast.rx.f.w64, bit 1 output.fast.w5, bit 2 resolve.fast2/3.w5, bit 3 input.features.w5c (wave64 SRV-only, bit-identical to input.features.lite), bit 4 body L2, bit 5 body L0, bit 6 body L1, bit 7 body L3 (stagef.{E3,D3-F,D3-R}), bit 8 body L4/L5 (stagef.{E4,E5,D4-F,D4-R}, RR_B32G4=1, RR_PRE=14, 0 spills), bit 9 pool.main.w5 (0 FP64), bit 10 resolve.fast2/3.w5c (QN=28, RP=16, LLDS, QLD1, 32-bit MV, rolled 3x3), bit 11 output.fast.w5c (rolled of_reproj 55 VGPR + PH1W + LD3); 0 selects the wave-4c frame (13a53c9).
+  unsigned w5 = 0xaff;             // WG_RR_W5 at creation (hex mask, default 0xaff = every bit but 8 and 10, which are opt-in): clean/rr-f-wave5b/5c levers, rr_mode fast ONLY (forced off for exact and accurate: w5_effective()): bit 0 head.fast.rx.f.w64, bit 1 output.fast.w5, bit 2 resolve.fast2/3.w5, bit 3 input.features.w5c (wave64 SRV-only, bit-identical to input.features.lite), bit 4 body L2, bit 5 body L0, bit 6 body L1, bit 7 body L3 (stagef.{E3,D3-F,D3-R}), bit 8 body L4/L5 (stagef.{E4,E5,D4-F,D4-R}, RR_B32G4=1, RR_PRE=14, 0 spills), bit 9 pool.main.w5 (0 FP64), bit 10 resolve.fast2/3.w5c (QN=28, RP=16, LLDS, QLD1, 32-bit MV, rolled 3x3), bit 11 output.fast.w5c (rolled of_reproj 55 VGPR + PH1W + LD3); 0 selects the wave-4c frame (13a53c9).
   unsigned vbits = 0;              // variant set (mode_vbits, per-knob overrides applied): head relaxed / body exact / output Fast / resolve exact
   bool infold = false;             // stagee.IN0 computes the front-end MLP itself (relaxed body in a build with kRrInFold)
   uint32_t twin = kTimingWindow;           // WG_RR_TIMING_WINDOW=N at creation: frames per timing log line (benches)
