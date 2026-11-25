@@ -328,6 +328,7 @@ def pack(m):
             sc[f"head.{a}"] = sc_f16(K[n])
     sc["head.k_g"] = sc_f16(H["g"])
     sc["head.k_s1"] = f32bits(s1)
+    sc["head.k_s2"] = f32bits(s2)   # clean/rr-f-wave5: head.fast.rx.f.w64 computes rho = tanh(f32(y17 s2)) (no head.rho gather)
     sc["K1"] = f32bits(np.float32(H["K1"][0]))
     # input stage (52): front-end MLP fragments (gpu/input_stage.py), dither, read tables
     IN0 = G["IN0"]

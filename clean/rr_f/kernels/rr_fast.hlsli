@@ -10,6 +10,13 @@
 #ifndef RR_SMAJOR
 #define RR_SMAJOR 1
 #endif
+// clean/rr-f-wave5 RR_Q8_FAST 1 (opt-in, NOT exact for values beyond +-448 / NaN; fast mode only): branchless Q8. Every group is
+// the clamp to +-448 (v_max / v_min; a NaN gives one of the bounds) and the driver conversion, with no bad codes collected
+// and no slow path: Q8_TRY / Q8_ELSE / Q8_END expand to `{ fast } if (false) { slow }`, so rr_sat, rr_nan, q8s, q8h_slow and
+// the wave votes leave the IR (and their live ranges the registers). 0 (default): the text of every kernel before wave 5.
+#ifndef RR_Q8_FAST
+#define RR_Q8_FAST 0
+#endif
 
 // ---- Q8 fast path ----------------------------------------------------------------------------------------------------
 // The unclamped driver conversion equals Q8 (rr_q8) for every finite |x| <= 464 (values in (448, 464] round to
@@ -21,6 +28,11 @@
 #endif
 uint2 q8f(v8f d, inout uint bad)
 {
+#if RR_Q8_FAST
+    v8f c;
+    [unroll] for (uint i = 0; i < 8; ++i) c.v[i] = min(max(d.v[i], -448.0f), 448.0f);
+    return wg_pack_q8_nc_ags(c);
+#else
 #if defined(RR_L01BIT) && (L01_Q8CLAMP & RR_L01BIT) != 0
     // A46 q8-clamp-nocheck: clamp to +-448 (v_maxmin; a NaN gives one of the bounds, not 0x7f / 0xff) then the driver
     // conversion; no bad codes collected, so the group's slow path is never taken. NOT exact for NaN inputs.
@@ -31,6 +43,7 @@ uint2 q8f(v8f d, inout uint bad)
     const uint2 q = wg_pack_q8_nc_ags(d);
     bad |= ((q.x & 0x7f7f7f7fu) + 0x01010101u) | ((q.y & 0x7f7f7f7fu) + 0x01010101u);
     return q;
+#endif
 }
 #ifndef RR_COUNT
 #define RR_COUNT 0            // 1: counting build (isa_stats --dyn): fast paths only, loops unrolled; never run
@@ -52,6 +65,21 @@ bool q8_slow(uint bad) { return WaveActiveAnyTrue((bad & 0x80808080u) != 0u); }
 #if WG_WAVE == 64
 // clean/rr-mp2-level0 L0a (rr_block_c32.hlsl design D): one conversion per tile (h.xy = tile 0, h.zw = tile 1; the
 // wave64 f16 fragment is 2 dwords), the same per-value conversion and byte order
+#if RR_Q8_FAST
+// RR_Q8_FAST: the conversion of packed f16 values known finite and within +-448 (no clamp); P and the clamped groups below
+uint2 q8hf_nc(uint4 h)
+{
+    const wg_frag r0 = wg_ags_convert(rr_w64f(h.x, h.y, 0u, 0u), WG_AGS_T_F16_ACC, WG_AGS_T_FP8_B);
+    const wg_frag r1 = wg_ags_convert(rr_w64f(h.z, h.w, 0u, 0u), WG_AGS_T_F16_ACC, WG_AGS_T_FP8_B);
+    return uint2(r0.v[0], r1.v[0]);
+}
+uint2 q8hf(uint4 h, inout uint bad)
+{
+    const half2 lo = half2(-448.0, -448.0), hi = half2(448.0, 448.0);   // packed v_pk_max_f16 / v_pk_min_f16: a NaN gives a bound
+    return q8hf_nc(uint4(rr_b2(min(max(rr_h2(h.x), lo), hi)), rr_b2(min(max(rr_h2(h.y), lo), hi)),
+                         rr_b2(min(max(rr_h2(h.z), lo), hi)), rr_b2(min(max(rr_h2(h.w), lo), hi))));
+}
+#else
 uint2 q8hf(uint4 h, inout uint bad)
 {
     const wg_frag r0 = wg_ags_convert(rr_w64f(h.x, h.y, 0u, 0u), WG_AGS_T_F16_ACC, WG_AGS_T_FP8_B);
@@ -59,6 +87,23 @@ uint2 q8hf(uint4 h, inout uint bad)
     const uint2 q = uint2(r0.v[0], r1.v[0]);
     bad |= ((q.x & 0x7f7f7f7fu) + 0x01010101u) | ((q.y & 0x7f7f7f7fu) + 0x01010101u);
     return q;
+}
+#endif
+#else
+#if RR_Q8_FAST
+uint2 q8hf_nc(uint4 h)
+{
+    wg_frag f;
+    f.v[0] = h.x; f.v[1] = h.y; f.v[2] = h.z; f.v[3] = h.w;
+    [unroll] for (uint i = 4; i < 8; ++i) f.v[i] = 0u;
+    const wg_frag r = wg_ags_convert(f, WG_AGS_T_F16_ACC, WG_AGS_T_FP8_B);
+    return uint2(r.v[0], r.v[1]);
+}
+uint2 q8hf(uint4 h, inout uint bad)
+{
+    const half2 lo = half2(-448.0, -448.0), hi = half2(448.0, 448.0);
+    return q8hf_nc(uint4(rr_b2(min(max(rr_h2(h.x), lo), hi)), rr_b2(min(max(rr_h2(h.y), lo), hi)),
+                         rr_b2(min(max(rr_h2(h.z), lo), hi)), rr_b2(min(max(rr_h2(h.w), lo), hi))));
 }
 #else
 uint2 q8hf(uint4 h, inout uint bad)
@@ -71,6 +116,7 @@ uint2 q8hf(uint4 h, inout uint bad)
     bad |= ((q.x & 0x7f7f7f7fu) + 0x01010101u) | ((q.y & 0x7f7f7f7fu) + 0x01010101u);
     return q;
 }
+#endif
 #endif
 // Q8 groups (several Q8 calls sharing one wave-uniform slow-path decision):
 //     uint bad = 0u;  Q8_TRY <fast forms, accumulating bad>  Q8_ELSE <slow forms>  Q8_END
@@ -92,7 +138,12 @@ static uint rr_cnt0, rr_cnt1, rr_cnt2;
 #define DBG_INIT
 #define DBG_FLUSH
 #endif
-#if RR_STICKY
+#if RR_Q8_FAST
+// every group is the clamped fast form: no per-group vote, no sticky slow path (the slow form is dead code)
+#define Q8_TRY {
+#define Q8_ELSE } if (false) {
+#define Q8_END }
+#elif RR_STICKY
 #define Q8_TRY [branch] if (!rr_sat) {
 #define Q8_ELSE rr_sat = q8_slow(bad); if (!rr_sat) { DBG_C(0) } } [branch] if (rr_sat) { DBG_C(1)
 #define Q8_END }
@@ -142,8 +193,12 @@ uint2 q8s(v8f d)
 uint2 q8h_slow(uint4 h) { return q8s(rr_unh(fence4(h))); }
 uint2 q8h_small(uint4 h)   // values known finite and within +-448 (P)
 {
+#if RR_Q8_FAST
+    return q8hf_nc(h);
+#else
     uint bad = 0u;
     return q8hf(h, bad);
+#endif
 }
 
 // 51.3 step 3 (rr_attn_w2) with the same operations; the bit step as a packed 16-bit shift and one 32-bit mask:
@@ -309,6 +364,23 @@ rrbv bv_attn(rrbv s, RrWx k)
 #define bv_q8s q8h_slow
 #define bv_d8 d8h
 #define bv_mad pk_mad
+#if RR_SMAJOR >= 2
+#define bv_act(V_, C_) act2_4(V_, C_)   // clean/rr-f-wave5: stage-major activation of the packed forms (the same per-value operations)
+#else
 #define bv_act(V_, C_) uint4(act2(V_.x, C_), act2(V_.y, C_), act2(V_.z, C_), act2(V_.w, C_))
+#endif
 #define bv_attn(V_, C_) uint4(attn_w2(V_.x, C_), attn_w2(V_.y, C_), attn_w2(V_.z, C_), attn_w2(V_.w, C_))
+#endif
+// clean/rr-f-wave5: helpers of the wave64 body kernels for both forms of rrbv (RR_B32: f32 values; otherwise packed f16, the
+// RR_B16R forms). RR_BCV(x): the rrbv form of an f32 accumulator (the f32 form itself, or the packed round-toward-zero f16
+// pairs); RR_CHAIN: the type of a matrix-step chain that stays f32 between its steps (f32 either way); RR_BVK(h): the scalar
+// constant of a residual add (h x: float, or the half2 splat h).
+#if RR_B32
+#define RR_BCV(x_) x_
+#define RR_CHAIN rrbv
+#define RR_BVK(h_) h_##x
+#else
+#define RR_BCV(x_) rr_h16(x_)
+#define RR_CHAIN v8f
+#define RR_BVK(h_) h_
 #endif

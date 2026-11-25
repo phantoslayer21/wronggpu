@@ -514,6 +514,37 @@ W4C_WIDE_DEFS = {}   # per stage: defines of the wave64 form beyond the wave32 r
 W4C_C32_DEFS = {"IN0": {"RR_DEFER": 1, "RR_W4C": 6, "RR_SMAJOR": 2}, "D0-F": {"RR_W4C": 2}}
 
 
+# clean/rr-f-wave5 (fast mode only; the runtime's WG_RR_W5 mask): the relaxed body's wave64 stages with the packed-f16 elementwise forms
+# (L01_B16R, the bit of the stage in its file's L01_* mask) and the branchless Q8 (RR_Q8_FAST, rr_fast.hlsli): the stagef.* kernels.
+# NOT exact (round toward zero of the packed values, a NaN / out-of-range value takes the clamp's bound); network arithmetic only:
+# the history state keeps its operations (the hidden-state pre-activation rounds to nearest even). Bit 1 IN0 / bit 2 D0-F
+# (rr_block_c32.hlsl: IN0 with the folded MLP as step2_raw chains, RR_W4C 6; D0-F RR_W4C 2, the exchange-buffer overlay RR_OVL 1;
+# the deferred Q8 decision RR_DEFER is not needed once no Q8 group has a slow path), bit 3 E1 / D1-F / D1-R (rr_block_c64_w64.hlsl),
+# bit 4 E2 / D2-F / D2-R (rr_block_wide_w64.hlsl, the route's group count and prefetch mask as for stagee.<n>.w64).
+W5_Q8 = {"RR_Q8_FAST": 1}
+W5_C32_DEFS = {"IN0": dict(W5_Q8, L01_B16R=1, RR_FOLD_B32=1, RR_W4C=6, RR_SMAJOR=2),
+               "D0-F": dict(W5_Q8, L01_B16R=2, RR_W4C=2, RR_OVL=1)}
+W5_C64_DEFS = {"E1": dict(W5_Q8, L01_B16R=4), "D1-F": dict(W5_Q8, L01_B16R=8), "D1-R": dict(W5_Q8, L01_B16R=16)}
+W5_WIDE_DEFS = {"E2": dict(W5_Q8, L01_B16R=16), "D2-F": dict(W5_Q8, L01_B16R=8), "D2-R": dict(W5_Q8, L01_B16R=16)}
+# runtime kernel name -> (stage, builder, defines)
+W5_KERNELS = (("stagef.IN0.w64", "IN0", "c32", W5_C32_DEFS), ("stagef.D0-F.w64", "D0-F", "c32", W5_C32_DEFS),
+              ("stagef.E1.w64", "E1", "c64", W5_C64_DEFS), ("stagef.D1-F.w64", "D1-F", "c64", W5_C64_DEFS),
+              ("stagef.D1-R.w64", "D1-R", "c64", W5_C64_DEFS), ("stagef.E2.w64", "E2", "wide", W5_WIDE_DEFS),
+              ("stagef.D2-F.w64", "D2-F", "wide", W5_WIDE_DEFS), ("stagef.D2-R.w64", "D2-R", "wide", W5_WIDE_DEFS))
+
+
+def kernel_w5(name, zmode, step="E", ldsw=1, extra=None):
+    """The dxil of the stagef.<name>.w64 kernel (clean/rr-f-wave5); extra: A/B defines on top (e.g. RR_DEFER)."""
+    for _, st, kind, defs in W5_KERNELS:
+        if st != name:
+            continue
+        d = dict(defs[name], **(extra or {}))
+        if kind == "c32":
+            return kernel_for(name, zmode, step=step, ldsw=ldsw, extra=d)
+        return (kernel_c64_w64 if kind == "c64" else kernel_wide_w64)(name, zmode, step=step, ldsw=ldsw, extra=d)
+    raise KeyError(name)
+
+
 def kernel_dxil(name, zmode, step="E", ldsw=1):
     """The dxil the body uses for a stage."""
     return kernel_for(name, zmode, step=step, ldsw=ldsw)

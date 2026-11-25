@@ -78,6 +78,23 @@ WG_ARGS_BEGIN
 WG_ARGS_END
 
 #define RR_L01BIT (RR_ADAPT ? 4 : RR_KIND == 2 ? 8 : 16)   // this stage's bit in the L01_* masks (as rr_block_fast.hlsl)
+// clean/rr-f-wave5 (fast mode only: the stagef.* kernels): L01_B16R (the bit of the stage in the mask) takes the relaxed body's packed-f16
+// elementwise forms (act2 / attn_w2 / pk_mad / Q8 from f16 on v_cvt_pkrtz-packed WMMA results, rr_fast.hlsli bv_*) instead of the f32
+// forms of RR_B32, as rr_block_c32.hlsl does (the matrix chains stay f32 between their steps, packed once at their ends; the
+// hidden-state pre-activation is rounded to nearest even). RR_Q8_FAST 1 (rr_fast.hlsli): branchless Q8. Not exact; quality gate.
+#ifndef L01_B16R
+#define L01_B16R 0
+#endif
+#if defined(RR_B32) && RR_B32 && (RR_L01BIT & L01_B16R) != 0
+#undef RR_B32
+#define RR_B32 0
+#define RR_B16R 1
+#endif
+#if defined(RR_B16R)
+#define RR_STEP2HH(a0_, b0_, a1_, b1_, c_) wg_to_f16_ags(step2_raw(a0_, b0_, a1_, b1_, c_))   // history: RNE
+#else
+#define RR_STEP2HH step2h
+#endif
 #include "rr_common.hlsli"
 #include "rr_step.hlsli"
 #undef rr_d8
@@ -189,7 +206,7 @@ uint2 mlp_frag(uint j, uint f) { return wfrag(pMlp + j * UNIT, f); }
 #endif
 #define RR_FPP
 #define RR_FPA
-#if !RR_B32 || !RR_VARL || !RR_WIL || RR_Z != 0 || RR_STEP != 0 || !RR_STICKY
+#if ((!RR_B32 && !defined(RR_B16R)) || !RR_VARL || (!RR_WIL && !defined(RR_B16R)) || RR_Z != 0 || RR_STEP != 0 || !RR_STICKY)
 #error "rr_block_c64_w64.hlsl: the relaxed stagee configuration only"
 #endif
 #if RR_KIND == 0 && (RR_ADAPT != 2 || RR_CN != 96 || RR_HMERGE != 1)
@@ -206,7 +223,7 @@ uint2 mlp_frag(uint j, uint f) { return wfrag(pMlp + j * UNIT, f); }
 // Q8(act(Du_j)), then one Dd step per channel tile. first: the Dd start values are the f32 bias tiles (the chunk-0
 // form); otherwise the widened packed dd. L01_MDPF: the Dd weight fragments are loaded right after the chunk's hidden
 // WMMAs, before the activation and the Q8 branch.
-void mlp_chunk(uint j, bool first, uint2 y1q[KS], inout rrbv dd[KS], RrWx wc)
+void mlp_chunk(uint j, bool first, uint2 y1q[KS], inout RR_CHAIN dd[KS], RrWx wc)
 {
     v8f u0 = bias_tile(pB1, 2u * j), u1 = bias_tile(pB1, 2u * j + 1u);
     rrbv h0, h1;
@@ -214,7 +231,7 @@ void mlp_chunk(uint j, bool first, uint2 y1q[KS], inout rrbv dd[KS], RrWx wc)
         const uint2 a00 = mlp_frag(j, 2u * s), a01 = mlp_frag(j, 2u * s + 1u);
         const uint2 a10 = mlp_frag(j, KS + 2u * s), a11 = mlp_frag(j, KS + 2u * s + 1u);
         wil2(u0, u1, a00, y1q[2 * s], a01, y1q[2 * s + 1], a10, y1q[2 * s], a11, y1q[2 * s + 1]);
-        if (s + 1 == NS) { h0 = u0; h1 = u1; }
+        if (s + 1 == NS) { h0 = RR_BCV(u0); h1 = RR_BCV(u1); }
     }
     uint2 wd[2 * KS];
     [unroll] for (uint q = 0; q < 2 * KS; ++q) wd[q] = mlp_frag(j, 2u * KS + q);
@@ -270,8 +287,10 @@ WG_KERNEL(rr_block)
     const RrWc wc = rr_wc(wc0, wc1, wc2, wc3, wc4);
     const half2 ra2 = rr_splat_lo(c_ra_m), m2 = rr_splat_hi(c_ra_m);
     const half2 f2 = rr_splat_lo(c_f_g), g2 = rr_splat_hi(c_f_g);
+#if RR_B32
     const RrWx wx = rr_wx(wc);
     const float ra2x = (float)ra2.x, m2x = (float)m2.x, f2x = (float)f2.x;
+#endif
     const int Mx = Nx >> 1, My = Ny >> 1;
     const int cx0 = (8 * wi - sx) >> 1, cy0 = (8 * wj - sy) >> 1;
 
@@ -343,7 +362,7 @@ WG_KERNEL(rr_block)
         [unroll] for (uint ct = 0; ct < KS; ++ct) {
             const uint2 sk = rr_tld(pX, tok[0] * RC + 16u * ct, tok[1] * RC + 16u * ct);
             const uint2 up = uint2(RR_UP32(ub0 + 4u * ct), RR_UP32(ub1 + 4u * ct));
-            xr[ct] = bv_mad(bv_d8(sk), f2x, bv_d8(up));
+            xr[ct] = bv_mad(bv_d8(sk), RR_BVK(f2), bv_d8(up));
         }
         Q8_TRY [unroll] for (uint c0 = 0; c0 < KS; ++c0) xf[c0] = bv_q8f(xr[c0], bad);
         Q8_ELSE [unroll] for (uint c = 0; c < KS; ++c) xf[c] = bv_q8s(xr[c]); Q8_END
@@ -354,6 +373,9 @@ WG_KERNEL(rr_block)
 
     // ---- heads: steps 1-6 ------------------------------------------------------------------------------------------
     rrbv dp[KS];
+#if !RR_B32
+    v8f dpv[KS];   // RR_B16R: the Dp chain stays f32 between the heads, packed once after the loop
+#endif
     [unroll] for (uint h = 0; h < RH; ++h) {
         // [A] q_h (features x tokens) and v_h^T (tokens x features)
         v8f aq0 = zero8(), aq1 = zero8(), av0 = zero8(), av1 = zero8();
@@ -388,8 +410,9 @@ WG_KERNEL(rr_block)
             v8f s0 = rr_cat4(wg_ld4f(tb0, 0u), wg_ld4f(tb1, 0u)), s1 = rr_cat4(wg_ld4f(tb0, 1024u), wg_ld4f(tb1, 1024u));
             v8f s2 = rr_cat4(wg_ld4f(tb0, 2048u), wg_ld4f(tb1, 2048u)), s3 = rr_cat4(wg_ld4f(tb0, 3072u), wg_ld4f(tb1, 3072u));
             wil4(s0, s1, s2, s3, k[0], qf0, k[1], qf1, k[2], qf0, k[3], qf1, k[4], qf0, k[5], qf1, k[6], qf0, k[7], qf1);
-            wt[0] = bv_attn(s0, BVW); wt[1] = bv_attn(s1, BVW); wt[2] = bv_attn(s2, BVW); wt[3] = bv_attn(s3, BVW);
+            wt[0] = bv_attn(RR_BCV(s0), BVW); wt[1] = bv_attn(RR_BCV(s1), BVW); wt[2] = bv_attn(RR_BCV(s2), BVW); wt[3] = bv_attn(RR_BCV(s3), BVW);
         }
+#if RR_B32
         // step 4: Z, r = 1 / Z, P = Q8(w r) (f32 softmax normalisation; Z as the wave32 tree, see the head comment)
         v8f zt;
         [unroll] for (uint i3 = 0; i3 < 8; ++i3) zt.v[i3] = (wt[0].v[i3] + wt[1].v[i3]) + (wt[2].v[i3] + wt[3].v[i3]);
@@ -402,6 +425,30 @@ WG_KERNEL(rr_block)
             [unroll] for (uint i4 = 0; i4 < 4; ++i4) { p.v[i4] = wt[J4].v[i4] * rz0; p.v[4 + i4] = wt[J4].v[4 + i4] * rz1; }
             pf[J4] = rr_q8_small(p);
         }
+#else
+        // step 4 (RR_B16R, the packed form of the exact body): Z = the f32 dot2add sum of the packed weights (per tile the lane's
+        // 4 elements of every key tile, then the other half's (lane ^ 32) and the other row group's (lane ^ 16)), R(Z), r =
+        // R(1 / Z) in f16, P = Q8(R(w r)) packed
+        float za = 0.0f, zc = 0.0f;
+        [unroll] for (uint J3 = 0; J3 < 4; ++J3) {
+            za = dot2add(rr_h2(wt[J3].x), half2(1.0, 1.0), za);
+            za = dot2add(rr_h2(wt[J3].y), half2(1.0, 1.0), za);
+            zc = dot2add(rr_h2(wt[J3].z), half2(1.0, 1.0), zc);
+            zc = dot2add(rr_h2(wt[J3].w), half2(1.0, 1.0), zc);
+        }
+        const float zs0 = za + wg_xor(za, 32u), zs1 = zc + wg_xor(zc, 32u);
+        const uint zb0 = f2h_hw(zs0 + wg_xor16(zs0)), zb1 = f2h_hw(zs1 + wg_xor16(zs1));
+        const half2 r2a = rr_h2(f2h_hw(rcp(f16tof32(zb0))) * 0x10001u), r2b = rr_h2(f2h_hw(rcp(f16tof32(zb1))) * 0x10001u);
+        uint2 pf[4];
+        [unroll] for (uint J4 = 0; J4 < 4; ++J4) {
+            uint4 p;
+            p.x = rr_b2(rr_h2(wt[J4].x) * r2a);
+            p.y = rr_b2(rr_h2(wt[J4].y) * r2a);
+            p.z = rr_b2(rr_h2(wt[J4].z) * r2b);
+            p.w = rr_b2(rr_h2(wt[J4].w) * r2b);
+            pf[J4] = q8h_small(p);
+        }
+#endif
         // step 5: O_h = Q8(MM(P; v_h)), keys 0-31 then 32-63
         v8f ov[2];
         {
@@ -416,6 +463,7 @@ WG_KERNEL(rr_block)
         Q8_TRY of[0] = q8f(ov[0], bad); of[1] = q8f(ov[1], bad);
         Q8_ELSE of[0] = q8s(ov[0]); of[1] = q8s(ov[1]); Q8_END
         // step 6: Dp step h
+#if RR_B32
         [unroll] for (uint ct = 0; ct < KS; ++ct) {
             v8f c;
             if (h == 0u) c = bias_tile(pBo, ct); else c = bv_un(dp[ct]);
@@ -424,7 +472,16 @@ WG_KERNEL(rr_block)
         [unroll] for (uint c2 = 0; c2 < KS; c2 += 2u)
             wil2(dp[c2], dp[c2 + 1u], wo_frag(h, 2u * c2), of[0], wo_frag(h, 2u * c2 + 1u), of[1],
                  wo_frag(h, 2u * c2 + 2u), of[0], wo_frag(h, 2u * c2 + 3u), of[1]);
+#else
+        if (h == 0u) { [unroll] for (uint ct = 0; ct < KS; ++ct) dpv[ct] = bias_tile(pBo, ct); }
+        [unroll] for (uint c2 = 0; c2 < KS; c2 += 2u)
+            wil2(dpv[c2], dpv[c2 + 1u], wo_frag(h, 2u * c2), of[0], wo_frag(h, 2u * c2 + 1u), of[1],
+                 wo_frag(h, 2u * c2 + 2u), of[0], wo_frag(h, 2u * c2 + 3u), of[1]);
+#endif
     }
+#if !RR_B32
+    [unroll] for (uint c6 = 0; c6 < KS; ++c6) dp[c6] = RR_BCV(dpv[c6]);
+#endif
 
     // ---- step 7: first residual -------------------------------------------------------------------------------------
     rrbv y1h[KS];
@@ -433,9 +490,9 @@ WG_KERNEL(rr_block)
         uint bad = 0u;
         [unroll] for (uint c1 = 0; c1 < KS; ++c1) {
 #if RR_KIND == 2
-            y1h[c1] = bv_mad(dp[c1], ra2x, xr[c1]);
+            y1h[c1] = bv_mad(dp[c1], RR_BVK(ra2), xr[c1]);
 #else
-            y1h[c1] = bv_mad(dp[c1], ra2x, bv_d8(xf[c1]));
+            y1h[c1] = bv_mad(dp[c1], RR_BVK(ra2), bv_d8(xf[c1]));
 #endif
         }
         Q8_TRY [unroll] for (uint c0 = 0; c0 < KS; ++c0) y1q[c0] = bv_q8f(y1h[c0], bad);
@@ -443,16 +500,24 @@ WG_KERNEL(rr_block)
     }
 
     // ---- step 8: MLP (chunk 0 peeled: its Dd steps start from the f32 bias; the chunk loop fully unrolled) ------------
+#if RR_B32
     rrbv dd[KS];
     mlp_chunk(0u, true, y1q, dd, BVW);
     [unroll] for (uint j = 1; j < NJ; ++j) mlp_chunk(j, false, y1q, dd, BVW);
+#else
+    v8f ddc[KS];   // RR_B16R: the Dd chain stays f32 over the chunks, packed once after them
+    mlp_chunk(0u, true, y1q, ddc, BVW);
+    [unroll] for (uint j = 1; j < NJ; ++j) mlp_chunk(j, false, y1q, ddc, BVW);
+    rrbv dd[KS];
+    [unroll] for (uint c6 = 0; c6 < KS; ++c6) dd[c6] = RR_BCV(ddc[c6]);
+#endif
 
     // ---- step 9: second residual, block output y2 ---------------------------------------------------------------------
     uint2 y2[KS];
     {
         rrbv yh[KS];
         uint bad = 0u;
-        [unroll] for (uint c3 = 0; c3 < KS; ++c3) yh[c3] = bv_mad(dd[c3], m2x, y1h[c3]);
+        [unroll] for (uint c3 = 0; c3 < KS; ++c3) yh[c3] = bv_mad(dd[c3], RR_BVK(m2), y1h[c3]);
         Q8_TRY [unroll] for (uint c0 = 0; c0 < KS; ++c0) y2[c0] = bv_q8f(yh[c0], bad);
         Q8_ELSE [unroll] for (uint c = 0; c < KS; ++c) y2[c] = bv_q8s(yh[c]); Q8_END
     }
@@ -519,7 +584,7 @@ WG_KERNEL(rr_block)
         uint4 dhb;
         [unroll] for (uint s = 0; s < NS; ++s) {
             if (s + 1 < NS) dh = step2(wfrag(pWh, 2u * s), y2[2 * s], wfrag(pWh, 2u * s + 1u), y2[2 * s + 1], dh);
-            else dhb = step2h(wfrag(pWh, 2u * s), y2[2 * s], wfrag(pWh, 2u * s + 1u), y2[2 * s + 1], dh);
+            else dhb = RR_STEP2HH(wfrag(pWh, 2u * s), y2[2 * s], wfrag(pWh, 2u * s + 1u), y2[2 * s + 1], dh);
         }
         const uint z1 = wg_xor_u(dhb.z, 32u), w1 = wg_xor_u(dhb.w, 32u);
         const bool t1 = rr_hh != 0u;

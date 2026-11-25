@@ -74,6 +74,23 @@ WG_ARGS_BEGIN
 WG_ARGS_END
 
 #define RR_L01BIT (RR_KIND == 2 ? 8 : 16)   // this stage's bit in the L01_* masks (as rr_block_fast.hlsl)
+// clean/rr-f-wave5 (fast mode only: the stagef.* kernels): L01_B16R (the bit of the stage in the mask) takes the relaxed body's packed-f16
+// elementwise forms (act2 / attn_w2 / pk_mad / Q8 from f16 on v_cvt_pkrtz-packed WMMA results, rr_fast.hlsli bv_*) instead of the f32
+// forms of RR_B32, as rr_block_c32.hlsl does (the matrix chains stay f32 between their steps, packed once at their ends; the
+// hidden-state pre-activation is rounded to nearest even). RR_Q8_FAST 1 (rr_fast.hlsli): branchless Q8. Not exact; quality gate.
+#ifndef L01_B16R
+#define L01_B16R 0
+#endif
+#if defined(RR_B32) && RR_B32 && (RR_L01BIT & L01_B16R) != 0
+#undef RR_B32
+#define RR_B32 0
+#define RR_B16R 1
+#endif
+#if defined(RR_B16R)
+#define RR_STEP2HH(a0_, b0_, a1_, b1_, c_) wg_to_f16_ags(step2_raw(a0_, b0_, a1_, b1_, c_))   // history: RNE
+#else
+#define RR_STEP2HH step2h
+#endif
 #include "rr_common.hlsli"
 #include "rr_step.hlsli"
 #undef rr_d8
@@ -218,8 +235,23 @@ uint2 mlp_frag(uint j, uint f) { return wfrag(pMlp + j * UNIT, f); }
 #include "rr_fast.hlsli"
 #define RR_FPP
 #define RR_FPA
-#if !RR_B32 || !RR_VARL || !RR_WIL || RR_Z != 0 || RR_STEP != 0 || !RR_STICKY || RR_COUNT
+#if ((!RR_B32 && !defined(RR_B16R)) || !RR_VARL || (!RR_WIL && !defined(RR_B16R)) || RR_Z != 0 || RR_STEP != 0 || !RR_STICKY || RR_COUNT)
 #error "rr_block_wide_w64.hlsl: the relaxed stagee configuration only"
+#endif
+// the matrix chains of the heads (Dp) and the MLP (Dd): the packed steps of the f32 form (bv_step: an f32 chain, RR_B32), or
+// (RR_B16R) f32 chains kept between their steps and packed once at their ends (dp / dd hold the packed results there)
+#if RR_B32
+#define RR_CSTEP bv_step
+#define RR_CUN bv_un
+#define RR_CINIT bv_of
+#define RR_DPC dp
+#define RR_DDC dd
+#else
+#define RR_CSTEP step2_raw
+#define RR_CUN(x_) x_
+#define RR_CINIT(x_) x_
+#define RR_DPC dpc
+#define RR_DDC ddc
 #endif
 #if RR_KIND == 2 && RR_KC == 0
 #error "rr_block_wide_w64.hlsl: the fusion kind needs RR_KC"
@@ -270,8 +302,10 @@ WG_KERNEL(rr_block)
     const RrWc wc = rr_wc(wc0, wc1, wc2, wc3, wc4);
     const half2 ra2 = rr_splat_lo(c_ra_m), m2 = rr_splat_hi(c_ra_m);
     const half2 f2 = rr_splat_lo(c_f_g), g2 = rr_splat_hi(c_f_g);
+#if RR_B32
     const RrWx wx = rr_wx(wc);
     const float ra2x = (float)ra2.x, m2x = (float)m2.x, f2x = (float)f2.x;
+#endif
     const int Mx = Nx >> 1, My = Ny >> 1;
     const int cx0 = (8 * wi - sx) >> 1, cy0 = (8 * wj - sy) >> 1;
     uint cto[OWN];                                          // owned channel tiles
@@ -315,7 +349,7 @@ WG_KERNEL(rr_block)
         [unroll] for (uint ct = 0; ct < KS; ++ct) {
             const uint2 sk = rr_tld(pX, tok[0] * RC + 16u * ct, tok[1] * RC + 16u * ct);
             const uint2 up = uint2(rr_l32[ub0 + 4u * ct], rr_l32[ub1 + 4u * ct]);
-            xr[ct] = bv_mad(bv_d8(sk), f2x, bv_d8(up));
+            xr[ct] = bv_mad(bv_d8(sk), RR_BVK(f2), bv_d8(up));
         }
         Q8_TRY [unroll] for (uint c0 = 0; c0 < KS; ++c0) xf[c0] = bv_q8f(xr[c0], bad);
         Q8_ELSE [unroll] for (uint c = 0; c < KS; ++c) xf[c] = bv_q8s(xr[c]); Q8_END
@@ -323,7 +357,7 @@ WG_KERNEL(rr_block)
             const uint ct = cto[i1];
             const uint2 sk = rr_tld(pX, tok[0] * RC + 16u * ct, tok[1] * RC + 16u * ct);
             const uint2 up = uint2(rr_l32[ub0 + 4u * ct], rr_l32[ub1 + 4u * ct]);
-            rb[i1] = bv_mad(bv_d8(sk), f2x, bv_d8(up));
+            rb[i1] = bv_mad(bv_d8(sk), RR_BVK(f2), bv_d8(up));
         }
         GroupMemoryBarrierWithGroupSync();                  // UP overlays the head buffers
     }
@@ -334,7 +368,10 @@ WG_KERNEL(rr_block)
 
     // ---- heads: steps 1-6, rounds of G heads -------------------------------------------------------------------------
     rrbv dp[OWN];
-    [unroll] for (uint i2 = 0; i2 < OWN; ++i2) dp[i2] = bv_of(bias_tile(pBo, cto[i2]));
+#if !RR_B32
+    v8f dpc[OWN];
+#endif
+    [unroll] for (uint i2 = 0; i2 < OWN; ++i2) RR_DPC[i2] = RR_CINIT(bias_tile(pBo, cto[i2]));
     const uint qb = QV_OFF + g * 512u;
     [unroll] for (uint r = 0; r < HR; ++r) {
         const uint h = r * G + g;
@@ -392,7 +429,8 @@ WG_KERNEL(rr_block)
 #endif
         rrbv wt[4];
         wil4(sb[0], sb[1], sb[2], sb[3], kk[0], qf0, kk[1], qf1, kk[2], qf0, kk[3], qf1, kk[4], qf0, kk[5], qf1, kk[6], qf0, kk[7], qf1);
-        [unroll] for (uint J = 0; J < 4; ++J) wt[J] = bv_attn(sb[J], BVW);
+        [unroll] for (uint J = 0; J < 4; ++J) wt[J] = bv_attn(RR_BCV(sb[J]), BVW);
+#if RR_B32
         // step 4: Z, r = 1 / Z, P = Q8(w r) (f32 softmax normalisation; Z as the wave32 tree, see the head comment)
         v8f zt;
         [unroll] for (uint i3 = 0; i3 < 8; ++i3) zt.v[i3] = (wt[0].v[i3] + wt[1].v[i3]) + (wt[2].v[i3] + wt[3].v[i3]);
@@ -405,6 +443,30 @@ WG_KERNEL(rr_block)
             [unroll] for (uint i4 = 0; i4 < 4; ++i4) { p.v[i4] = wt[J4].v[i4] * rz0; p.v[4 + i4] = wt[J4].v[4 + i4] * rz1; }
             pf[J4] = rr_q8_small(p);
         }
+#else
+        // step 4 (RR_B16R, the packed form of the exact body): Z = the f32 dot2add sum of the packed weights (per tile the lane's
+        // 4 elements of every key tile, then the other half's (lane ^ 32) and the other row group's (lane ^ 16)), R(Z), r =
+        // R(1 / Z) in f16, P = Q8(R(w r)) packed
+        float za = 0.0f, zc = 0.0f;
+        [unroll] for (uint J3 = 0; J3 < 4; ++J3) {
+            za = dot2add(rr_h2(wt[J3].x), half2(1.0, 1.0), za);
+            za = dot2add(rr_h2(wt[J3].y), half2(1.0, 1.0), za);
+            zc = dot2add(rr_h2(wt[J3].z), half2(1.0, 1.0), zc);
+            zc = dot2add(rr_h2(wt[J3].w), half2(1.0, 1.0), zc);
+        }
+        const float zs0 = za + wg_xor(za, 32u), zs1 = zc + wg_xor(zc, 32u);
+        const uint zb0 = f2h_hw(zs0 + wg_xor16(zs0)), zb1 = f2h_hw(zs1 + wg_xor16(zs1));
+        const half2 r2a = rr_h2(f2h_hw(rcp(f16tof32(zb0))) * 0x10001u), r2b = rr_h2(f2h_hw(rcp(f16tof32(zb1))) * 0x10001u);
+        uint2 pf[4];
+        [unroll] for (uint J4 = 0; J4 < 4; ++J4) {
+            uint4 p;
+            p.x = rr_b2(rr_h2(wt[J4].x) * r2a);
+            p.y = rr_b2(rr_h2(wt[J4].y) * r2a);
+            p.z = rr_b2(rr_h2(wt[J4].z) * r2b);
+            p.w = rr_b2(rr_h2(wt[J4].w) * r2b);
+            pf[J4] = q8h_small(p);
+        }
+#endif
         // step 5: O_h = Q8(MM(P; v_h)), keys 0-31 then 32-63
         v8f ov[2];
         {
@@ -433,7 +495,7 @@ WG_KERNEL(rr_block)
         }
         [unroll] for (uint gg = 0; gg < G; ++gg) {
             [unroll] for (uint i4 = 0; i4 < OWN; ++i4)
-                dp[i4] = bv_step(wo[gg][2 * i4], ob[gg][0], wo[gg][2 * i4 + 1], ob[gg][1], bv_un(dp[i4]));
+                RR_DPC[i4] = RR_CSTEP(wo[gg][2 * i4], ob[gg][0], wo[gg][2 * i4 + 1], ob[gg][1], RR_CUN(RR_DPC[i4]));
         }
 #else
         [unroll] for (uint gg = 0; gg < G; ++gg) {
@@ -445,10 +507,13 @@ WG_KERNEL(rr_block)
                 wa[i3] = wo_frag(hh, 2u * cto[i3]);
                 wb[i3] = wo_frag(hh, 2u * cto[i3] + 1u);
             }
-            [unroll] for (uint i4 = 0; i4 < OWN; ++i4) dp[i4] = bv_step(wa[i4], o0, wb[i4], o1, bv_un(dp[i4]));
+            [unroll] for (uint i4 = 0; i4 < OWN; ++i4) RR_DPC[i4] = RR_CSTEP(wa[i4], o0, wb[i4], o1, RR_CUN(RR_DPC[i4]));
         }
 #endif
     }
+#if !RR_B32
+    [unroll] for (uint i0 = 0; i0 < OWN; ++i0) dp[i0] = RR_BCV(dpc[i0]);
+#endif
     GroupMemoryBarrierWithGroupSync();                      // Y overlays the head buffers
 
     // ---- step 7: first residual of the owned tiles; Q8(y1) of every channel to LDS ----------------------------------
@@ -457,7 +522,7 @@ WG_KERNEL(rr_block)
         uint2 yq[OWN];
         uint bad = 0u;
         [unroll] for (uint i5 = 0; i5 < OWN; ++i5) {
-            y1h[i5] = bv_mad(dp[i5], ra2x, rb[i5]);
+            y1h[i5] = bv_mad(dp[i5], RR_BVK(ra2), rb[i5]);
         }
         Q8_TRY [unroll] for (uint c0 = 0; c0 < OWN; ++c0) yq[c0] = bv_q8f(y1h[c0], bad);
         Q8_ELSE [unroll] for (uint c = 0; c < OWN; ++c) yq[c] = bv_q8s(y1h[c]); Q8_END
@@ -472,7 +537,10 @@ WG_KERNEL(rr_block)
 
     // ---- step 8: MLP in rounds of G chunks ---------------------------------------------------------------------------
     rrbv dd[OWN];
-    [unroll] for (uint i7 = 0; i7 < OWN; ++i7) dd[i7] = bv_of(bias_tile(pB2, cto[i7]));
+#if !RR_B32
+    v8f ddc[OWN];
+#endif
+    [unroll] for (uint i7 = 0; i7 < OWN; ++i7) RR_DDC[i7] = RR_CINIT(bias_tile(pB2, cto[i7]));
 #if RR_MLK == 2
     // two chunks per group per round, (2 r2 + k) G + g; the round's 2 G Au tiles in AU [r2 & 1][k][g], one barrier, then
     // the Dd chain over the round's chunks in chunk order (the same steps and operands as RR_MLK 1)
@@ -486,7 +554,7 @@ WG_KERNEL(rr_block)
             rrbv h0, h1;
             [unroll] for (uint s = 0; s < NS; ++s) {
                 wil2(u0, u1, w1[2 * s], y1q[2 * s], w1[2 * s + 1], y1q[2 * s + 1], w1[KS + 2 * s], y1q[2 * s], w1[KS + 2 * s + 1], y1q[2 * s + 1]);
-                if (s + 1 == NS) { h0 = u0; h1 = u1; }
+                if (s + 1 == NS) { h0 = RR_BCV(u0); h1 = RR_BCV(u1); }
             }
             const rrbv a0h = bv_act(h0, BVW);
             const rrbv a1h = bv_act(h1, BVW);
@@ -524,7 +592,7 @@ WG_KERNEL(rr_block)
             }
             [unroll] for (uint gg2 = 0; gg2 < G; ++gg2) {
                 [unroll] for (uint i9 = 0; i9 < OWN; ++i9)
-                    dd[i9] = bv_step(w3[gg2][2 * i9], ab2[gg2][0], w3[gg2][2 * i9 + 1], ab2[gg2][1], bv_un(dd[i9]));
+                    RR_DDC[i9] = RR_CSTEP(w3[gg2][2 * i9], ab2[gg2][0], w3[gg2][2 * i9 + 1], ab2[gg2][1], RR_CUN(RR_DDC[i9]));
             }
         }
     }
@@ -548,7 +616,7 @@ WG_KERNEL(rr_block)
         rrbv h0, h1;
         [unroll] for (uint s = 0; s < NS; ++s) {
             wil2(u0, u1, W1A(s), y1q[2 * s], W1B(s), y1q[2 * s + 1], W1C(s), y1q[2 * s], W1D(s), y1q[2 * s + 1]);
-            if (s + 1 == NS) { h0 = u0; h1 = u1; }
+            if (s + 1 == NS) { h0 = RR_BCV(u0); h1 = RR_BCV(u1); }
         }
 #undef W1A
 #undef W1B
@@ -583,7 +651,7 @@ WG_KERNEL(rr_block)
         }
         [unroll] for (uint gg2 = 0; gg2 < G; ++gg2) {
             [unroll] for (uint i9 = 0; i9 < OWN; ++i9)
-                dd[i9] = bv_step(w2[gg2][2 * i9], ab2[gg2][0], w2[gg2][2 * i9 + 1], ab2[gg2][1], bv_un(dd[i9]));
+                RR_DDC[i9] = RR_CSTEP(w2[gg2][2 * i9], ab2[gg2][0], w2[gg2][2 * i9 + 1], ab2[gg2][1], RR_CUN(RR_DDC[i9]));
         }
 #else
         [unroll] for (uint gg2 = 0; gg2 < G; ++gg2) {
@@ -595,10 +663,13 @@ WG_KERNEL(rr_block)
                 wa[i8] = mlp_frag(jj, 2u * KS + 2u * cto[i8]);
                 wb[i8] = mlp_frag(jj, 2u * KS + 2u * cto[i8] + 1u);
             }
-            [unroll] for (uint i9 = 0; i9 < OWN; ++i9) dd[i9] = bv_step(wa[i9], b0, wb[i9], b1, bv_un(dd[i9]));
+            [unroll] for (uint i9 = 0; i9 < OWN; ++i9) RR_DDC[i9] = RR_CSTEP(wa[i9], b0, wb[i9], b1, RR_CUN(RR_DDC[i9]));
         }
 #endif
     }
+#endif
+#if !RR_B32
+    [unroll] for (uint i0 = 0; i0 < OWN; ++i0) dd[i0] = RR_BCV(ddc[i0]);
 #endif
 
     // ---- step 9: second residual, y2 of the owned tiles (memory, LDS) ------------------------------------------------
@@ -607,7 +678,7 @@ WG_KERNEL(rr_block)
         uint2 y2o[OWN];
         uint bad = 0u;
         [unroll] for (uint c3 = 0; c3 < OWN; ++c3) {
-            yh[c3] = bv_mad(dd[c3], m2x, y1h[c3]);
+            yh[c3] = bv_mad(dd[c3], RR_BVK(m2), y1h[c3]);
         }
         Q8_TRY [unroll] for (uint c0 = 0; c0 < OWN; ++c0) y2o[c0] = bv_q8f(yh[c0], bad);
         Q8_ELSE [unroll] for (uint c = 0; c < OWN; ++c) y2o[c] = bv_q8s(yh[c]); Q8_END
@@ -697,7 +768,7 @@ WG_KERNEL(rr_block)
             wh[2 * s + 1] = wfrag(pWh, 2u * s + 1u);
 #endif
             if (s + 1 < NS) dh = step2(wh[2 * s], y2[2 * s], wh[2 * s + 1], y2[2 * s + 1], dh);
-            else dhb = step2h(wh[2 * s], y2[2 * s], wh[2 * s + 1], y2[2 * s + 1], dh);
+            else dhb = RR_STEP2HH(wh[2 * s], y2[2 * s], wh[2 * s + 1], y2[2 * s + 1], dh);
         }
         const uint z1 = wg_xor_u(dhb.z, 32u), w1 = wg_xor_u(dhb.w, 32u);
         const bool t1 = rr_hh != 0u;

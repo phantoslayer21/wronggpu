@@ -24,6 +24,20 @@
 //     are the wave32 lane's words.
 // Wave-uniform votes (the Q8 clamp test, the activation's rare path, the record flag) cover both tiles: both forms of
 // those groups give the same bits for every value, and the flag word is an OR.
+//
+// clean/rr-f-wave5 RR_HFAST_ALU 1 (opt-in; fast mode only, the runtime kernel head.fast.rx.f.w64; NOT bit-exact to head.fast.rx.w64):
+// "network arithmetic may be relaxed, history logic stays exact".
+//   * the 13 random 128 - 256 KB gathers of the tail (sig x 5, tanh x 2, exp2 x 4, rcp, rho) are bounded hardware f32 ALU work: sig
+//     = rcp(1 + exp2(clamp(-x, -80, 80) log2 e)) (finite at +-inf and for every |x|: +1 / 0), tanh = sign (1 - e) rcp(1 + e), e =
+//     exp2(-2 log2 e min(|x|, 10)) (always within [-1, 1], at most 1 f16 ulp), rho = that tanh of x * s2 (s2 = the f32 bits in
+//     the otherwise unused p_dz argument; the runtime derives it for model files without head.k_s2), CANDW = the 4-way softmax
+//     exp2((z - zmax) log2 e) / sum in f32. The Cnet history blend (55.2) is the text of head.fast.rx.w64, f16 roundings and fences kept.
+//   * Q8: every group is the clamp to +-448 and the driver conversion (no wave vote, no slow path, no kept pre-activations).
+//   * with a render-record scratch (p_oscr != 0, always for the runtime): no CANDW store (output.fast.f reads the record's W
+//     halves; OFX_NOCHK output.fallback.f never runs), and no subnormal-band check / flag word. Cnet, HID, PREC and GATES are stored as before.
+#ifndef RR_HFAST_ALU
+#define RR_HFAST_ALU 0
+#endif
 #include "wg_platform.hlsli"
 #if WG_WAVE != 64 || WG_BLOCK != 128
 #error "rr_d0r_w64.hlsl: WG_BLOCK 128, WG_WAVE 64 only"
@@ -174,6 +188,17 @@ float sw_absmax8(float m, v8f d)
 bool sw_in448(float m) { return WaveActiveAllTrue(m <= 448.0f); }
 // Q8 of 51.1 for groups of tiles of f16 values held in f32: saturation at +-448, RNE; one wave-uniform test skips the
 // clamp when no value of the wave needs it (NaN -> 0xff, see DESIGN-55 section 4).
+#if RR_HFAST_ALU
+// RR_HFAST_ALU: every Q8 group is the clamp to +-448 (a NaN gives a bound) and the driver conversion
+#define RR_Q8(N, src, dst)                                                                                  \
+    {                                                                                                       \
+        [unroll] for (uint qj_ = 0; qj_ < N; ++qj_) {                                                       \
+            v8f qc_;                                                                                        \
+            [unroll] for (uint qi_ = 0; qi_ < 8; ++qi_) qc_.v[qi_] = max(min(src[qj_].v[qi_], 448.0f), -448.0f); \
+            dst[qj_] = wg_pack_q8_nc_ags(qc_);                                                              \
+        }                                                                                                   \
+    }
+#else
 #define RR_Q8(N, src, dst)                                                                                  \
     {                                                                                                       \
         float am_ = 0.0f;                                                                                   \
@@ -181,6 +206,7 @@ bool sw_in448(float m) { return WaveActiveAllTrue(m <= 448.0f); }
         if (sw_in448(am_)) { [unroll] for (uint qj_ = 0; qj_ < N; ++qj_) dst[qj_] = wg_pack_q8_nc_ags(src[qj_]); } \
         else { [unroll] for (uint qk_ = 0; qk_ < N; ++qk_) dst[qk_] = sw_pack_q8_v2(src[qk_]); }            \
     }
+#endif
 
 // 51.3 step 3 on a pair of f16 scores: u = R(s A_SCALE), clamp (a NaN gives A_CLAMPn), p = R(c R(A_P1 - c c) + A_P0),
 // w = 2^(n-15) (1 + y - n), y = 32 (p - 1): for p in [1 + 1/32, 1 + 31/32) the f16 bits of w are (bits(p) << 5) & 0x7fe0.
@@ -221,6 +247,24 @@ uint rr_act(uint xh, half2 cln2, half2 cl2, half2 c12, half2 c22, half2 c32)
 }
 
 // sigx(dd) / 2 = 0.5 / (1 + e^-dd) in f32 (CANDW, 55.3: within about 2 f32 ulp before the rounding to f16).
+#if RR_HFAST_ALU
+// the bounded f32 forms of the table lookups (RR_HFAST_ALU, head comment): sigmoid or tanh of x with one exp2 and one
+// reciprocal either way; th selects tanh (a wave-uniform-free select, both lanes' halves run the same instructions)
+float rr_sigtanh(float x, bool th)
+{
+    const float ax = min(abs(x), 10.0f);
+    const float a = th ? -2.8853900817779268f * ax : min(max(-x, -80.0f), 80.0f) * 1.4426950408889634f;
+    const float e = exp2(a);
+    const float r = rcp(1.0f + e);
+    const float t = (1.0f - e) * r;
+    return th ? asfloat(asuint(t) | (asuint(x) & 0x80000000u)) : r;   // t >= 0: the sign of x (also -0) is one bit-or
+}
+float rr_tanhf(float x) { return rr_sigtanh(x, true); }
+uint rr_sig16(uint h) { return rr_f2h(rr_sigtanh(f16tof32(h), false)); }
+uint rr_tanh16(uint h) { return rr_f2h(rr_sigtanh(f16tof32(h), true)); }
+// the three packed 55.2 clamp of a Q8 group of packed f16 values: v_pk_max_f16 / v_pk_min_f16
+uint rr_c448(uint v) { return U2(min(max(H2(v), half2(-448.0, -448.0)), half2(448.0, 448.0))); }
+#endif
 float rr_lhalf(float dd)
 {
     const float t = min(max(-dd, -100.0f), 87.0f);   // e^t stays finite; beyond, the f16 result is 1/2 or 0 anyway
@@ -423,6 +467,19 @@ WG_KERNEL(rr_d0r_head)
                 n2[i3] = wfrag1(p_wf, F_2 + (i3 >> 1) * 8u + 2u * (j + 1u) + (i3 & 1u));
             }
         }
+#if RR_HFAST_ALU
+        // RR_HFAST_ALU: the activation clamped to +-448 and converted, no kept pre-activations, no vote, no rare path
+        uint2 au[2];
+        [unroll] for (uint k0 = 0; k0 < 2; ++k0) {
+            const uint nt = 2u * j + k0;
+            v8f a = bias_tile(p_bias, 128u + 64u * nt);
+            a = wg_wmma_fp8(uint2(w1[2u * k0], w1[2u * k0]), y1q[0], a);
+            a = wg_wmma_fp8(uint2(w1[2u * k0 + 1u], w1[2u * k0 + 1u]), y1q[1], a);
+            const uint4 h = wg_to_f16_ags(a);
+            au[k0] = rr_q8h_small(uint4(rr_c448(rr_act(h.x, cln2, cl2, c12, c22, c32)), rr_c448(rr_act(h.y, cln2, cl2, c12, c22, c32)),
+                                        rr_c448(rr_act(h.z, cln2, cl2, c12, c22, c32)), rr_c448(rr_act(h.w, cln2, cl2, c12, c22, c32))));
+        }
+#else
         v8f du[2];
         uint4 ah[2];
         uint4 hh2[2];
@@ -450,6 +507,7 @@ WG_KERNEL(rr_d0r_head)
             du[1] = rr_widen(rr_fence4(ah[1]));
             RR_Q8(2u, du, au);
         }
+#endif
         [unroll] for (uint c1 = 0; c1 < 2; ++c1) {
             v8f a;
             if (j == 0u) a = bias_tile(p_bias, 640u + 64u * c1);
@@ -490,6 +548,14 @@ WG_KERNEL(rr_d0r_head)
     const bool h0 = hf == 0u;
     const uint X1 = wg_xor16_u(h0 ? Y0.z : Y0.x), X2 = wg_xor16_u(h0 ? Y0.w : Y0.y);
     const uint WA = h0 ? Y0.x : X1, YS = h0 ? Y0.y : X2, W1 = h0 ? X1 : Y0.z, W2 = h0 ? X2 : Y0.w, WT = Y1.x;
+#if RR_HFAST_ALU
+    // the table lookups as bounded f32 work (head comment): hf0 sig(g0, g1, g2, g3), sig(py), tanh(hb), rho; hf1 sig(G0, G1, G2, px), tanh(ha)
+    const uint S0 = rr_sig16(WA & 0xffffu), S1 = rr_sig16(WA >> 16);
+    const uint S2 = rr_sig16(YS & 0xffffu), S3 = rr_sig16(YS >> 16);
+    const uint S4 = rr_f2h(rr_sigtanh(f16tof32(h0 ? W1 : W2), !h0));   // hf0 sig, hf1 tanh: one exp2 and one reciprocal
+    const uint T2 = rr_tanh16(WT & 0xffffu);
+    const float RHO = rr_tanhf(f16tof32(W1 >> 16) * asfloat(p_dz));      // rho = tanh(f32(y17 s2)), s2 = the f32 bits of p_dz
+#else
     const uint ptab = rr_u(p_tab);
     // table lookups: hf0 sig(g0, g1, g2, g3), sig(py), tanh(hb), rho(rho); hf1 sig(G0, G1, G2, px), tanh(ha)
     const uint S0 = wg_ld16(ptab, (WA & 0xffffu) * 2u), S1 = wg_ld16(ptab, (WA >> 16) * 2u);
@@ -497,6 +563,7 @@ WG_KERNEL(rr_d0r_head)
     const uint S4 = wg_ld16(ptab, h0 ? (W1 & 0xffffu) * 2u : TAB_TANH + (W2 & 0xffffu) * 2u);
     const uint T2 = wg_ld16(ptab, TAB_TANH + (WT & 0xffffu) * 2u);
     const float RHO = asfloat(wg_ld32(p_rho, (W1 >> 16) * 4u));
+#endif
     // the two lanes of a token swap: hf0 -> (sig g2, sig g3), la; hf1 -> (sig px, lb)
     const uint Q0 = wg_xor16_u(h0 ? (S2 | (S3 << 16)) : (S3 | ((W1 & 0xffffu) << 16)));
     const uint Q1 = wg_xor16_u(W2 & 0xffffu);
@@ -505,6 +572,20 @@ WG_KERNEL(rr_d0r_head)
     // CANDW (55-ERRATUM-2): W4.r..a from (y10, y11, y12, y13), every step binary16 (each lane gets the other lane's
     // pair and computes all four): m = max; d = R(z - m); t = R(d R(log2 e)); e = R(2^t) (table, correctly rounded);
     // S = R(R(e0 + e2) + R(e1 + e3)); q = R(1/S) (table, correctly rounded); W = R(e q). hf0 stores W0, W1, hf1 W2, W3.
+#if RR_HFAST_ALU
+    // CANDW as f32 (head comment): W_i = exp2((z_i - zmax) log2 e) / sum, hf0 stores W0, W1, hf1 W2, W3 (packed, round toward zero:
+    // only the 8-bit codes of the values are used)
+    const uint T3 = rr_tanh16((h0 ? WT : W2) >> 16);
+    const uint P18 = wg_xor16_u(h0 ? W2 : W1);
+    const uint ZW01 = h0 ? W2 : P18, ZW23 = h0 ? P18 : W1;
+    const float zq0 = f16tof32(ZW01 & 0xffffu), zq1 = f16tof32(ZW01 >> 16), zq2 = f16tof32(ZW23 & 0xffffu), zq3 = f16tof32(ZW23 >> 16);
+    const float zmx = max(max(zq0, zq1), max(zq2, zq3));
+    const float L2Ef = 1.4426950408889634f;
+    const float ee0 = exp2((zq0 - zmx) * L2Ef), ee1 = exp2((zq1 - zmx) * L2Ef), ee2 = exp2((zq2 - zmx) * L2Ef), ee3 = exp2((zq3 - zmx) * L2Ef);
+    const float qS = rcp((ee0 + ee1) + (ee2 + ee3));
+    const uint WL = wg_h2((h0 ? ee0 : ee2) * qS, (h0 ? ee1 : ee3) * qS);
+    const uint cw18a = WL & 0xffffu, cw18b = WL >> 16;
+#else
     const uint T3 = wg_ld16(ptab, TAB_TANH + ((h0 ? WT : W2) >> 16) * 2u);
     const uint P18 = wg_xor16_u(h0 ? W2 : W1);
     const half2 Z01 = H2(h0 ? W2 : P18), Z23 = H2(h0 ? P18 : W1);
@@ -522,6 +603,7 @@ WG_KERNEL(rr_d0r_head)
     const half2 Q18 = H2(wg_ld16(ptab, TAB_RCP16 + (SS & 0xffffu) * 2u) * 0x10001u);
     const uint WL = U2(HF(H2(h0 ? E01 : E23) * Q18));
     const uint cw18a = WL & 0xffffu, cw18b = WL >> 16;
+#endif
 
     // ---------------------------------------------------------------- 55.2 Cnet (hf0: channels 0, 1; hf1: 2, 3)
     const half2 g2 = rr_c2(k_g);
@@ -557,10 +639,18 @@ WG_KERNEL(rr_d0r_head)
         const float d = f16tof32(la) - f16tof32(lb);                   // f32(la - lb), one rounding
         cv = rr_lhalf(h0 ? d : -d);                        // hf0: w = sigx(d)/2, hf1: w' = sigx(-d)/2
     }
+#if RR_HFAST_ALU
+    // PREC (f32 products of f32 values: no addend, nothing a fused form could change; the fences of the exact-arithmetic text are dropped)
+    const float po = f16tof32(h0 ? S4 : S3) * s1;                  // hf0: Py, hf1: Px
+    const float sq = po * po;                                      // hf0: PREC 1, hf1: PREC 0
+    const float px = f16tof32(Q0 & 0xffffu) * s1;                  // hf0: Px
+    const float p2 = (px * po) * RHO;                              // hf0: PREC 2 = (Px Py) rho
+#else
     const float po = FF(f16tof32(h0 ? S4 : S3) * s1);              // hf0: Py, hf1: Px
     const float sq = po * po;                                      // hf0: PREC 1, hf1: PREC 0
     const float px = FF(f16tof32(Q0 & 0xffffu) * s1);              // hf0: Px
     const float p2 = FF(px * po) * RHO;                            // hf0: PREC 2 = (Px Py) rho
+#endif
     v8f cf = zero8();
     cf.v[0] = cv; cf.v[1] = sq; cf.v[2] = p2;
     const uint4 c16 = wg_to_f16_ags(cf);
@@ -579,11 +669,21 @@ WG_KERNEL(rr_d0r_head)
     {
         const uint cw16 = (u8a | (u8b << 8)) & 0xffffu, hd16 = (rr_s8(hv) | (rr_s8(hv2) << 8)) & 0xffffu;
         const uint gt = u80 | (u81 << 8) | (u82 << 16);
+#if RR_HFAST_ALU
+        const uint hnx = wg_xor16_u(hn), hdx = wg_xor16_u(hd16), sqx = wg_xor16_u(sq16), gtx = wg_xor16_u(gt);
+        uint cwx = 0u;   // CANDW: read by output.fallback.f only (with a render-record scratch the fast output stage reads the record's W halves)
+        [branch] if (p_oscr == 0u) cwx = wg_xor16_u(cw16);
+#else
         const uint hnx = wg_xor16_u(hn), cwx = wg_xor16_u(cw16), hdx = wg_xor16_u(hd16), sqx = wg_xor16_u(sq16), gtx = wg_xor16_u(gt);
+#endif
         if (h0) {
             if (inT) wg_st64(rr_u(p_cnet), tt * 8u, uint2(hn, hnx));
             if (inI) {
+#if RR_HFAST_ALU
+                if (p_oscr == 0u) wg_st32(rr_u(p_candw), ti * 4u, cw16 | (cwx << 16));
+#else
                 wg_st32(rr_u(p_candw), ti * 4u, cw16 | (cwx << 16));
+#endif
                 wg_st32(rr_u(p_hid), ti * 4u, hdx | (hd16 << 16));
                 wg_st64(rr_u(p_prec), ti * 8u, uint2((sqx & 0xffffu) | (sq16 << 16), p216));
                 wg_st32(rr_u(p_gates), ti * 4u, gtx);
@@ -593,12 +693,20 @@ WG_KERNEL(rr_d0r_head)
     // the render record of token ti (rr_output_prep's a / b vectors): hf0 holds Cnet 0, 1, PREC 1 (Py), PREC 2, CANDW
     // bytes 0, 1; hf1 Cnet 2, PREC 0 (Px), GATES, CANDW bytes 2, 3 (the stores above)
     [branch] if (p_oscr != 0u) {
+#if !RR_HFAST_ALU
         bool orare = false;
+#endif
         v8f e = zero8();
         e.v[0] = rr_ocf(f16tof32(hn & 0xffffu));
         e.v[1] = rr_ocf(f16tof32(hn >> 16));
+#if RR_HFAST_ALU
+        // no subnormal-band check, no flag word (output.fallback.f never runs under OFX_NOCHK)
+        e.v[2] = rr_ofence(f16tof32(sq16) * asfloat(k_o2n));
+        e.v[3] = h0 ? rr_ofence(f16tof32(p216) * asfloat(k_o2x2n)) : rr_od255(u8b);   // hf1: W half 3
+#else
         e.v[2] = rr_omq(f16tof32(sq16), asfloat(k_o2n), orare);
         e.v[3] = h0 ? rr_omq(f16tof32(p216), asfloat(k_o2x2n), orare) : rr_od255(u8b);   // hf1: W half 3
+#endif
         e.v[4] = rr_od255(u8a);
         e.v[5] = rr_od255(h0 ? u8b : u80);                                                       // hf0: W half 1
         e.v[6] = rr_od255(u81); e.v[7] = rr_od255(u82);
@@ -617,6 +725,8 @@ WG_KERNEL(rr_d0r_head)
                 }
             }
         }
+#if !RR_HFAST_ALU
         if (WaveActiveAnyTrue(orare) && WaveIsFirstLane()) { uint o; wg_mem_gc.InterlockedOr(rr_u(p_oscr) + 4u, 1u, o); }
+#endif
     }
 }

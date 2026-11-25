@@ -119,6 +119,18 @@ original.
   MLP), and `output.fast.f_ph1w` (OFX_PH1W alone, no OFX_LD3 / OFX_QST). `WG_RR_W4C` at creation (hex mask, default `0x19` = bits 0, 3, 4, -29 us at 1440p Q layer and plain; bits 1, 2, 5 are opt-in, they measured +23, +6 / -1 and +8 us; bit 0
   level 2, bit 1 level 3, bit 2 level-4 decoder, bit 3 IN0, bit 4 D0-F (needs `WG_RR_W4` bit 1), bit 5 `output.fast.f_ph1w` when
   `WG_RR_W4` bit 2 is off); `WG_RR_W4C=0` is the wave-4b frame. The exact body and the dataflow forms keep wave32.
+- wave-5 levers (clean/rr-f-wave5, **rr_mode fast only, not byte-identical**, GPU timing / quality gates pending; the owner's rule:
+  network arithmetic may be relaxed, history logic stays exact): `head.fast.rx.f.w64` (`head/dx12/rr_d0r_w64.hlsl` with `RR_HFAST_ALU`: the
+  13 table gathers of the head tail (sig x 5, tanh x 2, exp2 x 4, rcp, rho) are bounded f32 ALU work, every Q8 group is the clamp to +-448 and the
+  driver conversion, and with the render-record scratch there is no CANDW store and no subnormal-band check / flag word; rho takes s2 of
+  page 55.3 in the root constant the other head kernels pass as 0 (`head.k_s2`, packed by `rr_pack.cpp` / `pack_model.py`; the runtime
+  derives it from `head.rho` for a model file packed without it) and the Cnet history blend is unchanged), and `stagef.{IN0, D0-F, E1, D1-F, D1-R,
+  E2, D2-F, D2-R}.w64` (the wave64 body stages with `RR_Q8_FAST` (`rr_fast.hlsli`: no Q8 slow path, no `rr_sat` / `rr_nan` / wave votes) and
+  `L01_B16R` (packed f16 `act2` / `attn_w2` / `pk_mad` / `q8hf` on `v_cvt_pkrtz` results, the matrix chains f32 between their steps; the
+  hidden-state pre-activation rounds to nearest even); IN0 with the folded front-end MLP as `step2_raw` chains). `WG_RR_W5` at creation
+  (hex mask, default `0x1f`; bit 0 head, bit 1 IN0, bit 2 D0-F, bit 3 level 1, bit 4 level 2); the effective mask is 0 for exact and
+  accurate (the nine kernels are VG_OUT alternatives: only Fast mode compiles them in its default frame), `WG_RR_W5=0` is the wave-4c
+  frame for paired ABBA timing and PSNR / SSIM comparison.
 - tail (clean/rr-f-s10-tail): the resolve reads the exp2 table from the arena instead of copying it into LDS; 24-bit multiplies for
   addressing in the output stage; the main output's store is folded into resolve.fast2 / resolve.fixup (`WG_RR_FUSESTORE=0` at creation
   brings the separate store pass back). Also used by the exact-resolve (`_X`) kernels of mode exact.

@@ -316,7 +316,13 @@ enum Kid {
   // bit 5 +8 / +9, all six +7 / +1; 0x19 (bits 0, 3, 4) -29 / -29 (8 of 8 rounds). Bits 1, 2 and 5 are opt-in (not wins).
   K_ESTAGEC0 = K_ESTAGEW0 + 3,
   K_IN0_W4C = K_ESTAGEC0 + 8, K_D0F_W4C, K_OUT_FAST_F_PH1W,
-  K_COUNT = K_OUT_FAST_F_PH1W + 1
+  // clean/rr-f-wave5 (Fast mode only; WG_RR_W5, default 0x1f, bit 0 .. 4): head.fast.rx.f.w64 (the relaxed head with its table gathers as bounded
+  // f32 ALU work, branchless Q8, no dead CANDW store / subnormal-band check), stagef.{IN0, D0-F, E1, D1-F, D1-R, E2, D2-F, D2-R}.w64 (the
+  // wave64 body stages with the packed-f16 elementwise forms and the branchless Q8). NOT byte-identical to wave 4c: network arithmetic
+  // relaxed, the history logic exact. All nine are in the VG_OUT group's alternatives, so only Fast mode (the one variant set with
+  // the VG_OUT bit) compiles them in its default frame and dispatches them; Accurate and Exact never start them.
+  K_HEAD_FAST_RXF = K_OUT_FAST_F_PH1W + 1, K_FSTAGE0,
+  K_COUNT = K_FSTAGE0 + 8
 };
 const char* const kKernelNames[] = {
     "stage.IN0", "stage.E1", "stage.E2", "stage.E3", "stage.E4", "stage.E5", "stage.D4-F", "stage.D4-R",
@@ -345,7 +351,9 @@ const char* const kKernelNames[] = {
     "head.fast.rx0", "output.fast.f0", "stagee0.E1", "stagee0.D1-F", "stagee0.D0-F",
     "head.fast.rx.w64", "stagee.D1-R.w64", "stagee.D1-F.w64", "stagee.E1.w64",
     "stagee.E2.w64", "stagee.D2-F.w64", "stagee.D2-R.w64", "stagee.E3.w64", "stagee.D3-F.w64", "stagee.D3-R.w64",
-    "stagee.D4-F.w64", "stagee.D4-R.w64", "stagee.IN0.w4c", "stagee.D0-F.w4c", "output.fast.f_ph1w"};
+    "stagee.D4-F.w64", "stagee.D4-R.w64", "stagee.IN0.w4c", "stagee.D0-F.w4c", "output.fast.f_ph1w",
+    "head.fast.rx.f.w64", "stagef.IN0.w64", "stagef.D0-F.w64", "stagef.E1.w64", "stagef.D1-F.w64", "stagef.D1-R.w64",
+    "stagef.E2.w64", "stagef.D2-F.w64", "stagef.D2-R.w64"};
 static_assert(sizeof(kKernelNames) / sizeof(kKernelNames[0]) == K_COUNT, "kKernelNames and Kid disagree");
 // clean/rr-f-flow: kernels only the opt-in variants dispatch (exact / strict / debug head, body steps X and Z,
 // WG_RR_PATHS=verified); the default frame (head fast, body E, fast paths) never uses them
@@ -377,6 +385,10 @@ int variant_group(int k, bool* alt) {
   if (k >= K_ESTAGEW0 && k < K_ESTAGEW0 + 3) return VG_BODY;   // clean/rr-f-wave4b: the relaxed body's level-1 stages in wave64
   if (k >= K_ESTAGEC0 && k <= K_D0F_W4C) return VG_BODY;       // clean/rr-f-wave4c: the wide stages in wave64, IN0 / D0-F .w4c
   if (k == K_OUT_FAST_F_PH1W) { *alt = true; return VG_OUT; }   // clean/rr-f-wave4c: Fast mode's output.fast.f with OFX_PH1W alone
+  // clean/rr-f-wave5: the Fast-only head / body kernels sit in VG_OUT's alternatives (the bit only Fast mode has, rr_modes.cpp
+  // modes_self_check): kernel_in_default_frame() is true for them in a runtime that starts in Fast and false otherwise, so Accurate
+  // and Exact compile them in the second pass (a later switch to Fast) and never in their first
+  if (k == K_HEAD_FAST_RXF || (k >= K_FSTAGE0 && k < K_FSTAGE0 + 8)) { *alt = true; return VG_OUT; }
   if (k >= K_ESTAGE0 && k < K_ESTAGE0 + 15) return VG_BODY;
   if (k >= K_DSTAGE0 && k < K_DSTAGE0 + 15) return VG_BODY;   // clean/rr-f-s12-dflow: the relaxed body's dataflow form
   if (k >= K_ESTAGEX0 && k < K_ESTAGEX0 + 15) { *alt = true; return VG_BODY; }
@@ -1097,6 +1109,31 @@ void append_tables(Model* m) {
   add("in.EXPT", expt, sizeof expt);
 }
 
+// clean/rr-f-wave5: the head's s2 (page 55.3, the f32 bits as scalar head.k_s2) for a model file packed before the scalar existed: the
+// fast head's ALU form (head.fast.rx.f.w64) computes rho = tanh(f32(v s2)) instead of reading head.rho. rho[v] = tanh(f32(v s2)) for every
+// binary16 v, so s2 = atanh(rho[v]) / v at a small normal v: v = 0.0625 (entry 0x2c00: 16 atanh(rho)), else 0.015625 (0x2400), 2^-7, 2^-8
+// when tanh already saturates (|rho| > 0.99). Same container bytes, no new blob; the derived value only feeds the relaxed head.
+void derive_head_s2(Model* m) {
+  if (!m->ok || m->has_scalar("head.k_s2")) return;
+  const uint64_t off = m->blob("head.rho");
+  if (off == UINT64_MAX || off + 65536ull * 4ull > m->image.size()) return;
+  static const uint32_t kIdx[] = {0x2c00u, 0x2400u, 0x2000u, 0x1c00u};
+  float s2 = 0.0f;
+  for (uint32_t idx : kIdx) {
+    float r;
+    memcpy(&r, m->image.data() + off + 4ull * idx, 4);
+    const float v = ldexpf(1.0f + (float)(idx & 0x3ffu) / 1024.0f, (int)((idx >> 10) & 31u) - 15);
+    if (std::isfinite(r) && fabsf(r) > 0.0f && (fabsf(r) <= 0.99f || idx == kIdx[3])) {
+      s2 = atanhf(fminf(fmaxf(r, -0.999999f), 0.999999f)) / v;
+      break;
+    }
+  }
+  uint32_t u;
+  memcpy(&u, &s2, 4);
+  m->scalars["head.k_s2"] = u;
+  log_line(fmt("model: head.k_s2 derived from head.rho (s2 = %g; the model file has no such scalar)", (double)s2));
+}
+
 void init_once() {
   Runtime& rt = R();
   if (rt.init_done) return;
@@ -1127,6 +1164,7 @@ void init_once() {
         rt.model_err = std::string("model lacks the symbol ") + n;
         log_line(std::string("model not loaded: lacks the symbol ") + n);
       }
+    if (rt.model.ok) derive_head_s2(&rt.model);   // clean/rr-f-wave5: head.k_s2 for models packed before it existed
     if (rt.model.ok)
       log_line(fmt("model loaded: %s (%s, %zu bytes device image, %zu blobs, %zu scalars, %s%s, sha256 %s%s)",
                    rt.model.path.c_str(), rt.model.kind == "wgcm" ? "converter output, groups' keyed digests checked"
@@ -1716,6 +1754,7 @@ struct Instance {
   unsigned w4 = 2;                 // WG_RR_W4 at creation (hex mask, default 2): clean/rr-f-wave4 levers (bit 0 head R4.1, bit 1 body R4.2, bit 2 output R4.3); 0 bits select the *0 kernels. Paired timing at 1440p Q: only bit 1 wins (-78 us layer / -83 us plain); bit 0 is neutral (+2 us), bit 2 loses (+10 us output)
   unsigned w4b = 0xf;              // WG_RR_W4B at creation (hex mask, default 0xf): clean/rr-f-wave4b wave64 forms on (bit 0 head.fast.rx.w64, bit 1 stagee.D1-R, bit 2 stagee.D1-F, bit 3 stagee.E1); 0 bits select the wave32 kernels of WG_RR_W4
   unsigned w4c = 0x19;             // WG_RR_W4C at creation (hex mask, default 0x19 = bits 0, 3, 4): clean/rr-f-wave4c levers on (bit 0 wide stages of level 2 in wave64, bit 1 level 3, bit 2 level 4 decoder D4-F / D4-R, bit 3 stagee.IN0.w4c, bit 4 stagee.D0-F.w4c, bit 5 output.fast.f_ph1w); 0 bits select the kernels of WG_RR_W4 / WG_RR_W4B. Same bits as without (byte-identical kernels, written arguments in rr_block_wide_w64.hlsl / rr_block_c32.hlsl / rr_output_fast.hlsli)
+  unsigned w5 = 0x1f;              // WG_RR_W5 at creation (hex mask, default 0x1f): clean/rr-f-wave5 levers, rr_mode fast ONLY (forced off for exact and accurate: w5_effective()): bit 0 head.fast.rx.f.w64 (table gathers as f32 ALU work, branchless Q8, no dead CANDW store), bit 1 stagef.IN0.w64, bit 2 stagef.D0-F.w64, bit 3 stagef.{E1, D1-F, D1-R}.w64, bit 4 stagef.{E2, D2-F, D2-R}.w64; 0 selects the wave-4c kernels (the frame of 13a53c9). NOT byte-identical (network arithmetic relaxed; the history logic exact)
   unsigned vbits = 0;              // variant set (mode_vbits, per-knob overrides applied): head relaxed / body exact / output Fast / resolve exact
   bool infold = false;             // stagee.IN0 computes the front-end MLP itself (relaxed body in a build with kRrInFold)
   uint32_t twin = kTimingWindow;           // WG_RR_TIMING_WINDOW=N at creation: frames per timing log line (benches)
@@ -2086,6 +2125,12 @@ void plan_frame(const Instance& in, const FrameShape& f, WorkPlan* P, FrameBufs*
 // split | copy, copy = exact through f32 copies, any other value = exact; clean/rr-f-s9-inx, owner 2026-10-28: the
 // history samples stay exact in the default), the front-end MLP variant and its fold. Returns the overrides text of the
 // log line. Creation-only items (history size, WG_RR_HSCALE, the arena) are not touched.
+// clean/rr-f-wave5: the WG_RR_W5 levers that run: only in rr_mode fast (in->mode == MODE_FAST, the one mode whose variant set has the
+// VG_OUT bit, rr_modes.cpp) and with the output variant of Fast in use; 0 for exact and accurate whatever WG_RR_W5 says, so
+// those modes dispatch exactly the kernels of wave 4c
+unsigned w5_effective(const Instance* in) {
+  return (in->mode == MODE_FAST && ((in->vbits >> VG_OUT) & 1u) != 0u) ? (in->w5 & 0x1fu) : 0u;
+}
 std::string apply_mode(Instance* in, Mode m) {
   in->mode = m;
   in->vbits = mode_vbits(m);
@@ -2233,6 +2278,8 @@ uint32_t create_locked(const WgRrCreate* d, void** out) {
       if (GetEnvironmentVariableA("WG_RR_W4B", w4bv, sizeof w4bv)) in->w4b = (unsigned)strtoul(w4bv, nullptr, 16) & 0xfu;
       char w4cv[16] = {};
       if (GetEnvironmentVariableA("WG_RR_W4C", w4cv, sizeof w4cv)) in->w4c = (unsigned)strtoul(w4cv, nullptr, 16) & 0x3fu;
+      char w5v[16] = {};
+      if (GetEnvironmentVariableA("WG_RR_W5", w5v, sizeof w5v)) in->w5 = (unsigned)strtoul(w5v, nullptr, 16) & 0x1fu;
     }
     in->alias = !(GetEnvironmentVariableA("WG_RR_ALIAS", av, sizeof av) && strcmp(av, "0") == 0);
     char dxv[8] = {};
@@ -2332,6 +2379,12 @@ uint32_t create_locked(const WgRrCreate* d, void** out) {
     log_line(fmt("instance %u: wave-4c levers (WG_RR_W4C) 0x%x: wide level 2 %s, level 3 %s, level 4 decoder %s, IN0 %s, D0-F %s, output ph1w %s (output also needs WG_RR_W4 bit 2 off)", in->id,
                  in->w4c, (in->w4c & 1u) ? "on" : "off", (in->w4c & 2u) ? "on" : "off", (in->w4c & 4u) ? "on" : "off",
                  (in->w4c & 8u) ? "on" : "off", (in->w4c & 16u) ? "on" : "off", (in->w4c & 32u) ? "on" : "off"));
+    {   // clean/rr-f-wave5: the Fast-mode-only levers (the effective mask is 0 in every other mode)
+      const unsigned w5e = w5_effective(in);
+      log_line(fmt("instance %u: wave-5 levers (WG_RR_W5) 0x%x, effective 0x%x (rr_mode fast only): head ALU %s, IN0 %s, D0-F %s, level 1 %s, level 2 %s", in->id,
+                   in->w5, w5e, (w5e & 1u) ? "on" : "off", (w5e & 2u) ? "on" : "off", (w5e & 4u) ? "on" : "off",
+                   (w5e & 8u) ? "on" : "off", (w5e & 16u) ? "on" : "off"));
+    }
     log_line(fmt("instance %u: rr_mode=%s (%s%s): head %s, input %s, body %s, output %s, resolve %s", in->id, mode_name(in->mode),
                  msrc, vover.c_str(), (in->vbits >> VG_HEAD) & 1 ? "relaxed (RR_HVARL 7)" : "exact",
                  in->input_lite ? "lite" : (in->input_split ? "split (history exact)" : (in->input_copy ? "exact (copy)" : "exact")),
@@ -3465,6 +3518,14 @@ uint32_t evaluate_locked(Instance* in, const WgRrFrame* f, WgRrFrameResult* res)
         if (rlx && wc4 >= 0 && ((in->w4c >> wc4) & 1u) != 0u) c4 = (Kid)(K_ESTAGEC0 + c4k);
         else if (rlx && s == 0 && (in->w4c & 8u)) c4 = K_IN0_W4C;
         else if (rlx && s == 14 && (in->w4c & 16u) && (in->w4 & 2u)) c4 = K_D0F_W4C;
+        // clean/rr-f-wave5 (Fast mode only, WG_RR_W5 bits 1 .. 4: IN0, D0-F, level 1 = E1 / D1-F / D1-R, level 2 = E2 / D2-F / D2-R): the stagef.*
+        // kernels replace every wave-4 form of these stages (the dataflow form above is opt-in and keeps its own kernels)
+        {
+          const unsigned w5e = w5_effective(in);
+          const int f5 = (s == 0) ? 0 : (s == 14) ? 1 : (s == 1) ? 2 : (s == 12) ? 3 : (s == 13) ? 4 : (s == 2) ? 5 : (s == 10) ? 6 : (s == 11) ? 7 : -1;
+          const int f5bit = (s == 0) ? 1 : (s == 14) ? 2 : (s == 1 || s == 12 || s == 13) ? 3 : (s == 2 || s == 10 || s == 11) ? 4 : -1;
+          if (rlx && f5 >= 0 && ((w5e >> f5bit) & 1u) != 0u) c4 = (Kid)(K_FSTAGE0 + f5);
+        }
         dispatch(l, in->body_e ? (c4 != K_COUNT ? c4 : (w64 ? (Kid)(K_ESTAGEW0 + sw) : (s0 >= 0 ? (Kid)(K_ESTAGEB0 + s0) : (Kid)(((in->vbits >> VG_BODY) & 1 ? K_ESTAGEX0 : K_ESTAGE0) + s)))) : d.k, nwx * nwy, a);
       }
     }
@@ -3519,7 +3580,11 @@ uint32_t evaluate_locked(Instance* in, const WgRrFrame* f, WgRrFrameResult* res)
     if (in->prepu_at < 0) rec_prepu();   // no barrier: the head does not touch its words
     if (nsk) {
     } else if (!in->head_exact) {
-      dispatch(l, in->head_debug ? K_HEAD_DEBUG : in->head_fast ? ((in->vbits >> VG_HEAD) & 1 ? ((in->w4b & 1u) ? K_HEAD_FAST_RXW : ((in->w4 & 1u) ? K_HEAD_FAST_RX : K_HEAD_FAST_RX0)) : K_HEAD_FAST) : K_HEAD_STRICT,
+      // clean/rr-f-wave5 bit 0 (Fast mode only): head.fast.rx.f.w64 takes s2 of page 55.3 (the f32 bits) in the root constant the other head
+      // kernels pass as 0 (p_dz, argument 15): rho = tanh(f32(y17 s2)) is computed, not read from head.rho
+      const bool hw5 = (w5_effective(in) & 1u) != 0u && in->head_fast && !in->head_debug && ((in->vbits >> VG_HEAD) & 1) != 0;
+      if (hw5) a[15] = M.scalar("head.k_s2");
+      dispatch(l, in->head_debug ? K_HEAD_DEBUG : in->head_fast ? ((in->vbits >> VG_HEAD) & 1 ? (hw5 ? K_HEAD_FAST_RXF : ((in->w4b & 1u) ? K_HEAD_FAST_RXW : ((in->w4 & 1u) ? K_HEAD_FAST_RX : K_HEAD_FAST_RX0))) : K_HEAD_FAST) : K_HEAD_STRICT,
                nwx * nwy, a);
       if (!(in->dprobe2 & 4)) uav_barrier(l, A);
     } else {   // exact head: weight planes, the integer pass (marks windows it cannot take), strict fixup of those

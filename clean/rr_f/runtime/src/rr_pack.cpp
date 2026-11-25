@@ -490,6 +490,7 @@ bool pack_wgcm(const std::vector<WgcmGroup>& groups, Model* out, std::string* er
     for (auto& k : kHk) sc[std::string("head.") + k[0]] = bits16(*KS(k[1]));
     sc["head.k_g"] = bits16(*T(Hd, "g"));
     sc["head.k_s1"] = fbits(s1);
+    sc["head.k_s2"] = fbits(s2);   // clean/rr-f-wave5: head.fast.rx.f.w64 computes rho = tanh(f32(y17 s2)) (no head.rho gather)
     sc["K1"] = bits32(*T(Hd, "K1"));
   }
   // input stage (52): front-end MLP fragments, dither, read tables
