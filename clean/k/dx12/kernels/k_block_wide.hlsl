@@ -21,7 +21,7 @@
 // @wg-kernel k_stagew2_d4__rodd co=k_block_wide.co block=256 wave=32 args=s184:p19.b32 entry=kw_stage defines=K_SMX=1,KW_C=128,KW_HEADS=4,KW_IN=1,KW_CIN=160,KW_CNEXT=0,KW_NG=2
 // @wg-kernel k_stagew2_d3__rodd co=k_block_wide.co block=256 wave=32 args=s184:p19.b32 entry=kw_stage defines=K_SMX=1,KW_C=96,KW_HEADS=4,KW_IN=1,KW_CIN=128,KW_CNEXT=0,KW_NG=2,KW_RD=4
 #ifndef KW_LD_A16
-#define KW_LD_A16 2   // 16-byte loads, alignment proven on the scalar base only (no per-lane v_and -16; 1 = whole address, 0 = none) (hlsl/k_wide.hlsli)
+#define KW_LD_A16 1   // 16-byte aligned loads: the whole address masked (hlsl/k_wide.hlsli; 2 = scalar base only: loses RADV's b128 loads)
 #endif
 #include "wg_platform.hlsli"
 

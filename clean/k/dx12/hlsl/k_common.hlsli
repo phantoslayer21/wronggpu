@@ -67,9 +67,12 @@ uint wgk_pin(uint v) { return WaveActiveBitOr(v & wgk_zero()); }
 #ifndef KB_LD_A16
 #define KB_LD_A16 0
 #endif
-// KB_LD_A16 = 2: the low 4 bits are cleared on the scalar base only ((base & ~15) + off: the same addresses; no per-lane
-// v_and_b32 -16 on the D3D12 driver, which emits the 128-bit loads without the lane mask, RGA gfx1201). 1: the whole address
-// (RADV's ACO needs the proof), 0: none.
+// KB_LD_A16 = 1 (the kernels' default): the whole address is masked, (base + off) & ~15: RADV's ACO takes the 128-bit
+// alignment from exactly this mask on each load address. 2: the low 4 bits are cleared on the scalar base only ((base & ~15)
+// + off: the same addresses): RGA gfx1201 then shows no per-lane v_and_b32 -16 (-40 .. -100 of them per stage kernel), but
+// DXC writes base + (lane << 4) + c as (base & ~15) + (lane << 4 | c), and ACO does not take that as 16-byte aligned
+// (RADV, measured: +6 .. +16 % instructions in k_stage2_d1 / e1 / e0 / d0_hp and k_stage_e2 / d2, the loads split).
+// ((base & ~15) + (off & ~15) is no remedy: DXC folds the second mask away, the DXIL is that of 2.) 0: none.
 #if KB_LD_A16 == 2
 uint4 wgk_ld128_a16(uint base, uint off) { return wg_mem.Load4((base & ~15u) + off); }
 #else
