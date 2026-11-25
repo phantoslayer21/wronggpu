@@ -186,12 +186,14 @@ struct FgD3d12ExecutorDesc {
     //    (fg_lite_blend_w / _pack_w, fg_full_blend_*_w), 16 the output pyramid's coarse pushes in one workgroup
     //    (fg_out_tail) and level 1 pushed in the fine pass (fg_out_push_fine_l1), 32 X0 / X1 stored as RGB
     //    (fg_full_blend_*_x3, fg_out_pull_x3). Independent of fuse.
-    //    Wave 2 (all bit-exact, in the default; WG_FG_FUSE2=17 is the Wave 1B default without them): 64 fg_lite_fill16_p2 (A15:
+    //    Wave 2 (all bit-exact; 64 and 512 are in the default, the others are opt-in; WG_FG_FUSE2=17 is the Wave 1B default
+    //    without them): 64 fg_lite_fill16_p2 (A15:
     //    the fill without integer divisions), 128 the bilinear taps of the blends, the light weights and the output pull as
     //    16 / 8-byte row loads (A16: the _b kernels), 256 the light blend on 32 x 8 tiles with 8-byte pair stores (A17: the _t
     //    kernels), 512 the output pull's division skipped on hole-free tiles (A17: the _q kernels), 1024 net2's convolutions of
     //    the indices of a batch as one (groups, 1, N) launch (A18: the _z kernels; needs batch; WG_FG_NET2_BATCH=0 turns it
-    //    off whatever the mask says). The default mask is 2001 = 17 + 64 + 128 + 256 + 512 + 1024; 2047 is every lever.
+    //    off whatever the mask says). The default mask is 593 = 17 + 64 + 512 (paired ABBA at 1440p: 128 and 256 regress, 1024
+    //    is neutral); 2001 is 17 + all of Wave 2 and 2047 is every lever.
     int batch = -1, hoist = -1, dualq = -1, fuse = -1, fuse2 = -1;
     // Developer frame dumps (off while dump_dir is empty; the ASI sets it only in a developer build): of the game
     // frames that generate, every dump_every-th one (at most dump_max), the game frame's slot image (game_<n>.ppm) and

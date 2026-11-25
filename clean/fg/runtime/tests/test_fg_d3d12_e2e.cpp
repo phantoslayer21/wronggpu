@@ -17,7 +17,8 @@
 //                       a mask of the Wave 1B levers: 1 net1 cells, 2 net2 pairs, 4 upwarp in L14, 8 blend weights,
 //                       16 pyramid tail, 32 X0 / X1 as RGB, and the Wave 2 levers 64 fill16 without divisions, 128 bilinear row
 //                       loads, 256 light blend tiles, 512 output pull power-of-two skip, 1024 net2 z-batching; the default is
-//                       2001 = 17 + all of Wave 2, 17 alone is the Wave 1B default; WG_FG_NET2_BATCH=0 also stops 1024)
+//                       593 = 17 + 64 + 512, 17 alone is the Wave 1B default, 2001 = 17 + all of Wave 2;
+//                       WG_FG_NET2_BATCH=0 also stops 1024)
 //       [--turbo-fuse2 MASK]  the Wave 1B mask the --only turbo legs run against all levers off (default 2047: every lever)
 //       The report has the per-stage sums and the honest multi-queue numbers: the wall-clock GPU span and the busy
 //       time per game frame over the timed window (overlap between queues is counted once there, twice in the sums).

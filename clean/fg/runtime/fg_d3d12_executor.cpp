@@ -70,9 +70,11 @@ enum Fuse2Bit : uint32_t {
     // 32 x 8 tiles with 8-byte pair stores and the output pull skipping its division on hole-free tiles, A18 net2's
     // convolutions of every generated index of a batch in one (groups, 1, N) launch
     kF2Fill = 64, kF2Bil = 128, kF2Tile = 256, kF2Pow2 = 512, kF2NetZ = 1024, kF2All = 2047,
-    // the levers that won in paired ABBA runs at 1440p (A6 net1 cells, A14 pyramid tail); the others are exact but cost GPU time
-    // (A13 weights in the blends, A7 net2 pairs, A9 upwarp in L14, A12 RGB X0 / X1) and stay opt-in (a mask, e.g. 63)
-    kF2Default = kF2Cells | kF2Tail | kF2Fill | kF2Bil | kF2Tile | kF2Pow2 | kF2NetZ,   // 17 is the Wave 1B default
+    // the levers that won in paired ABBA runs at 1440p (A6 net1 cells, A14 pyramid tail, A15 fill16 without divisions, A17
+    // output pull power-of-two skip); the others are exact but do not win (A13 weights in the blends, A7 net2 pairs, A9 upwarp
+    // in L14, A12 RGB X0 / X1 cost GPU time; A16 bilinear row loads and the A17 light blend tiles regress, A18 net2 z-batching
+    // is neutral) and stay opt-in (a mask, e.g. 63 or 2047)
+    kF2Default = kF2Cells | kF2Tail | kF2Fill | kF2Pow2,   // 593; 17 is the Wave 1B default
 };
 constexpr uint32_t kFirstTurbo = kFineMask;  // a pipeline of these that the device refuses is dropped, not fatal
 constexpr uint32_t kFirstFull = kFullBlend;
