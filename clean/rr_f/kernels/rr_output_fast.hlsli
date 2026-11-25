@@ -55,8 +55,12 @@
 #define OF_LH 12
 groupshared uint4 of_ra[OF_LW * OF_LH];
 groupshared uint of_rb[OF_LW * OF_LH];
+// clean/rr-f-wave4c W4C.3: the PH1 tile copy (of_lin, of_rowrare: 3,104 bytes) is only read by the groupshared PH1 below; with
+// OFX_PH1W on wave64 it is declared nowhere, so the kernel's LDS is of_ra + of_rb alone (7,200 bytes)
+#if !(OFX_PH1W && WG_WAVE == 64)
 groupshared float3 of_lin[OF_TX * OF_TY];
 groupshared uint of_rowrare[OF_TY];
+#endif
 
 // scratch (bytes from the scratch argument): word 0 the fallback count (cleared by prep), word 1 the prep flags (bit 0:
 // every quad falls back, bit 1: the TR table has nonzero entries below 2^-26; cleared by the fallback kernel), words

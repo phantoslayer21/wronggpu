@@ -480,6 +480,40 @@ def kernel_c64_w64(name, zmode, step="E", ldsw=1, extra=None):
     return build.compile_kernel("rr_block_c64_w64.hlsl", "rr_block", d, tag=tag)
 
 
+# clean/rr-f-wave4c W4C.1: the wide stages of the relaxed body (E2, D2-F, D2-R, E3, D3-F, D3-R, D4-F, D4-R: step E with RR_B32 in
+# WG_RR_EDEFS, RR_B32G4 for level 4) in wave64, design D (rr_block_wide_w64.hlsl: wave w = 2 g + tw holds the two token tiles of
+# the wave32 kernel's waves 4 g + 2 tw and 4 g + 2 tw + 1, the weight fragments shared; the same bits as the wave32 kernel). The
+# wave32 kernel's route gives the group count and operand-prefetch mask. E4 / E5 (RR_B32 off at G = 4) keep wave32.
+W4C_WIDE_STAGES = ("E2", "D2-F", "D2-R", "E3", "D3-F", "D3-R", "D4-F", "D4-R")
+W4C_WIDE_L2 = ("E2", "D2-F", "D2-R")
+W4C_WIDE_L3 = ("E3", "D3-F", "D3-R")
+W4C_WIDE_L4 = ("D4-F", "D4-R")
+
+
+def kernel_wide_w64(name, zmode, step="E", ldsw=1, extra=None):
+    assert name in W4C_WIDE_STAGES and step == "E" and "RR_B32=1" in os.environ.get("WG_RR_EDEFS", "").split(",")
+    src, rd = route_def(route(name, ldsw, step))
+    assert src == "rr_block_wide.hlsl", (name, src)
+    d = stage_defines(name, zmode, step, ldsw)
+    d.update(rd)
+    d["WG_WAVE"] = 64
+    for k, v in W4C_WIDE_DEFS.get(name, {}).items():   # tuned operand-prefetch / chunk-count defines of the wave64 form
+        d.setdefault(k, v)
+    tag = "rsw64_" + name.replace("-", "") + "_z" + zmode + "_" + step + ("_l" if ldsw else "")
+    if extra:
+        d.update(extra)
+        tag += "_" + "_".join(f"{k}{v}" for k, v in sorted(extra.items()))
+    return build.compile_kernel("rr_block_wide_w64.hlsl", "rr_block", d, tag=tag)
+
+
+W4C_WIDE_DEFS = {}   # per stage: defines of the wave64 form beyond the wave32 route's (filled below once tuned)
+# clean/rr-f-wave4c W4C.2: extra defines of stagee.IN0.w4c / stagee.D0-F.w4c (rr_block_c32.hlsl wave64): RR_DEFER 1 (deferred Q8),
+# RR_W4C bit 1 (Dd / Wo weight prefetch), bit 2 (IN0's folded front-end MLP interleaved), RR_SMAJOR 2 (act2_4 there)
+# RGA (gfx1201): IN0 with RR_DEFER 92 VGPRs (stagee.IN0 84), D0-F with RR_DEFER 104 / 105 (L01_DEFERFENCE 0) VGPRs, over the 96 tier
+# (stagee.D0-F 90): D0-F takes the prefetch alone (90 VGPRs)
+W4C_C32_DEFS = {"IN0": {"RR_DEFER": 1, "RR_W4C": 6, "RR_SMAJOR": 2}, "D0-F": {"RR_W4C": 2}}
+
+
 def kernel_dxil(name, zmode, step="E", ldsw=1):
     """The dxil the body uses for a stage."""
     return kernel_for(name, zmode, step=step, ldsw=ldsw)

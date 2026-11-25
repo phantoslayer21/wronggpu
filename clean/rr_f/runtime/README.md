@@ -112,6 +112,13 @@ original.
   `WG_RR_W4B=0` is the wave-4 frame (A/B and byte checks); bit 0 does not depend on `WG_RR_W4` bit 0, bits 1-3 need its bit 1 (the
   default). Paired timing at 1440p Q (layer / plain, `fast`): `0xf` -178 / -175 us, bit 0 -71 / -71, bit 1 -45 / -44, bit 2 -42 / -39,
   bit 3 -25 / -23; all four byte-identical. The exact body (mode exact) and the dataflow forms keep wave32.
+- wave-4c levers (clean/rr-f-wave4c, same bits by construction, GPU timing pending): the relaxed body's wide stages in wave64
+  (`kernels/rr_block_wide_w64.hlsl`: `stagee.{E2, D2-F, D2-R, E3, D3-F, D3-R, D4-F, D4-R}.w64`, wave `2 g + tw` holds the two token tiles
+  of the wave32 waves `4 g + 2 tw`, `4 g + 2 tw + 1`; E4 / E5 stay wave32), `stagee.IN0.w4c` / `stagee.D0-F.w4c` (the wave64 form of
+  `rr_block_c32.hlsl` with the deferred Q8 decision `RR_DEFER`, the Dd / Wo weight prefetch and, for IN0, the interleaved front-end
+  MLP), and `output.fast.f_ph1w` (OFX_PH1W alone, no OFX_LD3 / OFX_QST). `WG_RR_W4C` at creation (hex mask, default `0x19` = bits 0, 3, 4, -29 us at 1440p Q layer and plain; bits 1, 2, 5 are opt-in, they measured +23, +6 / -1 and +8 us; bit 0
+  level 2, bit 1 level 3, bit 2 level-4 decoder, bit 3 IN0, bit 4 D0-F (needs `WG_RR_W4` bit 1), bit 5 `output.fast.f_ph1w` when
+  `WG_RR_W4` bit 2 is off); `WG_RR_W4C=0` is the wave-4b frame. The exact body and the dataflow forms keep wave32.
 - tail (clean/rr-f-s10-tail): the resolve reads the exp2 table from the arena instead of copying it into LDS; 24-bit multiplies for
   addressing in the output stage; the main output's store is folded into resolve.fast2 / resolve.fixup (`WG_RR_FUSESTORE=0` at creation
   brings the separate store pass back). Also used by the exact-resolve (`_X`) kernels of mode exact.

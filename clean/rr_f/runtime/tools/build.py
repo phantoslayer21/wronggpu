@@ -51,6 +51,8 @@ FAST_OUT_DEFINES = {"OF_HWRCP": 1, "OF_REPROJ_MAX": 1,   # Fast mode's output st
 # one 12-byte store). WG_RR_OUTF_FASTDEFS (JSON object, build time) replaces them; the runtime kernel output.fast.f0 is
 # the same kernel without them (WG_RR_W4 bit 2 = 0 selects it).
 FAST_OUT_FAST_ONLY = {"OFX_PH1W": 1, "OFX_LD3": 1, "OFX_QST": 1}
+# clean/rr-f-wave4c W4C.3: output.fast.f_ph1w = output.fast.f0 plus OFX_PH1W alone
+FAST_OUT_PH1W_ONLY = {"OFX_PH1W": 1}
 
 
 class _env:
@@ -82,6 +84,8 @@ OWN_KEY_SKIP = ("rr_input.hlsl", "rr_input_mlp.hlsl", "rr_block.hlsl", "rr_block
                 # clean/rr-f-wave4b: the wave64 forms (the head's own file is never included by the other head kernels;
                 # listing them keeps every existing head kernel's cache key)
                 "rr_d0r_w64.hlsl", "rr_block_c64_w64.hlsl",
+                # clean/rr-f-wave4c: the wave64 form of the wide stages (never included by the head)
+                "rr_block_wide_w64.hlsl",
                 "rr_in_math.hlsli",   # a14-frame (request of track C): included by rr_input.hlsl only
                 # clean/rr-f-s10-tail: the output / resolve / pool / exposure kernels are never included by the head
                 "rr_output.hlsl", "rr_output_fast.hlsli", "rr_output_probe.hlsl", "rr_resolve.hlsl", "rr_resolve_fast.hlsl",
@@ -129,6 +133,18 @@ def kernels(out):
         res += [("stagee." + n + ".w64", 37, stage.kernel_c64_w64(n, ez, step="E", ldsw=1)) for n in stage.W4B_C64_STAGES]
     else:   # (a non-relaxed library: the names stay, with stagee.<n>'s own DXIL)
         res += [("stagee." + n + ".w64", 37, stage.kernel_for(n, ez, step="E", ldsw=1)) for n in stage.W4B_C64_STAGES]
+    # clean/rr-f-wave4c W4C.1: the wide stages (E2, D2-F, D2-R, E3, D3-F, D3-R, D4-F, D4-R) in wave64 (rr_block_wide_w64.hlsl, the
+    # same bits as stagee.<n>; runtime WG_RR_W4C bits 0 / 1 / 2 = level 2 / level 3 / level 4 decoder). E4 / E5 keep wave32.
+    if b32:
+        res += [("stagee." + n + ".w64", 37, stage.kernel_wide_w64(n, ez, step="E", ldsw=1)) for n in stage.W4C_WIDE_STAGES]
+    else:
+        res += [("stagee." + n + ".w64", 37, stage.kernel_for(n, ez, step="E", ldsw=1)) for n in stage.W4C_WIDE_STAGES]
+    # clean/rr-f-wave4c W4C.2: stagee.IN0.w4c / stagee.D0-F.w4c = stagee.IN0 / D0-F (rr_block_c32.hlsl wave64) with the deferred Q8 decision
+    # (RR_DEFER), the Dd / Wo weight prefetch and, for IN0, the interleaved front-end MLP (stage.W4C_C32_DEFS); same bits. Runtime
+    # WG_RR_W4C bits 3 / 4. The non-relaxed library repeats stagee.<n>'s DXIL under the names.
+    for n in ("IN0", "D0-F"):
+        res.append(("stagee." + n + ".w4c", 37, stage.kernel_for(n, ez, step="E", ldsw=1, extra=stage.W4C_C32_DEFS[n]) if b32
+                    else stage.kernel_for(n, ez, step="E", ldsw=1)))
     # clean/rr-f-s12-dflow: staged.* = stagee.* in the dataflow form (rr_dflow.hlsli: row counters instead of the UAV
     # barriers; opt-in WG_RR_DFLOW=1). Only the rr_block_wide.hlsl stages have that form; the others repeat stagee.*'s
     # DXIL (kRrDflowMask: the stages that have it)
@@ -230,6 +246,11 @@ def kernels(out):
         res.append((f"output.{n}.f", nargs, dxil))
     # clean/rr-f-wave4: output.fast.f before R4.3 (A/B kernel of the runtime's WG_RR_W4 mask)
     res.append(("output.fast.f0", GO.NARGS, GO.kernel_set(defines=FAST_OUT_DEFINES, fast=True, names=("fast",), spec=True)["fast"][0]))
+    # clean/rr-f-wave4c W4C.3 (same bits; rr_output_fast.hlsli): output.fast.f with OFX_PH1W alone (the PH1 pool inside each
+    # wave64, no groupshared tile copy: LDS 10,304 -> 7,200 bytes) without OFX_LD3 / OFX_QST, which Wave 4a mixed into the same
+    # kernel. Runtime WG_RR_W4C bit 5 (when WG_RR_W4 bit 2 is off).
+    res.append(("output.fast.f_ph1w", GO.NARGS, GO.kernel_set(defines=FAST_OUT_DEFINES, fast=True, names=("fast",), spec=True,
+                                                              fast_only=json.loads(os.environ.get("WG_RR_OUTF_PH1W_DEFS", json.dumps(FAST_OUT_PH1W_ONLY))))["fast"][0]))
     for n in ("main", "pool"):
         res.append((f"resolve.{n}", 3, ck("rr_resolve.hlsl", f"rr_resolve_{n}", {"WG_BLOCK": 64, "RR_ELEM_EXACT": 1,
                                                                                 "RR_MUT": 0},

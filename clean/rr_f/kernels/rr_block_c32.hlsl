@@ -909,19 +909,37 @@ WG_KERNEL(rr_block)
 //     so the P codes, and everything after them, have the wave32 bits for every input;
 //   * the Q8 votes (WaveActiveAnyTrue) cover both tiles: both forms of a Q8 group give rr_q8's bits for every input,
 //     so which one runs is a speed choice only (as in wave32).
-#if !RR_B32 || RR_WSRC != 1 || !RR_WIL || RR_QV1 || RR_DEFER || RR_DFLOW || RR_PFB || RR_MLA || RR_FOLD_B32 || !RR_STICKY
+// clean/rr-f-wave4c W4C.2 (same output bits; opt-in defines of the wave64 kernel, the .w4c kernels of the runtime's WG_RR_W4C
+// bits 3 / 4): RR_DEFER 1 = the deferred Q8 decision of the wave32 kernel above (the window runs once with the fast Q8 forms
+// only, the two waves' bad-code flags meet in LDS, a flagged window reruns in the per-group form); RR_W4C bit 1 = the MLP Dd
+// weight fragments loaded right after the chunk's hidden WMMAs and the Wo fragments before the PV Q8 (L01_MDPF style);
+// bit 2 = IN0's folded front-end MLP with its chains WMMA-interleaved (L01_WILF form) and act2_4, the W2 fragments loaded
+// before the Q8 of the first layer. Every chain keeps its WMMAs, roundings and operands, so the bits are unchanged.
+#ifndef RR_W4C
+#define RR_W4C 0
+#endif
+#if !RR_B32 || RR_WSRC != 1 || !RR_WIL || RR_QV1 || RR_DFLOW || RR_PFB || RR_MLA || RR_FOLD_B32 || !RR_STICKY
 #error "rr_block_c32.hlsl wave64: the relaxed stagee configuration only"
 #endif
 #if RR_KIND == 0 && RR_INFOLD != 1
 #error "rr_block_c32.hlsl wave64: IN0 with the folded variant-E front-end MLP only"
 #endif
-#if RR_KIND == 0 && (L01_WILF || RR_SMAJOR >= 2)
-#error "rr_block_c32.hlsl wave64: L01_WILF / RR_SMAJOR 2 forms not ported"
+#if RR_KIND == 0 && ((L01_WILF && !(RR_W4C & 4)) || (RR_SMAJOR >= 2 && !(RR_W4C & 4)))
+#error "rr_block_c32.hlsl wave64: L01_WILF / RR_SMAJOR 2 forms only through RR_W4C bit 2"
 #endif
+#if RR_DEFER
+void rr_window(const bool rr_fp)
+{
+#else
 WG_KERNEL(rr_block)
 {
     WG_SETUP();
+#endif
+#if RR_DEFER
+    rr_lane = WaveGetLaneIndex() RR_OPQ;
+#else
     rr_lane = WaveGetLaneIndex();
+#endif
     rr_lp = rr_lane & 31u;
     rr_hh = rr_lane >> 5;
     rr_hf = (rr_lane >> 4) & 1u;
@@ -931,13 +949,21 @@ WG_KERNEL(rr_block)
     rr_sat = false;
     rr_nan = false;
     DBG_INIT
+#if RR_DEFER
+    const uint wv0 = 2u * WaveReadLaneFirst((wg_lane_id() RR_OPQ) >> 6);   // wave32 wave of tile 0 (tile 1: wv0 + 1)
+#else
     const uint wv0 = 2u * WaveReadLaneFirst(wg_lane_id() >> 6);   // wave32 wave of tile 0 (tile 1: wv0 + 1)
+#endif
     const uint n = rr_lane & 15u;
 #if RR_KIND == 2
     rr_uo = rr_fence_u(32u * n + 2u * rr_hf + rr_hh);   // dword of UP slot ((n HID + 16 ot + 8 hf) >> 3) - 4 ot
     rr_f2 = rr_fence_u(2u * rr_hf + rr_hh);
 #endif
+#if RR_DEFER
+    const uint wid = RR_WBID() RR_OPQ;
+#else
     const uint wid = RR_WBID();
+#endif
     const int wi = (int)(wid % (uint)nwx), wj = (int)(wid / (uint)nwx);
     const int lx = (int)(n & 7u);
     const int X = 8 * wi - sx + lx;
@@ -1011,6 +1037,26 @@ WG_KERNEL(rr_block)
         [unroll] for (uint ks = 0; ks < 4u; ++ks)
             f[ks] = rr_tld(pX, tok[0] * 64u + 16u * ks, tok[1] * 64u + 16u * ks);
         uint4 ah[2][2];
+#if RR_W4C & 4
+        // W4C.2: per br the two feature tiles' chains WMMA-interleaved (each chain: bias, wmma, wmma, f16 round, wmma, wmma, packed
+        // f16 = MLP_STEP2 + MLP_STEP2H), the activation stage-major (act2_4, the same operations per value)
+        [unroll] for (uint br = 0; br < 2u; ++br) {
+            v8f c0 = bias_tile(pBup + br * 128u, 0u), c1 = bias_tile(pBup + br * 128u, 1u);
+            const uint w0 = (br * 2u) * 4u, w1 = (br * 2u + 1u) * 4u;
+            wil2(c0, c1, wfrag(pCin, w0 + 0u), f[0], wfrag(pCin, w0 + 1u), f[1], wfrag(pCin, w1 + 0u), f[0], wfrag(pCin, w1 + 1u), f[1]);
+            c0 = rr_r16(c0); c1 = rr_r16(c1);
+            wil2(c0, c1, wfrag(pCin, w0 + 2u), f[2], wfrag(pCin, w0 + 3u), f[3], wfrag(pCin, w1 + 2u), f[2], wfrag(pCin, w1 + 3u), f[3]);
+            ah[br][0] = act2_4(rr_h16(c0), wc);
+            ah[br][1] = act2_4(rr_h16(c1), wc);
+        }
+        uint2 w2f[8];   // the second layer's fragments, loaded before the first layer's Q8 group
+        [unroll] for (uint o2 = 0; o2 < 2u; ++o2) {
+            w2f[4u * o2 + 0u] = wfrag(pWup, 2u * o2);
+            w2f[4u * o2 + 1u] = wfrag(pWup, 2u * o2 + 1u);
+            w2f[4u * o2 + 2u] = wfrag(pWup, 4u + 2u * o2);
+            w2f[4u * o2 + 3u] = wfrag(pWup, 4u + 2u * o2 + 1u);
+        }
+#else
         [unroll] for (uint br = 0; br < 2u; ++br) {
             [unroll] for (uint ft = 0; ft < 2u; ++ft) {
                 const uint w = (br * 2u + ft) * 4u;
@@ -1020,6 +1066,7 @@ WG_KERNEL(rr_block)
                 ah[br][ft] = uint4(act2(h.x, wc), act2(h.y, wc), act2(h.z, wc), act2(h.w, wc));
             }
         }
+#endif
         uint2 a[2][2];
         {
             uint bad = 0u;
@@ -1030,12 +1077,25 @@ WG_KERNEL(rr_block)
             Q8_END
         }
         v8f o[2];
+#if RR_W4C & 4
+        {
+            v8f z[2];
+            [unroll] for (uint o0 = 0; o0 < 2u; ++o0) z[o0] = bias_tile(pHc, o0);
+            [unroll] for (uint o1 = 0; o1 < 2u; ++o1) z[o1] = wg_wmma_fp8(w2f[4u * o1 + 0u], a[0][0], z[o1]);
+            [unroll] for (uint o3 = 0; o3 < 2u; ++o3) z[o3] = wg_wmma_fp8(w2f[4u * o3 + 1u], a[0][1], z[o3]);
+            [unroll] for (uint o4 = 0; o4 < 2u; ++o4) z[o4] = rr_r16(z[o4]);
+            [unroll] for (uint o5 = 0; o5 < 2u; ++o5) z[o5] = wg_wmma_fp8(w2f[4u * o5 + 2u], a[1][0], z[o5]);
+            [unroll] for (uint o6 = 0; o6 < 2u; ++o6) z[o6] = wg_wmma_fp8(w2f[4u * o6 + 3u], a[1][1], z[o6]);
+            [unroll] for (uint o7 = 0; o7 < 2u; ++o7) o[o7] = rr_r16(z[o7]);
+        }
+#else
         [unroll] for (uint ot = 0; ot < 2u; ++ot) {
             v8f z = bias_tile(pHc, ot);
             z = MLP_STEP2(wfrag(pWup, (0u * 2u + ot) * 2u), a[0][0], wfrag(pWup, (0u * 2u + ot) * 2u + 1u), a[0][1], z);
             o[ot] = MLP_STEP2(wfrag(pWup, (1u * 2u + ot) * 2u), a[1][0], wfrag(pWup, (1u * 2u + ot) * 2u + 1u),
                               a[1][1], z);
         }
+#endif
         {
             uint bad = 0u;
             Q8_TRY xf[0] = q8f(o[0], bad); xf[1] = q8f(o[1], bad);
@@ -1100,12 +1160,19 @@ WG_KERNEL(rr_block)
             wil2(ov[0], ov[1], vt[0], pf[0], vt[2], pf[1], vt[1], pf[0], vt[3], pf[1]);
             wil2(ov[0], ov[1], vt[4], pf[2], vt[6], pf[3], vt[5], pf[2], vt[7], pf[3]);
         }
+#if RR_W4C & 2
+        const uint2 wo0 = wo_frag(h, 0u), wo1 = wo_frag(h, 1u), wo2 = wo_frag(h, 2u), wo3 = wo_frag(h, 3u);
+#endif
         bad = 0u;
         uint2 of[2];
         Q8_TRY of[0] = q8f(ov[0], bad); of[1] = q8f(ov[1], bad);
         Q8_ELSE of[0] = q8s(ov[0]); of[1] = q8s(ov[1]); Q8_END
         // step 6: Dp step h
+#if RR_W4C & 2
+        wil2(dpv[0], dpv[1], wo0, of[0], wo1, of[1], wo2, of[0], wo3, of[1]);
+#else
         wil2(dpv[0], dpv[1], wo_frag(h, 0u), of[0], wo_frag(h, 1u), of[1], wo_frag(h, 2u), of[0], wo_frag(h, 3u), of[1]);
+#endif
         if (h + 1u == RH) { dp[0] = dpv[0]; dp[1] = dpv[1]; }
     }
 
@@ -1132,14 +1199,21 @@ WG_KERNEL(rr_block)
     [unroll] for (uint j = 0; j < NJ; ++j) {
         rrbv h0 = bias_tile(pB1, 2u * j), h1 = bias_tile(pB1, 2u * j + 1u);
         wil2(h0, h1, mlp_frag(j, 0u), y1q[0], mlp_frag(j, 1u), y1q[1], mlp_frag(j, KS), y1q[0], mlp_frag(j, KS + 1u), y1q[1]);
+#if RR_W4C & 2
+        const uint2 wd0 = mlp_frag(j, 2u * KS), wd1 = mlp_frag(j, 2u * KS + 1u), wd2 = mlp_frag(j, 2u * KS + 2u), wd3 = mlp_frag(j, 2u * KS + 3u);
+#endif
         const rrbv a0h = bv_act(h0, BVW);
         const rrbv a1h = bv_act(h1, BVW);
         uint bad = 0u;
         uint2 au0, au1;
         Q8_TRY au0 = bv_q8f(a0h, bad); au1 = bv_q8f(a1h, bad);
         Q8_ELSE au0 = bv_q8s(a0h); au1 = bv_q8s(a1h); Q8_END
+#if RR_W4C & 2
+        wil2(ddv[0], ddv[1], wd0, au0, wd1, au1, wd2, au0, wd3, au1);
+#else
         wil2(ddv[0], ddv[1], mlp_frag(j, 2u * KS), au0, mlp_frag(j, 2u * KS + 1u), au1, mlp_frag(j, 2u * KS + 2u), au0,
              mlp_frag(j, 2u * KS + 3u), au1);
+#endif
         if (j + 1u == NJ) { dd[0] = ddv[0]; dd[1] = ddv[1]; }
     }
 
@@ -1202,4 +1276,23 @@ WG_KERNEL(rr_block)
 #endif
     DBG_FLUSH
 }
+#if RR_DEFER
+// the deferred window (as the wave32 kernel above, two wave64 waves): the flags of the waves meet in LDS in two dwords the
+// rerun does not write before its first barrier (head 1's exchange buffer, dwords 1024 ..; head 0's for the fusion kind,
+// whose up-projections come first and live in head 1's buffer)
+WG_KERNEL(rr_block)
+{
+    WG_SETUP();
+    rr_badw = 0u;
+    rr_negoff = false;
+    rr_window(true);
+    const uint fb = (RR_KIND == 2 ? 0u : 1024u);
+    const bool wbad = WaveActiveAnyTrue((rr_badw & 0x80808080u) != 0u);
+    GroupMemoryBarrierWithGroupSync();                 // every wave's last exchange read is done
+    if (WaveIsFirstLane()) rr_xq32[fb + (wg_lane_id() >> 6)] = wbad ? 1u : 0u;
+    GroupMemoryBarrierWithGroupSync();
+    const bool any = (rr_xq32[fb] | rr_xq32[fb + 1u]) != 0u;
+    [branch] if (any && L01_DEFERNEG != 1) rr_window(false);
+}
+#endif
 #endif   // WG_WAVE
