@@ -37,6 +37,10 @@
    "encoder_mo.co"
   ],
   [
+   "emo/input_encoder_mo_pf",
+   "encoder_mo.co"
+  ],
+  [
    "expand_c96",
    "swin.co"
   ],
@@ -69,6 +73,10 @@
    "encoder.co"
   ],
   [
+   "input_encoder_pf",
+   "encoder.co"
+  ],
+  [
    "native_driver_probe",
    "-"
   ],
@@ -93,11 +101,19 @@
    "post_mo_w64__orig.co"
   ],
   [
+   "pmo/post_tf4_dl_f32_p12_mo_pf",
+   "post_mo_w64__orig.co"
+  ],
+  [
    "pmo/post_tf_f32_p12_mo",
    "post_mo_w64__orig.co"
   ],
   [
    "pmo/post_tf_f32_p12_mo_direct",
+   "post_mo_w64__orig.co"
+  ],
+  [
+   "pmo/post_tf_f32_p12_mo_pf",
    "post_mo_w64__orig.co"
   ],
   [
@@ -165,6 +181,10 @@
    "post_w64__orig.co"
   ],
   [
+   "w64/post_tf4_dl_f32_p12_diet_vsit_pf",
+   "post_w64__orig.co"
+  ],
+  [
    "w64/post_tf_f32_p12_diet_vsit",
    "post_w64.co"
   ],
@@ -178,6 +198,10 @@
   ],
   [
    "w64/post_tf_f32_p12_diet_vsit_direct",
+   "post_w64__orig.co"
+  ],
+  [
+   "w64/post_tf_f32_p12_diet_vsit_pf",
    "post_w64__orig.co"
   ],
   [
