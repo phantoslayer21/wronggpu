@@ -839,7 +839,8 @@ struct Runtime {
         l_exfuse_env = !(ef && std::string(ef) == "0");
         l_exfuse = l_exfuse_env &&
                    manifest_missing({"swin_block_c96_add_ex_hyb", "swin_block_c64_add_ex_hyb"}).empty();
-        // WG_L_W3: a mask of the wave 3 levers (default 0x17 = bits 0, 1, 2, 4; 0 = the wave 2 kernels), each lever its own kernels
+        // WG_L_W3: a mask of the wave 3 levers (default 0 = the wave 2 kernels: every lever is opt-in, each one measured
+        // slower than the wave 2 kernel at 1440p Quality on the RX 9070 XT), each lever its own kernels
         // in the manifest, selected only when the manifest has them (a manifest without them runs the wave 2 kernel: the same
         // bytes):
         //   0x01 the C = 32 blocks (l_swin_block_c32_enc_lin_hyb, l_swin_block_c32_dec_coef12_hyb) with direct weights (no LDS
@@ -848,7 +849,7 @@ struct Runtime {
         //   0x04 the C = 96 blocks (swin_block_c96_hyb, swin_block_c96_add_ex_hyb) and the bottleneck (swin_bneck6_hyb): the
         //        arithmetic GELU; 0x20 (with 0x04): the C = 96 blocks with SW_MLP_PAIRS / SW_COMMIT_EARLY / SW_NORM2_EARLY
         //   0x10 l_project_gather, l_dec_project in wave64
-        unsigned w3 = 0x17;
+        unsigned w3 = 0;
         const char* w3e = std::getenv("WG_L_W3");
         if (w3e && *w3e) {
           char* end = nullptr;
@@ -882,12 +883,13 @@ struct Runtime {
           w3add("l_project_gather", "l_project_gather_w64");
           w3add("l_dec_project", "l_dec_project_w64");
         }
-        // WG_L_W4: a mask of the wave 4 levers (default 0x3 = bits 0 and 1; 0 = the wave 3 frame), each lever its own kernels in
+        // WG_L_W4: a mask of the wave 4 levers (default 0x1 = bit 0; 0 = the wave 3 frame; 0x02 is opt-in, measured neutral,
+        // and 0x04, measured slower), each lever its own kernels in
         // the manifest, selected only when the manifest has them (a manifest without them runs the wave 3 kernel: the same bytes):
         //   0x01 the fused post (w64_lc12/l_post_tf_p12, _pf) as l_post_tf_p12_w4 / _pf_w4: history_cr's loads in one burst
         //   0x02 the q20 encoder (lev/input_encoder_q20, _pf) as _w4 / _pf_w4: 96 registers instead of 104 / 106
         //   0x04 (with 0x01): the post as l_post_tf_p12_w4m / _pf_w4m, the motion loads issued ahead of the last gather column
-        unsigned w4 = 0x3;
+        unsigned w4 = 0x1;
         const char* w4e = std::getenv("WG_L_W4");
         if (w4e && *w4e) {
           char* end = nullptr;

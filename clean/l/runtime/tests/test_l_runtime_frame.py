@@ -105,9 +105,9 @@ def run(options="", frames=4, build_files=(), env=None, model=None, exe=None, fl
     (Model L's reconstruction kernel is HDR; Model M does not read the flag). manifest: [(kernel, code object)] for
     <build>/dx12/manifest.json (the D3D12 ports a build has; backend 3). tf_default: leave WG_L_POST_TF unset (Model L's
     fused post, the shipped default); otherwise it is 0, the separate launches the other tests trace. w3_default: leave
-    WG_L_W3 unset (the wave 3 kernels of the default mask 0x17, when the manifest has them); otherwise it is 0, the wave 2
-    kernels (the names every other test checks). w4_default: leave WG_L_W4 unset (the wave 4 post and encoder kernels of the
-    default mask 0x3, when the manifest has them); otherwise it is 0, the wave 3 kernels."""
+    WG_L_W3 unset (the default mask 0, the wave 2 kernels); otherwise it is 0, the wave 2
+    kernels as well (the names every other test checks). w4_default: leave WG_L_W4 unset (the wave 4 post kernel of the
+    default mask 0x1, the fused post, when the manifest has it); otherwise it is 0, the wave 3 kernels."""
     build = tempfile.mkdtemp(prefix="wg_lfb_")
     for n in build_files:
         open(os.path.join(build, n), "wb").close()
@@ -1409,19 +1409,18 @@ class ReleaseDefault(unittest.TestCase):
                 text = self.kernels_text(got)
                 ntwins = sum(k.endswith("_hyb") and not k.endswith("_q7c_hyb") for k, _ in full_ports())
                 for want in ("l_form=hybrid", "l_hyb_d3d12=on", "l_post_c12=on", "hyb_twins=%d" % ntwins,
-                             "swin_fused=dec2,dec1", "l_exfuse=on", "hyb_tables=on", "l_w3=23 w3_kernels=%d" % len(W3_DEFAULT)):
+                             "swin_fused=dec2,dec1", "l_exfuse=on", "hyb_tables=on", "l_w3=0 w3_kernels=0"):
                     self.assertIn(want, text)
                 names = self.launched(got)
-                # the wave 3 default mask 0x17: each kernel of W3_DEFAULT in place of its wave 2 form
-                twin_of = {w3: w2 for w2, w3 in W3_DEFAULT.items()}
+                # the default wave 3 mask is 0: the wave 2 kernels (the levers of WG_L_W3 are opt-in)
+                twin_of = {}
                 used = (set(HYB_TWINS) - {"l_swin_block_c32_enc_hyb", "l_swin_block_c32_dec_hyb",
                                           "swin_block_c128_hyb", "swin_block_c96_add_hyb", "swin_block_c64_add_hyb",
                                           "expand_c128_hyb", "expand_c96_hyb"} | {ENC_LIN_HYB, DEC_COEF_HYB, BNECK_HYB}
                         | set(EX_HYB))
-                used = {W3_DEFAULT.get(k, k) for k in used}
                 self.assertTrue(used <= names, sorted(used - names))
-                self.assertEqual(set(W3_DEFAULT) & names, set())   # no wave 2 form of a routed kernel
-                self.assertTrue(set(W3_DEFAULT.values()) <= names, sorted(set(W3_DEFAULT.values()) - names))
+                self.assertEqual(set(W3_DEFAULT.values()) & names, set())   # no wave 3 form of a kernel
+                self.assertTrue(set(W3_DEFAULT) <= names, sorted(set(W3_DEFAULT) - names))
                 self.assertIn("w64_lc12/l_post_tf_p12", names)   # the fused post (WG_L_POST_TF default on)
                 blocks = [n for n in names if n.split("/")[-1].startswith(("swin_", "l_swin_", "patch_merge", "expand"))]
                 self.assertEqual([n for n in blocks if not n.endswith("_hyb") and n not in twin_of], [])   # no M-form block, merge, expand
@@ -1600,7 +1599,7 @@ class ReleaseDefault(unittest.TestCase):
 class WaveThree(unittest.TestCase):
     """Model L wave 3 (WG_L_W3, native D3D12 hybrid route): a mask of levers, each its own kernels in the manifest (the wave 2
     kernels stay), the same launches otherwise: kernel for kernel, grid, block and arguments identical to the wave 2 frame
-    (WG_L_W3=0), only the names of the routed kernels differ. Default 0x17; a manifest without a lever's kernels runs the wave
+    (WG_L_W3=0), only the names of the routed kernels differ. Default 0 (opt-in levers); a manifest without a lever's kernels runs the wave
     2 kernel; any other value is refused at create. (The kernels' bytes are the GPU verifier's: no GPU here.)"""
     SIZES = ("--sizes=96x64,96x64,80x48", "--reset=2")
 
@@ -1636,11 +1635,11 @@ class WaveThree(unittest.TestCase):
 
     def test_masks_route_only_the_names(self):
         _, base = self.frames(self.d3d12("0"))
-        for mask in (None, "0x17", "1", "2", "4", "8", "0x10", "0x24", "0x3f", "0x18"):
+        for mask in (None, "0x17", "1", "2", "4", "8", "0x10", "0x24", "0x3f", "0x18"):   # None: the default, 0
             with self.subTest(mask=mask):
                 lines = self.d3d12(mask)
                 t, got = self.frames(lines)
-                m = 0x17 if mask is None else int(mask, 0)
+                m = 0 if mask is None else int(mask, 0)
                 table = self.routed(m)
                 self.assertEqual(len(got), len(base))
                 hit = set()
@@ -1666,15 +1665,20 @@ class WaveThree(unittest.TestCase):
         """A manifest without a lever's kernels: that lever's launches keep the wave 2 kernel (same bytes), the rest are routed."""
         drop = {"swin_block_c64_hyb_w3", "l_project_gather_w64", "swin_bneck6_hyb_w3"}
         ports = [kc for kc in full_ports() if kc[0] not in drop]
-        _, got = self.frames(self.d3d12(None, ports=ports))
+        _, got = self.frames(self.d3d12("0x17", ports=ports))
         _, base = self.frames(self.d3d12("0"))
         table = {k: v for k, v in W3_DEFAULT.items() if v not in drop}
         for gf, bf in zip(got, base):
             self.assertEqual([(table.get(b[0], b[0]),) + b[1:] for b in bf], gf)
         self.assertEqual({k for f in got for k, *_ in f} & drop, set())
         none = [kc for kc in full_ports() if kc[0] not in W3_DEFAULT.values()]
-        _, got = self.frames(self.d3d12(None, ports=none))
+        _, got = self.frames(self.d3d12("0x17", ports=none))
         self.assertEqual(got, base)
+
+    def test_default_is_the_wave_2_frame(self):
+        _, a = self.frames(self.d3d12(None))
+        _, b = self.frames(self.d3d12("0"))
+        self.assertEqual(a, b)
 
     def test_bad_values_refused(self):
         for bad in ("64", "0x40", "-1", "x", "1,2", "0x1g", "1.5"):
@@ -1689,7 +1693,7 @@ class WaveFour(unittest.TestCase):
     kernels in the manifest (the wave 3 kernels stay), the same launches otherwise: kernel for kernel, grid, block and arguments
     identical to the wave 3 frame (WG_L_W4=0), only the names of the routed kernels differ. Bit 0 (0x01) the fused post
     w64_lc12/l_post_tf_p12[_pf] -> _w4 (0x04 with it: _w4m), bit 1 (0x02) the q20 encoder lev/input_encoder_q20[_pf] -> _w4;
-    default 0x3; a manifest without a lever's kernels runs the wave 3 kernel; any other value is refused at create. (The
+    default 0x1 (the post; 0x02 and 0x04 are opt-in); a manifest without a lever's kernels runs the wave 3 kernel; any other value is refused at create. (The
     kernels' bytes are the GPU verifier's: no GPU here.)"""
     TF = "w64_lc12/l_post_tf_p12"
     ENC = "lev/input_encoder_q20"
@@ -1727,11 +1731,11 @@ class WaveFour(unittest.TestCase):
     def test_masks_route_only_the_names(self):
         for pe in (None, 2.0):   # without and with the folded division (the _pf forms)
             _, base = self.frames(self.d3d12("0", pe=pe))
-            for mask in (None, "0x3", "1", "2", "3", "4", "5", "6", "0x7"):
+            for mask in (None, "0x1", "0x3", "1", "2", "3", "4", "5", "6", "0x7"):
                 with self.subTest(pe=pe, mask=mask):
                     lines = self.d3d12(mask, pe=pe)
                     t, got = self.frames(lines)
-                    m = 0x3 if mask is None else int(mask, 0)
+                    m = 0x1 if mask is None else int(mask, 0)
                     table = self.routed(m, pe is not None)
                     self.assertEqual(len(got), len(base))
                     hit = set()
@@ -1747,12 +1751,12 @@ class WaveFour(unittest.TestCase):
                     text = next(ln for ln in lines if ln.startswith("kernels "))
                     self.assertIn("l_w4=%d w4_kernels=%d" % (m, self.count(m)), text)
 
-    def test_default_is_both_levers(self):
+    def test_default_is_the_post_lever(self):
         t, got = self.frames(self.d3d12(None))
         names = {k for f in got for k, *_ in f}
         self.assertIn(self.TF + "_w4", names)
-        self.assertIn(self.ENC + "_w4", names)
-        self.assertEqual(names & {self.TF, self.ENC, self.TF + "_w4m"}, set())
+        self.assertIn(self.ENC, names)   # the q20 encoder lever (0x02) is opt-in
+        self.assertEqual(names & {self.TF, self.ENC + "_w4", self.TF + "_w4m"}, set())
         self.assertEqual(t.kernels["post_last"], self.TF)   # the route's own name (the launch is mapped)
 
     def test_zero_is_the_wave_3_frame(self):
@@ -1771,7 +1775,7 @@ class WaveFour(unittest.TestCase):
                                 ({self.TF + sfx + "_w4", self.ENC + sfx + "_w4"}, {})):
                 with self.subTest(pe=pe, drop=sorted(drop)):
                     ports = [kc for kc in full_ports() if kc[0] not in drop]
-                    _, got = self.frames(self.d3d12(None, pe=pe, ports=ports))
+                    _, got = self.frames(self.d3d12("0x3", pe=pe, ports=ports))
                     for gf, bf in zip(got, base):
                         self.assertEqual([(table.get(b[0], b[0]),) + b[1:] for b in bf], gf)
             # 0x4 asks for the _w4m post: without its kernels the _w4 post runs
@@ -1781,14 +1785,14 @@ class WaveFour(unittest.TestCase):
             self.assertIn(self.TF + sfx + "_w4", names)
             self.assertEqual({n for n in names if n.endswith("_w4m")}, set())
         none = [kc for kc in full_ports() if not kc[0].endswith(("_w4", "_w4m"))]
-        _, got = self.frames(self.d3d12(None, ports=none))
+        _, got = self.frames(self.d3d12("0x3", ports=none))
         _, base = self.frames(self.d3d12("0"))
         self.assertEqual(got, base)
 
     def test_not_fused_frames_have_no_w4_post(self):
-        """WG_L_POST_TF=0 (the separate launches, no fused post): the encoder is still routed, the post kernels do not appear."""
+        """WG_L_POST_TF=0 (the separate launches, no fused post): the encoder (0x02, opt-in) is still routed, the post kernels do not appear."""
         lines = run("model=L", frames=2, build_files=FT.SHIPPING, flags=("--backend=3",), manifest=full_ports(),
-                    env={"WG_L_POST_TF": "0"}, tf_default=True, w4_default=True)
+                    env={"WG_L_POST_TF": "0", "WG_L_W4": "0x3"}, tf_default=True)
         _, got = self.frames(lines)
         names = {k for f in got for k, *_ in f}
         self.assertEqual([n for n in names if "l_post_tf" in n], [])
