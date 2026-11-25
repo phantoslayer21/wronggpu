@@ -24,6 +24,7 @@
 // forms 1/2 it does not clamp to FP16 or explicitly round to half. The UAV format supplies the final format conversion.
 // Form 3 uses native_direct.hlsli's immutable frame b1 and texture table (rs=direct).
 // @wg-kernel w64/post_tf_f32_p12_diet_vsit co=post_w64__orig.co entry=post_tf_f32_p12_diet_vsit block=512 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u,u,u,u,u,u
+// @wg-kernel w64/post_tf_f32_p12_diet_vsit_pf co=post_w64__orig.co entry=post_tf_f32_p12_diet_vsit block=512 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u,u,u,u,u,u defines=WG_STAGED_PIDIV=1
 // @wg-kernel w64/post_tf_p12_diet_vsit co=post_w64__orig.co entry=post_tf_p12_diet_vsit block=512 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u,u,u,u,u,u defines=POST_OUT=1
 // @wg-kernel w64/post_tf_p12_diet_vsit_tex co=post_w64__orig.co rs=tex entry=post_tf_p12_diet_vsit block=512 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u,u,u,u,u,u defines=POST_OUT=2
 // @wg-kernel w64/post_tf_f32_p12_diet_vsit_direct co=post_w64__orig.co rs=direct entry=post_tf_f32_p12_diet_vsit_direct block=512 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u,u,u,u,u,u defines=WG_DIRECT_TEXTURES=1,POST_OUT=3
@@ -38,6 +39,7 @@
 // bx, by, idw, idh) after c2. Buffer form: the raw motion buffer (wg_motion_hi.hlsli); direct form: the game's motion
 // texture (its `motion` pointer is not read).
 // @wg-kernel pmo/post_tf_f32_p12_mo co=post_mo_w64__orig.co entry=post_tf_f32_p12_diet_vsit block=512 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u,b40,u,u,u,u,u defines=WG_POST_MO=1
+// @wg-kernel pmo/post_tf_f32_p12_mo_pf co=post_mo_w64__orig.co entry=post_tf_f32_p12_diet_vsit block=512 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u,b40,u,u,u,u,u defines=WG_POST_MO=1,WG_STAGED_PIDIV=1
 // @wg-kernel pmo/post_tf_f32_p12_mo_direct co=post_mo_w64__orig.co rs=direct entry=post_tf_f32_p12_diet_vsit_direct block=512 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u,b40,u,u,u,u,u defines=WG_DIRECT_TEXTURES=1,POST_OUT=3,WG_POST_MO=1
 //
 // Native AA and ratios between 1.0 and 1.5 (Brief 15; D3D12 only, no HIP kernel of its own): the same body with NW = 4
@@ -47,8 +49,10 @@
 // LDS); runtime.cpp tf4_supported is the host bound (the step footprint of NW = 4 fits 448). LDS: 448 x 48 + 20 x 480 =
 // 31104 bytes. The kernels above keep their DXIL (the defaults below).
 // @wg-kernel w64/post_tf4_dl_f32_p12_diet_vsit co=post_w64__orig.co entry=post_tf_f32_p12_diet_vsit block=256 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u,u,u,u,u,u defines=WG_TF_NW=4,WG_TF_CAP=448
+// @wg-kernel w64/post_tf4_dl_f32_p12_diet_vsit_pf co=post_w64__orig.co entry=post_tf_f32_p12_diet_vsit block=256 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u,u,u,u,u,u defines=WG_TF_NW=4,WG_TF_CAP=448,WG_STAGED_PIDIV=1
 // @wg-kernel w64/post_tf4_dl_f32_p12_diet_vsit_direct co=post_w64__orig.co rs=direct entry=post_tf_f32_p12_diet_vsit_direct block=256 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u,u,u,u,u,u defines=WG_DIRECT_TEXTURES=1,POST_OUT=3,WG_TF_NW=4,WG_TF_CAP=448
 // @wg-kernel pmo/post_tf4_dl_f32_p12_mo co=post_mo_w64__orig.co entry=post_tf_f32_p12_diet_vsit block=256 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u,b40,u,u,u,u,u defines=WG_POST_MO=1,WG_TF_NW=4,WG_TF_CAP=448
+// @wg-kernel pmo/post_tf4_dl_f32_p12_mo_pf co=post_mo_w64__orig.co entry=post_tf_f32_p12_diet_vsit block=256 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u,b40,u,u,u,u,u defines=WG_POST_MO=1,WG_TF_NW=4,WG_TF_CAP=448,WG_STAGED_PIDIV=1
 // @wg-kernel pmo/post_tf4_dl_f32_p12_mo_direct co=post_mo_w64__orig.co rs=direct entry=post_tf_f32_p12_diet_vsit_direct block=256 wave=64 args=p,p,p,p,p,p,p,p,p,p,p,b64,p,u,u,u,u,u,u,u,u,b40,u,u,u,u,u defines=WG_DIRECT_TEXTURES=1,POST_OUT=3,WG_POST_MO=1,WG_TF_NW=4,WG_TF_CAP=448
 //
 // Analytic output filter (WG_LZ_ANALYTIC = 1; HIP: post_w64.co, post.hip built with -mwavefrontsize64 and the default
@@ -68,16 +72,22 @@
 #if WG_LZ_ANALYTIC && ((POST_OUT != 0 && POST_OUT != 3) || defined(WG_POST_MO))
 #error "analytic output filter: forms 0 and 3 (direct) only"
 #endif
+#ifndef POST_OUT
+#define POST_OUT 0
+#endif
 #if defined(WG_DIRECT_TEXTURES)
 #include "native_direct.hlsli"
 #include "wg_f16lut.hlsli"
+#elif POST_OUT == 0 && !WG_LZ_ANALYTIC
+#include "wg_f16lut.hlsli"
 #endif
-#ifndef POST_OUT
-#define POST_OUT 0
+#if defined(WG_STAGED_PIDIV)
+#include "wg_pidiv.hlsli"
 #endif
 // WG_POST_CUTS: the exact instruction cuts below (history base fold, shared horizontal min / max) in the forms whose
 // bytes the checks cover (0: 3 x f32 rows, 3: direct); the RGBA16F row forms 1 / 2 keep their previous code
 #define WG_POST_CUTS (POST_OUT == 0 || POST_OUT == 3)
+#define WG_POST_OPT (POST_OUT == 0 || POST_OUT == 3)
 #if POST_OUT == 2
 RWTexture2D<float4> wg_tex_out : register(u3);   // the output texture (RGBA16F), written through a typed UAV
 #endif
@@ -185,6 +195,9 @@ float unif(float x) { return asfloat(WaveReadLaneFirst(asuint(x))); }
 #if POST_OUT == 3
 #define PD_P , const bool pd_rc, const bool pd_pi1
 #define PD_A , pd_rc, pd_pi1
+#elif POST_OUT == 0 && defined(WG_STAGED_PIDIV)
+#define PD_P , PiDiv pd_div
+#define PD_A , pd_div
 #else
 #define PD_P
 #define PD_A
@@ -193,10 +206,10 @@ float unif(float x) { return asfloat(WaveReadLaneFirst(asuint(x))); }
 #if WG_WAVE == 64   // wave32: wg_platform.hlsli includes it
 #include "wg_ags.hlsli"
 #endif
-#if POST_OUT == 3 && !defined(WG_NO_PT_SMALL)
+#if WG_POST_OPT && !defined(WG_NO_PT_SMALL)
 #define WG_PT_SMALL 1   // post_posttr.hlsli: Dec's polynomial flag by one minimum
 #endif
-#if POST_OUT == 3 && !defined(WG_NO_PT_INF)
+#if WG_POST_OPT && !defined(WG_NO_PT_INF)
 #define WG_PT_INF 1     // post_posttr.hlsli: blend's infinity flag by one maximum
 #endif
 
@@ -343,8 +356,8 @@ TfRaw tf_fetch(int idx, int col, int row PD_P)
     return t;
 }
 
-#if POST_OUT == 3
-// The direct form's staging fetch of texel i = mini(lane, ilast) of footprint rows r0 ..., columns c0 ... (ncol per
+#if WG_POST_OPT
+// Staging fetch of texel i = mini(lane, ilast) of footprint rows r0 ..., columns c0 ... (ncol per
 // row): (row, column) = (st_r, st_col) on lane < ilast + 1 (the lane's own texel, fixed per lane), else those of texel
 // ilast (wave-uniform); the same texel and clamps as post_body's other forms
 TfRaw pd_stage_fetch(int lane, int ilast, int st_r, int st_col, float inv_ncol_u, int r0, int c0, int ncol PD_P)
@@ -360,7 +373,7 @@ TfRaw pd_stage_fetch(int lane, int ilast, int st_r, int st_col, float inv_ncol_u
 }
 #endif
 
-#if WG_TF_TWO && POST_OUT != 3
+#if WG_TF_TWO && !WG_POST_OPT
 // The buffer forms' second staged texel of the lane: i = mini(lane + kThreads, nstage - 1), the first texel's formula
 TfRaw tf_stage2(int lane, int nstage, float inv_ncol, int r0, int c0, int ncol PD_P)
 {
@@ -383,6 +396,9 @@ void tf_put(uint i, TfRaw r, float e PD_P)
     // reciprocal form (3 operations per channel, its own exact fallback lanes), as pd_normalize
     float4 c = r.c;
     if (pd_div_on(pd_rc, pd_pi1)) c.xyz = pd_xor(pd_div3(r.c.xyz));
+#elif POST_OUT == 0 && defined(WG_STAGED_PIDIV)
+    float4 c = r.c;
+    c.xyz = asfloat(asuint(pidiv3(r.c.xyz, pd_div, g_z)) ^ g_z);
 #else
     const float4 c = r.c;
 #endif
@@ -489,7 +505,7 @@ float3 history_cr_span(float qx, float qy)
         // lshl_add + one mad_u24 (iy in [1, P_dh - 3] and pitch = 8 P_dw < 2^24, so the 24-bit product is the full one)
         // (the constant opaque, g_z: the driver would otherwise split it again into its parts, one add each)
 #if WG_POST_CUTS
-        uint b0 = (mul24((uint)iy, pitch) + ((uint)ix * 8u + (((hist_prev & ~7u) - 8u - pitch) ^ g_z))) & ~7u;
+        uint b0 = mul24((uint)iy, pitch) + (uint)ix * 8u + ((((hist_prev & ~7u) - 8u - pitch) ^ g_z) & ~7u);
 #else
         uint b0 = (hist_prev & ~7u) + (uint)(ix - 1) * 8u + mul24((uint)(iy - 1), pitch);
 #endif
@@ -522,6 +538,9 @@ float3 fallback_rgb(int fx, int fy PD_P)
     const float4 c = pd_normalize(pd_raw_color(mul24((uint)fy, (uint)P_rw) + (uint)fx, fx, fy, pd_rc), pd_rc, pd_pi1);
 #else
     float4 c = wg_ld4f(color, mul24((uint)fy, (uint)P_rw * 16u) + (uint)fx * 16u);
+#if POST_OUT == 0 && defined(WG_STAGED_PIDIV)
+    c.xyz = asfloat(asuint(pidiv3(c.xyz, pd_div, g_z)) ^ g_z);
+#endif
 #endif
     return float3(enc_e(opq(g_e_prev * c.x)), enc_e(opq(g_e_prev * c.y)), enc_e(opq(g_e_prev * c.z)));
 }
@@ -847,12 +866,16 @@ void tf_row_sync()
 #endif
 }
 
-#if POST_OUT == 3
-// One vertical item of the direct form (post_body's step 3): output pixel (xg, y), ring column xo, its first ring row
+#if WG_POST_OPT
+// One vertical item (post_body's step 3): output pixel (xg, y), ring column xo, its first ring row
 // urel = 3 pr + 2 dy past the pass's first row pair, and the lane phase's filter weights wa = (w0, w4), wb = (w1, w3) as
 // FP16 bit pairs. post_body calls it with per-lane values fixed for the walk on the first pass (it = lane).
 void pd_vitem(int y, int xg, int xo, int urel, uint wa, uint wb, int p_next, bool interior, int s0, int r_first, bool lut,
-              float dec_scale PD_P)
+              float dec_scale
+#if POST_OUT == 0
+              , const bool p0_pi1
+#endif
+              PD_P)
 {
     if (or(y >= oh, xg >= ow)) return;
     uint t[5][3];
@@ -888,13 +911,23 @@ void pd_vitem(int y, int xg, int xo, int urel, uint wa, uint wb, int p_next, boo
     }
 #else
     const half w0 = hbox(wa), w4 = hbox(wa >> 16), w1 = hbox(wb), w3 = hbox(wb >> 16);
-    if (lut) {   // the output values T[r] (wg_f16lut.hlsli, lev-f16lut d7149e2): the chain below, looked up
+    if (lut) {   // the output values T[r] (wg_f16lut.hlsli): the chain below, looked up
+#if POST_OUT == 3
         float3 res;
         [unroll] for (int c = 0; c < 3; ++c) {
             const uint r = lz5_original(t[0][c], t[1][c], t[2][c], t[3][c], t[4][c], w0, w1, hbox(lz_w2), w3, w4);
             res[c] = asfloat(wg_ld32(color, WG_F16LUT_DEC + (r << 2)));
         }
         native_direct_output[uint2((uint)xg, (uint)y)] = float4(res, 1.0f);
+#else
+        uint3 res;
+        [unroll] for (int c = 0; c < 3; ++c) {
+            const uint r = lz5_original(t[0][c], t[1][c], t[2][c], t[3][c], t[4][c], w0, w1, hbox(lz_w2), w3, w4);
+            res[c] = wg_ld32(B_unused, WG_F16LUT_DEC + (r << 2));
+        }
+        const uint o = mul24((uint)y, (uint)ow * 12u) + mul24((uint)xg, 12u);
+        wg_mem.Store3(out_p + o, res);
+#endif
         return;
     }
     float vo[3], qv[3];
@@ -909,6 +942,7 @@ void pd_vitem(int y, int xg, int xo, int urel, uint wa, uint wb, int p_next, boo
     if (WaveActiveAnyTrue(vsmall)) {   // Dec's polynomial only when some lane needs it (post.hip's branches)
         [unroll] for (int c = 0; c < 3; ++c) vo[c] = qv[c] < kDecPolyMax ? dec_m1_poly(qv[c]) : vo[c];
     }
+#if POST_OUT == 3
     // Match the staged FP32 output, optional scale_rgb, then Converter's typed output. opq preserves the
     // first pass's rounding boundary: the driver must not regroup vo * (dec_scale * nd_color_pi).
     const float3 result = float3(mul_nz(vo[0], dec_scale), mul_nz(vo[1], dec_scale), mul_nz(vo[2], dec_scale));
@@ -925,6 +959,16 @@ void pd_vitem(int y, int xg, int xo, int urel, uint wa, uint wb, int p_next, boo
             if (zr) native_direct_output[uint2((uint)xg, (uint)y)] = float4(ex, 1.0f);
         }
     }
+#else
+    const uint o = mul24((uint)y, (uint)ow * 12u) + mul24((uint)xg, 12u);
+    if (p0_pi1) {
+        wg_mem.Store3(out_p + o, uint3(asuint(vo[0] * dec_scale), asuint(vo[1] * dec_scale), asuint(vo[2] * dec_scale)));
+    } else {
+        const float3 res = float3(mul_nz(vo[0], dec_scale), mul_nz(vo[1], dec_scale), mul_nz(vo[2], dec_scale));
+        const float3 so = float3(m1_scale(res.x, pi_arg), m1_scale(res.y, pi_arg), m1_scale(res.z, pi_arg));
+        wg_mem.Store3(out_p + o, uint3(asuint(so.x), asuint(so.y), asuint(so.z)));
+    }
+#endif
 }
 
 // item it's (y - 2 p_next, xo, urel, wa, wb) (post_body's decomposition of an item index)
@@ -952,9 +996,8 @@ void pd_vsplit(int it, out int yrel, out int xo, out int urel, out uint wa, out 
 void post_body(const bool pd_rc, const bool pd_pi1)   // the direct form's body (its kernel at the end of the file)
 {
 #elif POST_OUT == 0
-WG_KERNEL(post_tf_f32_p12_diet_vsit)
+void post_body(const bool p0_pi1)   // form 0's body (its kernel at the end of the file)
 {
-    WG_SETUP();
 #else
 WG_KERNEL(post_tf_p12_diet_vsit)
 {
@@ -962,10 +1005,13 @@ WG_KERNEL(post_tf_p12_diet_vsit)
 #endif
     if (P_dw < 4) return;
     g_z = (uint)ow >> 31;   // 0 (ow > 0), unknown to the compiler
+#if POST_OUT == 0 && defined(WG_STAGED_PIDIV)
+    const PiDiv pd_div = pidiv_make((uint)P_pad0);
+#endif
     g_e = P_e;
     g_e_prev = P_e_prev;
     g_ratio = P_ratio;
-#if POST_OUT != 3
+#if !WG_POST_OPT
     float dec_scale = dec_scale_arg;
     if (expo != 0u) {   // kDiet: ratio and dec_scale precomputed in the exposure pair
         float e0 = unif(wg_ldf(expo, 0u)), e1 = unif(wg_ldf(expo, 4u));
@@ -1010,8 +1056,8 @@ WG_KERNEL(post_tf_p12_diet_vsit)
         nstage = ncol * nrow < kTfCap ? ncol * nrow : kTfCap;
     }
     TfRaw raw;
-#if POST_OUT == 3
-    // Direct form: texel i = mini(lane, nstage - 1) as below, but its footprint row and clamped column are fixed per lane
+#if WG_POST_OPT
+    // texel i = mini(lane, nstage - 1) as below, but its footprint row and clamped column are fixed per lane
     // for lane < nstage (opaque: computed once) and wave-uniform for the other lanes (texel nstage - 1: scalar ALU)
     const float inv_ncol_u = unif(inv_ncol);
     const int st_r = (int)(((float)lane + 0.5f) * inv_ncol);
@@ -1035,8 +1081,8 @@ WG_KERNEL(post_tf_p12_diet_vsit)
     TfRaw raw2 = tf_stage2(lane, nstage, inv_ncol, r0, c0, ncol PD_A);
 #endif
 #endif
-#if POST_OUT == 3
-    // Direct form: the per-launch values after the first staging loads (lev-f16lut 1a9daed: with the exposure-pair loads
+#if WG_POST_OPT
+    // per-launch values after the first staging loads (lev-f16lut 1a9daed: with the exposure-pair loads
     // first, every wave waited for them before issuing any texel load)
     float dec_scale = dec_scale_arg;
     if (expo != 0u) {   // kDiet: ratio and dec_scale precomputed in the exposure pair
@@ -1046,11 +1092,13 @@ WG_KERNEL(post_tf_p12_diet_vsit)
         g_ratio = unif(wg_ldf(expo, 12u));
         dec_scale = unif(wg_ldf(expo, 16u));
     }
-    // the output table of this frame (wg_f16lut.hlsli; color: the table, 0 = none), wave-uniform
+    // the output table of this frame (wg_f16lut.hlsli; color in form 3, B_unused in form 0; 0 = none), wave-uniform
 #if WG_LZ_ANALYTIC
     const bool lut = false;   // the table is indexed by an FP16 filter result (the original's); the analytic one is FP32
-#else
+#elif POST_OUT == 3
     const bool lut = WaveReadLaneFirst(f16lut_valid(color, dec_scale, nd_color_pi, nd_output_rne16) ? 1u : 0u) != 0u;
+#else
+    const bool lut = WaveReadLaneFirst(f16lut_valid(B_unused, dec_scale, p0_pi1 ? 1.0f : pi_arg, 0u) ? 1u : 0u) != 0u;
 #endif
 #endif
 
@@ -1069,7 +1117,7 @@ WG_KERNEL(post_tf_p12_diet_vsit)
     const uint2 mo_dims = uint2(0u, 0u);
 #endif
 
-#if POST_OUT == 3
+#if WG_POST_OPT
     // the horizontal pass's lane roles (row hk, channel hc, cell hg) and its scratch offsets: fixed per lane
     const int hk_l = wl >= 30 ? 1 : 0, hrem_l = wl - 30 * hk_l, hc_l = hrem_l >= 20 ? 2 : (hrem_l >= 10 ? 1 : 0),
               hg_l = hrem_l - 10 * hc_l;
@@ -1151,7 +1199,7 @@ WG_KERNEL(post_tf_p12_diet_vsit)
                 // order): each texel's features are read from LDS once for both rows. Row y0 + 1's sums wait in gnext.
                 Gather gk;
                 if (k == 0) {
-#if POST_OUT == 3
+#if WG_POST_OPT
                     // unrolled: the first texel starts the sums from zeros as operands (no zero moves) and the loop's
                     // overhead goes (78 VGPRs). The colour sums start from an opaque +0 (gather_zero_opq): with a
                     // literal 0 the driver turns fma(w, ec, +0) into w * ec (a -0 product would stay -0).
@@ -1197,7 +1245,7 @@ WG_KERNEL(post_tf_p12_diet_vsit)
                     wg_st64(hist_out, mul24((uint)y, (uint)P_dw * 8u) + (uint)x * 8u, he);
                 // display values (FP16) of the 64 columns -> scratch row slot + k: lanes 2m, 2m + 1 share a dword
                 const uint srow = scr + (uint)k * kRowDw;
-#if POST_OUT == 3
+#if WG_POST_OPT
                 {   // the partner's two dwords (c0 | c1 << 16, c2), then the even lane's three packed dwords (the same bits)
                     const uint nx = QuadReadAcrossX(de.x), ny = QuadReadAcrossX(de.y);
                     const uint d0 = (de.x & 0xffffu) | (nx << 16), d1 = (de.x >> 16) | (nx & 0xffff0000u);
@@ -1222,7 +1270,7 @@ WG_KERNEL(post_tf_p12_diet_vsit)
 #endif
             }
             // reduced history: mean of H^ over the 2 x 2 block, the partner column in lane ^ 1
-#if POST_OUT == 3
+#if WG_POST_OPT
             // two code chains for the three channels: chain a is channel 0 on the even lane and channel 1 on the odd lane
             // (its sum hsum_o[1] + hsum_e[1]: the even lane's hsum_e[1] + hsum_o[1] commuted, equal but for a NaN's
             // payload, and every NaN m gives the code of enc_arg = 1e-4), chain b channel 2; the odd lane's code a comes
@@ -1258,7 +1306,7 @@ WG_KERNEL(post_tf_p12_diet_vsit)
             r0 = floor_i(pos_y(ys) - 0.5f) - 1;
             int nrow = floor_i(pos_y(yl) - 0.5f) + 2 - r0 + 1;
             nstage = ncol * nrow < kTfCap ? ncol * nrow : kTfCap;
-#if POST_OUT == 3
+#if WG_POST_OPT
             raw = pd_stage_fetch(lane, nstage - 1 < 0 ? 0 : nstage - 1, st_rx, st_col, inv_ncol_u, r0, c0, ncol PD_A);
 #if WG_TF_TWO
             raw2 = pd_stage_fetch(lane2, nstage - 1 < 0 ? 0 : nstage - 1, st_rx2, st_col2, inv_ncol_u, r0, c0, ncol PD_A);
@@ -1276,7 +1324,7 @@ WG_KERNEL(post_tf_p12_diet_vsit)
 
         // horizontal pass of the wave's two rows: lane (row hk, channel hc, cell hg), output columns 4 hg ... 4 hg + 3
         tf_row_sync();
-#if POST_OUT == 3
+#if WG_POST_OPT
         const bool hact = and(wact, h_lane);
         const int hk = hk_l;
 #else
@@ -1285,13 +1333,13 @@ WG_KERNEL(post_tf_p12_diet_vsit)
         const int hk = hl >= 30 ? 1 : 0, hrem = hl - 30 * hk, hc = hrem >= 20 ? 2 : (hrem >= 10 ? 1 : 0),
                   hg = hrem - 10 * hc;
 #endif
-#if POST_OUT == 3
+#if WG_POST_OPT
         uint hv[4];   // set and used on the hact lanes only
 #else
         uint hv[4] = { 0u, 0u, 0u, 0u };
 #endif
         if (hact) {
-#if POST_OUT == 3
+#if WG_POST_OPT
             const uint src = scr + h_src;
 #else
             const uint src = scr + (uint)hk * kRowDw + (uint)hc * 32u + (uint)hg * 3u;
@@ -1354,7 +1402,7 @@ WG_KERNEL(post_tf_p12_diet_vsit)
         }
         tf_row_sync();
         if (hact) {
-#if POST_OUT == 3
+#if WG_POST_OPT
             const uint dst = scr + h_dst;
 #else
             const uint dst = scr + (uint)hk * kRowDw + (uint)hc * (uint)kTfOutX + (uint)hg * 4u;
@@ -1373,15 +1421,23 @@ WG_KERNEL(post_tf_p12_diet_vsit)
         const int nitems = (p_rdy - p_next) * 2 * kTfOutX;
         const bool interior = and(3 * p_next - 2 >= 0, 3 * p_rdy + 1 <= P_dh - 1);
         const int s0 = interior ? (3 * p_next - 2 - r_first) % kRing : 0;
-#if POST_OUT == 3
+#if WG_POST_OPT
         if (lane < nitems)
-            pd_vitem(2 * p_next + v_yrel, v_xg, v_xo, v_urel, v_wa, v_wb, p_next, interior, s0, r_first, lut, dec_scale PD_A);
+            pd_vitem(2 * p_next + v_yrel, v_xg, v_xo, v_urel, v_wa, v_wb, p_next, interior, s0, r_first, lut, dec_scale
+#if POST_OUT == 0
+                     , p0_pi1
+#endif
+                     PD_A);
         [loop] for (int it = lane + kThreads; it < nitems; it += kThreads) {
             int yrel, xo, urel;
             uint wa, wb;
             pd_vsplit(it, yrel, xo, urel, wa, wb);
             pd_vitem(2 * p_next + yrel, strip * kTfOutX + xo, xo, urel, wa, wb, p_next, interior, s0, r_first, lut,
-                     dec_scale PD_A);
+                     dec_scale
+#if POST_OUT == 0
+                     , p0_pi1
+#endif
+                     PD_A);
         }
 #else
 #if POST_OUT == 0
@@ -1488,5 +1544,17 @@ WG_KERNEL(post_tf_f32_p12_diet_vsit_direct)
     [branch] if (and(rc, nd_color_pi == 1.0f)) post_body(true, true);
     else if (rc) post_body(true, false);
     else post_body(false, false);
+}
+#elif POST_OUT == 0
+WG_KERNEL(post_tf_f32_p12_diet_vsit)
+{
+    WG_SETUP();
+#if defined(WG_STAGED_PIDIV)
+    post_body(false);
+#else
+    // launch-uniform: the pi == 1 copy omits m1_scale completely
+    [branch] if (pi_arg == 1.0f) post_body(true);
+    else post_body(false);
+#endif
 }
 #endif

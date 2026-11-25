@@ -21,7 +21,7 @@
 // both pixels of every lane and only the stores are conditional). dec0's FP16 latent update is done in FP32 with an FP16
 // rounding after each step, not in half arithmetic (the driver contracts half mul + add into v_fma_mix_f32).
 // Bit-identical to the HIP kernel on the synthetic frames (clean/dx12/compare.py, both cases, every buffer).
-// @wg-kernel d1p12/swin_block_c64_add_dec0_nc co=dec1_dec0__pack12.co block=256 wave=32 args=p,p,p,u,u,u,u,p,p,p,p,p,p,p,b56 defines=WG_GELU_T5=0,WG_LD_A16=1
+// @wg-kernel d1p12/swin_block_c64_add_dec0_nc co=dec1_dec0__pack12.co block=256 wave=32 args=p,p,p,u,u,u,u,p,p,p,p,p,p,p,b56 defines=WG_GELU_T5=0
 //
 // DEC0_ONLY (port d1p12/dec0_q7; Model M on the FP16-form shared stages, WG_M_FORM=q7, where dec1 runs as the q7 block
 // l_q7_block_c64_dec and stores its map): the same kernel without the block. The epilogue's input o[0..3] (lane (t, hh):

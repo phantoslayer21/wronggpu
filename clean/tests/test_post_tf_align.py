@@ -77,14 +77,14 @@ class TestPostTfAlign(unittest.TestCase):
             self.assertTrue(any(b.start(1) <= c < b.end(1) for b in blocks), "a check outside WG_DEV_DIAGNOSTICS")
         self.assertTrue(any('#include "post_tf_align.h"' in b.group(1) for b in blocks), "the header outside the macro")
         self.assertNotIn('#include "post_tf_align.h"', re.sub(re.escape(DEV) + r"\n.*?\n#endif", "", src, flags=re.S))
-        for launch in (r'launch\(\("pmo/" \+ post_last\)', r"launch\(\(post_pre \+ tf_kernel\)"):
+        for launch in (r'launch\(\("pmo/" \+ post_last\)', r"launch\(\(post_pre \+ post_last\)\.c_str\(\), cdiv\(ow, 40\)"):
             m = re.search(launch, src)
             self.assertIsNotNone(m, launch)
             before = src[max(0, m.start() - 600):m.start()]
             self.assertIn("post_tf_misaligned(A, hist[cur])", before, "no check right before " + launch)
             self.assertRegex(before, r"return fail\(.*\n?.*is not 8-byte aligned")
             call = src[m.start():m.start() + 300]
-            self.assertIn("&cnet, &A, &B, &C, &hist[cur]", call, "the launch no longer passes A and hist[cur] as checked")
+            self.assertIn("&cnet, &A, &post_b, &C, &hist[cur]", call, "the launch no longer passes A and hist[cur] as checked")
 
 
 if __name__ == "__main__":

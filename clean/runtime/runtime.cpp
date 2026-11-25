@@ -28,6 +28,7 @@
 #include "model.h"
 #include "model_select.h"
 #include "runtime_core.h"
+#include "native_direct_pi.h"
 #include "wg_runtime.h"
 #ifdef WG_DEV_DIAGNOSTICS
 #include "post_tf_align.h"
@@ -487,6 +488,9 @@ struct Runtime {
   // Staged native D3D12 route (backend 3, buffer resources) with a pre-exposure other than 1: the output scale (scale_rgb) is
   // done by the true-fusion post kernel's store (WG_SCALE_FOLD / option scale_fold, default on): the same bytes, one launch fewer
   bool scale_fold = true;
+  // Staged native D3D12 route (POST_OUT == 0, output_filter=original): per-frame 256 KB FP16 decode LUT (WG_M_POST_LUT,
+  // default on) and dedicated pi != 1 _pf kernels folding color_divide (WG_M_PF_FOLD, default on; pi == 1 DXIL untouched).
+  bool m_post_lut = true, m_pf_fold = true;
   bool output_quality9 = false;  // private Model M final-resampling quality profile; histories/weights unchanged
   // output_filter=quality5: the 5-tap output filter with WrongGPU's quality5 weights. The post kernels come from
   // post_w64__q5.co (post.hip built with WG_LZ_PROFILE=1: the same kernels with other filter constants), so every
@@ -564,6 +568,7 @@ struct Runtime {
   // not read a colour buffer (they read the game's texture), so it is passed as their colour pointer.
   DevPtr f16lut = 0;
   static constexpr size_t kF16LutBytes = 256 + 65536 * 12;
+  static constexpr size_t kF16LutDecBytes = 256 + 65536 * 4;
   DevPtr mnear[2] = {0, 0}, mfar = 0, mcenter = 0, latent[2] = {0, 0}, reduced = 0;
   DevPtr skip1 = 0, merged1 = 0, skip2 = 0, merged2 = 0, bout[6] = {0}, e2 = 0, out2 = 0, e1 = 0, out1 = 0;
   DevPtr A = 0, B = 0, C = 0, hist[2] = {0, 0}, display = 0, out = 0, color_net = 0;
@@ -1432,6 +1437,8 @@ struct Runtime {
       if (k == "post_bands") post_bands = std::max(1, std::atoi(v.c_str()));
       if (k == "post_tf") post_tf = !(v == "0" || v == "off" || v == "false");
       if (k == "scale_fold") scale_fold = !(v == "0" || v == "off" || v == "false");
+      if (k == "m_post_lut") m_post_lut = !(v == "0" || v == "off" || v == "false");
+      if (k == "m_pf_fold") m_pf_fold = !(v == "0" || v == "off" || v == "false");
       if (k == "output_filter") {
         if (v != "default" && v != "original" && v != "analytic" && v != "quality5" && v != "quality9")
           return fail("output_filter must be original, analytic, quality5 or quality9 (or default; Model M)");
@@ -1471,6 +1478,8 @@ struct Runtime {
     if (const char* sr = std::getenv("WG_SWIN_RESIDENT")) swin_resident = std::max(0, std::atoi(sr));
     if (const char* t = std::getenv("WG_POST_TF")) post_tf = !(std::string(t) == "0" || std::string(t) == "off");
     if (const char* t = std::getenv("WG_SCALE_FOLD")) scale_fold = !(std::string(t) == "0" || std::string(t) == "off");
+    if (const char* t = std::getenv("WG_M_POST_LUT")) m_post_lut = !(std::string(t) == "0" || std::string(t) == "off");
+    if (const char* t = std::getenv("WG_M_PF_FOLD")) m_pf_fold = !(std::string(t) == "0" || std::string(t) == "off");
     // The output filter (spec 06 draft 4, spec 10 section 5 step 6): the original's weights from the model file by
     // default, the analytic set when the model file has none (noted for the log) or when it is selected.
     output_quality9 = output_filter_opt == "quality9";
@@ -1819,7 +1828,9 @@ struct Runtime {
               (native_direct_io || (alloc(&depth, R * 4) && alloc(&motion, R * 8) && alloc(&color_net, R * 16))) &&
               (!own_direct || alloc(&color_net, R * 16)) &&
               alloc(&expo, 32) &&
-              (!native_direct_io || (alloc(&f16lut, kF16LutBytes) && (dev->memset(f16lut, 0, 256) || dfail()))) &&
+              (!(native_direct_io || (d3d12_native && !model_l)) ||
+               (alloc(&f16lut, native_direct_io ? kF16LutBytes : kF16LutDecBytes) &&
+                (dev->memset(f16lut, 0, 256) || dfail()))) &&
               alloc(&expo_partials, 4 * (size_t)cdiv(ny, 4)) && alloc(&expo_computed, 4) && alloc(&expo_sync, 4) &&
               (dev->memset(expo_sync, 0, 4) || dfail()) && alloc(&feat0, t2 * 64) &&
               alloc(&mnear[0], R * 4) && alloc(&mnear[1], R * 4) && alloc(&mfar, R * 4) && alloc(&mcenter, R * 4) &&
@@ -2549,6 +2560,51 @@ struct Runtime {
     }
     const bool mo = mhi != 0;
     mo_last = mo;
+    // The post route of this frame (decided here, before color_divide / exposure, so staged native D3D12 can decide
+    // whether to fold color_divide into dedicated _pf kernels and whether to build the 256 KB FP16 decode LUT).
+    const int hp = io ? io->out_half_pitch : 0;
+    const bool band_now = post_band && recon2_supported(rw, rh, dw, dh) &&
+                          (hp <= 0 || filter_kernel == "post_filter_c1_s4_band") && !mo;
+    const bool tf_mo_route = mo && post_band && (hp <= 0 || filter_kernel == "post_filter_c1_s4_band") && post_tf &&
+                             post_diet && post_kernel == "post_recon2_r_band_p12" && filter_kernel == "post_filter_c1_s4_band";
+    const bool tf_mo4 = tf_mo_route && d3d12_native && hp <= 0 && tf4_supported(rw, rh, dw, dh) &&
+                        (post_tf4_force || !tf_supported(rw, rh, dw, dh, kTfCap));
+    const bool tf_mo = tf_mo_route && (tf_mo4 || tf_supported(rw, rh, dw, dh, kTfCap));
+    std::string tf_name;
+    const char* tf_kernel = nullptr;
+    int tf_block = 512;
+    if (band_now && post_tf && (p12 && recon2_supported(rw, rh, dw, dh)) && post_wave == 64 &&
+        post_kernel == "post_recon2_r_band_p12" && filter_kernel == "post_filter_c1_s4_band") {
+      const bool tf4 = d3d12_native && hp <= 0 && post_diet && tf_vdiet && post_sel && post_idx && post_trim &&
+                       tf4_supported(rw, rh, dw, dh) && (post_tf4_force || !tf_supported(rw, rh, dw, dh, kTfCap));
+      if (tf4) {
+        tf_name = std::string("post_tf4_dl_f32_p12_diet_vsit") + (native_direct_io ? "_direct" : "");
+        tf_kernel = tf_name.c_str();
+        tf_block = 256;
+      } else if (tf_supported(rw, rh, dw, dh, kTfCap)) {
+        if (post_diet) {
+          std::string sfx = std::string(tf_vdiet ? "v" : "") + (post_sel ? "s" : "") + (post_idx ? "i" : "");
+          if (post_trim && sfx == "vsi") sfx += "t";
+          tf_name = std::string(hp > 0 ? "post_tf_p12_diet" : "post_tf_f32_p12_diet") + (sfx.empty() ? "" : "_" + sfx);
+          if (native_direct_io) tf_name += "_direct";
+          tf_kernel = tf_name.c_str();
+        } else {
+          tf_kernel = hp > 0 ? "post_tf_p12" : "post_tf_f32_p12";
+        }
+      } else if (tf_supported(rw, rh, dw, dh, kTfDlCap)) {
+        tf_kernel = hp > 0 ? "post_tf_dl_p12" : "post_tf_dl_f32_p12";
+      }
+    }
+    const bool staged_tf_any =
+        d3d12_native && !native_direct_io && !raw && !model_l && hp <= 0 &&
+        (tf_mo || (tf_kernel && (tf_name == "post_tf_f32_p12_diet_vsit" || tf_name == "post_tf4_dl_f32_p12_diet_vsit")));
+    const bool fold_scale = scale_fold && staged_tf_any && pi != 1.0f;
+    const bool fold_pidiv = m_pf_fold && staged_tf_any && output_original && pi != 1.0f &&
+                            wgrt::native_direct_pi_window(pi).hi != 0u;
+    const bool use_post_lut = m_post_lut && staged_tf_any && output_original && f16lut != 0;
+    int pidiv_bits = 0;
+    if (fold_pidiv) std::memcpy(&pidiv_bits, &pi, 4);
+    const int mode = io && io->exposure_mode >= 0 ? io->exposure_mode : (cfg.auto_exposure ? 2 : 0);
     if (raw) {  // interop input copy: the game's formats -> dense color / pi, depth, motion in render pixels
       if (!depth || !motion) return fail("raw inputs need the runtime's own depth / motion buffers");
       DevPtr c16 = cin, d32 = din, m16 = min_;
@@ -2562,16 +2618,16 @@ struct Runtime {
       cnet = cin = color_net;  // exposure then reads color / pi with 1 / pi = 1 (see FrameIo)
       din = depth;
       min_ = motion;
-    } else if (!native_direct_io && pi != 1.0f) {
+    } else if (!native_direct_io && pi != 1.0f && !fold_pidiv) {
       int npix = rw * rh;
       float p_ = pi;
       if (!launch("color_divide", cdiv(npix, 256), 256, {&cin, &color_net, &p_, &npix})) return false;
+      if (mode == 2) dev->unordered_next();  // exposure reads cin, writes expo*; disjoint from color_net
       cnet = color_net;
     }
     if (native_direct_io) cnet = f16lut;  // the direct kernels' colour pointer: the output table (wg_f16lut.hlsli)
 
     // 1. exposure (spec 10 section 5.1, spec 07); pair state [e, e_prev, last e] on the GPU
-    const int mode = io && io->exposure_mode >= 0 ? io->exposure_mode : (cfg.auto_exposure ? 2 : 0);
     int use_computed = mode != 0 ? 1 : 0, first = frames == 0 ? 1 : 0;
     float value = fr.exposure;
     DevPtr esrc = mode == 1 ? io->expo_src : expo_computed;
@@ -2608,6 +2664,13 @@ struct Runtime {
 
     // the direct path's 64K tables of this frame (dx12/hlsl/wg_f16lut_in.hlsli, wg_f16lut.hlsli): one lane per FP16 pattern
     if (native_direct_io && !launch("f16lut_build_direct", 256, 256, {&f16lut, &expo})) return false;
+    // staged native D3D12 (POST_OUT == 0, output_filter=original): 256 KB FP16 decode LUT, overlapped with input_encoder
+    if (use_post_lut) {
+      float dec_scale_lut = (float)(0.01 / (fr.exposure == 0.0f ? 1.0 : (double)fr.exposure));
+      float pi_lut = fold_scale ? pi : 1.0f;
+      if (!launch("f16lut_build_dec", 256, 256, {&f16lut, &expo, &dec_scale_lut, &pi_lut})) return false;
+      dev->unordered_next();
+    }
 
     // 2. input encoder (spec 03)
     {
@@ -2640,6 +2703,7 @@ struct Runtime {
       p.idh = (float)(1.0 / dh);
       p.irw = (float)(1.0 / rw);
       p.irh = (float)(1.0 / rh);
+      p.pad0 = pidiv_bits;
       DevPtr w = wdev["enc0"];
       const int ntok = (fh / 2) * (fw / 2);
       if (model_l) {
@@ -2651,11 +2715,14 @@ struct Runtime {
         p.sy = mop.sy;
         p.bx = mop.bx;
         p.by = mop.by;
-        if (!launch(native_direct_io ? "emo/input_encoder_mo_direct" : "emo/input_encoder_mo", cdiv(ntok, 128), 256,
+        if (!launch(native_direct_io ? "emo/input_encoder_mo_direct"
+                                     : (fold_pidiv ? "emo/input_encoder_mo_pf" : "emo/input_encoder_mo"),
+                    cdiv(ntok, 128), 256,
                     {&cnet, &mhi, &reduced, &latent[cur], &mnear[cur], &feat0, &mnear[nxt], &mfar, &mcenter, &expo, &w,
                      &p, &emop}))
           return false;
-      } else if (!launch(native_direct_io ? "input_encoder_direct" : "input_encoder",
+      } else if (!launch(native_direct_io ? "input_encoder_direct"
+                                          : (fold_pidiv ? "input_encoder_pf" : "input_encoder"),
                          cdiv(ntok, 128), 256,
                   {&cnet, &din, &min_, &reduced, &latent[cur], &mnear[cur], &feat0, &mnear[nxt], &mfar, &mcenter,
                    &expo, &w, &p}))
@@ -2845,7 +2912,6 @@ struct Runtime {
     }
 
     // interop output copy (FrameIo.out_half_pitch > 0): the output is RGBA16F rows of that pitch with pi folded in
-    const int hp = io ? io->out_half_pitch : 0;
     if (post_fused && hp > 0 && !(out_f16 && pi == 1.0f && hp == 8 * ow))
       return fail("output copy (RGBA16F rows) with post kernel " + post_kernel +
                   ": needs a fused _o16 kernel, pre-exposure 1 and rows of 8 ow bytes");
@@ -2860,52 +2926,6 @@ struct Runtime {
                   (hp > 0 ? hp == 8 * ow : (!io || !io->out || io->out_rgba16f)) && pi == 1.0f &&
                   recon2_supported(rw, rh, dw, dh);
     frame_out_f16 = out_f16 || recon_out16 || hp > 0;
-    // the banded kernels need the footprint of post_recon2_r; other frames: the unbanded kernel (post_recon where it
-    // does not fit, 8-byte history) + the unbanded default filter
-    // (and write 3 x f32: not with the output copy)
-    // With the interop output copy (hp > 0) the default banded filter's RGBA16F-rows form post_filter_c1_s4_h_band
-    // (pi folded in, any pitch) keeps the path banded; bit-identical to the unbanded copy filters.
-    // (motion at output resolution: the true-fusion kernel post_tf_*_mo where the default one would run, otherwise
-    // post_recon2_r_p12_mo and the unbanded filter; kernels/post_mo.hip)
-    const bool band_now = post_band && recon2_supported(rw, rh, dw, dh) &&
-                          (hp <= 0 || filter_kernel == "post_filter_c1_s4_band") && !mo;
-    const bool tf_mo_route = mo && post_band && (hp <= 0 || filter_kernel == "post_filter_c1_s4_band") && post_tf &&
-                             post_diet && post_kernel == "post_recon2_r_band_p12" && filter_kernel == "post_filter_c1_s4_band";
-    // (native D3D12, f32 / direct forms: pmo/post_tf4_dl_* where the cap-352 kernel does not fit, or post_tf4=force)
-    const bool tf_mo4 = tf_mo_route && d3d12_native && hp <= 0 && tf4_supported(rw, rh, dw, dh) &&
-                        (post_tf4_force || !tf_supported(rw, rh, dw, dh, kTfCap));
-    const bool tf_mo = tf_mo_route && (tf_mo4 || tf_supported(rw, rh, dw, dh, kTfCap));
-    // True fusion: a frame of the default banded pack12 path (post kernels in wave64) whose size post_tf takes runs
-    // post_tf_p12 (Quality ... Ultra Performance) or post_tf_dl_p12 (native AA): bit-identical to the banded
-    // sequence (runner/post_exact.py), one launch, the display image is not written. Output as the banded path: RGBA16F
-    // rows with pi folded in for the interop output copy (hp > 0), otherwise 3 x f32 (then scale_rgb when pi != 1).
-    std::string tf_name;  // post_tf_*_diet[_<suffix>] (tf_kernel points into it)
-    const char* tf_kernel = nullptr;
-    int tf_block = 512;   // post_tf4_dl_*: 256
-    if (band_now && post_tf && p12_frame && post_wave == 64 && post_kernel == "post_recon2_r_band_p12" &&
-        filter_kernel == "post_filter_c1_s4_band") {
-      // Native D3D12 (Brief 15): post_tf4_dl_f32_p12_diet_vsit[_direct] where the cap-352 kernel does not fit (native AA
-      // and every ratio between 1.0 and 1.5), or every frame it takes with post_tf4=force; f32 / direct forms only
-      const bool tf4 = d3d12_native && hp <= 0 && post_diet && tf_vdiet && post_sel && post_idx && post_trim &&
-                       tf4_supported(rw, rh, dw, dh) && (post_tf4_force || !tf_supported(rw, rh, dw, dh, kTfCap));
-      if (tf4) {
-        tf_name = std::string("post_tf4_dl_f32_p12_diet_vsit") + (native_direct_io ? "_direct" : "");
-        tf_kernel = tf_name.c_str();
-        tf_block = 256;
-      } else if (tf_supported(rw, rh, dw, dh, kTfCap)) {
-        if (post_diet) {  // the _diet kernel with the suffix of its options (kernels/post.hip WG_TF_KERNEL_DIET_X)
-          std::string sfx = std::string(tf_vdiet ? "v" : "") + (post_sel ? "s" : "") + (post_idx ? "i" : "");
-          if (post_trim && sfx == "vsi") sfx += "t";  // post_trim: only the default kernel has the t form
-          tf_name = std::string(hp > 0 ? "post_tf_p12_diet" : "post_tf_f32_p12_diet") + (sfx.empty() ? "" : "_" + sfx);
-          if (native_direct_io) tf_name += "_direct";
-          tf_kernel = tf_name.c_str();
-        } else {
-          tf_kernel = hp > 0 ? "post_tf_p12" : "post_tf_f32_p12";
-        }
-      } else if (tf_supported(rw, rh, dw, dh, kTfDlCap)) {
-        tf_kernel = hp > 0 ? "post_tf_dl_p12" : "post_tf_dl_f32_p12";
-      }
-    }
     if (!mark(3)) return false;
     // l_post=own on the direct-resource route: Model L's reconstruction reads the colour from a buffer, so the game's
     // texture is staged into color_net first, with the staged route's values (native_direct_normalized_color: the
@@ -2934,12 +2954,9 @@ struct Runtime {
       p.e = e;
       p.e_prev = e;
       p.ratio = 1.0f;
+      p.pad0 = pidiv_bits;
       DevPtr w = wdev["post"];
-      // scale_fold: the staged true-fusion post (the HLSL ports of post_tf_f32_p12_diet_vsit, post_tf4_dl_*, pmo/post_tf_*_mo)
-      // applies the scale_rgb multiply itself when its pi argument is not 1. Never raw / direct / Model L / interop output copy.
-      const bool fold_scale =
-          scale_fold && d3d12_native && !native_direct_io && !raw && !model_l && hp <= 0 && pi != 1.0f &&
-          (tf_mo || (tf_kernel && (tf_name == "post_tf_f32_p12_diet_vsit" || tf_name == "post_tf4_dl_f32_p12_diet_vsit")));
+      DevPtr post_b = use_post_lut ? f16lut : (d3d12_native && !native_direct_io && hp <= 0 && !model_l ? (DevPtr)0 : B);
       if (post_fused) {  // reconstruction + output filter in one launch, straight into the output buffer
         if (!fused_supported(rw, rh, dw, dh))
           return fail(post_kernel + ": render size " + std::to_string(rw) + "x" + std::to_string(rh) +
@@ -2964,6 +2981,7 @@ struct Runtime {
               p_h = hp > 0 || fold_scale ? pi : 1.0f;
         post_last = tf_mo4 ? "post_tf4_dl_f32_p12_mo" : hp > 0 ? "post_tf_p12_mo" : "post_tf_f32_p12_mo";
         if (native_direct_io) post_last += "_direct";  // typed colour input and output texture (dx12/kernels/post.hlsl)
+        else if (fold_pidiv) post_last += "_pf";
         filter_last = "fused";
 #ifdef WG_DEV_DIAGNOSTICS
         if (const char* bad = post_tf_misaligned(A, hist[cur]))
@@ -2971,7 +2989,7 @@ struct Runtime {
                       " pointer is not 8-byte aligned (the D3D12 port reads it with 8-byte loads, dx12/kernels/post.hlsl)");
 #endif
         if (!launch(("pmo/" + post_last).c_str(), cdiv(ow, 40) * nch, tf_mo4 ? 256 : 512,
-                    with_taps({&cnet, &A, &B, &C, &hist[cur], &mnear[nxt], &mhi, &w, &hist[nxt], &reduced, &outp, &p,
+                    with_taps({&cnet, &A, &post_b, &C, &hist[cur], &mnear[nxt], &mhi, &w, &hist[nxt], &reduced, &outp, &p,
                                &expo, &ow_i, &oh_i, &dec_scale, &p_h, &hpitch, &cp, &k1, &c2, &mop})))
           return false;
         // spec 10 draft 2: the filter's result times pi (folded in with the copy; direct shader stores include it)
@@ -2990,15 +3008,15 @@ struct Runtime {
         const int nch = tf_chunks(ow, oh, cp, &k1, &c2);
         float dec_scale = (float)(0.01 / (fr.exposure == 0.0f ? 1.0 : (double)fr.exposure)),
               p_h = hp > 0 || fold_scale ? pi : 1.0f;
-        post_last = tf_kernel;
+        post_last = fold_pidiv ? (std::string(tf_kernel) + "_pf") : std::string(tf_kernel);
         filter_last = "fused";
 #ifdef WG_DEV_DIAGNOSTICS
         if (const char* bad = post_tf_misaligned(A, hist[cur]))
           return fail(std::string("post_tf: the ") + bad +
                       " pointer is not 8-byte aligned (the D3D12 port reads it with 8-byte loads, dx12/kernels/post.hlsl)");
 #endif
-        if (!launch((post_pre + tf_kernel).c_str(), cdiv(ow, 40) * nch, tf_block,
-                    with_taps({&cnet, &A, &B, &C, &hist[cur], &mnear[nxt], &mcenter, &mfar, &w, &hist[nxt], &reduced,
+        if (!launch((post_pre + post_last).c_str(), cdiv(ow, 40) * nch, tf_block,
+                    with_taps({&cnet, &A, &post_b, &C, &hist[cur], &mnear[nxt], &mcenter, &mfar, &w, &hist[nxt], &reduced,
                                &outp, &p, &expo, &ow_i, &oh_i, &dec_scale, &p_h, &hpitch, &cp, &k1, &c2})))
           return false;
         if (!native_direct_io && hp <= 0 && pi != 1.0f && !fold_scale) {  // direct / folded stores already include this multiply

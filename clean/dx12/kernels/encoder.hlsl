@@ -16,6 +16,7 @@
 // projection into "tok < ntok" (its only effect is that store); here every lane runs it (the WMMA needs the whole wave)
 // and only the store is conditional: the same bytes.
 // @wg-kernel input_encoder co=encoder.co block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b116
+// @wg-kernel input_encoder_pf co=encoder.co entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b116 defines=WG_STAGED_PIDIV=1
 // @wg-kernel input_encoder_direct co=encoder.co entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b116 rs=direct defines=WG_DIRECT_TEXTURES=1
 //
 // Motion at output resolution (WG_ENC_MO; HIP: input_encoder_mo of kernels/encoder_mo.hip, code object encoder_mo.co
@@ -25,6 +26,7 @@
 // kernel without depth, then WgEncMoParams (mw, mh, pitch, wide, kmx, kmy) after WgEncParams. Buffer form: the raw
 // motion buffer (wg_motion_hi.hlsli); direct form: the game's motion texture (its `motion` pointer is not read).
 // @wg-kernel emo/input_encoder_mo co=encoder_mo.co entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,b116,b24 defines=WG_ENC_MO=1
+// @wg-kernel emo/input_encoder_mo_pf co=encoder_mo.co entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,b116,b24 defines=WG_ENC_MO=1,WG_STAGED_PIDIV=1
 // @wg-kernel emo/input_encoder_mo_direct co=encoder_mo.co entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,b116,b24 rs=direct defines=WG_DIRECT_TEXTURES=1,WG_ENC_MO=1
 //
 // Model L's value kernel (WG_ENC_VALUES_OUT; HIP: encoder.hip built with WG_ENC_VALUES_OUT=1 as l_enc_values.co, issue
@@ -64,6 +66,9 @@
 #endif
 #if defined(WG_ENC_MO)
 #include "wg_motion_hi.hlsli"
+#endif
+#if defined(WG_STAGED_PIDIV)
+#include "wg_pidiv.hlsli"
 #endif
 
 WG_ARGS_BEGIN
@@ -182,7 +187,10 @@ void pixel_values(int mode, Uni U, int x, int y, float4 c, float2 mn, float2 mf,
     [unroll] for (uint ch = 0; ch < 3; ++ch) {
         float ec = U.e * c[ch];
         float r = kG * wg_log2(wg_fmax(mad(100.0f, wg_fmin(ec, 32752.0f), 1.0f), k1em4));
-        float g = ec > 32752.0f ? kG * wg_log2(mad(100.0f, ec, 1.0f)) : r;
+        float g = r;
+        [branch] if (WaveActiveAnyTrue(ec > 32752.0f)) {
+            g = ec > 32752.0f ? kG * wg_log2(mad(100.0f, ec, 1.0f)) : r;
+        }
         bool nan = ec != ec;
         v[ch] = nan ? 0.0f : r;
         gc[ch] = nan ? 0.0f : g;
@@ -316,6 +324,12 @@ float2 enc_mo_raw(int x, uint ty)
     return wg_mo_value(wg_mo_load(motion, ty * (uint)mo_pitch + (mo_wide != 0 ? tx * 8u : tx * 4u)), mo_wide);
 #endif
 }
+#endif
+
+#if !WG_ENC_VALUES_OUT
+// Per-lane private scratch in LDS (10 KB for 256 lanes, bank-conflict-free) so slot 1 inputs and slot 0 outputs
+// do not stay live in VGPRs across pixel_values, keeping input_encoder <= 96 VGPRs (4 WGs/CU on gfx1201, 0 scratch).
+groupshared uint enc_lds[10 * WG_BLOCK];
 #endif
 
 void encoder_main()
@@ -516,24 +530,67 @@ void encoder_main()
     }
 
     // Slot 0, then slot 1: the 20 values -> 5 words of FP8, values 8..15 swapped with the partner lane (lane ^ 16)
+#if defined(WG_STAGED_PIDIV)
+    const PiDiv pd = pidiv_make((uint)P_pad0);
+#endif
     uint q[2][5], x8[2][2];
+#if !WG_ENC_VALUES_OUT
+    // Park slot 1's inputs in per-lane LDS during slot 0's pixel_values (no barrier needed: lane-private)
+    enc_lds[0u * WG_BLOCK + tid] = asuint(cs[1].x);
+    enc_lds[1u * WG_BLOCK + tid] = asuint(cs[1].y);
+    enc_lds[2u * WG_BLOCK + tid] = asuint(cs[1].z);
+    enc_lds[3u * WG_BLOCK + tid] = asuint(mn[1].x);
+    enc_lds[4u * WG_BLOCK + tid] = asuint(mn[1].y);
+    enc_lds[5u * WG_BLOCK + tid] = asuint(mf[1].x);
+    enc_lds[6u * WG_BLOCK + tid] = asuint(mf[1].y);
+    enc_lds[7u * WG_BLOCK + tid] = asuint(mc[1].x);
+    enc_lds[8u * WG_BLOCK + tid] = asuint(mc[1].y);
+    enc_lds[9u * WG_BLOCK + tid] = xs[1];
+#endif
     [unroll] for (uint dx2 = 0; dx2 < 2; ++dx2) {
+#if !WG_ENC_VALUES_OUT
+        float4 c;
+        float2 mn_c, mf_c, mc_c;
+        uint x_c;
+        if (dx2 == 0u) {
+            c = cs[0]; mn_c = mn[0]; mf_c = mf[0]; mc_c = mc[0]; x_c = xs[0];
+        } else {
+            c = float4(asfloat(enc_lds[0u * WG_BLOCK + tid]), asfloat(enc_lds[1u * WG_BLOCK + tid]),
+                       asfloat(enc_lds[2u * WG_BLOCK + tid]), 0.0f);
+            mn_c = float2(asfloat(enc_lds[3u * WG_BLOCK + tid]), asfloat(enc_lds[4u * WG_BLOCK + tid]));
+            mf_c = float2(asfloat(enc_lds[5u * WG_BLOCK + tid]), asfloat(enc_lds[6u * WG_BLOCK + tid]));
+            mc_c = float2(asfloat(enc_lds[7u * WG_BLOCK + tid]), asfloat(enc_lds[8u * WG_BLOCK + tid]));
+            x_c = enc_lds[9u * WG_BLOCK + tid];
+            // Park slot 0's quantized outputs in LDS while slot 1 runs pixel_values
+            enc_lds[0u * WG_BLOCK + tid] = q[0][0];
+            enc_lds[1u * WG_BLOCK + tid] = q[0][1];
+            enc_lds[2u * WG_BLOCK + tid] = q[0][4];
+            enc_lds[3u * WG_BLOCK + tid] = x8[0][0];
+            enc_lds[4u * WG_BLOCK + tid] = x8[0][1];
+        }
+#else
         float4 c = cs[dx2];
+        float2 mn_c = mn[dx2], mf_c = mf[dx2], mc_c = mc[dx2];
+        uint x_c = xs[dx2];
+#endif
+#if defined(WG_STAGED_PIDIV)
+        c = float4(asfloat(asuint(pidiv3(c.xyz, pd, (uint)P_rw >> 31u)) ^ ((uint)P_rw >> 31u)), c.w);
+#endif
         float v[20];
         if (U.mode == kHistGeneral)   // uniform
-            pixel_values(kHistGeneral, U, (int)xs[dx2], y, c, mn[dx2], mf[dx2], mc[dx2], v
+            pixel_values(kHistGeneral, U, (int)x_c, y, c, mn_c, mf_c, mc_c, v
 #if defined(WG_DIRECT_TEXTURES)
                          , lut, lt[dx2]
 #endif
                          );
         else if (U.mode == kHistSame)
-            pixel_values(kHistSame, U, (int)xs[dx2], y, c, mn[dx2], mf[dx2], mc[dx2], v
+            pixel_values(kHistSame, U, (int)x_c, y, c, mn_c, mf_c, mc_c, v
 #if defined(WG_DIRECT_TEXTURES)
                          , lut, lt[dx2]
 #endif
                          );
         else
-            pixel_values(kHistRaw, U, (int)xs[dx2], y, c, mn[dx2], mf[dx2], mc[dx2], v
+            pixel_values(kHistRaw, U, (int)x_c, y, c, mn_c, mf_c, mc_c, v
 #if defined(WG_DIRECT_TEXTURES)
                          , lut, lt[dx2]
 #endif
@@ -546,6 +603,13 @@ void encoder_main()
         x8[dx2][1] = wg_xor16_u(qq[3]);
 #endif
     }
+#if !WG_ENC_VALUES_OUT
+    q[0][0] = enc_lds[0u * WG_BLOCK + tid];
+    q[0][1] = enc_lds[1u * WG_BLOCK + tid];
+    q[0][4] = enc_lds[2u * WG_BLOCK + tid];
+    x8[0][0] = enc_lds[3u * WG_BLOCK + tid];
+    x8[0][1] = enc_lds[4u * WG_BLOCK + tid];
+#endif
 
 #if WG_ENC_VALUES_OUT
     // pixel (X0 + dx, Y) of the halo map: 20 value bytes and 12 zero bytes
@@ -574,34 +638,46 @@ void encoder_main()
         bf[2 * p + 1] = uint2(own ? q[d][4] : 0u, 0u);
     }
 
-    // Two output tiles at a time; every A fragment and bias of a pair is loaded before its first WMMA
-    uint o[8];
+    // Two output tiles at a time; stream A fragments per p2 step to keep VGPRs <= 96 (4 WGs/CU, 0 spills)
     [unroll] for (uint pr = 0; pr < 2; ++pr) {
         v8f acc[2];
-        uint2 A[2][8];
+        uint2 A[2][2];
         [unroll] for (uint j = 0; j < 2; ++j) {
             acc[j] = wg_load8f(w, kOffBias + hh * 32u + (2u * pr + j) * 64u);
-            [unroll] for (uint kb = 0; kb < 8; ++kb)
-                A[j][kb] = wg_ld64(w, kOffFrags + ((2u * pr + j) * 8u + kb) * 256u + lane * 8u);
+            A[j][0] = wg_ld64(w, kOffFrags + ((2u * pr + j) * 8u + 0u) * 256u + lane * 8u);
+            A[j][1] = wg_ld64(w, kOffFrags + ((2u * pr + j) * 8u + 1u) * 256u + lane * 8u);
         }
         [unroll] for (uint p2 = 0; p2 < 4; ++p2) {
+            uint2 An[2][2];
+            if (p2 < 3u) {
+                [unroll] for (uint jn = 0; jn < 2; ++jn) {
+                    An[jn][0] = wg_ld64(w, kOffFrags + ((2u * pr + jn) * 8u + 2u * p2 + 2u) * 256u + lane * 8u);
+                    An[jn][1] = wg_ld64(w, kOffFrags + ((2u * pr + jn) * 8u + 2u * p2 + 3u) * 256u + lane * 8u);
+                }
+            }
             [unroll] for (uint j2 = 0; j2 < 2; ++j2) {
-                acc[j2] = wg_wmma_fp8(A[j2][2 * p2], bf[2 * p2], acc[j2]);
-                acc[j2] = wg_wmma_fp8(A[j2][2 * p2 + 1], bf[2 * p2 + 1], acc[j2]);
+                acc[j2] = wg_wmma_fp8(A[j2][0], bf[2 * p2], acc[j2]);
+                acc[j2] = wg_wmma_fp8(A[j2][1], bf[2 * p2 + 1], acc[j2]);
                 acc[j2] = round_f16(acc[j2]);
             }
+            if (p2 < 3u) {
+                [unroll] for (uint jc = 0; jc < 2; ++jc) {
+                    A[jc][0] = An[jc][0];
+                    A[jc][1] = An[jc][1];
+                }
+            }
         }
+        uint o4[4];
         [unroll] for (uint j3 = 0; j3 < 2; ++j3) {
             [unroll] for (uint i = 0; i < 8; ++i) acc[j3].v[i] = wg_fmin(wg_fmax(acc[j3].v[i], -6.28125f), 6.28125f);
             uint2 qo = wg_pack_q8_nc_ags(acc[j3]);   // within +-6.28125: the bytes of wg_pack_q8
-            o[4 * pr + 2 * j3] = qo.x;
-            o[4 * pr + 2 * j3 + 1] = qo.y;
+            o4[2 * j3] = qo.x;
+            o4[2 * j3 + 1] = qo.y;
         }
-    }
-    if (tok < ntok) {
-        uint fo = (uint)tok * 64u + hh * 32u;
-        wg_st128(features, fo, uint4(o[0], o[1], o[2], o[3]));
-        wg_st128(features, fo + 16u, uint4(o[4], o[5], o[6], o[7]));
+        if (tok < ntok) {
+            uint fo = (uint)tok * 64u + hh * 32u + pr * 16u;
+            wg_st128(features, fo, uint4(o4[0], o4[1], o4[2], o4[3]));
+        }
     }
 #endif
 }

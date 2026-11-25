@@ -37,6 +37,10 @@
    "encoder_mo.co"
   ],
   [
+   "emo/input_encoder_mo_pf",
+   "encoder_mo.co"
+  ],
+  [
    "expand_c96",
    "swin.co"
   ],
@@ -57,6 +61,10 @@
    "exposure.co"
   ],
   [
+   "f16lut_build_dec",
+   "-"
+  ],
+  [
    "f16lut_build_direct",
    "-"
   ],
@@ -66,6 +74,10 @@
   ],
   [
    "input_encoder_direct",
+   "encoder.co"
+  ],
+  [
+   "input_encoder_pf",
    "encoder.co"
   ],
   [
@@ -93,11 +105,19 @@
    "post_mo_w64__orig.co"
   ],
   [
+   "pmo/post_tf4_dl_f32_p12_mo_pf",
+   "post_mo_w64__orig.co"
+  ],
+  [
    "pmo/post_tf_f32_p12_mo",
    "post_mo_w64__orig.co"
   ],
   [
    "pmo/post_tf_f32_p12_mo_direct",
+   "post_mo_w64__orig.co"
+  ],
+  [
+   "pmo/post_tf_f32_p12_mo_pf",
    "post_mo_w64__orig.co"
   ],
   [
@@ -165,6 +185,10 @@
    "post_w64__orig.co"
   ],
   [
+   "w64/post_tf4_dl_f32_p12_diet_vsit_pf",
+   "post_w64__orig.co"
+  ],
+  [
    "w64/post_tf_f32_p12_diet_vsit",
    "post_w64.co"
   ],
@@ -178,6 +202,10 @@
   ],
   [
    "w64/post_tf_f32_p12_diet_vsit_direct",
+   "post_w64__orig.co"
+  ],
+  [
+   "w64/post_tf_f32_p12_diet_vsit_pf",
    "post_w64__orig.co"
   ],
   [
@@ -191,12 +219,92 @@
  ],
  "model_l": [
   [
+   "bneck/swin_bneck6_mb_nc",
+   "swin__bmegahg.co"
+  ],
+  [
+   "bneck/swin_bneck6_mbo_nc",
+   "swin__bmegahg.co"
+  ],
+  [
+   "bneck/swin_bneck6_nc",
+   "swin__bmegahg.co"
+  ],
+  [
+   "color_divide",
+   "frame.co"
+  ],
+  [
+   "d1p12/dec0_q7",
+   "dec1_dec0__pack12.co"
+  ],
+  [
+   "d1p12/swin_block_c64_add_dec0_nc",
+   "dec1_dec0__pack12.co"
+  ],
+  [
+   "d1p12/swin_block_c64_add_dec0_xd_nc",
+   "dec1_dec0__pack12.co"
+  ],
+  [
+   "emo/input_encoder_mo",
+   "encoder_mo.co"
+  ],
+  [
+   "emo/input_encoder_mo_direct",
+   "encoder_mo.co"
+  ],
+  [
+   "emo/input_encoder_mo_pf",
+   "encoder_mo.co"
+  ],
+  [
    "expand_c128_hyb",
    "-"
   ],
   [
+   "expand_c96",
+   "swin.co"
+  ],
+  [
    "expand_c96_hyb",
    "-"
+  ],
+  [
+   "exposure_auto_diet",
+   "exposure.co"
+  ],
+  [
+   "exposure_auto_diet_direct",
+   "exposure.co"
+  ],
+  [
+   "exposure_pair_diet",
+   "exposure.co"
+  ],
+  [
+   "exposure_pair_diet_direct",
+   "exposure.co"
+  ],
+  [
+   "f16lut_build_dec",
+   "-"
+  ],
+  [
+   "f16lut_build_direct",
+   "-"
+  ],
+  [
+   "input_encoder",
+   "encoder.co"
+  ],
+  [
+   "input_encoder_direct",
+   "encoder.co"
+  ],
+  [
+   "input_encoder_pf",
+   "encoder.co"
   ],
   [
    "l_coef",
@@ -371,12 +479,56 @@
    "-"
   ],
   [
+   "native_driver_probe",
+   "-"
+  ],
+  [
+   "native_fill",
+   "-"
+  ],
+  [
+   "patch_merge_c64",
+   "swin.co"
+  ],
+  [
    "patch_merge_c64_hyb",
    "-"
   ],
   [
+   "patch_merge_c96",
+   "swin.co"
+  ],
+  [
    "patch_merge_c96_hyb",
    "-"
+  ],
+  [
+   "pmo/post_tf4_dl_f32_p12_mo",
+   "post_mo_w64__orig.co"
+  ],
+  [
+   "pmo/post_tf4_dl_f32_p12_mo_direct",
+   "post_mo_w64__orig.co"
+  ],
+  [
+   "pmo/post_tf4_dl_f32_p12_mo_pf",
+   "post_mo_w64__orig.co"
+  ],
+  [
+   "pmo/post_tf_f32_p12_mo",
+   "post_mo_w64__orig.co"
+  ],
+  [
+   "pmo/post_tf_f32_p12_mo_direct",
+   "post_mo_w64__orig.co"
+  ],
+  [
+   "pmo/post_tf_f32_p12_mo_pf",
+   "post_mo_w64__orig.co"
+  ],
+  [
+   "scale_rgb",
+   "frame.co"
   ],
   [
    "swin_block_c128_hyb",
@@ -395,19 +547,191 @@
    "-"
   ],
   [
+   "swin_block_c64_nc",
+   "swin.co"
+  ],
+  [
+   "swin_block_c96_add_ex_nc",
+   "swin.co"
+  ],
+  [
    "swin_block_c96_add_hyb",
    "-"
+  ],
+  [
+   "swin_block_c96_add_xe_nc",
+   "swin.co"
+  ],
+  [
+   "swin_block_c96_add_xe_rev_nc",
+   "swin.co"
+  ],
+  [
+   "swin_block_c96_add_xe_xd_nc",
+   "swin.co"
+  ],
+  [
+   "swin_block_c96_add_xe_xo_nc",
+   "swin.co"
   ],
   [
    "swin_block_c96_hyb",
    "-"
   ],
   [
+   "swin_block_c96_nc",
+   "swin.co"
+  ],
+  [
+   "swin_block_c96_pm_nc",
+   "swin.co"
+  ],
+  [
+   "swin_block_c96_pm_rev_nc",
+   "swin.co"
+  ],
+  [
    "swin_bneck6_hyb",
    "-"
+  ],
+  [
+   "timing_barrier",
+   "frame.co"
+  ],
+  [
+   "w64/post_filter_c1_s4",
+   "post_w64.co"
+  ],
+  [
+   "w64/post_tf4_dl_f32_p12_diet_vsit",
+   "post_w64.co"
+  ],
+  [
+   "w64/post_tf4_dl_f32_p12_diet_vsit",
+   "post_w64__orig.co"
+  ],
+  [
+   "w64/post_tf4_dl_f32_p12_diet_vsit_direct",
+   "post_w64.co"
+  ],
+  [
+   "w64/post_tf4_dl_f32_p12_diet_vsit_direct",
+   "post_w64__orig.co"
+  ],
+  [
+   "w64/post_tf4_dl_f32_p12_diet_vsit_pf",
+   "post_w64__orig.co"
+  ],
+  [
+   "w64/post_tf_f32_p12_diet_vsit",
+   "post_w64.co"
+  ],
+  [
+   "w64/post_tf_f32_p12_diet_vsit",
+   "post_w64__orig.co"
+  ],
+  [
+   "w64/post_tf_f32_p12_diet_vsit_direct",
+   "post_w64.co"
+  ],
+  [
+   "w64/post_tf_f32_p12_diet_vsit_direct",
+   "post_w64__orig.co"
+  ],
+  [
+   "w64/post_tf_f32_p12_diet_vsit_pf",
+   "post_w64__orig.co"
+  ],
+  [
+   "w64/post_tf_p12_diet_vsit",
+   "post_w64__orig.co"
+  ],
+  [
+   "w64/post_tf_p12_diet_vsit_tex",
+   "post_w64__orig.co"
   ]
  ],
  "model_k": [
+  [
+   "bneck/swin_bneck6_mb_nc",
+   "swin__bmegahg.co"
+  ],
+  [
+   "bneck/swin_bneck6_mbo_nc",
+   "swin__bmegahg.co"
+  ],
+  [
+   "bneck/swin_bneck6_nc",
+   "swin__bmegahg.co"
+  ],
+  [
+   "color_divide",
+   "frame.co"
+  ],
+  [
+   "d1p12/dec0_q7",
+   "dec1_dec0__pack12.co"
+  ],
+  [
+   "d1p12/swin_block_c64_add_dec0_nc",
+   "dec1_dec0__pack12.co"
+  ],
+  [
+   "d1p12/swin_block_c64_add_dec0_xd_nc",
+   "dec1_dec0__pack12.co"
+  ],
+  [
+   "emo/input_encoder_mo",
+   "encoder_mo.co"
+  ],
+  [
+   "emo/input_encoder_mo_direct",
+   "encoder_mo.co"
+  ],
+  [
+   "emo/input_encoder_mo_pf",
+   "encoder_mo.co"
+  ],
+  [
+   "expand_c96",
+   "swin.co"
+  ],
+  [
+   "exposure_auto_diet",
+   "exposure.co"
+  ],
+  [
+   "exposure_auto_diet_direct",
+   "exposure.co"
+  ],
+  [
+   "exposure_pair_diet",
+   "exposure.co"
+  ],
+  [
+   "exposure_pair_diet_direct",
+   "exposure.co"
+  ],
+  [
+   "f16lut_build_dec",
+   "-"
+  ],
+  [
+   "f16lut_build_direct",
+   "-"
+  ],
+  [
+   "input_encoder",
+   "encoder.co"
+  ],
+  [
+   "input_encoder_direct",
+   "encoder.co"
+  ],
+  [
+   "input_encoder_pf",
+   "encoder.co"
+  ],
   [
    "k_expo_scalars",
    "k_io.co"
@@ -651,6 +975,142 @@
   [
    "kxs/k_in_tiled_uniform",
    "k_io_exact.co"
+  ],
+  [
+   "native_driver_probe",
+   "-"
+  ],
+  [
+   "native_fill",
+   "-"
+  ],
+  [
+   "patch_merge_c64",
+   "swin.co"
+  ],
+  [
+   "patch_merge_c96",
+   "swin.co"
+  ],
+  [
+   "pmo/post_tf4_dl_f32_p12_mo",
+   "post_mo_w64__orig.co"
+  ],
+  [
+   "pmo/post_tf4_dl_f32_p12_mo_direct",
+   "post_mo_w64__orig.co"
+  ],
+  [
+   "pmo/post_tf4_dl_f32_p12_mo_pf",
+   "post_mo_w64__orig.co"
+  ],
+  [
+   "pmo/post_tf_f32_p12_mo",
+   "post_mo_w64__orig.co"
+  ],
+  [
+   "pmo/post_tf_f32_p12_mo_direct",
+   "post_mo_w64__orig.co"
+  ],
+  [
+   "pmo/post_tf_f32_p12_mo_pf",
+   "post_mo_w64__orig.co"
+  ],
+  [
+   "scale_rgb",
+   "frame.co"
+  ],
+  [
+   "swin_block_c64_nc",
+   "swin.co"
+  ],
+  [
+   "swin_block_c96_add_ex_nc",
+   "swin.co"
+  ],
+  [
+   "swin_block_c96_add_xe_nc",
+   "swin.co"
+  ],
+  [
+   "swin_block_c96_add_xe_rev_nc",
+   "swin.co"
+  ],
+  [
+   "swin_block_c96_add_xe_xd_nc",
+   "swin.co"
+  ],
+  [
+   "swin_block_c96_add_xe_xo_nc",
+   "swin.co"
+  ],
+  [
+   "swin_block_c96_nc",
+   "swin.co"
+  ],
+  [
+   "swin_block_c96_pm_nc",
+   "swin.co"
+  ],
+  [
+   "swin_block_c96_pm_rev_nc",
+   "swin.co"
+  ],
+  [
+   "timing_barrier",
+   "frame.co"
+  ],
+  [
+   "w64/post_filter_c1_s4",
+   "post_w64.co"
+  ],
+  [
+   "w64/post_tf4_dl_f32_p12_diet_vsit",
+   "post_w64.co"
+  ],
+  [
+   "w64/post_tf4_dl_f32_p12_diet_vsit",
+   "post_w64__orig.co"
+  ],
+  [
+   "w64/post_tf4_dl_f32_p12_diet_vsit_direct",
+   "post_w64.co"
+  ],
+  [
+   "w64/post_tf4_dl_f32_p12_diet_vsit_direct",
+   "post_w64__orig.co"
+  ],
+  [
+   "w64/post_tf4_dl_f32_p12_diet_vsit_pf",
+   "post_w64__orig.co"
+  ],
+  [
+   "w64/post_tf_f32_p12_diet_vsit",
+   "post_w64.co"
+  ],
+  [
+   "w64/post_tf_f32_p12_diet_vsit",
+   "post_w64__orig.co"
+  ],
+  [
+   "w64/post_tf_f32_p12_diet_vsit_direct",
+   "post_w64.co"
+  ],
+  [
+   "w64/post_tf_f32_p12_diet_vsit_direct",
+   "post_w64__orig.co"
+  ],
+  [
+   "w64/post_tf_f32_p12_diet_vsit_pf",
+   "post_w64__orig.co"
+  ],
+  [
+   "w64/post_tf_p12_diet_vsit",
+   "post_w64__orig.co"
+  ],
+  [
+   "w64/post_tf_p12_diet_vsit_tex",
+   "post_w64__orig.co"
   ]
  ]
 }
