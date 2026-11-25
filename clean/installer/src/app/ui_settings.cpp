@@ -54,7 +54,8 @@ float SettingRow(Gfx& gx, float x, float y, float w, bool border, wchar_t icon, 
     float actW = ownW, ctrlH = ownW > 0 ? 28.f : 0.f;  // ownW: room for a control the caller draws (the accent swatches)
     // a conversion running: an activity indicator beside its button (it has no amount to show), 22 DIPs of the row
     auto working = [](const Act& a) {  // the one "Converting..."
-        return (v.task == T_MODEL && (a.id == ID_S_RECONVERT || a.id == ID_S_MODELMORE)) || (v.task == T_RRDATA && (a.id == ID_S_RRCONVERT || a.id == ID_S_RRMORE));
+        return (v.task == T_MODEL && (a.id == ID_S_RECONVERT || a.id == ID_S_MODELMORE)) || (v.task == T_RRDATA && (a.id == ID_S_RRCONVERT || a.id == ID_S_RRMORE)) ||
+               (v.task == T_MODELK && (a.id == ID_S_KCONVERT || a.id == ID_S_KMORE)) || (v.task == T_MODELL && (a.id == ID_S_LCONVERT || a.id == ID_S_LMORE));
     };
     for (auto& a : acts) { actW += ButtonW(gx, a.text, 0, kBtnH, B_PLAIN) + 8 + (working(a) ? 22.f : 0.f); ctrlH = kBtnH; }
     if (actW > 0) actW -= 8;
@@ -323,6 +324,73 @@ wstring HipRuntimeWords(const wstring& dll) {
     return L"HIP " + ver;
 }
 
+// ---- the Model K and Model L data (0.7.0) ----------------------------------------------------------------------------------
+// A context of its own per read or conversion (the model's converter data, folder and file by preset, SelectPreset): the
+// window's context and the other workers' never change under them.
+namespace {
+struct PresetContext {
+    Context c;
+    bool ok = false;
+    wstring error;
+    explicit PresetContext(wchar_t preset) {
+        c.data = g.ctx.data;
+        c.logFile = g.ctx.logFile;
+        c.ownDataDir = g.ctx.ownDataDir;
+        c.ignoreListFiles = g.ctx.ignoreListFiles;
+        c.ignoreEntries = g.ctx.ignoreEntries;
+        c.ignoreListBytes = g.ctx.ignoreListBytes;
+        ok = SelectPreset(c, PresetName(preset), error);
+    }
+};
+}  // namespace
+
+bool PresetDataReady(wchar_t preset, wstring* why) {
+    PresetContext p(preset);
+    if (!p.ok) { if (why) *why = p.error; return false; }
+    return ExistingModelValid(p.c, why);
+}
+
+wstring PresetDataFile(wchar_t preset) {
+    PresetContext p(preset);
+    return p.ok ? ModelFile(p.c) : wstring();
+}
+
+void ConvertPresetData(wchar_t preset, const wstring& dll, bool noScan, wstring& msg, bool& ok, bool& again) {
+    const wstring name = wstring(L"Model ") + preset;
+    PresetContext p(preset);
+    if (!p.ok) { msg = name + L": " + p.error; return; }
+    const std::vector<StoreGame> libs = noScan ? std::vector<StoreGame>{} : ScanLibraries();
+    const wstring file = ModelFile(p.c), kept = file + L".keep";
+    if (IsFile(kept)) {  // left by a conversion that never ended: the data it set aside comes first, unless the file in its place is valid
+        wstring why;
+        if (!IsFile(file) || !ExistingModelValid(p.c, &why)) {
+            if (MoveFileExW(kept.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) LogLine(p.c, name + L": put back from " + kept + L" (an earlier conversion did not finish)");
+        } else DeleteFileW(kept.c_str());
+    }
+    const bool had = IsFile(file);
+    if (had && !MoveFileExW(file.c_str(), kept.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        msg = name + L": the current model data could not be moved (" + ErrText(GetLastError()) + L"). Nothing changed.";
+        return;
+    }
+    auto putBack = [&] { if (had) MoveFileExW(kept.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH); };
+    try {
+        const ModelState ms = FindModel(p.c, nullptr, dll, libs);
+        if (!ms.ok()) { putBack(); msg = name + L": " + ms.error + (had ? L" The model data in use stays." : L""); return; }
+        Ui ui;  // quiet: its steps go nowhere, its lines to the log
+        ui.step = [](int, int, const wstring&) {};
+        ui.log = [&p](const wstring& line) { LogLine(p.c, line); };
+        LogLine(p.c, name + L": " + WriteModel(p.c, ms, ui).outcome);
+        ok = true; again = had;
+        if (had) DeleteFileW(kept.c_str());
+    } catch (const SetupError& x) {
+        putBack();
+        msg = x.msg + (had ? L" The model data in use stays." : L"");
+    } catch (...) {
+        putBack();
+        throw;
+    }
+}
+
 wstring ModelConvertedWords(bool again, bool chose) {
     const wstring game = v.modelSource.empty() ? wstring() : ModelSourceGame(v.modelSource);
     const wstring from = !game.empty() ? game + L"'s DLSS file" : chose ? wstring(L"the file you chose") : wstring(L"a DLSS file on this PC");
@@ -472,6 +540,42 @@ void PaintSettings(Gfx& gx, const Rc& area) {
             waits(modelActs, modelWait, v.task == T_MODEL);
             return h;
         }};
+    // 0.7.0: Model K data and Model L data (builds with those models), in Model M data's pattern and words: Ready with its path
+    // in the tooltip and Options... (Choose a DLSS file..., Convert again); not converted yet: the two ways side by side. Only
+    // the games set to that model need it: optional (a grey dot) until one is.
+    auto presetRow = [&](wchar_t preset, bool ready, const wstring& whyIn, int idMore, int idFile, int idConvert, int idText, int task) {
+        return [&, preset, ready, whyIn, idMore, idFile, idConvert, idText, task](float ry, bool b) {
+            const wstring name = wstring(L"Model ") + preset;
+            wstring pwhy = v.fixture ? wstring() : whyIn;
+            const bool pAbsent = pwhy.empty() || pwhy.find(L"no converted") != wstring::npos;
+            if (!pwhy.empty()) pwhy[0] = towupper(pwhy[0]);
+            const string letter(1, static_cast<char>(towlower(preset)));
+            bool wanted = false;
+            for (auto& g0 : v.games) wanted = wanted || (g0.hasRecord && g0.srModel == letter);
+            std::vector<Act> acts = ready ? std::vector<Act>{{idMore, L"Options\u2026", false, modelCan, name + L" data options"}}
+                                          : std::vector<Act>{{idFile, L"Choose a DLSS file\u2026", false, modelCan, L"Choose a DLSS file for the " + name + L" data"},
+                                                             {idConvert, pAbsent ? L"Convert" : L"Convert again", false, modelCan,
+                                                              pAbsent ? L"Convert the " + name + L" data" : L"Convert the " + name + L" data again", wanted}};
+            if (v.task == task) acts = {{ready ? idMore : v.focus == idFile ? idFile : idConvert, L"Converting\u2026", false, false, L"", !ready && wanted}};
+            const wstring path = v.fixture ? L"C:\\Users\\Player\\AppData\\Local\\WrongGPU\\model\\" + wstring(1, preset) + L"\\model.wgcm" : PresetDataFile(preset);
+            const wstring tip = (ready || pAbsent ? L"" : L"Why: " + pwhy + L". ") + name + L" data file: " + path;
+            const wchar_t* need = preset == L'L' ? L"Choose a DLSS file that has Model L (version 310.5\u00a0or\u00a0newer), or Convert finds one in your games."
+                                                 : L"Choose a DLSS file from one of your games, or Convert finds one.";
+            const float h = SettingRow(gx, lx, ry, lw, b, ic::cube, name + L" data",
+                                       ready      ? Status{0, L"Ready", L"Games set to " + name + L" use it."}
+                                       : pAbsent ? Status{wanted ? 1 : 2, L"Not converted yet", wstring(wanted ? L"" : L"Only games set to " + name + L" need it. ") + need}
+                                                 : Status{1, L"Not ready", L"The " + name + L" data on this PC can't be used. Convert it again."},
+                                       L"", acts, 0, -1, {}, 0, ready || !pAbsent ? idText : 0, ready || !pAbsent ? tip : L"");
+            waits(acts, modelWait, v.task == task);
+            return h;
+        };
+    };
+#if WRONGGPU_MODEL_K
+    modelRows.push_back(presetRow(L'K', v.modelKReady, v.modelKWhy, ID_S_KMORE, ID_S_KFILE, ID_S_KCONVERT, ID_S_KTEXT, T_MODELK));
+#endif
+#if WRONGGPU_MODEL_L
+    modelRows.push_back(presetRow(L'L', v.modelLReady, v.modelLWhy, ID_S_LMORE, ID_S_LFILE, ID_S_LCONVERT, ID_S_LTEXT, T_MODELL));
+#endif
     if (rrRows) {
         modelRows.push_back([&](float ry, bool b) {
             // not converted while no game waits for it: optional (a grey dot, as the HIP runtime's "Not found"), the sentence
@@ -497,8 +601,8 @@ void PaintSettings(Gfx& gx, const Rc& area) {
         [&](float ry, bool b) {
             return SettingRow(gx, lx, ry, lw, b, ic::processor, L"HIP runtime",
                               hip.empty() ? Status{2, L"Not found", L""} : Status{0, L"Found", hipWords.empty() ? L"" : hipWords + L"."},
-                              hip.empty() ? L"Optional. Model M runs on Direct3D\u00a012 without it, and no game setting uses it."
-                                          : L"Not used in games: Model M runs on Direct3D\u00a012.",
+                              hip.empty() ? L"Optional. WrongGPU runs on Direct3D\u00a012 without it, and no game setting uses it."
+                                          : L"Not used in games: WrongGPU runs on Direct3D\u00a012.",
                               {}, 0, -1, {}, 0, hipPath ? ID_S_HIPTEXT : 0, hipPath ? L"HIP runtime file: " + hip : L"");
         });
     section(modelRows);

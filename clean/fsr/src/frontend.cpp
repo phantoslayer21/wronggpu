@@ -13,6 +13,7 @@
 #include "ffx_describe.h"
 #include "diagnostics.h"
 #include "wg_settings_io.h"  // pure part: describe() (the registry's log words)
+#include "wg_sr_modes.h"     // the SR models' modes (fast / exact) and their runtime options
 
 namespace wgfsr {
 
@@ -69,8 +70,18 @@ struct FrontEnd::UpscaleContext {
     struct Replaced {
         const WgUpscalerBackend* backend;
         WgUpscaler* upscaler;
+        std::string options;  // a mode switch's replaced upscaler: its options and output size (switching back takes it again)
+        uint32_t width = 0, height = 0;
     };
     std::vector<Replaced> replaced;
+    // The SR mode (wg_sr_modes.h): the model letter the upscaler runs and its mode (0 fast, 1 exact); srMode -1: not the
+    // front end's (runtime_options / WG_RUNTIME_OPTIONS name the mode, or no WrongGPU upscaler), never switched live.
+    char srModel = 0;
+    int32_t srMode = -1;
+    uint32_t modeSwitches = 0;     // upscalers created again for a mode switch (FrontEnd::kMaxModeSwitches)
+    bool modeSwitchFailed = false; // such a create failed: no more attempts for this context
+    // The options of upscalers a mode switch replaced (they stay alive with their upscalers in `replaced`).
+    std::vector<std::string> retiredOptions;
     void DestroyReplaced() {
         for (const Replaced& r : replaced) r.backend->destroy(r.upscaler);
         replaced.clear();
@@ -89,6 +100,8 @@ struct FrontEnd::UpscaleContext {
         modelProviderId = fresh.modelProviderId;
         selectedModel = fresh.selectedModel;
         modelOption = fresh.modelOption;
+        srModel = fresh.srModel;
+        srMode = fresh.srMode;
         fpMessage = fresh.fpMessage;
         amd = nullptr;
         amdApi = nullptr;
@@ -724,6 +737,7 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
                 return FFX_API_RETURN_ERROR_RUNTIME_ERROR;
             }
         }
+        ApplySrMode(*u, tag);
         const std::string refusal = ApplyModelDir(*u, tag);
         info.options = u->options.c_str();
         info.log = &UpscalerLog;
@@ -1125,6 +1139,142 @@ void FrontEnd::ResizeForFrame(UpscaleContext& u, WgFrame& frame, const std::stri
         "): the upscaler is created again for it; the context stays; " +
         (lost ? old + " destroyed now (the device is lost)"
               : old + " kept until the context is destroyed (the game's command lists may still use them)"));
+}
+
+namespace {
+// Whether `options` (or WG_RUNTIME_OPTIONS) name a mode key of model `m`: K also counts k_approx (its fast forms).
+bool NamesModeKey(const std::string& options, const WgSrModeKey& m) {
+    const char* env = std::getenv("WG_RUNTIME_OPTIONS");
+    for (const char* key : {m.state_key, m.model == 'K' ? "k_approx" : nullptr}) {
+        if (!key) continue;
+        bool found = false;
+        OptionValue(options, key, &found);
+        if (!found && env) OptionValue(env, key, &found);
+        if (found) return true;
+    }
+    return false;
+}
+// `options` without its items of key m.state_key, with the mode's own item placed before the last model item (the model
+// item stays the last of the front end's own items; the runtime reads options by key, so the place changes nothing else),
+// or at the end when there is none.
+std::string WithModeItem(const std::string& options, const WgSrModeKey& m, int32_t mode) {
+    std::vector<std::string> items;
+    size_t lastModel = std::string::npos;
+    size_t start = 0;
+    while (start <= options.size()) {
+        size_t end = options.find(';', start);
+        if (end == std::string::npos) end = options.size();
+        const std::string item = options.substr(start, end - start);
+        start = end + 1;
+        std::string key = item.substr(0, item.find('='));
+        key.erase(0, std::min(key.size(), key.find_first_not_of(" \t")));
+        while (!key.empty() && (key.back() == ' ' || key.back() == '\t')) key.pop_back();
+        for (char& c : key) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (item.empty() || key == m.state_key) continue;
+        if (key == "model") lastModel = items.size();
+        items.push_back(item);
+    }
+    const std::string own = mode == WG_SR_MODE_EXACT ? m.exact_option : m.fast_option;
+    items.insert(lastModel == std::string::npos ? items.end() : items.begin() + static_cast<std::ptrdiff_t>(lastModel), own);
+    std::string out;
+    for (const std::string& i : items) out += (out.empty() ? "" : ";") + i;
+    return out;
+}
+}  // namespace
+
+void FrontEnd::ApplySrMode(UpscaleContext& u, const std::string& tag) {
+    const char model = OwnModelK(u.options) ? 'K' : OwnModel(u.options, "L") ? 'L' : 'M';
+    const WgSrModeKey* m = wg_sr_mode_of(model);
+    u.srModel = model;
+    u.srMode = -1;
+    if (!m) return;
+    if (NamesModeKey(u.options, *m)) {
+        LogOnce(tag, std::string("mode: Model ") + model + ": runtime_options / WG_RUNTIME_OPTIONS name its mode (" + m->state_key +
+                         (model == 'K' ? " / k_approx" : "") + "); the menu's Fast / Exact choice is not applied");
+        return;
+    }
+    std::string described;
+    int32_t mode = platform_.menu.srMode ? platform_.menu.srMode(m->slot, false, &described) : -1;
+    if (mode != WG_SR_MODE_FAST && mode != WG_SR_MODE_EXACT) {
+        mode = kWgOptions[m->slot].default_value;
+        described = std::string(kWgOptions[m->slot].key) + "=" + wg_sr_mode_name(mode) + " (default)";
+    }
+    u.srMode = mode;
+    u.options = WithModeItem(u.options, *m, mode);
+    Log(tag + " mode: Model " + model + " " + wg_sr_mode_title(mode) + " (" + described + "; passed to the runtime as " +
+        (mode == WG_SR_MODE_EXACT ? m->exact_option : m->fast_option) + ")");
+}
+
+void FrontEnd::SwitchModeForFrame(UpscaleContext& u, WgFrame& frame, const std::string& tag) {
+    if (u.srMode < 0 || !platform_.menu.srMode || !u.backend || !u.upscaler || u.pending || u.broken || u.modeSwitchFailed) return;
+    const WgSrModeKey* m = wg_sr_mode_of(u.srModel);
+    if (!m) return;
+    const int32_t want = platform_.menu.srMode(m->slot, /*liveOnly=*/true, nullptr);
+    if ((want != WG_SR_MODE_FAST && want != WG_SR_MODE_EXACT) || want == u.srMode) return;
+    const std::string what = std::string("Model ") + u.srModel + " " + wg_sr_mode_title(want);
+    // The options string with the other mode: the new upscaler is created with it; the old upscaler and its options stay
+    // alive (u.replaced / u.retiredOptions) until the context is destroyed. (Options always begin with the front end's own
+    // items, view=...;filter=..., so the strings are heap buffers: moving one keeps its characters where they are.)
+    std::string fresh = WithModeItem(u.options, *m, want);
+    WgCreateInfo info = u.createInfo;
+    info.options = fresh.c_str();
+    const bool lost = platform_.deviceLost && platform_.deviceLost(u.device);
+    // Back to a mode this context ran before at this size: its kept upscaler is taken again (no create, no more memory):
+    // a context holds at most one upscaler per mode from mode switches.
+    for (auto it = u.replaced.begin(); !lost && it != u.replaced.end(); ++it) {
+        if (it->backend != u.backend || it->options != fresh || it->width != info.output_width || it->height != info.output_height)
+            continue;
+        WgUpscaler* again = it->upscaler;
+        u.replaced.erase(it);
+        u.replaced.push_back({u.backend, u.upscaler, u.options, u.createInfo.output_width, u.createInfo.output_height});
+        u.retiredOptions.push_back(std::move(u.options));
+        u.options = std::move(fresh);
+        info.options = u.options.c_str();
+        u.upscaler = again;
+        u.createInfo = info;
+        const int32_t was = u.srMode;
+        u.srMode = want;
+        frame.reset = 2;  // its history is old
+        u.resetNext = u.restartNext = false;
+        Log(tag + " note U" + std::to_string(u.id) + ": " + what + " chosen in OptiScaler's menu (was " + wg_sr_mode_title(was) +
+            "): the upscaler this context kept for it runs again from this frame (without its old history); the context stays");
+        return;
+    }
+    if (u.modeSwitches >= kMaxModeSwitches) {
+        if (u.modeSwitches++ == kMaxModeSwitches)
+            Log(tag + " note U" + std::to_string(u.id) + ": " + what + " chosen in OptiScaler's menu after " + std::to_string(kMaxModeSwitches) +
+                " mode switches of this context; it applies from the game's next upscaler context (each switch keeps the old upscaler's "
+                "memory until the context is destroyed)");
+        return;
+    }
+    WgUpscaler* upscaler = nullptr;
+    u.creating = true;
+    const WgResult r = u.backend->create(&info, &upscaler);
+    u.creating = false;
+    if (r != WG_OK || !upscaler) {
+        if (upscaler) u.backend->destroy(upscaler);
+        u.modeSwitchFailed = true;
+        Log(tag + " note U" + std::to_string(u.id) + ": " + what + " chosen in OptiScaler's menu: creating the upscaler with it failed: " +
+            WgResultText(r) + "; the upscaler keeps Model " + u.srModel + " " + wg_sr_mode_title(u.srMode) + " for this context");
+        return;
+    }
+    // Issue #58 (as ResizeForFrame): command lists the game recorded before may still use the old upscaler.
+    if (lost) u.backend->destroy(u.upscaler);
+    else u.replaced.push_back({u.backend, u.upscaler, u.options, u.createInfo.output_width, u.createInfo.output_height});
+    u.retiredOptions.push_back(std::move(u.options));
+    u.options = std::move(fresh);
+    info.options = u.options.c_str();
+    u.upscaler = upscaler;
+    u.createInfo = info;
+    const int32_t was = u.srMode;
+    u.srMode = want;
+    ++u.modeSwitches;
+    frame.reset = 2;  // a new upscaler: no history
+    u.resetNext = u.restartNext = false;
+    Log(tag + " note U" + std::to_string(u.id) + ": " + what + " chosen in OptiScaler's menu (was " + wg_sr_mode_title(was) +
+        "): the upscaler is created again with it from this frame; the context stays; " +
+        (lost ? std::string("the old upscaler is destroyed now (the device is lost)")
+              : std::string("the old upscaler is kept until the context is destroyed (the game's command lists may still use it)")));
 }
 
 std::string FrontEnd::FailureKey(const WgUpscalerBackend* backend, const UpscaleContext& u) const {
@@ -1833,6 +1983,7 @@ ffxReturnCode_t FrontEnd::DispatchUpscale(UpscaleContext& u, const ffxDispatchDe
             }
         }
         if (u.broken) return BrokenFrame(u, frame, tag, frameIndex);  // bug hunt F1: the failed upscaler is not called again
+        SwitchModeForFrame(u, frame, tag);
         ResizeForFrame(u, frame, tag);
         if (platform_.diagnosticFrame) platform_.diagnosticFrame(u.id, frame);
         if (!u.fallbackBackend && platform_.standIn) u.fallbackBackend = platform_.standIn(config_);

@@ -416,6 +416,8 @@ void ApplyStateSettings(Config& c, const std::vector<std::pair<std::string, std:
             note("settings.ini: upscaler = " + lv + " (over wronggpu.ini)");
         } else if (key.rfind("rr_", 0) == 0 || key == "model") {
             continue;  // the RR plugin's keys and the model choice record's: not the front end's
+        } else if (key == "m_mode" || key == "l_mode" || key == "k_mode") {
+            continue;  // the SR modes: read at each create by the settings bridge (MenuSettings::srMode), so the menu can switch them
         } else if (IsRuntimeOptionKey(key)) {
             items += (items.empty() ? "" : ";") + key + "=" + p.second;
             note("settings.ini: " + key + " = " + p.second + " (over wronggpu.ini)");

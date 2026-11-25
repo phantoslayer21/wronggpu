@@ -24,7 +24,9 @@ inline bool IsRuntimeOptionKey(const std::string& key) {
         "dec_rdiv", "dec_bdiv", "swin_resident", "post_tf_cpairs", "post_diet", "tf_vdiet", "post_idx", "post_trim",
         "post_sel",
         // model K
-        "model_k_dir", "model_k_map", "network", "fp8_stages", "k_fast", "k_input", "k_diag", "k_head", "input_tiled"};
+        "model_k_dir", "model_k_map", "network", "fp8_stages", "k_fast", "k_input", "k_diag", "k_head", "input_tiled",
+        // the SR models' modes (clean/wgshared/include/wg_sr_modes.h; the front end appends them itself unless one is given)
+        "m_mode", "l_mode", "k_mode", "k_approx"};
     for (const char* k : kKeys)
         if (key == k) return true;
     return false;

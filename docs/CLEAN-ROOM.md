@@ -35,8 +35,9 @@ This document describes that process and who wrote what. The specification itsel
    machine-learning and numerical-methods literature;
 4. its own design, measurements and probes on its own hardware;
 5. for the Ray Reconstruction plugin's host interface: the plugin interface of the WrongGPU edition of OptiScaler (the
-   project owner's GPL-licensed fork). `clean/rr_f/proxy/include/wg_host_menu_abi.h` declares the binary interface the
-   plugin needs; no text was copied into it from any third-party file.
+   project owner's GPL-licensed fork). `clean/wgshared/include/wg_host_menu_abi.h` (since 0.7.0 one copy for the RR plugin
+   and WrongGPU.asi; `clean/rr_f/proxy/include/wg_host_menu_abi.h` includes it) declares the binary interface the
+   plugins need; no text was copied into it from any third-party file.
 
 ## Rules the clean team followed
 

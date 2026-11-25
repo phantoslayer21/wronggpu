@@ -28,7 +28,9 @@
 #include "../src/ffx_describe.h"
 #include "../src/frontend.h"
 #include "../src/param_map.h"
+#include "../src/runtime_keys.h"
 #include "wg_settings_io.h"  // pure part: describe()
+#include "wg_sr_modes.h"
 #include "../../runtime/interop/executor_select.h"  // the network runtime's refused-frame policy (header only)
 
 using namespace wgfsr;
@@ -268,6 +270,9 @@ static bool g_menuOn = false;
 static std::map<uint32_t, int32_t> g_menuValues;
 static std::vector<std::tuple<uint32_t, int32_t, std::string>> g_menuWrites;
 static bool g_menuWriter = true;
+// MenuSettings::srMode: the saved mode per slot (settings.ini / wronggpu.ini level) and the card's live write per slot
+static std::map<uint32_t, int32_t> g_srSaved, g_srLive;
+static int g_srLiveAsks = 0;
 static uint64_t g_folderEntry = 0;
 
 // Platform::activateServices (the D3D12 hooks after a successful create): on, its answer, its calls, and how many
@@ -299,6 +304,19 @@ static std::unique_ptr<FrontEnd> MakeFrontEnd(const Config& config) {
             return true;
         };
         p.menu.folderEntry = g_folderEntry;
+        p.menu.srMode = [](uint32_t slot, bool liveOnly, std::string* described) -> int32_t {
+            if (liveOnly) ++g_srLiveAsks;
+            auto live = g_srLive.find(slot);
+            if (live != g_srLive.end()) {
+                if (described) *described = std::string(kWgOptions[slot].key) + "=" + wg_sr_mode_name(live->second) + " (OptiScaler's menu)";
+                return live->second;
+            }
+            if (liveOnly) return -1;
+            auto saved = g_srSaved.find(slot);
+            if (saved == g_srSaved.end()) return -1;  // (the front end then takes the registry default)
+            if (described) *described = std::string(kWgOptions[slot].key) + "=" + wg_sr_mode_name(saved->second) + " (settings.ini)";
+            return saved->second;
+        };
     }
     p.original = []() -> const OriginalApi* { return g_originalAvailable ? g_originalApi : nullptr; };
     if (g_deviceHoldOn) {
@@ -418,6 +436,9 @@ static void Reset() {
     g_menuValues.clear();
     g_menuWrites.clear();
     g_menuWriter = true;
+    g_srSaved.clear();
+    g_srLive.clear();
+    g_srLiveAsks = 0;
     g_folderEntry = 0;
     g_createCalls = 0;
     g_activateOn = false;
@@ -3505,7 +3526,7 @@ static void TestRegistryEntries() {
     ParseConfig("[wronggpu]\nnot_a_key = 1\n", &warnings);
     CHECK(warnings.find("unknown key \"not_a_key\"") != std::string::npos);
     const std::string text = DefaultConfigText();
-    CHECK(text.find("[wronggpu]\r\n") != std::string::npos && text.find("rr_mode = accurate\r\n") != std::string::npos &&
+    CHECK(text.find("[wronggpu]\r\n") != std::string::npos && text.find("rr_mode = fast\r\n") != std::string::npos &&
           text.find("sr_model = M\r\n") != std::string::npos && text.find("[fsr]\r\n") != std::string::npos &&
           text.find("upscaler = network\r\n") != std::string::npos);
 }
@@ -4207,12 +4228,148 @@ static void TestStateSettings() {
     CHECK(e.upscaler == UpscalerChoice::Amd && e.runtimeOptions.empty());  // no state: wronggpu.ini as it is
 }
 
+// The SR modes (registry sr_m_mode / sr_l_mode / sr_k_mode, wg_sr_modes.h): the front end appends the model's mode to the
+// runtime options at create (fast by default; settings.ini's saved choice; never over the player's own runtime_options),
+// and a live change from WrongGPU.asi's card creates the upscaler again at the next frame, as an output resize does:
+// the context stays, the old upscaler is kept until the context is destroyed, and switching back takes it again.
+static void TestSrModes() {
+    auto modeItem = [](const char* key) {
+        bool found = false;
+        const std::string v = OptionValue(g_createOptions, key, &found);
+        return found ? v : std::string("<none>");
+    };
+    // no menu settings (tests, a build without the bridge): the registry default, fast
+    {
+        Reset();
+        auto fe = MakeFrontEnd(Config{});
+        UpscaleCreate c(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE);
+        ffxContext ctx = nullptr;
+        CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_OK && ctx);
+        CHECK(modeItem("m_mode") == "fast" && modeItem("l_mode") == "<none>" && modeItem("k_mode") == "<none>");
+        CHECK(CountLog("mode: Model M Fast (sr_m_mode=fast (default); passed to the runtime as m_mode=fast)") == 1);
+        CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+    }
+    // the saved choice (settings.ini m_mode=exact), then live switches from the card
+    {
+        Reset();
+        g_menuOn = true;
+        g_srSaved[WG_OPT_SR_M_MODE] = WG_SR_MODE_EXACT;
+        Config noPark;
+        noPark.contextParkMs = 0;
+        auto fe = MakeFrontEnd(noPark);
+        UpscaleCreate c(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE);
+        ffxContext ctx = nullptr;
+        CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_OK && ctx);
+        CHECK(g_createCalls == 1 && modeItem("m_mode") == "exact");
+        ffxDispatchDescUpscale d = MakeDispatch();
+        CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK && g_frames.size() == 1 && g_frames[0].reset == 0);
+        CHECK(g_srLiveAsks >= 1 && g_createCalls == 1);
+        // the card: Fast. The next frame runs a new upscaler with m_mode=fast; the old one is kept
+        g_srLive[WG_OPT_SR_M_MODE] = WG_SR_MODE_FAST;
+        CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);
+        CHECK(g_createCalls == 2 && modeItem("m_mode") == "fast" && g_destroyed == 0);
+        CHECK(g_frames.size() == 2 && g_frames[1].reset == 2);
+        CHECK(CountLog("Model M Fast chosen in OptiScaler's menu (was Exact): the upscaler is created again with it from this frame") == 1);
+        CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK && g_createCalls == 2 && g_frames[2].reset == 0);
+        // back to Exact: the kept upscaler runs again (no create), its history reset
+        g_srLive[WG_OPT_SR_M_MODE] = WG_SR_MODE_EXACT;
+        CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);
+        CHECK(g_createCalls == 2 && g_destroyed == 0 && g_frames.back().reset == 2);
+        CHECK(CountLog("the upscaler this context kept for it runs again from this frame") == 1);
+        g_srLive[WG_OPT_SR_M_MODE] = WG_SR_MODE_FAST;  // and Fast again: the other kept one
+        CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK && g_createCalls == 2);
+        CHECK(CountLog("the upscaler this context kept for it runs again from this frame") == 2);
+        // another model's mode does not touch this context
+        g_srLive[WG_OPT_SR_K_MODE] = WG_SR_MODE_EXACT;
+        CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK && g_createCalls == 2 && g_frames.back().reset == 0);
+        CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK && fe->OwnContextCount() == 0);
+        CHECK(g_destroyed == 2);  // the current upscaler and the kept one, both at the destroy
+    }
+    // a mode switch whose create fails: the upscaler keeps its mode, no more attempts for this context
+    {
+        Reset();
+        g_menuOn = true;
+        auto fe = MakeFrontEnd(Config{});
+        UpscaleCreate c(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE);
+        ffxContext ctx = nullptr;
+        CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_OK && ctx && modeItem("m_mode") == "fast");
+        ffxDispatchDescUpscale d = MakeDispatch();
+        CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);
+        g_failCreate = true;
+        g_srLive[WG_OPT_SR_M_MODE] = WG_SR_MODE_EXACT;
+        CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK && g_createCalls == 2 && g_frames.back().reset == 0);
+        CHECK(CountLog("creating the upscaler with it failed") == 1);
+        g_failCreate = false;
+        CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK && g_createCalls == 2);  // not tried again
+        CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+    }
+    // the player's own runtime_options name the mode: nothing appended, the card's live switch leaves the context alone
+    {
+        Reset();
+        g_menuOn = true;
+        g_srSaved[WG_OPT_SR_M_MODE] = WG_SR_MODE_FAST;
+        Config own;
+        own.runtimeOptions = "m_mode=exact";
+        auto fe = MakeFrontEnd(own);
+        UpscaleCreate c(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE);
+        ffxContext ctx = nullptr;
+        CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_OK && ctx);
+        CHECK(modeItem("m_mode") == "exact" && g_createOptions.find("m_mode=fast") == std::string::npos);
+        CHECK(CountLog("runtime_options / WG_RUNTIME_OPTIONS name its mode (m_mode)") == 1);
+        ffxDispatchDescUpscale d = MakeDispatch();
+        g_srLive[WG_OPT_SR_M_MODE] = WG_SR_MODE_FAST;
+        CHECK(fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK && fe->Dispatch(&ctx, &d.header) == FFX_API_RETURN_OK);
+        CHECK(g_createCalls == 1);
+        CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+    }
+#if WRONGGPU_MODEL_K
+    // Model K: k_mode (the K runtime maps fast to its k_approx forms); k_approx in runtime_options is the player's choice
+    {
+        Reset();
+        g_menuOn = true;
+        Config k;
+        k.runtimeOptions = "model=K";
+        auto fe = MakeFrontEnd(k);
+        UpscaleCreate c(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE);
+        ffxContext ctx = nullptr;
+        CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_OK && ctx);
+        CHECK(modeItem("k_mode") == "fast" && modeItem("m_mode") == "<none>");
+        CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+        Reset();
+        g_menuOn = true;
+        g_srSaved[WG_OPT_SR_K_MODE] = WG_SR_MODE_EXACT;
+        k.runtimeOptions = "model=K";
+        fe = MakeFrontEnd(k);
+        ctx = nullptr;
+        CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_OK && ctx && modeItem("k_mode") == "exact");
+        CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+        Reset();
+        g_menuOn = true;
+        k.runtimeOptions = "model=K;k_approx=a2";
+        fe = MakeFrontEnd(k);
+        ctx = nullptr;
+        CHECK(fe->CreateContext(&ctx, &c.upscale.header, kMemCb) == FFX_API_RETURN_OK && ctx);
+        CHECK(modeItem("k_mode") == "<none>" && modeItem("k_approx") == "a2");
+        CHECK(fe->DestroyContext(&ctx, kMemCb) == FFX_API_RETURN_OK);
+    }
+#endif
+    // settings.ini's m_mode / l_mode / k_mode are the settings bridge's, not runtime options of the state folder
+    {
+        Config e;
+        std::string notes;
+        ApplyStateSettings(e, {{"m_mode", "exact"}, {"k_mode", "fast"}, {"l_mode", "exact"}}, &notes);
+        CHECK(e.runtimeOptions.empty() && notes.empty());
+        CHECK(IsRuntimeOptionKey("m_mode") && IsRuntimeOptionKey("l_mode") && IsRuntimeOptionKey("k_mode") && IsRuntimeOptionKey("k_approx"));
+    }
+}
+
 int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // unbuffered: if a check aborts the process, the output so far is not lost
     TestCustomSlotFailedCreate();
     TestCustomSlotFailureKeyHasSize();
     TestCustomSlotInputRefused();
     TestOutputResize();
+    TestSrModes();
     TestResizeKeepsRetired();
     TestResizeCapDefault();
     TestBrokenNotCalledAgain();

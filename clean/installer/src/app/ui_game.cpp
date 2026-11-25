@@ -85,15 +85,18 @@ bool RepairUpdatesHere(const GameEntry& e) {
 // values changed outside the launcher.
 wstring SettingLabel(const string& key) {
     static const std::pair<const char*, const wchar_t*> k[] = {{"wronggpu", L"Use WrongGPU"}, {"executor", L"Runs on"}, {"output_filter", L"Output filter"},
-                                                              {"pre_exposure", L"Pre-exposure"}, {"sparkle_guard", L"Sparkle guard"}, {"fps_overlay", L"FPS overlay"}};
+                                                              {"pre_exposure", L"Pre-exposure"}, {"sparkle_guard", L"Sparkle guard"}, {"fps_overlay", L"FPS overlay"},
+                                                              {"model", L"Model"}, {"m_mode", L"Model M mode"}, {"k_mode", L"Model K mode"},
+                                                              {"l_mode", L"Model L mode"}};
     for (auto& x : k) if (key == x.first) return x.second;
     return FromUtf8(key);
 }
 wstring SettingWords(const string& key, const string& value) {
     static const std::pair<const char*, const wchar_t*> w[] = {{"on", L"On"}, {"off", L"Off"}, {"auto", L"Auto"}, {"dx12", L"Direct3D 12"}, {"hip", L"HIP"},
                                                               {"keep", L"Default"}, {"scale", L"Scale"}, {"original", L"Original"}, {"default", L"Default"},
-                                                              {"analytic", L"Classic"}, {"quality5", L"Even"}, {"quality9", L"Even (wide)"}};
-    (void)key;
+                                                              {"analytic", L"Classic"}, {"quality5", L"Even"}, {"quality9", L"Even (wide)"},
+                                                              {"fast", L"Fast"}, {"exact", L"Exact"}};
+    if (key == "model") return ModelWords(value);
     for (auto& x : w) if (value == x.first) return x.second;
     return FromUtf8(value);
 }
@@ -536,6 +539,16 @@ wstring FilesProblem(const GameEntry& e, size_t* count, wstring* tip) {
 }
 }  // namespace
 
+// 0.7.0: a model (and its mode) in the page's words (ui_shell.h)
+wstring ModelWords(const string& model) { return model == "k" ? L"Model K" : model == "l" ? L"Model L" : L"Model M"; }
+wstring ModelModeWords(const string& model, const string& mode) { return ModelWords(model) + (mode == "exact" ? L" (Exact)" : L" (Fast)"); }
+wstring ModelModeWords(const Profile& p) {
+    const string model = p.get("model").empty() ? string("m") : p.get("model");
+    const char* key = ModeKeyOf(model);
+    return ModelModeWords(model, key ? p.get(key) : string("fast"));
+}
+
+
 // What the running operation is waiting on, in words for "... once <this>" ("the update is done"; another game's:
 // "Quarry Nine's update is done"): the game page's caption, and leaving it with unsaved changes (SHIP-BAR 4: no
 // "operation").
@@ -548,6 +561,8 @@ wstring BusyDoneWords() {
         case T_COLLECT: return L"the logs are collected";
         case T_MODEL: return L"the Model M data is converted";
         case T_RRDATA: return L"the Ray Reconstruction data is converted";
+        case T_MODELK: return L"the Model K data is converted";
+        case T_MODELL: return L"the Model L data is converted";
         case T_SELFINSTALL: return L"WrongGPU is installed for this user";
         case T_FIRSTRUN: return v.first.installOffer && v.first.choice == 1 ? L"WrongGPU is installed for this user" : L"WrongGPU is set up";  // portable: no install
         case T_SELFUNINSTALL: return L"the launcher is uninstalled";
@@ -868,7 +883,7 @@ static HeadStatus Status() {
         // banner's words: its setup (the
         // line never says it ran where Last run says "Not used"), and as long as the plain line, so on the banner it stays
         // on the scrim's dark part, where white words read 4.5:1 (rr-notes.md)
-        s.sub = e.last.found && e.last.upscaler == L"amd" ? L"AMD FSR" : L"Model M";
+        s.sub = e.last.found && e.last.upscaler == L"amd" ? wstring(L"AMD FSR") : ModelModeWords(e.srModel, e.srMode);  // its setup: "Model M (Fast)"
         // where it runs: the player's choice in Runs on once they made one (Direct3D 12, HIP; "auto" leaves it to the card),
         // else where the last run ran
         const string runsOn = v.pageReading ? string() : v.saved.get("executor");
@@ -1336,12 +1351,40 @@ static float UpscalerSection(Gfx& gx, float x, float y, float w) {
         const bool on = Rec() && v.edit.get("wronggpu") != "off";  // not in the game yet: off (the accent would say it is on)
         // what off does on the game's route (r2b #3): OptiScaler hands the game's upscaler back to AMD FSR; on the direct route
         // WrongGPU is the game's FSR file itself and passes the frames to the game's own AMD FSR (wronggpu.ini upscaler = amd)
-        const wchar_t* offDoes = v.cur.hosted ? L"Model M upscales this game. Off: OptiScaler hands upscaling back to AMD FSR."
-                                              : L"Model M upscales this game. Off: WrongGPU passes upscaling to the game's own AMD FSR.";
+        const wstring chosen = ModelModeWords(v.edit);  // "Model M (Fast)": the model and its mode this page has chosen
+        const wstring offDoes = chosen + (v.cur.hosted ? L" upscales this game. Off: OptiScaler hands upscaling back to AMD FSR."
+                                                       : L" upscales this game. Off: WrongGPU passes upscaling to the game's own AMD FSR.");
+        const wstring modelName = ModelWords(v.edit.get("model").empty() ? string("m") : v.edit.get("model"));
         yy += SRow(gx, x, yy, w, true, L"Use WrongGPU", offDoes, kSwitchW, kSwitchH,
-                   [&](const Rc& r) { Switch(gx, ID_G_MASTER, r, on, en, L"Use WrongGPU (Model M)"); }, !en);
+                   [&](const Rc& r) { Switch(gx, ID_G_MASTER, r, on, en, L"Use WrongGPU (" + modelName + L")"); }, !en);
         // the rows under it apply only while it is on: dimmed and unavailable while it is off, as a dependent control is
         const bool sub = en && on;
+        // 0.7.0: the model the game starts with (builds with Model K or L) and its mode, Fast (the default) or Exact, under the
+        // switch: what most players set. A model whose data isn't converted yet says so and where to convert it.
+        if (const SettingDef* md = FindSetting("model")) {
+            std::vector<string> mvals;
+            for (const char* a = md->values; *a;) { const char* b = strchr(a, '|'); mvals.push_back(b ? string(a, b) : string(a)); if (!b) break; a = b + 1; }
+            std::vector<wstring> mlabels;
+            for (auto& m : mvals) mlabels.push_back(ModelWords(m));
+            const string cur = v.edit.get("model").empty() ? string("m") : v.edit.get("model");
+            int mi = 0;
+            for (size_t i = 0; i < mvals.size(); ++i) if (mvals[i] == cur) mi = int(i);
+            const bool ready = cur == "k" ? v.modelKReady : cur == "l" ? v.modelLReady : true;
+            const wstring mdesc = cur == "m" ? L"Model M works with every DLSS file. Model K and Model L need their own data, converted in Settings."
+                                  : ready ? ModelWords(cur) + L"'s data is ready on this PC."
+                                          : ModelWords(cur) + L"'s data isn't converted yet. Convert it in Settings > Model and runtime; until then the game starts on Model M.";
+            yy += SRow(gx, x, yy, w, false, L"Model", mdesc, SegmentedW(gx, mlabels, segW), 36,
+                       [&](const Rc& r) { Segmented(gx, ID_G_MODEL0, r.r(), r.y, mlabels, mi, sub, L"Model", 28, {}, true, segW); }, !sub);
+        }
+        if (const char* modeKey = ModeKeyOf(v.edit.get("model").empty() ? string("m") : v.edit.get("model"))) {
+            const std::vector<wstring> ml{L"Fast", L"Exact"};
+            const int modei = v.edit.get(modeKey) == "exact" ? 1 : 0;
+            yy += SRow(gx, x, yy, w, false, L"Mode",
+                       L"Fast (default) is the quickest, with a picture very close to Exact. Exact is the reference result and slower. "
+                       L"You can switch it in the game too, in OptiScaler's menu.",
+                       SegmentedW(gx, ml, segW), 36,
+                       [&](const Rc& r) { Segmented(gx, ID_G_SRMODE0, r.r(), r.y, ml, modei, sub, L"Mode", 28, {}, true, segW); }, !sub);
+        }
         // the expert rows behind "Advanced settings (4)" (UI review #5): most players need only the switch; a page opens with
         // them shown when one is off its default, changed outside the launcher or unsaved (AdvancedWanted)
         // one of them changed outside the launcher (read again while the page is open, too): shown, no toggle, as the callout

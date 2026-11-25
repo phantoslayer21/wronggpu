@@ -16,7 +16,10 @@ namespace wg {
 // model item and the OptiScaler entry OptiScaler starts with (UpscalerIndex); with M nothing is changed in either file
 // (except that Model K's or Model L's own item and entry go back to Model M's when the profile leaves them).
 // Fg: frame generation (fg.h; WRONGGPU_FG builds only): the game's state folder, settings.ini, once the player opts in.
-enum class Layer { Fe, Rt, Opti, Rr, Model, Fg };
+// Mode: each SR model's mode, Fast (the default) or Exact (m_mode, and k_mode / l_mode in builds with those models;
+// clean/wgshared/include/wg_sr_modes.h): the game's state folder, settings.ini, which the front end reads at each create and
+// WrongGPU.asi's card in OptiScaler's menu writes too (FoldSrFromGame brings that back into the profile); never wronggpu.ini.
+enum class Layer { Fe, Rt, Opti, Rr, Model, Fg, Mode };
 enum class Tier { Basic, Advanced, Diagnostics };
 
 // One setting of the profile. Values are the profile's own words ("on", "off", ...); Render maps them to the file.
@@ -112,6 +115,10 @@ Profile ImportProfile(const string& wronggpuIni, const string& optiIni, std::vec
 // installers never write.
 std::vector<string> IgnoredImportKeys(const string& wronggpuIni);
 inline const wchar_t* const kIgnoredPrefix = L"ignored: ";
+
+// The SR model modes of this build's profile (Layer::Mode): m_mode, then k_mode / l_mode where the build has those models.
+// `model`: 'm', 'k', 'l' (a profile's model value) -> its mode key; nullptr for a model this build has no mode for.
+const char* ModeKeyOf(const string& model);
 
 // A key whose value in the files differs from both its default and the profile: changed outside the launcher.
 struct OutsideEdit { string key, fileValue, profileValue; };

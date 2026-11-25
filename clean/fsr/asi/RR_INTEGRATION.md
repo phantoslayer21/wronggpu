@@ -15,7 +15,7 @@ What the ASI work of that time established:
   pinned before any host call site is published.
 - Publicly documented ASI loading does not define a resource interface for Ray Reconstruction, so F needed its own
   host interface (later provided by the plugin interface of the WrongGPU edition of OptiScaler; see
-  `clean/rr_f/proxy/include/wg_host_menu_abi.h`).
+  `clean/wgshared/include/wg_host_menu_abi.h`, shared since 0.7.0 by the RR plugin and WrongGPU.asi's upscaler card).
 
 Tests of that work were CPU-only (status / load checks, menu-thunk checks, synthetic transaction checks) and loaded only
 WrongGPU's own ASI. No game files were changed.

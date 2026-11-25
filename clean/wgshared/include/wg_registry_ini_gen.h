@@ -5,7 +5,7 @@
 #ifndef WG_REGISTRY_INI_GEN_H
 #define WG_REGISTRY_INI_GEN_H
 
-#define WG_REGISTRY_INI_HASH 0x9F5E68A9u
+#define WG_REGISTRY_INI_HASH 0xC20DFC10u
 static const char kWgDefaultIniText[] =
     "# WrongGPU settings: the one settings file of every WrongGPU DLL (<game exe folder>\\WrongGPU\\wronggpu.ini).\r\n"
     "# Delete this file to restore the defaults. The [wronggpu] section is generated from WrongGPU's registry\r\n"
@@ -16,9 +16,9 @@ static const char kWgDefaultIniText[] =
     "# sr_model: super-resolution model. Values: M | K | L. Default: M. Read by: sr-frontend, sr-runtime; applied at the\r\n"
     "# next SR create. Environment: WG_RUNTIME_MODEL.\r\n"
     "sr_model = M\r\n"
-    "# rr_mode: ray-reconstruction mode. Values: exact | accurate | fast. Default: accurate. Read by: rr-plugin,\r\n"
-    "# rr-runtime; applied at the next frame. Environment: WG_RR_MODE.\r\n"
-    "rr_mode = accurate\r\n"
+    "# rr_mode: ray-reconstruction mode. Values: exact | accurate | fast. Default: fast. Read by: rr-plugin, rr-runtime;\r\n"
+    "# applied at the next frame. Environment: WG_RR_MODE.\r\n"
+    "rr_mode = fast\r\n"
     "# rr_enabled: WrongGPU RR on/off (60.9 key 0). Values: 0 | 1. Default: 1. Read by: rr-plugin; applied when the game\r\n"
     "# creates RR.\r\n"
     "rr_enabled = 1\r\n"
@@ -50,6 +50,15 @@ static const char kWgDefaultIniText[] =
     "# (lone missed-ray outliers make reflection speckles in motion). Values: 0 | 1. Default: 0. Read by: rr-plugin;\r\n"
     "# applied at the next frame. Opt-in: changes the output.\r\n"
     "rr_hit_distance_filter = 0\r\n"
+    "# sr_m_mode: Model M mode. Values: fast | exact. Default: fast. Read by: sr-frontend, sr-runtime; applied at the\r\n"
+    "# next frame. Environment: WG_M_MODE.\r\n"
+    "sr_m_mode = fast\r\n"
+    "# sr_l_mode: Model L mode. Values: fast | exact. Default: fast. Read by: sr-frontend, sr-runtime; applied at the\r\n"
+    "# next frame. Environment: WG_L_MODE.\r\n"
+    "sr_l_mode = fast\r\n"
+    "# sr_k_mode: Model K mode. Values: fast | exact. Default: fast. Read by: sr-frontend, sr-runtime; applied at the\r\n"
+    "# next frame. Environment: WG_K_MODE.\r\n"
+    "sr_k_mode = fast\r\n"
     "# rr_model: path of the RR model file. Read by: rr-plugin, rr-runtime. Environment: WG_RR_MODEL.\r\n"
     "rr_model =\r\n"
     "# sr_runtime_dll: SR runtime library in the data folder. Read by: sr-frontend.\r\n"

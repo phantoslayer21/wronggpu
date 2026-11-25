@@ -56,7 +56,8 @@ static void TestPure() {
     CHECK(!wg::parse_value(WG_OPT_RR_ENABLED, "2", &v));
     CHECK(wg::slot_of_key("RR_MODE") == WG_OPT_RR_MODE && wg::slot_of_key("nope") == -1);
     CHECK(wg::is_registry_key("diag_env_3") && wg::is_registry_key("sr_model") && !wg::is_registry_key("upscaler"));
-    CHECK(wg::reader_mask(WG_READER_SR_FRONTEND) == ((1ull << WG_OPT_SR_MODEL) | (1ull << WG_OPT_SR_FALLBACK_TO_AMD) | (1ull << WG_OPT_ENTRY_SOURCE)));
+    CHECK(wg::reader_mask(WG_READER_SR_FRONTEND) == ((1ull << WG_OPT_SR_MODEL) | (1ull << WG_OPT_SR_FALLBACK_TO_AMD) | (1ull << WG_OPT_ENTRY_SOURCE) |
+                                                      (1ull << WG_OPT_SR_M_MODE) | (1ull << WG_OPT_SR_L_MODE) | (1ull << WG_OPT_SR_K_MODE)));
     CHECK(wg::entry_of_id(0x5747000000000002ull) && wg::entry_of_id(0x5747000000000002ull)->slot == WG_OPT_SR_MODEL);
     CHECK(!wg::entry_of_id(0x5747000000000103ull));  // i20: the RR modes are no version-list entries (RR plugin's box)
     CHECK(wg::entry_index_of_id(0x5747000000000001ull) == 0 && wg::entry_index_of_id(0x1234) == -1);
@@ -138,7 +139,18 @@ static void TestCreateOpenSeed() {
     // no ini: registry defaults, nothing set
     wg::SharedSettings c;
     CHECK(c.open(WG_SS_WRITER_RR_PLUGIN, Scratch(L"absent.ini"), nullptr, UniqueName("noini").c_str()) == wg::SharedSettings::Status::Created);
-    CHECK(c.view()->header.seed_source == 2 && c.view()->set_mask[0] == 0 && c.view()->values[WG_OPT_RR_MODE] == WG_RR_MODE_ACCURATE);
+    CHECK(c.view()->header.seed_source == 2 && c.view()->set_mask[0] == 0 && c.view()->values[WG_OPT_RR_MODE] == WG_RR_MODE_FAST);
+    CHECK(c.view()->values[WG_OPT_SR_M_MODE] == WG_SR_M_MODE_FAST && c.view()->values[WG_OPT_SR_K_MODE] == WG_SR_K_MODE_FAST);
+    // the SR mode slots are the in-game card's (owned slots: written without the writer election, never persisted)
+    CHECK(c.writer() == WG_SS_WRITER_NONE && c.write_owned_slot(WG_OPT_SR_M_MODE, WG_SR_M_MODE_EXACT));
+    CHECK(!c.write_owned_slot(WG_OPT_RR_MODE, WG_RR_MODE_EXACT) && !c.write_owned_slot(WG_OPT_SR_L_MODE, 2));
+    wg::Snapshot owned;
+    CHECK(c.snapshot(&owned) && owned.is_live(WG_OPT_SR_M_MODE) && owned.values[WG_OPT_SR_M_MODE] == WG_SR_M_MODE_EXACT &&
+          !owned.is_set(WG_OPT_RR_MODE));
+    // open only an existing block: a name nobody created is absent (nothing created), an existing one opens
+    wg::SharedSettings d;
+    CHECK(d.open(WG_SS_WRITER_SR_FRONTEND, std::wstring(), nullptr, UniqueName("never").c_str(), true) == wg::SharedSettings::Status::Absent);
+    CHECK(!d.present());
 }
 
 // The creator writes magic last: an opener on another thread sees either nothing published or a complete block.

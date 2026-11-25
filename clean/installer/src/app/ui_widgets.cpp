@@ -1154,6 +1154,8 @@ wstring BusyWhy(const GameEntry& e) {
     switch (v.task) {
         case T_MODEL: return L"Waits until the Model M data is converted.";
         case T_RRDATA: return L"Waits until the Ray Reconstruction data is converted.";
+        case T_MODELK: return L"Waits until the Model K data is converted.";
+        case T_MODELL: return L"Waits until the Model L data is converted.";
         case T_SELFINSTALL: return L"Waits until WrongGPU is installed for this user.";
         case T_FIRSTRUN: return v.first.installOffer && v.first.choice == 1 ? L"Waits until WrongGPU is installed for this user." : L"Waits until WrongGPU is set up.";
         case T_SELFUNINSTALL: return L"Waits until the launcher is uninstalled.";

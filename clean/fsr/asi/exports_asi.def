@@ -2,6 +2,7 @@
 LIBRARY WrongGPU
 EXPORTS
     InitializeASI
+    OptiPluginInit
     WrongGpuAsiQuery
     WrongGpuAsiQueryStatusV1
     WrongGpuAsiSetChoiceRecordV1

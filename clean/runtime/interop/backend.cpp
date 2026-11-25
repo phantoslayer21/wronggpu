@@ -799,9 +799,12 @@ class Context {
                                 : ""));
       const std::string net = option_value(n_rtopts_, "network"), fast = option_value(n_rtopts_, "k_fast");
       const std::string approx = option_value(n_rtopts_, "k_approx");   // the opt-in close approximations
-      const bool exact = (net.empty() || net == "fused") && fast != "1" && approx.empty();
+      const std::string kmode = option_value(n_rtopts_, "k_mode");      // the player's Fast / Exact (clean/k/runtime/runtime_k.cpp)
+      const bool exact = (net.empty() || net == "fused") && fast != "1" && (approx.empty() || approx == "off" || approx == "none") &&
+                         kmode != "fast";
       say(WG_LOG_INFO, std::string("network model K mode: network=") + (net.empty() ? "fused" : net) + ";k_fast=" +
-                           (fast.empty() ? "0" : fast) + (approx.empty() ? std::string() : ";k_approx=" + approx) +
+                           (fast.empty() ? "0" : fast) + (kmode.empty() ? std::string() : ";k_mode=" + kmode) +
+                           (approx.empty() ? std::string() : ";k_approx=" + approx) +
                            ";handover=" + (staged_out_ ? "staged" : "fence") +
                            (exact ? ", the standard path" : ", an approximation (opt-in)") +
                            (k_default_ ? " (the default mode; network=fused8;k_fast=1;handover=staged selects the "

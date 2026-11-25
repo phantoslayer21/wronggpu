@@ -401,6 +401,19 @@ bool option_given(const WgRtConfig& c, const std::string& key) {
   }
   return false;
 }
+// the position (item index) of the last key= item in the runtime options followed by WG_RUNTIME_OPTIONS; -1 when absent
+long option_pos(const WgRtConfig& c, const std::string& key) {
+  const char* env = std::getenv("WG_RUNTIME_OPTIONS");
+  const std::string text = std::string(c.runtime_options ? c.runtime_options : "") + ";" + (env ? env : "");
+  long pos = -1, index = 0;
+  for (size_t a = 0; a <= text.size(); ++index) {
+    size_t b = text.find(';', a);
+    if (b == std::string::npos) b = text.size();
+    if (text.compare(a, key.size() + 1, key + "=") == 0) pos = index;
+    a = b + 1;
+  }
+  return pos;
+}
 // a value for a one-line message: control characters as '?'
 std::string one_line(std::string v) {
   for (char& ch : v)
@@ -541,7 +554,37 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   // Newton step (kernels k_out_color*__a2, k_out_pixel_c*__a2; clean/k/dx12/hlsl/k_out.hlsli KO_APPROX). A comma list
   // selects several. The native D3D12 device only (HIP and the hybrid device refuse); taking one adds a note of create
   // (not bit-exact).
-  if (option_given(c, "k_approx")) {
+  // k_mode (0.7.0; the SR front end passes the player's Fast / Exact choice, clean/wgshared/include/wg_sr_modes.h):
+  // "fast" takes the k_approx forms this create supports (a1 with the exact input stage, a2 without k_fast=1 and with the
+  // compact head, both on the native D3D12 device only); what it cannot take runs the standard path, said in a note, never
+  // a refusal. "exact": the standard path. A k_approx item after the k_mode item (later in runtime_options, or in
+  // WG_RUNTIME_OPTIONS, which comes after them) decides instead. Neither given: the standard path, as before.
+  const long kmode_at = option_pos(c, "k_mode"), kapprox_at = option_pos(c, "k_approx");
+  if (kmode_at >= 0 && kmode_at > kapprox_at) {
+    const std::string kmode = option(c, "k_mode");
+    if (kmode == "fast") {
+      std::string left;
+      if (c.backend == 3) {
+        approx_a1_ = in_exact_;
+        approx_a2_ = !fast_ && compact_head_;
+        if (!approx_a1_) left += "; a1 not taken (the fast input stage was chosen)";
+        if (!approx_a2_) left += fast_ ? "; a2 not taken (k_fast=1)" : "; a2 not taken (k_head=full)";
+      } else {
+        left = "; the standard path runs (its faster forms need the native D3D12 device)";
+      }
+      approx_note_ = std::string("model K: k_mode=fast") + (approx_a1_ || approx_a2_ ? approx_tag() : std::string()) +
+                     (approx_a1_ || approx_a2_ ? " (the faster mode; Exact is the standard path)" : "") + left +
+                     (approx_a1_ ? std::string("; a1 applies to the tiled input stage, frames on the legacy input path "
+                                               "run the standard input stage")
+                                 : std::string());
+    } else if (kmode == "exact") {
+      approx_note_ = "model K: k_mode=exact (the standard path)";
+    } else {
+      return fail("model K: unknown k_mode " + one_line(kmode) + " (fast or exact)");
+    }
+  } else if (kapprox_at >= 0 && (option(c, "k_approx") == "off" || option(c, "k_approx") == "none")) {
+    approx_note_ = "model K: k_approx=" + option(c, "k_approx") + " (the standard path)";
+  } else if (kapprox_at >= 0) {
     const std::string kapprox = option(c, "k_approx");
     if (kapprox.empty()) return fail("model K: k_approx is empty (a1, a2 or a1,a2)");
     size_t at = 0;

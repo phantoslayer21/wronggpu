@@ -315,6 +315,10 @@ int main(int argc, char** argv) {
   // settings block unavailable; the legacy wronggpu-rr.ini line of an older install)
   bool fast = false, fast_noblock = false, legacy_mode = false;
   bool log_cap = false;  // wronggpu-rr.log already at its size cap when the plugin starts: moved to .log.old
+  // 0.7.0: a game interface of another 2.x version accepted by its exports (--probedver; --no-tff: without
+  // slSetTagForFrame), one refused for a missing core export (--badver --probe-missing), and the fault guard of the
+  // game-interface route (--fault: an access violation inside the guarded part; --fault-cpp: a C++ exception)
+  bool probedver = false, no_tff = false, probe_missing = false, fault = false, fault_cpp = false;
   for (int i = 2; i < argc; ++i) {
     if (strcmp(argv[i], "--badver") == 0) badver = true;
     if (strcmp(argv[i], "--exact") == 0) exact = true;              // the launcher allowed exact: three modes
@@ -325,7 +329,16 @@ int main(int argc, char** argv) {
     if (strcmp(argv[i], "--fast-noblock") == 0) fast_noblock = true;  // the same, the shared settings block unavailable
     if (strcmp(argv[i], "--legacy-mode") == 0) legacy_mode = true;    // rr_mode only in the plugin's wronggpu-rr.ini
     if (strcmp(argv[i], "--log-cap") == 0) log_cap = true;            // the log at its 8 MiB cap: one rotation
+    if (strcmp(argv[i], "--probedver") == 0) probedver = true;
+    if (strcmp(argv[i], "--no-tff") == 0) no_tff = true;
+    if (strcmp(argv[i], "--probe-missing") == 0) probe_missing = true;
+    if (strcmp(argv[i], "--fault") == 0) fault = true;
+    if (strcmp(argv[i], "--fault-cpp") == 0) fault = fault_cpp = true;
   }
+  // the fault build's trigger (tools/build.py builds the plugin a second time with WG_TEST_FAULT_HOOKS): the first
+  // slGetNewFrameToken (role 15) that reaches the core faults
+  SetEnvironmentVariableA("WG_TEST_FAULT_ROLE", fault ? "15" : nullptr);
+  SetEnvironmentVariableA("WG_TEST_FAULT_CPP", fault_cpp ? "1" : nullptr);
   std::string stage = argv[1];
   if (stage.back() != '\\' && stage.back() != '/') stage += '\\';
   const std::wstring wstage = widen(stage.c_str());
@@ -485,6 +498,39 @@ int main(int argc, char** argv) {
   }
 #endif
 
+  if (probedver) {  // 0.7.0: an interface of another 2.x version with every core export: hooked, its calls reach the stand-in
+    std::vector<std::string> L = read_lines(log_path);
+    CHECK(count(L, " accepted by its exports (every core function the route hooks is exported; ") == 1);
+    CHECK(count(L, no_tff ? "no slSetTagForFrame: frame-scoped tags off" : "slSetTagForFrame exported: frame-scoped tags on") == 1);
+    CHECK(count(L, " chosen for this game interface") == 1);
+    CHECK(count(L, "does not match this build's binding version") == 0);
+    CHECK(count(L, "hook: patched IAT slot ") >= 1);
+    st->calls = 0;
+    WgFrameToken* tok = nullptr;
+    uint32_t idx = 1;
+    CHECK_EQ(slGetNewFrameToken(&tok, &idx), 0);
+    CHECK(st->last_role != nullptr && strcmp(st->last_role, "new-frame-token") == 0);  // through our handler and the core
+    TEST_SUMMARY(no_tff ? "test_hook_dll (a 2.x interface accepted by its exports, no slSetTagForFrame)"
+                        : "test_hook_dll (a 2.x interface accepted by its exports)");
+  }
+  if (fault) {  // 0.7.0: a fault inside the guarded part: the call fails cleanly, the run passes every call on afterwards
+    WgFrameToken* tok = nullptr;
+    uint32_t idx = 1;
+    CHECK_EQ(slGetNewFrameToken(&tok, &idx), 24);  // WG_E_EXCEPTION_HANDLER, the process lives on
+    std::vector<std::string> L = read_lines(log_path);
+    CHECK(count(L, "hook: a fault inside WrongGPU RR's slGetNewFrameToken on the game-interface route; every game-interface "
+                   "call passes on to the game interface for the rest of the run") == 1);
+    st->last_role = nullptr;
+    CHECK_EQ(slGetNewFrameToken(&tok, &idx), 0);  // passed on to the game interface (the stand-in)
+    CHECK(st->last_role != nullptr && strcmp(st->last_role, "new-frame-token") == 0);
+    st->last_role = nullptr;
+    CHECK_EQ(slShutdown(), 0);  // a non-RR call too
+    CHECK(st->last_role != nullptr && strcmp(st->last_role, "shutdown") == 0);
+    L = read_lines(log_path);
+    CHECK(count(L, "hook: a fault inside WrongGPU RR's ") == 1);  // said once
+    TEST_SUMMARY(fault_cpp ? "test_hook_dll (a C++ exception inside the game-interface route)"
+                           : "test_hook_dll (an access violation inside the game-interface route)");
+  }
   if (badver) {
     // Wrong interface version: nothing patched, the RR roles still reach the stand-in.
     st->calls = 0;
@@ -494,6 +540,7 @@ int main(int argc, char** argv) {
     CHECK(st->last_role != nullptr && strcmp(st->last_role, "new-frame-token") == 0);  // reached the stand-in
     std::vector<std::string> L = read_lines(log_path);
     CHECK(count(L, "does not match this build's binding version") == 1);
+    if (probe_missing) CHECK(count(L, "; export probe: no slFreeResources)") == 1);  // 0.7.0: the export it lacks, named
     // clean/060-rr-plugin-hunt: only the game-interface route is left out; the log does not say "nothing was patched"
     CHECK(count(L, "the game-interface route is not used for this version (no import slot patched)") == 1);
     CHECK(count(L, "nothing was patched") == 0);

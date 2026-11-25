@@ -56,6 +56,18 @@ const SettingDef kSettings[] = {
      L"M: Model M (default). L: Model L, converted from a DLSS file of version 310.5 or newer that has it."},
 #endif
 #endif
+    // 0.7.0: each SR model's mode (Layer::Mode, clean/wgshared/include/wg_sr_modes.h): Fast is the default; the game's state
+    // folder (settings.ini) holds it, where the front end reads it and WrongGPU.asi's card in OptiScaler's menu changes it
+    {"m_mode", Layer::Mode, Tier::Basic, "fast", "fast|exact", L"Model M mode",
+     L"Fast (default): the quickest, with a picture very close to Exact. Exact: Model M's reference result, slower."},
+#if WRONGGPU_MODEL_K
+    {"k_mode", Layer::Mode, Tier::Basic, "fast", "fast|exact", L"Model K mode",
+     L"Fast (default): the quickest, with a picture very close to Exact. Exact: Model K's reference result, slower."},
+#endif
+#if WRONGGPU_MODEL_L
+    {"l_mode", Layer::Mode, Tier::Basic, "fast", "fast|exact", L"Model L mode",
+     L"Fast (default): the quickest, with a picture very close to Exact. Exact: Model L's reference result, slower."},
+#endif
 #if WRONGGPU_FG
     // Frame generation (#96, fg.h; only in a build with its choice, CMake WRONGGPU_FG): strictly off by default. `set` only,
     // not on the settings page. The values in exactly the spellings of the frame generation proxy's reader (no case folding).
@@ -74,6 +86,11 @@ const size_t kSettingCount = sizeof(kSettings) / sizeof(kSettings[0]);
 const SettingDef* FindSetting(const string& key) {
     for (auto& d : kSettings) if (key == d.key) return &d;
     return nullptr;
+}
+
+const char* ModeKeyOf(const string& model) {
+    const char* key = model == "k" ? "k_mode" : model == "l" ? "l_mode" : model == "m" || model.empty() ? "m_mode" : nullptr;
+    return key && FindSetting(key) ? key : nullptr;
 }
 
 static string TrimA(string t) {
@@ -196,6 +213,7 @@ string ProfileText(const Profile& p) {
     for (auto& d : kSettings) {
         if (d.layer == Layer::Model && p.isDefault(d.key)) continue;  // Model M: profile.ini as before the model choice
         if (d.layer == Layer::Fg && p.isDefault(d.key)) continue;     // frame generation never chosen: profile.ini as before it
+        if (d.layer == Layer::Mode && p.isDefault(d.key)) continue;   // Fast (the default): profile.ini as before the modes
         t += string(d.key) + "=" + p.get(d.key) + "\r\n";
     }
     for (auto& kv : p.v) if (!FindSetting(kv.first)) t += kv.first + "=" + kv.second + "\r\n";

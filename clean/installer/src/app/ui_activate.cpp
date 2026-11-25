@@ -127,6 +127,19 @@ void ActivateWidget(int id) {
     }
     // R1: Runs on offers Auto and Direct3D 12 only (HIP is a diagnostic in wronggpu.ini)
     if (id >= ID_G_EXEC0 && id < ID_G_EXEC0 + 2) { static const char* const x[] = {"auto", "dx12"}; SetSetting(v.edit, "executor", x[id - ID_G_EXEC0], nullptr); Invalidate(); return; }
+    if (id >= ID_G_MODEL0 && id < ID_G_MODEL0 + 3) {  // the Upscaler's Model: the models this build offers, in their order
+        const SettingDef* d = FindSetting("model");
+        if (!d) return;
+        std::vector<string> vals;
+        for (const char* a = d->values; *a;) { const char* b = strchr(a, '|'); vals.push_back(b ? string(a, b) : string(a)); if (!b) break; a = b + 1; }
+        const size_t i = size_t(id - ID_G_MODEL0);
+        if (i < vals.size()) { SetSetting(v.edit, "model", vals[i], nullptr); Invalidate(); }
+        return;
+    }
+    if (id >= ID_G_SRMODE0 && id < ID_G_SRMODE0 + 2) {  // the Upscaler's Mode: the chosen model's mode
+        if (const char* key = ModeKeyOf(v.edit.get("model"))) { SetSetting(v.edit, key, id == ID_G_SRMODE0 ? "fast" : "exact", nullptr); Invalidate(); }
+        return;
+    }
     if (id >= ID_G_PRE0 && id < ID_G_PRE0 + 2) { static const char* const x[] = {"scale", "original"}; SetSetting(v.edit, "pre_exposure", x[id - ID_G_PRE0], nullptr); Invalidate(); return; }
     if (id >= ID_G_RRMODE0 && id < ID_G_RRMODE0 + 3) { static const char* const x[] = {"exact", "accurate", "fast"}; SetSetting(v.edit, "rr_mode", x[id - ID_G_RRMODE0], nullptr); Invalidate(); return; }
     if (id >= ID_G_FPS0 && id < ID_G_FPS0 + 3) { static const char* const x[] = {"keep", "on", "off"}; SetSetting(v.edit, "fps_overlay", x[id - ID_G_FPS0], nullptr); Invalidate(); return; }
@@ -351,6 +364,41 @@ void ActivateWidget(int id) {
             std::vector<MenuItem> items{{L"Choose a DLSS file\u2026", ID_S_RRFILE, !v.busy, false, false, false, ic::cube},
                                         {L"Convert again", ID_S_RRCONVERT, !v.busy, false, false, false, ic::sync}};
             for (auto& h : v.hits) if (h.id == ID_S_RRMORE) OpenMenu(ID_S_RRMORE, h.r, items, true, 230);
+            return;
+        }
+        case ID_S_KMORE: case ID_S_LMORE: {  // ready Model K / Model L data's Options...: the same two ways as data that is not ready
+            const bool k = id == ID_S_KMORE;
+            std::vector<MenuItem> items{{L"Choose a DLSS file\u2026", k ? ID_S_KFILE : ID_S_LFILE, !v.busy, false, false, false, ic::cube},
+                                        {L"Convert again", k ? ID_S_KCONVERT : ID_S_LCONVERT, !v.busy, false, false, false, ic::sync}};
+            for (auto& h : v.hits) if (h.id == id) OpenMenu(id, h.r, items, true, 230);
+            return;
+        }
+        case ID_S_KCONVERT: case ID_S_KFILE: case ID_S_LCONVERT: case ID_S_LFILE: {
+            if (v.busy) return;  // an install may be copying the model file
+            if (ModelGameRunningSaid()) return;  // a running game may hold it: said before the search (and the picker)
+            const wchar_t preset = id == ID_S_KCONVERT || id == ID_S_KFILE ? L'K' : L'L';
+            wstring p;
+            if ((id == ID_S_KFILE || id == ID_S_LFILE) && !Browse(2, p)) return;
+            const bool noScan = g.noScan;
+            RunTask(preset == L'K' ? T_MODELK : T_MODELL, [p, noScan, preset]() -> std::function<void()> {  // off the window's thread
+                wstring msg;
+                bool ok = false, again = false;
+                ConvertPresetData(preset, p, noScan, msg, ok, again);
+                HealthMsg hm;
+                ReadModelState(hm);  // the new data's state read here too (it hashes the file), not on the window's thread
+                return [msg, ok, again, hm, preset, chose = !p.empty()] {
+                    TakeModelState(hm);
+                    const wstring name = wstring(L"Model ") + preset;
+                    if (ok) {
+                        ShowToast(L"The " + name + L" data is converted" + (again ? L" again" : L"") + (chose ? L" from the file you chose." : L"."), 1);
+                        return;
+                    }
+                    const wstring what = chose ? (preset == L'L' ? L"That file can't be used. Choose a DLSS file that has Model L (version 310.5 or newer)."
+                                                                 : L"That file can't be used. Choose the DLSS file of one of your games.")
+                                               : L"No DLSS file WrongGPU can use for " + name + L" was found. Choose one of your games' DLSS file.";
+                    InformDetails(name + L" couldn't be converted.\n\n" + what, kIconError, msg);
+                };
+            });
             return;
         }
         case ID_S_RRCONVERT: ConvertRr(L""); return;

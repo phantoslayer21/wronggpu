@@ -81,7 +81,8 @@ It logs to `wronggpu-asi.log` in its data directory.
 | `asi_log.h` | `wronggpu-asi.log` writer |
 | `asi_status.h` | CPU-only own diagnostic state and bounded query helper |
 | `asi_patch.h` | Bounded call-site transaction, revalidation and ownership-aware rollback |
-| `wronggpu_asi.cpp` | The DLL: `InitializeASI`, module identification, resolve, stub, call-site patching, the thunks, `WrongGpuAsiQuery` |
+| `wronggpu_asi.cpp` | The DLL: `InitializeASI`, module identification, resolve, stub, call-site patching, the thunks, `WrongGpuAsiQuery`, `OptiPluginInit` (0.7.0) |
+| `sr_card.h`, `sr_card.cpp` | 0.7.0: the "WrongGPU Upscaler" card on OptiScaler's Custom tab (the host's plugin interface, `clean/wgshared/include/wg_host_menu_abi.h`; a tab of its own on hosts without cards): the SR model that runs and the Fast / Exact mode of each model. A change writes the card's own shared-settings slot (`sr_m_mode` / `sr_k_mode` / `sr_l_mode`: the front end creates its upscaler again at the next frame) and the game's `wronggpu-setup\settings.ini` (`m_mode` / `k_mode` / `l_mode`, under the state lock: the launcher shows it). Tests: `test_asi_card` |
 | `exports_asi.def`, `version_asi.rc` | Exports and version resource |
 
 Tested: `tests/test_asi_thunk.cpp` (thunk logic), `tests/test_asi_scan.cpp` (offline anchor scan of an OptiScaler

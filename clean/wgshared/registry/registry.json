@@ -15,7 +15,7 @@
      "readers": ["sr-frontend", "sr-runtime"], "live": false, "latch": "sr-create", "ini_section": "wronggpu", "env": "WG_RUNTIME_MODEL",
      "menu": {"list": "versions", "label": "WrongGPU Model {value}", "folder_label": "WrongGPU {value}"},
      "values_from": "models", "doc": "super-resolution model"},
-    {"id": 1, "key": "rr_mode", "type": "choice", "values": ["exact", "accurate", "fast"], "default": "accurate",
+    {"id": 1, "key": "rr_mode", "type": "choice", "values": ["exact", "accurate", "fast"], "default": "fast",
      "readers": ["rr-plugin", "rr-runtime"], "live": true, "latch": "next-frame", "ini_section": "wronggpu", "env": "WG_RR_MODE",
      "menu": {"list": "panel", "label": "{value}"},
      "values_from": "modes", "doc": "ray-reconstruction mode"},
@@ -41,7 +41,16 @@
      "doc": "exact RR mode offered in the menu panel (turned on in the launcher; without it rr_mode=exact runs accurate)"},
     {"id": 11, "key": "rr_hit_distance_filter", "type": "onoff", "default": 0, "readers": ["rr-plugin"], "live": true,
      "latch": "next-frame", "ini_section": "wronggpu", "contract": true, "opt_in": true,
-     "doc": "52.7.2 deviation (opt-in): the specular hit distance is the median of its 1x4 pixel run (lone missed-ray outliers make reflection speckles in motion)"}
+     "doc": "52.7.2 deviation (opt-in): the specular hit distance is the median of its 1x4 pixel run (lone missed-ray outliers make reflection speckles in motion)"},
+    {"id": 12, "key": "sr_m_mode", "type": "choice", "values": ["fast", "exact"], "default": "fast",
+     "readers": ["sr-frontend", "sr-runtime"], "live": true, "latch": "next-frame", "ini_section": "wronggpu", "env": "WG_M_MODE",
+     "menu": {"list": "panel", "label": "{value}"}, "doc": "Model M mode"},
+    {"id": 13, "key": "sr_l_mode", "type": "choice", "values": ["fast", "exact"], "default": "fast",
+     "readers": ["sr-frontend", "sr-runtime"], "live": true, "latch": "next-frame", "ini_section": "wronggpu", "env": "WG_L_MODE",
+     "menu": {"list": "panel", "label": "{value}"}, "doc": "Model L mode"},
+    {"id": 14, "key": "sr_k_mode", "type": "choice", "values": ["fast", "exact"], "default": "fast",
+     "readers": ["sr-frontend", "sr-runtime"], "live": true, "latch": "next-frame", "ini_section": "wronggpu", "env": "WG_K_MODE",
+     "menu": {"list": "panel", "label": "{value}"}, "doc": "Model K mode"}
   ],
   "text_options": [
     {"key": "rr_model", "default": "", "readers": ["rr-plugin", "rr-runtime"], "env": "WG_RR_MODEL", "doc": "path of the RR model file"},

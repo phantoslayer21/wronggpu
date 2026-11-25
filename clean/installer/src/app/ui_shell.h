@@ -300,7 +300,8 @@ struct Hit {
     bool sticky = false;   // in the game page's right column (View::stickCol): it does not move 1:1 with the scroll
 };
 enum Page { P_LIBRARY, P_GAME, P_SETTINGS, P_COUNT };
-enum Task { T_NONE, T_MODEL, T_SELFINSTALL, T_SELFUNINSTALL, T_FIRSTRUN, T_COLLECT, T_RRDATA };  // View::task (T_RRDATA: the Ray Reconstruction data)
+enum Task { T_NONE, T_MODEL, T_SELFINSTALL, T_SELFUNINSTALL, T_FIRSTRUN, T_COLLECT, T_RRDATA, T_MODELK, T_MODELL };  // View::task (T_RRDATA: the Ray
+// Reconstruction data; T_MODELK / T_MODELL: the Model K / Model L data, Settings > Model and runtime)
 // B_PRIMARY: a filled accent capsule (Play, Apply, Continue). B_SECONDARY: a grey capsule (More, Discard in a sheet).
 // B_PLAIN: a grey rounded rectangle, radius 8 (a settings row's buttons: "Choose a DLSS file..."). B_GHOST: no fill until
 // hovered, radius 8 (the toolbar-like Rescan / Add game, Discard on the capsule). B_GLASS: a translucent white capsule with
@@ -362,6 +363,8 @@ enum : int {
     ID_G_LEARN,  // Learn more: the public page of a tool of the player's the game needs (REFramework, gamerules.h), in the browser
     ID_G_RECHECK,  // Check again: that game's folder read again for the tool (its callout)
     ID_G_EXEC0 = 3010, ID_G_FILTER = 3020,
+    ID_G_MODEL0 = 3012,   // + 0 Model M, then Model K, Model L (the models this build offers): the Upscaler's Model segments
+    ID_G_SRMODE0 = 3016,  // + 0 Fast, 1 Exact: the Upscaler's Mode segments (the chosen model's mode)
     ID_G_PRE0 = 3030, ID_G_SPARKLE = 3040, ID_G_FPS0 = 3050, ID_G_DETAILS = 3060, ID_G_LOG, ID_G_COLLECT, ID_G_FOLDER, ID_G_KEEP,
     ID_G_REVERT, ID_G_OKEEP, ID_G_OREVERT, ID_G_DISCARD, ID_G_APPLY, ID_G_LOCKED, ID_G_NOTICE, ID_G_CLEAN, ID_G_ADOPT, ID_G_FOUND, ID_G_OPTIMORE, ID_G_ADVMORE, ID_G_GUIDEFPS,
     ID_G_TITLE, ID_G_DIRTEXT, ID_G_EXETEXT,  // text for UI Automation (not focusable): the game's whole name, its folder, its exe
@@ -385,6 +388,9 @@ enum : int {
     // Settings > Ray Reconstruction data: Options... (a menu: Choose a DLSS file..., Convert again), the two ways, its words for UI
     // Automation (not focusable); Exact mode's switch
     ID_S_RRMORE = 4050, ID_S_RRFILE, ID_S_RRCONVERT, ID_S_RRTEXT, ID_S_EXACT,
+    // Settings > Model K data and Model L data (0.7.0): Options... (a menu: Choose a DLSS file..., Convert again), the two ways,
+    // the words for UI Automation (not focusable)
+    ID_S_KMORE = 4056, ID_S_KFILE, ID_S_KCONVERT, ID_S_KTEXT, ID_S_LMORE = 4060, ID_S_LFILE, ID_S_LCONVERT, ID_S_LTEXT,
     ID_S_REMOVEDATA = 4070,  // a portable copy's Launcher row: Remove data... (the shared data, its way out: it has no uninstall)
     ID_S_FOLDERRM0 = 4100,  // + index: an added game folder's Remove (kMaxFolderRows of them)
     ID_S_FOLDERTEXT0 = 4400,  // + index: an added game folder's words for UI Automation and its tooltip (its whole path; not focusable)
@@ -510,6 +516,8 @@ struct View {
     // Ray Reconstruction (rr.h): the RR data's state (read with the model's, off the UI thread), and whether this build has the
     // RR files (rrBuild; a game page and Settings show nothing of RR without them, unless a game already has them)
     bool rrReady = false, rrBuild = false; wstring rrWhy, rrSource;
+    // 0.7.0: the Model K and Model L data (builds with those models; read with the model's, off the UI thread)
+    bool modelKReady = false, modelLReady = false; wstring modelKWhy, modelLWhy;
     // WrongGPU's edition of OptiScaler is what installs use (optiedition.h, downloaded): without it a game whose RR needs it (gamerules.h) can't
     // use WrongGPU's Ray Reconstruction, and its page says so
     bool rrEdition = true;
@@ -565,6 +573,9 @@ static_assert(ID_S_THEME0 + 3 <= ID_S_INDEX0 && ID_S_INDEX0 + 3 <= ID_S_ACCENT0 
               ID_S_FOLDERRM0 + kMaxFolderRows <= ID_S_FOLDERTEXT0 && ID_S_FOLDERTEXT0 + kMaxFolderRows <= ID_MENU,
               "Settings' section index and folder ids must stay between its theme segments and the menus");
 static_assert(ID_S_EXACT < ID_S_REMOVEDATA && ID_S_REMOVEDATA < ID_S_FOLDERRM0, "Remove data must stay between the RR rows' ids and the folders' ids");
+static_assert(ID_S_EXACT < ID_S_KMORE && ID_S_KTEXT < ID_S_LMORE && ID_S_LTEXT < ID_S_REMOVEDATA, "the Model K / L data rows' ids must stay between the RR rows' and Remove data");
+static_assert(ID_G_EXEC0 + 2 <= ID_G_MODEL0 && ID_G_MODEL0 + 3 <= ID_G_SRMODE0 && ID_G_SRMODE0 + 2 <= ID_G_FILTER,
+              "the Upscaler's Model and Mode segments must stay between Runs on's segments and the output filter");
 static_assert(ID_FR_SHEET < ID_SCROLLBAR && ID_SCROLLBAR < ID_CAP_MIN && ID_CAP_CLOSE < ID_AUTO0, "the caption buttons' ids must stay between the first run's and the UI Automation words' ids");
 static_assert(ID_SCROLLBAR < ID_TILE && ID_TILE + kTileSpan <= ID_TILEQA && (long long)ID_TILEQA + kTileSpan <= 0x7fffffffLL,
               "the games' ids (a lockup, its action) must stay above every other id and apart from each other");
@@ -871,6 +882,17 @@ void PaintFirstRun(Gfx& gx);
 // The words of a model conversion that worked, for its toast (UI thread: the source game as the Library names it):
 // "Model M data is converted again from Cyberpunk 2077's DLSS file." `again`: a model was replaced; `chose`: the player picked the file.
 wstring ModelConvertedWords(bool again, bool chose);
+// 0.7.0: a model in the page's words: "Model M", "Model K", "Model L" (a profile's model value), and with its mode:
+// "Model M (Fast)", "Model L (Exact)"; for a profile, its model and that model's mode
+wstring ModelWords(const string& model);
+wstring ModelModeWords(const string& model, const string& mode);
+wstring ModelModeWords(const Profile& p);
+// The Model K / Model L data (Settings > Model and runtime): whether it is ready (its own converter data and folder: a
+// context of its own, so nothing the window or another worker reads changes), its file, and its conversion (the search and
+// the conversion, on a worker: RunTask T_MODELK / T_MODELL)
+bool PresetDataReady(wchar_t preset, wstring* why);
+wstring PresetDataFile(wchar_t preset);
+void ConvertPresetData(wchar_t preset, const wstring& dll, bool noScan, wstring& msg, bool& ok, bool& again);
 wstring HipRuntimeWords(const wstring& dll);  // "C:\...\amdhip64_7.dll" -> "HIP 7" (empty when the name says no version)
 // The arrow keys on the Library's lockups and its shelf buttons: the id to focus, -1 with nothing that way (Up and Down
 // then scroll), 0 not on a lockup.

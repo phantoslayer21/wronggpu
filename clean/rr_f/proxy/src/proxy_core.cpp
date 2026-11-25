@@ -126,17 +126,31 @@ RrProxy::RrProxy(const ProxyConfig& cfg, const OriginalApi& orig, const WgRrRunt
 
 // clean/rr-re9-pt: one begin/end pair around runtime work on the game's list; end runs when the scope closes (every
 // return path) and only if begin ran.
+// 0.7.0: the bracket open on this thread, so that the hook plugin's fault guard can close it after a structured exception
+// (which skips this scope's destructor): RrProxy::close_open_bracket_after_fault.
+namespace {
+thread_local const CmdListBracket* t_open_bracket = nullptr;
+thread_local void* t_open_cl = nullptr;
+}  // namespace
 class RrProxy::BracketScope {
  public:
   explicit BracketScope(const CmdListBracket& b) : b_(b) {}
   ~BracketScope() {
-    if (open_ && b_.end) b_.end(cmd_);
+    if (!open_) return;
+    // closed here unless the fault guard closed it already
+    if (t_open_bracket == &b_ && t_open_cl == cmd_) {
+      t_open_bracket = nullptr;
+      t_open_cl = nullptr;
+      if (b_.end) b_.end(cmd_);
+    }
   }
   void open(void* native_cmd) {
     if (open_ || !native_cmd || !b_.begin || !b_.end) return;
     b_.begin(native_cmd);
     cmd_ = native_cmd;
     open_ = true;
+    t_open_bracket = &b_;
+    t_open_cl = native_cmd;
   }
   BracketScope(const BracketScope&) = delete;
   BracketScope& operator=(const BracketScope&) = delete;
@@ -146,6 +160,14 @@ class RrProxy::BracketScope {
   void* cmd_ = nullptr;
   bool open_ = false;
 };
+
+void RrProxy::close_open_bracket_after_fault() {
+  const CmdListBracket* b = t_open_bracket;
+  void* cl = t_open_cl;
+  t_open_bracket = nullptr;
+  t_open_cl = nullptr;
+  if (b && cl && b->end) b->end(cl);
+}
 
 void RrProxy::diag_read() {
   if (diag_read_) return;
@@ -375,7 +397,6 @@ WgResultCode RrProxy::shutdown() {
   viewport_tags_.clear();
   for (auto& kv : frames_) release_frame(*kv.second);
   frames_.clear();
-  token_index_.clear();
   latest_constants_.clear();
   initialised_ = false;
   device_set_ = false;
@@ -709,7 +730,6 @@ WgResultCode RrProxy::new_frame_token(WgFrameToken** out, const uint32_t* frame_
   WgResultCode rc = orig_.new_frame_token ? orig_.new_frame_token(out, frame_index) : WG_E_MISSING_OR_INVALID_API;
   if (rc == WG_OK && out && *out) {
     std::lock_guard<std::recursive_mutex> lock(mu_);
-    token_index_[*out] = frame_index_of(*out);  // remembered; never used to reject a frame (60.7)
     diag_read();
     if (diag_on()) {
       char b[160];

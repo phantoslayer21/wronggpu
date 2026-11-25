@@ -335,6 +335,12 @@ GameEntry EntryFor(Context& ctx, const wstring& exeIn, const wstring& name, cons
         g.repairSuggested = !g.problems.empty();
         g.hasPrevious = PreviousFits(g.dir, rec, &g.previous);
         g.last = ReadLastRun(g.dir);
+        {
+            const Profile gp = GameProfile(g.dir);
+            g.srModel = gp.get("model").empty() ? string("m") : gp.get("model");
+            const char* modeKey = ModeKeyOf(g.srModel);
+            g.srMode = modeKey ? gp.get(modeKey) : string("fast");
+        }
         if (RecordHasRr(rec)) {
             g.rrInstalled = g.rrUses = true;
             if (g.rrWhy.empty()) g.rrWhy = L"installed";
@@ -1027,6 +1033,9 @@ std::vector<std::pair<string, string>> FrontEndStateKeys(const Profile& p) {
     std::vector<std::pair<string, string>> r{{"upscaler", p.get("wronggpu") == "off" ? "amd" : "network"}};
     for (size_t i = 0; i < kSettingCount; ++i)
         if (kSettings[i].layer == Layer::Rt) r.push_back({kSettings[i].key, p.get(kSettings[i].key)});  // explicit, defaults too
+    // the SR model modes (0.7.0, Layer::Mode): explicit too, so the front end and WrongGPU.asi's card read the launcher's choice
+    for (size_t i = 0; i < kSettingCount; ++i)
+        if (kSettings[i].layer == Layer::Mode) r.push_back({kSettings[i].key, p.get(kSettings[i].key)});
     return r;
 }
 
@@ -1037,7 +1046,8 @@ string WithFrontEndState(const string& wronggpuIni, const std::vector<std::pair<
         if (kv.first == "upscaler") {
             string cur, sec;
             t = IniGetFrontEnd(t, "upscaler", &cur, &sec) ? IniSet(t, sec, "upscaler", kv.second) : IniSet(t, "fsr", "upscaler", kv.second);
-        } else if (kv.first.rfind("rr_", 0) != 0 && kv.first != "model" && !IsFgKey(kv.first)) {  // (frame generation's keys: fg.h)
+        } else if (kv.first.rfind("rr_", 0) != 0 && kv.first != "model" && !IsFgKey(kv.first) &&  // (frame generation's keys: fg.h)
+                   kv.first != "m_mode" && kv.first != "k_mode" && kv.first != "l_mode") {      // (the SR modes: never runtime_options)
             items.push_back(kv);
         }
     }
@@ -1072,7 +1082,37 @@ Profile GameProfile(const wstring& dir) {
         p = ImportProfile(wini, oini);
     }
     FoldRrFromGame(dir, p);  // Ray Reconstruction's mode as the player last chose it in the game (OptiScaler's menu)
+    FoldSrFromGame(dir, p);  // the model and its mode as the player last chose them in the game
     return p;
+}
+
+bool FoldSrFromGame(const wstring& dir, Profile& p) {
+    bool changed = false;
+    if (FindSetting("model")) {
+        wgchoice::Record rec;
+        std::string err;
+        const std::filesystem::path recordPath = Join(StateDir(dir), wgchoice::kRecordFile);
+        if (wgchoice::ReadRecordFile(recordPath, &rec, &err) == wgchoice::ReadResult::Ok && rec.source != wgchoice::Source::Launcher) {
+            const string want(1, static_cast<char>(tolower(static_cast<unsigned char>(rec.model))));
+            string normal;
+            if (ValidateSetting(*FindSetting("model"), want, &normal, nullptr) && normal != p.get("model")) {
+                p.v["model"] = normal;
+                changed = true;
+            }
+        }
+    }
+    const wgstate::Settings s = wgstate::ReadSettings(dir);
+    for (size_t i = 0; i < kSettingCount; ++i) {
+        const SettingDef& d = kSettings[i];
+        if (d.layer != Layer::Mode) continue;
+        const std::string* v = wgstate::Get(s, d.key);
+        string normal;
+        if (v && ValidateSetting(d, *v, &normal, nullptr) && normal != p.get(d.key)) {
+            p.v[d.key] = normal;
+            changed = true;
+        }
+    }
+    return changed;
 }
 
 void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vector<wstring>& notes, std::vector<wstring>* warnings,
@@ -1488,6 +1528,7 @@ static void InstallOp(Context& ctx, const OpRequest& r, Ui& ui, OpResult& res) {
     if (!haveProfile) profile = r.hasProfile ? r.profile : DefaultProfile();
     MigrateRrState(ctx, dir);      // #219: an older plugin's or the player's edit of WrongGPU\wronggpu.ini: its mode into the state folder
     FoldRrFromGame(dir, profile);  // a Ray Reconstruction mode chosen in the game stays (the state folder keeps it through the install)
+    FoldSrFromGame(dir, profile);  // so do the model and the SR modes chosen in the game (OptiScaler's list, WrongGPU.asi's card)
     if (target.installed && !target.record.version.empty() && ctx.data && !IEq(target.record.version, ctx.data->version)) SavePrevious(ctx, dir, target.record, ui);
     std::vector<IniKeyChange> oldJournal = target.installed ? target.record.inikeys : !wrongDir.empty() ? wrong.inikeys : std::vector<IniKeyChange>{};
     // a game's opt-in keys follow its setting (ApplyProfile), not the old file

@@ -114,6 +114,9 @@ struct GameEntry {
                                    // RR runs there only with WrongGPU's edition of OptiScaler
     bool optiEdition = false;      // the install's OptiScaler is WrongGPU's edition (rr.h RecordHasEdition; installed games only)
     bool rrInstalled = false;      // the install placed WrongGPU's RR files
+    // 0.7.0: the SR model ("m", "k", "l") and its mode ("fast", "exact") the game starts with: its profile, with the choices made
+    // in the game folded in (FoldSrFromGame); read with the record
+    string srModel = "m", srMode = "fast";
     bool rrEnabled = true;         // WrongGPU\wronggpu.ini rr_enabled (an RR install)
     bool rrHeldOff = false;        // rc5: its RR waits for the game's experimental opt-in, which is off (gamerules.h): no RR
                                    // prepare, toast or question; the page says so
@@ -223,6 +226,13 @@ bool WriteLauncherModelChoice(Context& ctx, const wstring& dir, char model, std:
 // model setting, also when it is unchanged. `set <game> ... --gui-apply` (a WRONGGPU_TESTING build) runs it for the tests.
 OpRequest GuiApplyRequest(const wstring& dir, const Profile& edit);
 Profile GameProfile(const wstring& dir);  // profile.ini, else the profile its wronggpu.ini implies
+// 0.7.0: the choices the player made in the game, folded into the profile so the game page shows them and an update keeps
+// them (FoldRrFromGame's counterpart for super resolution): the model choice record (wronggpu-setup\model-choice.ini) when
+// the game (OptiScaler's list, source ffx, or WrongGPU.asi's menu, source plugin) made its last choice and it names a model
+// this build can choose (a record the launcher wrote is its own decision, e.g. Model M while Model K's data is not ready,
+// and never replaces the player's choice), and the SR modes of settings.ini (m_mode / k_mode / l_mode = fast | exact, which
+// WrongGPU.asi's card writes). True when it changed `p`.
+bool FoldSrFromGame(const wstring& dir, Profile& p);
 // #219 (0.6.5): the launcher never rewrites the game's wronggpu.ini after the install (the install's defaults, the player's to
 // edit). The front end's settings it manages go into the game's state folder, wronggpu-setup\settings.ini (wg_state.h), which
 // the front end reads over wronggpu.ini: upscaler (network / amd, from the profile's wronggpu on / off) and every runtime key

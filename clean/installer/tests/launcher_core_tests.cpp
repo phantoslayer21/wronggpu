@@ -31,6 +31,8 @@
 
 #include <shlobj.h>
 #include "wg_core/settings.h"
+#include "../../fsr/src/model_choice_record.h"  // the game's model choice record (FoldSrFromGame)
+#include "../../wgshared/include/wg_state.h"
 
 using namespace wg;
 
@@ -2801,6 +2803,88 @@ int main() {
 #endif
             SetEnvironmentVariableW(L"LOCALAPPDATA", had ? saved : nullptr);
             SetEnvironmentVariableW(L"WRONGGPU_TEST_REAL_DRIVER_CACHE", hadReal ? savedReal : nullptr);
+        }
+
+        // 0.7.0: each SR model's mode (Layer::Mode: m_mode, and k_mode / l_mode with those models), Fast by default: validated,
+        // persisted in the game's state folder (settings.ini, never wronggpu.ini, no outside edit), and the choices made in the
+        // game (WrongGPU.asi's card: settings.ini; OptiScaler's list / the plugin: the model choice record) folded back into the
+        // game's profile (FoldSrFromGame, GameProfile)
+        {
+            const SettingDef* mm = FindSetting("m_mode");
+            require(mm && mm->layer == Layer::Mode && mm->tier == Tier::Basic && string(mm->def) == "fast" && string(mm->values) == "fast|exact",
+                    "m_mode: a Basic setting of its own layer, fast by default, fast or exact");
+            require((FindSetting("k_mode") != nullptr) == (WRONGGPU_MODEL_K != 0) && (FindSetting("l_mode") != nullptr) == (WRONGGPU_MODEL_L != 0),
+                    "k_mode / l_mode only in builds with Model K / Model L");
+            Profile mp = DefaultProfile();
+            wstring why;
+            require(mp.get("m_mode") == "fast" && mp.isDefault("m_mode"), "the default profile: Model M Fast");
+            require(SetSetting(mp, "m_mode", " EXACT ", &why) && mp.get("m_mode") == "exact", "m_mode=exact (case and spaces folded)");
+            require(!SetSetting(mp, "m_mode", "hybrid", &why) && why.find(L"allowed: fast, exact") != wstring::npos && mp.get("m_mode") == "exact",
+                    "m_mode refuses anything but fast / exact, and says what is allowed");
+            require(ModeKeyOf("m") == string("m_mode") && ModeKeyOf("") == string("m_mode") && ModeKeyOf("x") == nullptr,
+                    "ModeKeyOf: Model M's mode key (also for an empty model)");
+            if (FindSetting("k_mode")) require(ModeKeyOf("k") == string("k_mode") && SetSetting(mp, "k_mode", "exact", &why), "k_mode=exact");
+            if (FindSetting("l_mode")) require(ModeKeyOf("l") == string("l_mode") && SetSetting(mp, "l_mode", "exact", &why), "l_mode=exact");
+            // profile.ini: a non-default mode is written and read back; Fast (the default) leaves profile.ini as before the modes
+            const string mtext = ProfileText(mp);
+            require(mtext.find("m_mode=exact\r\n") != string::npos && ProfileText(DefaultProfile()).find("m_mode=") == string::npos,
+                    "profile.ini: m_mode=exact written; the default Fast not written");
+            const wstring mpath = Join(dir, L"modes-profile.ini");
+            WriteFileAtomic(mpath, mtext.data(), mtext.size());
+            Profile mback;
+            require(LoadProfile(mpath, mback) && mback.get("m_mode") == "exact", "profile.ini round trip keeps m_mode=exact");
+            // the state keys: the modes go to settings.ini explicitly (defaults too); wronggpu.ini never holds them
+            const auto keys = FrontEndStateKeys(mp);
+            auto stateValue = [&](const char* k) { for (auto& kv : keys) if (kv.first == k) return kv.second; return string("<none>"); };
+            require(stateValue("m_mode") == "exact" && FrontEndStateKeys(DefaultProfile()).size() == keys.size(),
+                    "FrontEndStateKeys: m_mode (explicit, also when it is the default)");
+            if (FindSetting("k_mode")) require(stateValue("k_mode") == "exact", "FrontEndStateKeys: k_mode");
+            if (FindSetting("l_mode")) require(stateValue("l_mode") == "exact", "FrontEndStateKeys: l_mode");
+            string rendered;
+            require(RenderWronggpuIni(mp, "[fsr]\r\nupscaler = network\r\n", rendered, &why) && rendered.find("m_mode") == string::npos &&
+                        rendered.find("k_mode") == string::npos && rendered.find("l_mode") == string::npos,
+                    "wronggpu.ini never gets a mode (runtime_options untouched)");
+            const string withState = WithFrontEndState("[fsr]\r\nruntime_options = model=M\r\n", keys);
+            require(withState.find("m_mode") == string::npos && OptionsOf(withState).find("model=M") != string::npos,
+                    "the effective wronggpu.ini (state folder over the file) holds no mode item");
+            require(OutsideEdits(mp, withState, "").empty() && IgnoredImportKeys(withState).empty(),
+                    "the modes in settings.ini are no outside edit and no ignored developer key");
+            require(ImportProfile(withState, "").get("m_mode") == "fast", "an import of wronggpu.ini never invents a mode");
+
+            // a game whose settings.ini (WrongGPU.asi's card wrote it) and model choice record say what the player chose in the game
+            const wstring sg = Join(dir, L"srgame");
+            EnsureDir(StateDir(sg));
+            Profile fold = DefaultProfile();
+            require(!FoldSrFromGame(sg, fold), "nothing in the state folder: nothing to fold");
+            require(wgstate::SetSettings(sg, {{"m_mode", "exact"}}).ok(), "(the card saved m_mode=exact)");
+            require(FoldSrFromGame(sg, fold) && fold.get("m_mode") == "exact" && !FoldSrFromGame(sg, fold), "settings.ini's m_mode folds into the profile once");
+            require(wgstate::SetSettings(sg, {{"m_mode", "nonsense"}}).ok() && !FoldSrFromGame(sg, fold) && fold.get("m_mode") == "exact",
+                    "a value that is not a mode is not folded");
+            require(wgstate::SetSettings(sg, {{"m_mode", "fast"}}).ok() && FoldSrFromGame(sg, fold) && fold.get("m_mode") == "fast", "back to fast");
+            if (FindSetting("model")) {
+                const std::filesystem::path rec = Join(StateDir(sg), wgchoice::kRecordFile);
+                wgchoice::Record after;
+                std::string err;
+                const char other = WRONGGPU_MODEL_L ? 'L' : 'K';
+                const string otherKey(1, static_cast<char>(tolower(other)));
+                require(wgchoice::RecordChoice(rec, other, wgchoice::Source::Launcher, &after, &err) == wgchoice::Outcome::Written, "(a launcher record)");
+                require(!FoldSrFromGame(sg, fold) && fold.get("model") == "m", "the launcher's own record is not folded (its decision, not the player's in the game)");
+                require(wgchoice::RecordChoice(rec, other, wgchoice::Source::Plugin, &after, &err) == wgchoice::Outcome::Written, "(the plugin's record)");
+                require(FoldSrFromGame(sg, fold) && fold.get("model") == otherKey && !FoldSrFromGame(sg, fold), "the model chosen in the game folds into the profile once");
+                const char* otherMode = ModeKeyOf(otherKey);
+                require(otherMode && wgstate::SetSettings(sg, {{otherMode, "exact"}}).ok() && FoldSrFromGame(sg, fold) && fold.get(otherMode) == "exact" &&
+                            fold.get("m_mode") == "fast",
+                        "that model's mode folds too; Model M's stays");
+                require(wgchoice::RecordChoice(rec, 'M', wgchoice::Source::Ffx, &after, &err) == wgchoice::Outcome::Written && FoldSrFromGame(sg, fold) &&
+                            fold.get("model") == "m",
+                        "OptiScaler's list (source ffx) back to Model M folds too");
+                // GameProfile: profile.ini, then both folds (the game page shows what the player chose in the game)
+                SaveProfile(ProfilePath(sg), DefaultProfile());
+                require(wgchoice::RecordChoice(rec, other, wgchoice::Source::Plugin, &after, &err) == wgchoice::Outcome::Written, "(the plugin's record again)");
+                const Profile shown = GameProfile(sg);
+                require(shown.get("model") == otherKey && shown.get(otherMode) == "exact" && shown.get("m_mode") == "fast",
+                        "GameProfile folds the model choice record and settings.ini's modes over profile.ini");
+            }
         }
 
         RemoveTree(dir);

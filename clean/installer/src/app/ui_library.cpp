@@ -1020,6 +1020,8 @@ static wstring BusyNote() {
         switch (v.task) {
             case T_MODEL: doing = L"Converting the Model M data…"; break;
             case T_RRDATA: doing = L"Converting the Ray Reconstruction data\u2026"; break;
+            case T_MODELK: doing = L"Converting the Model K data\u2026"; break;
+            case T_MODELL: doing = L"Converting the Model L data\u2026"; break;
             case T_SELFINSTALL: doing = L"Installing WrongGPU for this user…"; break;  // the toast's and BusyWhy's words
             case T_SELFUNINSTALL: doing = L"Uninstalling the launcher…"; break;
             case T_FIRSTRUN:  // Install for this user, or (portable, no choice) the model and the adoptions only
@@ -1118,7 +1120,7 @@ static float FeatureBanner(Gfx& gx, float x0, float y, float cw, float h, int in
     else {
         // the game page's header says the same ("Model M and Ray Reconstruction"): "on" is WrongGPU's state only, and
         // where it ran only with Ray Reconstruction off (its setup, not where it last ran: the page's Last run says that)
-        status = L"WrongGPU is on · Model M";
+        status = L"WrongGPU is on · " + ModelModeWords(e.srModel, e.srMode);
         // the page header's rule (r6 #6): after a run of Ray Reconstruction alone, or one where RR did the upscaling, Model M had no
         // part in it: "Ray Reconstruction" alone
         if (RrAloneLastRun(e)) status = L"WrongGPU is on · Ray Reconstruction";
