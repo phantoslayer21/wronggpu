@@ -12,6 +12,16 @@
 #ifndef SW_LDS_BYTES
 #error "define SW_LDS_BYTES before including swin_common.hlsli"
 #endif
+// SW_DIRECT_W 1 (Model L wave 3; swin_block.hlsl, hybrid blocks with C != 96 only): no staging of the weight units through
+// the LDS. Every fragment is read straight from the block's weights in global memory (the layout is the staged one:
+// fragment i of a unit = 256 bytes, lane l's 8 bytes at 8 l): no staging buffers, no barriers for them, and an LDS size of
+// 0 (or the expand records alone, SW_ECL > 0), i.e. the occupancy the registers allow. SW_LDS_BYTES may then be 0.
+// WG_LD_A16 2 (the wave 3 kernels' define): the 16-byte alignment contract of 1 for wg_ld128 / wg_ld4f, and for the direct
+// fragments the 8-byte alignment of sw_lfrag_b, stated by the pre-masked base (wg_platform.hlsli is not touched: Model K's
+// softmax self-check digest covers it).
+#ifndef SW_DIRECT_W
+#define SW_DIRECT_W 0
+#endif
 #if SW_LDS_BYTES > 32768
 #error "D3D12 groupshared memory is limited to 32 KB"
 #endif
@@ -28,9 +38,12 @@ int sw_mirror(int p, int n)
 // The words are 64-bit integers: the driver's compiler then reads and writes fragments as ds_load_2addr_b64 /
 // ds_store_2addr_b64 (with uint2 elements it split every access into two 32-bit halves: twice the LDS instructions,
 // and 28 more VGPRs in swin_block_c64).
+#if SW_LDS_BYTES > 0
 groupshared uint64_t sw_lds_q[SW_LDS_BYTES / 8];
+#endif
 uint2 sw_q2(uint64_t q) { return uint2((uint)q, (uint)(q >> 32)); }
 uint64_t sw_2q(uint2 v) { return (uint64_t)v.x | ((uint64_t)v.y << 32); }
+#if SW_LDS_BYTES > 0
 #define SW_LDS_GET(a) sw_q2(sw_lds_q[a])
 #define SW_LDS_PUT(a, v) (sw_lds_q[a] = sw_2q(v))
 
@@ -38,6 +51,7 @@ uint2 sw_lds_ld64(uint off) { return SW_LDS_GET(off >> 3); }
 uint4 sw_lds_ld128(uint off) { uint a = off >> 3; return uint4(SW_LDS_GET(a), SW_LDS_GET(a + 1u)); }
 void sw_lds_st64(uint off, uint2 v) { SW_LDS_PUT(off >> 3, v); }
 void sw_lds_st128(uint off, uint4 v) { uint a = off >> 3; SW_LDS_PUT(a, v.xy); SW_LDS_PUT(a + 1u, v.zw); }
+#endif
 // A loop bound the driver's compiler cannot fold (wg_grid_, the launch's workgroup count, is below 2^31, so this is
 // always 0): loops written with it stay loops instead of being unrolled, as HIP's "#pragma unroll 1" loops (the driver
 // unrolled the head and MLP loops in spite of [loop]: 43 KB of code for the C = 96 block).
@@ -50,9 +64,17 @@ uint sw_zero_bits() { return 0u - (wg_grid_ >> 31); }
 // The lane is offset by sw_zero_bits() (0): the driver's compiler then cannot prove that the unit and lane bits are disjoint,
 // keeps an addition instead of an OR, and folds 256 i into the ds_load offset (with the plain lane every fragment read
 // cost an OR and a shift).
+#if SW_DIRECT_W
+// SW_DIRECT_W: `base` = the global byte address of the lane's element of fragment 0 of the unit (SW_DFB in swin_block.hlsl,
+// masked to 8 bytes once so that the driver folds each constant fragment offset into its load); fragment i = 256 i bytes on.
+#define SW_FRAG_STRIDE 256u
+uint2 sw_lfrag_b(uint base, uint index) { return wg_mem.Load2(base + index * SW_FRAG_STRIDE); }
+#else
+#define SW_FRAG_STRIDE 32u
 uint sw_lane_base(uint unit, uint lane) { return (unit >> 3) + lane + sw_zero_bits(); }
 uint2 sw_lfrag_b(uint base, uint index) { return SW_LDS_GET(base + index * 32u); }
 uint2 sw_lfrag(uint unit, uint index, uint lane) { return sw_lfrag_b(sw_lane_base(unit, lane), index); }
+#endif
 
 // ---- FP32 sums (HIP's ISA order and fusion) -------------------------------------------------------------------------
 // hsum8(a * a) as clang contracts it: each pair is fma(a_even, a_even, a_odd * a_odd), then

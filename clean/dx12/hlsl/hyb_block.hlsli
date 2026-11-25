@@ -265,3 +265,45 @@ uint4 hyb_softmax_fin(HybSmaxPre r)
     return hyb_hpack(P);
 }
 uint4 hyb_softmax_p(v8f s, uint hh) { return hyb_softmax_fin(hyb_softmax_pre(s)); }
+
+// GELU16 -> the 8 FP16 values of the MLP's activation, arithmetic instead of the 128 KB table (HYB_GELU_POLY 1; Model L wave 3):
+// oracle.gelu_q7 on packed FP16 pairs, every step its own FP16 rounding (v_pk_{min,max,mul,add,sub}_f16 are single
+// correctly-rounded operations):
+//   y = min(max(h, -2), 2);  g = RN16(h * RN16(1/2 + RN16(y * RN16(a - RN16(b |y|)))))     a = 0x3698, b = 0x2d30
+// Exact for ALL 65,536 FP16 inputs (clean/l/tests/test_hyb_gelu_poly.py: byte for byte against hyb_tables.gelu16_q8 after
+// the FP8 point, +-inf, NaN and +-0 included: NaN -> y = -2, p4 = 0, NaN * 0 = NaN -> 0xff; -inf -> -inf * 0 = NaN -> 0xff;
+// +inf -> +inf * 1 -> the saturating pack's 0x7e). A FUSED multiply-add in either step is NOT exact (37 of 65,536 bytes
+// differ), so both multiplies feeding an add pass the same OR with an opaque zero as the norm's square (HYB_OPAQUE0): the
+// driver sees no multiply-add. hyb_isa_scan.py rule 1 looks at squares only; the kernels' fma counts (isa_checks.json) pin
+// this one (no v_pk_fma_f16 / v_fma_f16 / v_fma_mix beyond the softmax's).
+// Returns the values widened to float32 (v_cvt_f32_f16: hyb_isa_scan.py rule 2 sees FP16 values at the FP8 pack).
+// the contraction barrier on a packed pair without leaving the packed domain: the bits of both halves OR the same opaque zero
+// (one v_or_b32; going through hyb_h2u / hyb_u2h cost an unpack and a repack per pair)
+h2 hyb_opaque_h2(h2 v)
+{
+    const uint16_t o = (uint16_t)(HYB_OPAQUE0);
+    return asfloat16(asuint16(v) | uint16_t2(o, o));
+}
+v8f hyb_gelu_poly8(uint4 h)
+{
+    const h2 c2 = h2(asfloat16((uint16_t)0x4000u), asfloat16((uint16_t)0x4000u));    // +2
+    const h2 cn2 = h2(asfloat16((uint16_t)0xc000u), asfloat16((uint16_t)0xc000u));   // -2
+    const h2 ca = h2(asfloat16((uint16_t)0x3698u), asfloat16((uint16_t)0x3698u));    // Q7_GELU_A = 0.412109375
+    const h2 cb = h2(asfloat16((uint16_t)0x2d30u), asfloat16((uint16_t)0x2d30u));    // Q7_GELU_B = 0.0810546875
+    const h2 chf = h2(asfloat16((uint16_t)0x3800u), asfloat16((uint16_t)0x3800u));   // 1/2
+    const uint w[4] = { h.x, h.y, h.z, h.w };
+    uint go[4];
+    [unroll] for (uint i = 0; i < 4; ++i) {
+        const h2 x = hyb_u2h(w[i]);
+        const h2 y = min(max(x, cn2), c2);
+        precise h2 p1 = abs(y) * cb;
+        const h2 p1b = hyb_opaque_h2(p1);
+        const h2 p2 = ca - p1b;
+        precise h2 p3 = y * p2;
+        const h2 p3b = hyb_opaque_h2(p3);
+        const h2 p4 = chf + p3b;
+        const h2 r = x * p4;
+        go[i] = hyb_h2u(r);
+    }
+    return hyb_h2f8(uint4(go[0], go[1], go[2], go[3]));
+}

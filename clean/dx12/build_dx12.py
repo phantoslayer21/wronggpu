@@ -229,9 +229,10 @@ MODEL_L_ONLY = {"swin_block_c64_add_ex_nc", "lev/input_encoder_q20", "lev/input_
 def is_model_l(decl):
     """A port of one of Model L's code objects (#89: l_swin.co, l_ops.co, l_post.co, l_enc_values.co), a Model L kernel
     of the direct route with no code object (co "-", named l_*), a kernel only Model L launches (MODEL_L_ONLY), or a
-    kernel of the hybrid form (named *_hyb: WG_L_FORM = hybrid, Model L's route only so far)."""
+    kernel of the hybrid form (named *_hyb: WG_L_FORM = hybrid, Model L's route only so far; *_hyb_w3 / *_hyb_w3p / *_hyb_gp: its wave 3
+    variants, WG_L_W3)."""
     return (decl["co"].startswith("l_") or decl["name"].startswith("l_") or decl["name"] in MODEL_L_ONLY
-            or decl["name"].endswith("_hyb"))
+            or decl["name"].endswith("_hyb") or re.search(r"_hyb_(w3p?|gp)$", decl["name"]) is not None)
 
 
 def is_frame_gen(decl):

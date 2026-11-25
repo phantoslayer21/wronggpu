@@ -109,6 +109,24 @@
 #define SW_GELU_LATE0 0
 #endif
 #endif
+// Model L wave 3 levers (hybrid blocks; default off: the wave 2 kernels are byte for byte what they were)
+// HYB_GELU_POLY 1: q8(GELU16(h)) of the MLP by arithmetic on packed FP16 (hyb_gelu_poly8, hlsl/hyb_block.hlsli; exact for
+//     all 65,536 inputs) instead of the 128 KB table: no 8 u16 loads per tile (the table path's VMEM gathers). Each tile's
+//     FP8 point is hyb_q8 (one wave-uniform branch per tile). 2: the group's two tiles share one hyb_q8_pair (one branch,
+//     16 live float32 values instead of 8) and the whole GELU sits after the next group's W1 chain.
+// SW_DIRECT_W 1: the weights read straight from global memory, no LDS staging (swin_common.hlsli).
+#ifndef HYB_GELU_POLY
+#define HYB_GELU_POLY 0
+#endif
+#ifndef SW_DIRECT_W
+#define SW_DIRECT_W 0
+#endif
+#if (HYB_GELU_POLY || SW_DIRECT_W) && !SW_HYB
+#error "HYB_GELU_POLY / SW_DIRECT_W: hybrid kernels only (SW_HYB=1)"
+#endif
+#if HYB_GELU_POLY && SW_Q7_CHUNK
+#error "HYB_GELU_POLY: the plain hybrid form (the q7c form's GELU is not built here)"
+#endif
 // SW_ECL > 0 with SW_HYB (the hybrid decoder blocks with their expand fused in: swin_block_c96_add_ex_hyb,
 // swin_block_c64_add_ex_hyb): SW_ADD only, plain FP8 (no q7c chunks), see hyb_fused_expand below
 #if SW_HYB && (SW_GELU != 0 || (SW_ECL > 0 && (!SW_ADD || SW_Q7_CHUNK)) || SW_NORM_R2 || SW_SMAX_STAGED || SW_SMAX_ADDST || SW_REV_PHI || SW_CLAMP_SKIP || SW_N2_BATCH)
@@ -239,7 +257,15 @@ WG_ARGS_END
 #define THREADS WG_BLOCK
 #define PFMAX ((MAXU / 16 + THREADS - 1) / THREADS)   // staged 16-byte chunks per lane, largest unit
 
+#if SW_DIRECT_W
+#if SW_ECL > 0
+#define SW_LDS_BYTES (128 * SW_C)   // the expand records of the 8 windows: 128 records of C bytes (fused_expand)
+#else
+#define SW_LDS_BYTES 0
+#endif
+#else
 #define SW_LDS_BYTES (2 * MAXU)
+#endif
 #include "swin_common.hlsli"
 #include "speed_swin.hlsli"
 #include "speed_c64.hlsli"
@@ -528,6 +554,25 @@ void sw_gelu_fin(v8f h[GROUP], SwGeluPre p, out uint2 q[GROUP])
 uint L_head(uint hd) { return L_STREAM + hd * HEAD_BYTES; }
 uint L_mlp(uint u) { return L_STREAM + SW_HEADS * HEAD_BYTES + u * MLP_BYTES; }
 
+#if SW_DIRECT_W
+#if SW_Q7_CHUNK || SW_MEGA || SW_C == 96 || SW_C == 128 || SW_MLP_DEP || SW_STAGE_LATE || SW_GL_LDS
+#error "SW_DIRECT_W: the plain hybrid blocks of C = 32 and 64 only (no q7c chunks, bottleneck queue, table in the LDS)"
+#endif
+// the lane's element of fragment 0 of the unit at byte `unit` of the block's weights, masked to 8 bytes once (the loads'
+// constant offsets then fold into the instruction); sw_zero_bits keeps the additions as additions (see sw_lane_base)
+#define SW_DFB(unit) (((unit) + lane * 8u + sw_zero_bits()) & ~7u)
+#define SW_HEAD_FB(hd) SW_DFB(w + L_head(hd))
+#define SW_MLP_FB(u) SW_DFB(w + L_mlp(u))
+// no staging barriers: nothing is written to the LDS for the weights (the expand records' barrier is separate)
+#define SW_WBAR() ((void)0)
+#define SW_E_LDS 0u
+#else
+#define SW_HEAD_FB(hd) sw_lane_base(buf * MAXU, lane)
+#define SW_MLP_FB(u) (sw_lane_base(buf * MAXU, lane) + SW_MDZ)
+#define SW_WBAR() wg_barrier_lds()
+#define SW_E_LDS MAXU
+#endif
+
 // Inner FP8 pack (HIP pack_in<SAFE>) with the driver conversion (wave-uniform control flow); the output pack is sw_pack_q8.
 uint2 pack_in(v8f d)
 {
@@ -585,6 +630,11 @@ void hd_st8(uint word, v8f a)
 // ---- Stager<MAXU, THREADS>: global -> registers (fetch) -> LDS (commit), `chunks` 16-byte chunks (a compile-time
 // constant at every call, so the row tests fold): lane tid moves chunks tid, tid + THREADS, ...; in a partial last row the
 // lanes past the end re-load / re-store the unit's last chunk (same value: no per-lane branch).
+#if SW_DIRECT_W
+struct Stager { uint none; };   // nothing is staged: the weights are read from global memory where they are used
+void st_fetch(inout Stager s, uint src, uint chunks, uint tid) {}
+void st_commit(Stager s, uint dst, uint chunks, uint tid) {}
+#else
 struct Stager { uint4 pre[PFMAX]; };
 void st_fetch(inout Stager s, uint src, uint chunks, uint tid)
 {
@@ -608,6 +658,7 @@ void st_commit(Stager s, uint dst, uint chunks, uint tid)
         }
     }
 }
+#endif
 
 void load_frags_g(uint base, uint off, out uint2 f[KC])
 {
@@ -983,7 +1034,7 @@ WG_KERNEL(SW_ENTRY)
 #if FZ_XO
     fz_wait_b5(nwx, nwin, tid);
 #endif
-    fused_expand(w + L_TAIL, MAXU, nwx, nwin, tid, (int)wg_block_id(), lowp);
+    fused_expand(w + L_TAIL, SW_E_LDS, nwx, nwin, tid, (int)wg_block_id(), lowp);
     const uint lpw = WaveReadLaneAt(lowp, wave_id);   // this wave's window (win: the same clamp)
 #if SW_HYB
     // the coarse source position of E (sw_coarse_src): the mirrored group, the member's own sub-pixel
@@ -1048,13 +1099,17 @@ WG_KERNEL(SW_ENTRY)
     }
 #endif
     st_commit(stage, 0u, HEAD_BYTES / 16, tid);
-    wg_barrier_lds();
+#if !SW_DIRECT_W || SW_ECL > 0
+    wg_barrier_lds();   // direct weights: only the expand records need it
+#endif
 #if SW_ECL > 0
     [unroll] for (uint i = 0; i < KC / 2; ++i) {
-        uint4 v = sw_lds_ld128(MAXU + eslot * SW_C + hh * HALF + 16u * i);
+        uint4 v = sw_lds_ld128(SW_E_LDS + eslot * SW_C + hh * HALF + 16u * i);
         xa[2 * i] = v.xy; xa[2 * i + 1] = v.zw;
     }
+#if !SW_DIRECT_W
     wg_barrier_lds();   // read before the buffer they live in is refilled
+#endif
 #endif
     uint buf = 0u;
 
@@ -1178,7 +1233,7 @@ WG_KERNEL(SW_ENTRY)
         const bool last = hd + 1u == nheads;
         if (last) st_fetch(stage, w + L_mlp(0), MLP_BYTES / 16, tid);   // uniform branches: unit sizes stay constants
         else st_fetch(stage, w + L_head(hd + 1u), HEAD_BYTES / 16, tid);
-        const uint U = buf * MAXU, fb = sw_lane_base(U, lane);
+        const uint fb = SW_HEAD_FB(hd);
 #if SW_C == 64
         // c64: the head's position bias issued before the QKV products (load latency hidden; about 1 us faster). The
         // c96 kernels keep it below: there the earlier load made the register allocator add about 60 moves (+23 us).
@@ -1474,13 +1529,13 @@ WG_KERNEL(SW_ENTRY)
 #if SW_NORM2_EARLY
         if (!last) {
             st_commit(stage, (buf ^ 1u) * MAXU, HEAD_BYTES / 16, tid);
-            wg_barrier_lds();
+            SW_WBAR();
             buf ^= 1u;
         }
 #else
         if (last) st_commit(stage, (buf ^ 1u) * MAXU, MLP_BYTES / 16, tid);
         else st_commit(stage, (buf ^ 1u) * MAXU, HEAD_BYTES / 16, tid);
-        wg_barrier_lds();
+        SW_WBAR();
         buf ^= 1u;
 #endif
     }
@@ -1492,7 +1547,7 @@ WG_KERNEL(SW_ENTRY)
         [unroll] for (uint k = 0; k < KC; ++k) { ng2[k] = wg_load8f(g2, 32u * k); nb2[k] = wg_load8f(b2, 64u * k); }
     }
     st_commit(stage, (buf ^ 1u) * MAXU, MLP_BYTES / 16, tid);
-    wg_barrier_lds();
+    SW_WBAR();
     buf ^= 1u;
 #endif
 
@@ -1740,7 +1795,7 @@ WG_KERNEL(SW_ENTRY)
         // hyb_gelu_pre(hcur_h[0..1]) (16x u16 global LUT loads) directly across W1(j0 + GROUP) FP8 WMMAs!
         uint4 hcur_h[GROUP];
         {
-            const uint fb0 = sw_lane_base(buf * MAXU, lane) + SW_MDZ;
+            const uint fb0 = SW_MLP_FB(u);
             uint2 f1[GROUP][KC];
             [unroll] for (uint g = 0; g < GROUP; ++g)
                 [unroll] for (uint kc = 0; kc < KC; ++kc) f1[g][kc] = sw_lfrag_b(fb0, g * 2u * KC + kc);
@@ -1751,7 +1806,7 @@ WG_KERNEL(SW_ENTRY)
             [unroll] for (uint g3o = 0; g3o < GROUP; ++g3o) hcur_h[g3o] = hyb_rn16x8(hc[g3o]);
         }
         [unroll] for (uint j0 = 0; j0 < HPU; j0 += GROUP) {
-            const uint fb = sw_lane_base(buf * MAXU, lane) + SW_MDZ + j0 * (2u * KC * 32u);
+            const uint fb = SW_MLP_FB(u) + j0 * (2u * KC * SW_FRAG_STRIDE);
 #if SW_HYB_DUMP
             [unroll] for (uint ghd = 0; ghd < GROUP; ++ghd)
                 HD_ST8(HD_H + 8u * (u * HPU + j0 + ghd), hyb_h2f8(hcur_h[ghd]));
@@ -1759,8 +1814,10 @@ WG_KERNEL(SW_ENTRY)
             uint4 hnext_h[GROUP];
             uint2 hf[GROUP];
             if (j0 + GROUP < HPU) {
+#if !HYB_GELU_POLY
                 const HybGeluPre gp0 = hyb_gelu_pre(hcur_h[0]);
-                const uint fbn = fb + GROUP * (2u * KC * 32u);
+#endif
+                const uint fbn = fb + GROUP * (2u * KC * SW_FRAG_STRIDE);
                 v8f hn[GROUP];
                 [unroll] for (uint g2 = 0; g2 < GROUP; ++g2) hn[g2] = wg_load8f(b1d, (u * HPU + j0 + GROUP + g2) * 64u);
                 [unroll] for (uint kc0 = 0; kc0 < KC / 2; ++kc0) {
@@ -1768,21 +1825,40 @@ WG_KERNEL(SW_ENTRY)
                     [unroll] for (uint g = 0; g < GROUP; ++g) f1[g] = sw_lfrag_b(fbn, g * 2u * KC + kc0);
                     [unroll] for (uint g3 = 0; g3 < GROUP; ++g3) hn[g3] = wg_wmma_fp8(f1[g3], mf[kc0], hn[g3]);
                 }
+#if HYB_GELU_POLY == 1
+                hf[0] = hyb_q8(hyb_gelu_poly8(hcur_h[0]));
+#elif !HYB_GELU_POLY
                 hf[0] = hyb_gelu_fin(gp0);
                 const HybGeluPre gp1 = hyb_gelu_pre(hcur_h[1]);
+#endif
                 [unroll] for (uint kc1 = KC / 2; kc1 < KC; ++kc1) {
                     uint2 f1[GROUP];
                     [unroll] for (uint g = 0; g < GROUP; ++g) f1[g] = sw_lfrag_b(fbn, g * 2u * KC + kc1);
                     [unroll] for (uint g3 = 0; g3 < GROUP; ++g3) hn[g3] = wg_wmma_fp8(f1[g3], mf[kc1], hn[g3]);
                 }
+#if HYB_GELU_POLY == 1
+                hf[1] = hyb_q8(hyb_gelu_poly8(hcur_h[1]));
+#elif HYB_GELU_POLY == 2
+                hyb_q8_pair(hyb_gelu_poly8(hcur_h[0]), hyb_gelu_poly8(hcur_h[1]), hf[0], hf[1]);
+#else
                 hf[1] = hyb_gelu_fin(gp1);
+#endif
                 [unroll] for (uint g3o = 0; g3o < GROUP; ++g3o) hnext_h[g3o] = hyb_rn16x8(hn[g3o]);
             } else {
+#if !HYB_GELU_POLY
                 const HybGeluPre gp0 = hyb_gelu_pre(hcur_h[0]);
                 const HybGeluPre gp1 = hyb_gelu_pre(hcur_h[1]);
+#endif
                 [unroll] for (uint g7 = 0; g7 < GROUP; ++g7) hnext_h[g7] = hcur_h[g7];
+#if HYB_GELU_POLY == 1
+                hf[0] = hyb_q8(hyb_gelu_poly8(hcur_h[0]));
+                hf[1] = hyb_q8(hyb_gelu_poly8(hcur_h[1]));
+#elif HYB_GELU_POLY == 2
+                hyb_q8_pair(hyb_gelu_poly8(hcur_h[0]), hyb_gelu_poly8(hcur_h[1]), hf[0], hf[1]);
+#else
                 hf[0] = hyb_gelu_fin(gp0);
                 hf[1] = hyb_gelu_fin(gp1);
+#endif
             }
             uint2 f2[GROUP][KC];
             [unroll] for (uint g4 = 0; g4 < GROUP; ++g4)
@@ -1858,7 +1934,11 @@ WG_KERNEL(SW_ENTRY)
             uint2 hf[GROUP];
 #if SW_HYB
             [unroll] for (uint gh = 0; gh < GROUP; ++gh) {
+#if HYB_GELU_POLY
+                hf[gh] = hyb_q8(hyb_gelu_poly8(hyb_rn16x8(hcur[gh])));
+#else
                 hf[gh] = hyb_gelu_q8(hyb_rn16x8(hcur[gh]));
+#endif
                 HD_ST8(HD_H + 8u * (u * HPU + j0 + gh), hyb_round16(hcur[gh]));
             }
 #elif SW_GELU != 0
@@ -1922,7 +2002,7 @@ WG_KERNEL(SW_ENTRY)
 #if !SW_COMMIT_EARLY
             st_commit(stage, (buf ^ 1u) * MAXU, MLP_BYTES / 16, tid);
 #endif
-            wg_barrier_lds();
+            SW_WBAR();
             buf ^= 1u;
         }
 #if SW_REV_PHI

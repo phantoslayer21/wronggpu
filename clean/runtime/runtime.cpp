@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Per-frame runtime, core part (spec 10 sections 0, 2-5, 7, 8). See wg_runtime.h and clean/FORMATS.md.
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
@@ -366,6 +367,11 @@ struct Runtime {
   int dev_bneck_abort = -1;   // WG_DEV_BNECK_ABORT (developer builds): the frame whose bottleneck is made to time out
   bool diag_hooks_ignored = false;   // a release build ignored the diagnostic launch hooks on the hybrid route
   std::vector<std::pair<std::string, std::string>> hyb_map;  // M-form route name -> its hybrid twin
+  // Model L wave 3 (WG_L_W3, native D3D12 hybrid route): a launch's kernel as resolved above (the hybrid twin, or the plain name
+  // of l_project_gather / l_dec_project) -> its wave 3 kernel (the same arguments and bytes; the wave 2 kernels stay in the
+  // manifest, so each lever is switchable): see create
+  std::vector<std::pair<std::string, std::string>> w3_map;
+  unsigned l_w3 = 0;  // the mask in force (0 = every kernel its wave 2 form)
   DRow drow;
   int block_threads[5] = {256, 256, 256, 256, 256}, gemm_threads = 256, nt = 2, wpw[3] = {1, 1, 1};  // = variants.DEFAULT_GEOMETRY
   int block_wpg[5] = {0, 0, 0, 0, 0};  // windows per workgroup per block kernel; 0 = threads / 32 * wpw
@@ -829,6 +835,49 @@ struct Runtime {
         l_exfuse_env = !(ef && std::string(ef) == "0");
         l_exfuse = l_exfuse_env &&
                    manifest_missing({"swin_block_c96_add_ex_hyb", "swin_block_c64_add_ex_hyb"}).empty();
+        // WG_L_W3: a mask of the wave 3 levers (default 0x17 = bits 0, 1, 2, 4; 0 = the wave 2 kernels), each lever its own kernels
+        // in the manifest, selected only when the manifest has them (a manifest without them runs the wave 2 kernel: the same
+        // bytes):
+        //   0x01 the C = 32 blocks (l_swin_block_c32_enc_lin_hyb, l_swin_block_c32_dec_coef12_hyb) with direct weights (no LDS
+        //        staging) and the arithmetic GELU; 0x08 (when 0x01 is clear): the C = 32 blocks with the arithmetic GELU only
+        //   0x02 the C = 64 blocks (swin_block_c64_hyb, swin_block_c64_add_ex_hyb), the same two levers
+        //   0x04 the C = 96 blocks (swin_block_c96_hyb, swin_block_c96_add_ex_hyb) and the bottleneck (swin_bneck6_hyb): the
+        //        arithmetic GELU; 0x20 (with 0x04): the C = 96 blocks with SW_MLP_PAIRS / SW_COMMIT_EARLY / SW_NORM2_EARLY
+        //   0x10 l_project_gather, l_dec_project in wave64
+        unsigned w3 = 0x17;
+        const char* w3e = std::getenv("WG_L_W3");
+        if (w3e && *w3e) {
+          char* end = nullptr;
+          const unsigned long v = std::isdigit((unsigned char)*w3e) ? std::strtoul(w3e, &end, 0) : 0xffffffffUL;
+          if (v > 0x3f || (end && *end))
+            return fail("WG_L_W3: unknown value \"" + std::string(w3e) + "\" (a mask of 0x01 .. 0x20, 0 = off)");
+          w3 = (unsigned)v;
+        }
+        l_w3 = w3;
+        auto w3add = [&](const char* from, const std::string& to) {
+          if (std::find(have.begin(), have.end(), to) != have.end()) w3_map.push_back({from, to});
+        };
+        if (w3 & 0x01) {
+          w3add("l_swin_block_c32_enc_lin_hyb", "l_swin_block_c32_enc_lin_hyb_w3");
+          w3add("l_swin_block_c32_dec_coef12_hyb", "l_swin_block_c32_dec_coef12_hyb_w3");
+        } else if (w3 & 0x08) {
+          w3add("l_swin_block_c32_enc_lin_hyb", "l_swin_block_c32_enc_lin_hyb_gp");
+          w3add("l_swin_block_c32_dec_coef12_hyb", "l_swin_block_c32_dec_coef12_hyb_gp");
+        }
+        if (w3 & 0x02) {
+          w3add("swin_block_c64_hyb", "swin_block_c64_hyb_w3");
+          w3add("swin_block_c64_add_ex_hyb", "swin_block_c64_add_ex_hyb_w3");
+        }
+        if (w3 & 0x04) {
+          const char* sfx = (w3 & 0x20) ? "_w3p" : "_w3";
+          w3add("swin_block_c96_hyb", std::string("swin_block_c96_hyb") + sfx);
+          w3add("swin_block_c96_add_ex_hyb", std::string("swin_block_c96_add_ex_hyb") + sfx);
+          w3add("swin_bneck6_hyb", "swin_bneck6_hyb_w3");
+        }
+        if (w3 & 0x10) {
+          w3add("l_project_gather", "l_project_gather_w64");
+          w3add("l_dec_project", "l_dec_project_w64");
+        }
       }
     }
     if (m_hyb_d3d12) {   // Model M on the hybrid twins (c.backend == 3, set above); each kernel refused by name when missing
@@ -1962,6 +2011,8 @@ struct Runtime {
                       (cfg.backend == 3 && p12 ? "l_post_recon_p12" : "l_post_recon");
     if (l_hyb_d3d12)   // l_dec_skip: the decoder block's skip S = the encoder block's map l_x3 (RN16(E + S))
       kernels_text += " l_hyb_d3d12=on hyb_twins=" + std::to_string(hyb_map.size() / 2) + " l_dec_skip=l_x3" +
+                      // Model L wave 3: the mask in force and how many launches it routes to a wave 3 kernel
+                      " l_w3=" + std::to_string(l_w3) + " w3_kernels=" + std::to_string(w3_map.size()) +
                       // the arena tables (native D3D12; "off" on the HIP twins' route, whose device has none)
                       std::string(" hyb_tables=") + (dev->hyb_tables() ? "on" : "off");
     if (m_hyb_d3d12)   // Model M on the hybrid twins: dec1's map stored, dec0 = d1p12/dec0_q7
@@ -2098,7 +2149,7 @@ struct Runtime {
       if (n == k) dev->unordered_next();
     for (const auto& m : ((ab_block && ksub_b) ? ksub_ab : ksub_list))
       if (m.first == k) k = m.second.c_str();
-    std::string hyb_k;
+    std::string hyb_k, w3_k;
     if (hyb_d3d12()) {
       const std::string kk = k;
       const auto it = std::find_if(hyb_map.begin(), hyb_map.end(), [&](const auto& m) { return m.first == kk; });
@@ -2116,6 +2167,12 @@ struct Runtime {
                         " in the kernel manifest; refusing the frame (no mix with the M-form kernels)");
       }
     }
+    for (const auto& m : w3_map)   // Model L wave 3 (WG_L_W3): the kernel as resolved -> its wave 3 form
+      if (m.first == k) {
+        w3_k = m.second;
+        k = w3_k.c_str();
+        break;
+      }
     if (pending_mark >= 0) {
       const int e = pending_mark;
       pending_mark = -1;

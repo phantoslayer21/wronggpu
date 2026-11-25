@@ -89,15 +89,23 @@ const Signature kSignatures[] = {
     {"coef_decoder", "ppppppppD"},          // Model M's decoder (also its pack12 form)
     {"swin_block_c96_add_ex_hyb", "ppppiiiip"},  // the fused decoder blocks (WG_L_EXFUSE): the blocks' arguments, then aux
     {"swin_block_c64_add_ex_hyb", "ppppiiiip"},  // (null: unused by the expand kernels)
+    {"swin_block_c96_add_ex_hyb_w3", "ppppiiiip"},   // Model L wave 3 (WG_L_W3): the same arguments as the wave 2 kernels
+    {"swin_block_c96_add_ex_hyb_w3p", "ppppiiiip"},
+    {"swin_block_c64_add_ex_hyb_w3", "ppppiiiip"},
     {"swin_block_*", "ppppiiii"},           // Model M's blocks: x, skip, out, w, H, W, ox, oy
     {"swin_bneck6_hyb", "ppppppppppiiiiiii"},  // the hybrid bottleneck in one launch (speed lever 4): x, out, tmp,
                                                // sync, b0 ... b5's blobs, H, W, even / odd offsets, workgroups
+    {"swin_bneck6_hyb_w3", "ppppppppppiiiiiii"},  // wave 3: the same arguments
     {"l_swin_block_c32_dec_coef12_nc", "ppppiiiippppii"},  // the decoder block with l_coef_pack12 folded in: then
                                                            // A, C, latent, dec0.coef, rw, rh (native D3D12, fusion lc)
     {"l_swin_block_c32_enc_lin_nc", "ppppiiiipp"},  // the encoder block with the linears as its prologue (fusion
                                                     // le): x = q, then enc0.Win1, enc0.Win2
     {"l_swin_block_c32_enc_lin_hyb", "ppppiiiipp"},      // its hybrid twin (speed lever 3; the same arguments)
     {"l_swin_block_c32_dec_coef12_hyb", "ppppiiiippppii"},  // its hybrid twin (speed lever 3; the same arguments)
+    {"l_swin_block_c32_enc_lin_hyb_w3", "ppppiiiipp"},      // Model L wave 3 (WG_L_W3): the same arguments
+    {"l_swin_block_c32_enc_lin_hyb_gp", "ppppiiiipp"},
+    {"l_swin_block_c32_dec_coef12_hyb_w3", "ppppiiiippppii"},
+    {"l_swin_block_c32_dec_coef12_hyb_gp", "ppppiiiippppii"},
     {"l_swin_block_c32*", "ppppiiii"},      // Model L's blocks (clean/l/FORMATS.md)
     {"l_q7_block_*", "pppppiiii"},  // the FP16-form blocks (l_q7.co / l_q7w.co, their hybrid builds): x, skip, out,
                                     // w, the tables, H, W, ox, oy
@@ -108,6 +116,8 @@ const Signature kSignatures[] = {
     {"l_linear_32_32_fused", "ppppi"},  // the two in one: q, x2, Win1, Win2, npix (native D3D12, fusion ll)
     {"l_project_gather", "pppii"},
     {"l_dec_project", "pppii"},
+    {"l_project_gather_w64", "pppii"},  // Model L wave 3 (WG_L_W3 bit 4): the wave64 forms, the same arguments
+    {"l_dec_project_w64", "pppii"},
     {"l_coef", "ppppppD"},
     {"l_post_recon", "ppppppppppppPp"},  // Model M's post_recon arguments (clean/l/FORMATS.md step 5)
     {"l_coef_pack12", "ppppppD"},  // the same arguments (B unused)
