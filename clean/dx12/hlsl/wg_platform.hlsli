@@ -37,8 +37,18 @@ globallycoherent RWByteAddressBuffer wg_mem_gc : register(u1);  // the same memo
 static uint wg_tid_;   // lane index in the workgroup (HIP threadIdx.x)
 static uint wg_bid_;   // workgroup index in the grid (HIP blockIdx.x)
 
+#ifndef WG_Z_GRID
+#define WG_Z_GRID 0
+#endif
+#if WG_Z_GRID   // a kernel declared with WG_Z_GRID=1 is launched as (groups, 1, N): wg_gid_z() is the z slice (0 .. N - 1)
+#define WG_KERNEL(name) [numthreads(WG_BLOCK, 1, 1)] [WaveSize(WG_WAVE)] \
+    void name(uint wg_sv_tid_ : SV_GroupThreadID, uint3 wg_sv_gid3_ : SV_GroupID)
+#define wg_sv_gid_ (wg_sv_gid3_.x)
+#define wg_gid_z() (wg_sv_gid3_.z)
+#else
 #define WG_KERNEL(name) [numthreads(WG_BLOCK, 1, 1)] [WaveSize(WG_WAVE)] \
     void name(uint wg_sv_tid_ : SV_GroupThreadID, uint wg_sv_gid_ : SV_GroupID)
+#endif
 #if WG_REV_ORDER   // a kernel declared with WG_REV_ORDER=1: workgroup g does the work of workgroup G - 1 - g (the same
                   // bytes; the last-written part of its input, likelier still in the caches, first)
 #define WG_SETUP() (wg_tid_ = wg_sv_tid_, wg_bid_ = wg_grid_ - 1u - (wg_sv_gid_ + wg_group_base_))

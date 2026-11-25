@@ -54,14 +54,25 @@ enum Kernel : uint32_t {
     kPairC64, kPairC32,                                                                 // A7: net2 residual pairs
     kOutTail, kFineL1, kFinePackL1,                                                     // A14: output pyramid tail
     kMConv2MidCells,                                                                    // A6: net1_01 builds its cells
+    // Wave 2 (the fuse2 bits 64 .. 1024): exact variants of kernels above, each used only when its DXIL is present
+    kFill16P2,                                                                          // A15: fill without divisions
+    kLiteBlendB, kLiteBlendPackB, kLiteBlendT, kLiteBlendPackT, kLiteBlendBT, kLiteBlendPackBT, kWeightsB,   // A16 (B) / A17 (T)
+    kFullBlendB, kFullBlendMergeB,                                                      // A16
+    kOutPullB, kOutPullPackB, kOutPullQ, kOutPullPackQ, kOutPullBQ, kOutPullPackBQ,     // A16 (B) / A17 (Q)
+    kN2zm1b1, kN2zm1b2, kN2zm2b1, kN2zm2b2, kN2zm2b4, kN2zm1b4s, kN2zm1b2s, kN2zm1b1u, kN2zm1b2u, kN2zm2b4u,
+    kN2zm3b2u, kN2zm3b4u, kN2zh3b1u, kN2zh3b1uS3,                                       // A18: z-sliced net2 convolutions
     kKernelCount,
 };
 // the Wave 1B levers (bits of FgD3d12ExecutorDesc::fuse2 when it is a mask)
 enum Fuse2Bit : uint32_t {
-    kF2Cells = 1, kF2Pair = 2, kF2Upwarp = 4, kF2Weights = 8, kF2Tail = 16, kF2X3 = 32, kF2All = 63,
+    kF2Cells = 1, kF2Pair = 2, kF2Upwarp = 4, kF2Weights = 8, kF2Tail = 16, kF2X3 = 32,
+    // Wave 2, all bit-exact: A15 fill16 without divisions, A16 bilinear taps as 16 / 8-byte row loads, A17 the light blend on
+    // 32 x 8 tiles with 8-byte pair stores and the output pull skipping its division on hole-free tiles, A18 net2's
+    // convolutions of every generated index of a batch in one (groups, 1, N) launch
+    kF2Fill = 64, kF2Bil = 128, kF2Tile = 256, kF2Pow2 = 512, kF2NetZ = 1024, kF2All = 2047,
     // the levers that won in paired ABBA runs at 1440p (A6 net1 cells, A14 pyramid tail); the others are exact but cost GPU time
     // (A13 weights in the blends, A7 net2 pairs, A9 upwarp in L14, A12 RGB X0 / X1) and stay opt-in (a mask, e.g. 63)
-    kF2Default = kF2Cells | kF2Tail,
+    kF2Default = kF2Cells | kF2Tail | kF2Fill | kF2Bil | kF2Tile | kF2Pow2 | kF2NetZ,   // 17 is the Wave 1B default
 };
 constexpr uint32_t kFirstTurbo = kFineMask;  // a pipeline of these that the device refuses is dropped, not fatal
 constexpr uint32_t kFirstFull = kFullBlend;
@@ -85,6 +96,8 @@ bool KernelNeeded(uint32_t k, bool full, FgNet2Path path) {
     if (k == kOutPullPack || k == kOutPushFinePack || k == kFullBlendMerge) return full;  // Full path only
     if ((k >= kFullBlendW && k <= kOutPullPackX3) || k == kOutTail || k == kFineL1 || k == kFinePackL1) return full;
     if (k == kN2m1b2Uw || k == kN2m1b2sUw || k == kPairC64 || k == kPairC32) return full && path == FgNet2Path::Fast;
+    if (k >= kN2zm1b1 && k <= kN2zh3b1uS3) return full && path == FgNet2Path::Fast;
+    if (k >= kFullBlendB && k <= kOutPullPackBQ) return full;   // the Full path's A16 / A17 variants
     if (k < kFirstFull || k >= kFirstOptional) return true;
     if (!full) return false;
     if (k == kNet2Conv || k == kNet2Up2 || k == kNet2Warp) return path == FgNet2Path::Exact;
@@ -141,6 +154,15 @@ const char* const kKernelNames[kKernelCount] = {
     "fg_net2_mpair_res_c64", "fg_net2_mpair_res_c32",
     "fg_out_tail", "fg_out_push_fine_l1", "fg_out_push_fine_pack_l1",
     "fg_mconv2_mid_cells",
+    "fg_lite_fill16_p2",
+    "fg_lite_blend_b", "fg_lite_blend_pack_b", "fg_lite_blend_t", "fg_lite_blend_pack_t", "fg_lite_blend_bt",
+    "fg_lite_blend_pack_bt", "fg_lite_weights_b",
+    "fg_full_blend_b", "fg_full_blend_merge_b",
+    "fg_out_pull_b", "fg_out_pull_pack_b", "fg_out_pull_q", "fg_out_pull_pack_q", "fg_out_pull_bq", "fg_out_pull_pack_bq",
+    "fg_net2_mconv_m1b1_z", "fg_net2_mconv_m1b2_z", "fg_net2_mconv_m2b1_z", "fg_net2_mconv_m2b2_z",
+    "fg_net2_mconv_m2b4_z", "fg_net2_mconv_m1b4s_z", "fg_net2_mconv_m1b2s_z", "fg_net2_mconv_m1b1u_z",
+    "fg_net2_mconv_m1b2u_z", "fg_net2_mconv_m2b4u_z", "fg_net2_mconv_m3b2u_z", "fg_net2_mconv_m3b4u_z",
+    "fg_net2_mconv_h3b1u_z", "fg_net2_mconv_h3b1u_s3_z",
 };
 static_assert(sizeof(kKernelNames) / sizeof(*kKernelNames) == kKernelCount, "one name per kernel");
 
@@ -695,6 +717,12 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
     bool x3_on = false;             // A12: X0 / X1 hold r, g, b only
     bool tail_on = false;           // A14: the pyramid's coarse pushes in one workgroup
     bool l1_on = false;             // A14: level 1 is pushed inside the fine pass
+    bool fill_p2_on = false;        // A15: fg_lite_fill16_p2 for the periods 1, 2, 4
+    bool bil_on = false;            // A16: the bilinear taps as row loads (the _b kernels, where present)
+    bool tile_on = false;           // A17: the light blend on 32 x 8 tiles (the _t kernels)
+    bool pow2_on = false;           // A17: the output pull skips its division on hole-free tiles (the _q kernels)
+    bool netz_on = false;           // A18: net2's per-index launches of a batch as one (groups, 1, N) launch
+    bool want_netz_env = true;      // WG_FG_NET2_BATCH=0 turns A18 off whatever the mask says
     bool hole_fused = false;  // the fine pass already ran the hole mask of this frame (the HoleMask op is then empty)
     // the fused / retiled kernels (kFineMask, kInpaintTiled, kInterm2) are used when present
     bool Fused(uint32_t k) const { return want_fuse && pso[k] != nullptr; }
@@ -997,11 +1025,28 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                 pso[kFullBlendMergeX3] && (!full_weights_on || (pso[kFullBlendWX3] && pso[kFullBlendMergeWX3]));
         tail_on = full && Fused2(kF2Tail, kOutTail);
         l1_on = full && Fused2(kF2Tail, kFineL1) && pso[kFinePackL1];
+        fill_p2_on = Fused2(kF2Fill, kFill16P2);
+        bil_on = (want_fuse2 & kF2Bil) != 0;
+        tile_on = (want_fuse2 & kF2Tile) != 0;
+        pow2_on = full && (want_fuse2 & kF2Pow2) != 0;
+        netz_on = full && fast() && want_netz_env && (want_fuse2 & kF2NetZ) != 0;   // needs batch_on too (checked at emit)
+    }
+    bool Has(uint32_t k) const { return k < kKernelCount && pso[k] != nullptr; }
+    // the variant of `base` for the A16 (b) / A17 (t) levers that are on and whose kernels exist
+    uint32_t PickBT(uint32_t base, uint32_t kb, uint32_t kt, uint32_t kbt, bool b, bool t) const {
+        if (b && t && Has(kbt)) return kbt;
+        if (t && Has(kt)) return kt;
+        if (b && Has(kb)) return kb;
+        return base;
     }
     // The Full blend kernel for (merged input, W built in, X0 / X1 as RGB)
     uint32_t FullBlendKernel(bool merged) const {
         const bool w = full_weights_on, x = x3_on;
-        if (merged) return w ? (x ? kFullBlendMergeWX3 : kFullBlendMergeW) : (x ? kFullBlendMergeX3 : kFullBlendMerge);
+        if (merged) {
+            if (!w && !x && bil_on && Has(kFullBlendMergeB)) return kFullBlendMergeB;   // A16
+            return w ? (x ? kFullBlendMergeWX3 : kFullBlendMergeW) : (x ? kFullBlendMergeX3 : kFullBlendMerge);
+        }
+        if (!w && !x && bil_on && Has(kFullBlendB)) return kFullBlendB;
         return w ? (x ? kFullBlendWX3 : kFullBlendW) : (x ? kFullBlendX3 : kFullBlend);
     }
 
@@ -1553,10 +1598,12 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         }
         EmitDispatch(r, k, groups, args, n, barrier);
     }
-    void EmitDispatch(Rec& r, uint32_t k, uint32_t groups, const uint32_t* args, uint32_t n, bool barrier) {
+    // depth > 1 (A18): a (groups, 1, depth) launch of a WG_Z_GRID kernel; groups then fits one dispatch
+    void EmitDispatch(Rec& r, uint32_t k, uint32_t groups, const uint32_t* args, uint32_t n, bool barrier,
+                      uint32_t depth = 1) {
         ArenaTo(r, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         if (barrier) Barrier(r);
-        if (desc.kernel_profile) ProfMark(r, k, groups);
+        if (desc.kernel_profile) ProfMark(r, k, groups * depth);
         r.cl->SetPipelineState(pso[k].Get());
         uint32_t c[kRootConstants] = {};
         c[1] = groups;
@@ -1564,7 +1611,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         for (uint32_t base = 0; base < groups; base += 65535) {
             c[0] = base;
             r.cl->SetComputeRoot32BitConstants(2, 2 + n, c, 0);
-            r.cl->Dispatch(std::min<uint32_t>(groups - base, 65535), 1, 1);
+            r.cl->Dispatch(std::min<uint32_t>(groups - base, 65535), 1, depth);
         }
         r.dirty = true;
         ++counters.dispatches;
@@ -1763,7 +1810,9 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
 
     void Fill16(Rec& r, uint32_t off, uint64_t bytes, const uint32_t* p, uint32_t period, bool barrier = true) {
         const uint32_t n16 = static_cast<uint32_t>(bytes / 2);
-        D(r, kFill16, groups_for(n16, 8), {off, n16, p[0], p[1], p[2], p[3], period}, barrier);
+        // A15: every fill the runtime records has period 1, 2 or 4, which the division-free kernel needs
+        const bool p2 = fill_p2_on && (period == 1 || period == 2 || period == 4);
+        D(r, p2 ? kFill16P2 : kFill16, groups_for(n16, 8), {off, n16, p[0], p[1], p[2], p[3], period}, barrier);
     }
 
     void RegArgs(const InputTex& t, bool present, uint32_t* out10) const {
@@ -2033,7 +2082,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
             }
             case FgOp::Weights:
                 if (op.lite_blend ? lite_weights_on : full_weights_on) return true;   // the blend computes W in LDS
-                D(r, kWeights, groups_for(nsc),
+                D(r, bil_on && Has(kWeightsB) ? kWeightsB : kWeights, groups_for(nsc),
                   {R(kRoleMA), R(kRoleMB), R(kRoleNA), R(kRoleNB), R(kRoleW), g.w1, g.h1, g.wd, g.hd});
                 return true;
             case FgOp::Prefill:
@@ -2066,7 +2115,11 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                     Dispatch(r, packed ? kLiteBlendPackW : kLiteBlendW, cdiv(g.wo, 32) * cdiv(g.ho, 8), w, n);
                     return true;
                 }
-                Dispatch(r, packed ? kLiteBlendPack : kLiteBlend, groups_for(static_cast<uint64_t>(g.wo) * g.ho), a, n);
+                const uint32_t lk = packed ? PickBT(kLiteBlendPack, kLiteBlendPackB, kLiteBlendPackT, kLiteBlendPackBT, bil_on, tile_on)
+                                           : PickBT(kLiteBlend, kLiteBlendB, kLiteBlendT, kLiteBlendBT, bil_on, tile_on);
+                const bool tiled = lk == kLiteBlendT || lk == kLiteBlendPackT || lk == kLiteBlendBT || lk == kLiteBlendPackBT;
+                // A17: the tiled kernels take 32 x 8 pixel tiles (tiles_x * ceil(ho / 8) workgroups)
+                Dispatch(r, lk, tiled ? cdiv(g.wo, 32) * cdiv(g.ho, 8) : groups_for(static_cast<uint64_t>(g.wo) * g.ho), a, n);
                 return true;
             }
             case FgOp::FullBlend: {
@@ -2358,7 +2411,10 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         // fuse_pack: the pull and push-fine kernels write the slot's packed rows (pack_off, pack_pitch bytes, format
         // code in the out_x argument) instead of the float16 image
         const bool packed = fuse_pack != 0;
-        const uint32_t pull = packed ? (x3_on ? kOutPullPackX3 : kOutPullPack) : (x3_on ? kOutPullX3 : kOutPull);
+        uint32_t pull = packed ? (x3_on ? kOutPullPackX3 : kOutPullPack) : (x3_on ? kOutPullX3 : kOutPull);
+        if (!x3_on)   // A16 (b) / A17 (q)
+            pull = packed ? PickBT(kOutPullPack, kOutPullPackB, kOutPullPackQ, kOutPullPackBQ, bil_on, pow2_on)
+                          : PickBT(kOutPull, kOutPullB, kOutPullQ, kOutPullBQ, bil_on, pow2_on);
         D(r, pull, tx * ty,
           {x0, x1, xw, nb_out.off, sig, packed ? pack_off : out_off, fine, lv[1], lv[2], lv[3], lv[4], g.wo, g.ho,
            g.W2, g.H2, g.k, tx, packed ? pack_pitch : out_stride, packed ? fuse_pack : 0u, 0u, fb(rk)});
@@ -2722,7 +2778,73 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
             for (const Deferred& d : lists[f]) keys[f].push_back({d.kernel, d.barrier});
         std::vector<FgLaunchSlot> order;
         FgInterleaveLaunches(keys, &order);   // the rule (fg_exec_plan.h) is tested on its own
-        for (const FgLaunchSlot& s : order) EmitDeferred(r, lists[s.frame][s.index], s.barrier, s.mark_stage);
+        const size_t nf = lists.size();
+        for (size_t i = 0; i < order.size();) {
+            if (netz_on && batch_on && nf >= 2 && EmitZRun(r, lists, order, i, nf)) {
+                i += nf;
+                continue;
+            }
+            const FgLaunchSlot& s = order[i++];
+            EmitDeferred(r, lists[s.frame][s.index], s.barrier, s.mark_stage);
+        }
+    }
+
+    // A18: the z-sliced twin of a net2 convolution kernel (kKernelCount: none)
+    static uint32_t ZKernelOf(uint32_t k) {
+        switch (k) {
+            case kN2m1b1: return kN2zm1b1;
+            case kN2m1b2: return kN2zm1b2;
+            case kN2m2b1: return kN2zm2b1;
+            case kN2m2b2: return kN2zm2b2;
+            case kN2m2b4: return kN2zm2b4;
+            case kN2m1b4s: return kN2zm1b4s;
+            case kN2m1b2s: return kN2zm1b2s;
+            case kN2m1b1u: return kN2zm1b1u;
+            case kN2m1b2u: return kN2zm1b2u;
+            case kN2m2b4u: return kN2zm2b4u;
+            case kN2m3b2u: return kN2zm3b2u;
+            case kN2m3b4u: return kN2zm3b4u;
+            case kN2h3b1u: return kN2zh3b1u;
+            case kN2h3b1uS3: return kN2zh3b1uS3;
+            default: return kKernelCount;
+        }
+    }
+    static constexpr uint32_t kMconvArgs = 28, kMconvPointers = 9;   // fg_net2_mconv: 9 pointers, 19 scalars
+
+    // The launches order[i .. i + nf) are launch `index` of every frame back to back (the interleaved plan). When they are
+    // one net2 convolution kernel with the same grid and scalars, and each pointer is either the same in every frame
+    // (weights, null) or frame f's bank = frame 0's + f * sc_stride (the scratch banks are sc_stride bytes apart), they are
+    // recorded as one (groups, 1, nf) launch of the z-sliced kernel: slice f adds f * sc_stride to the pointers in zmask.
+    // Same launches, same data, one dispatch (and one set of weight reads) instead of nf. False: nothing recorded.
+    bool EmitZRun(Rec& r, const std::vector<std::vector<Deferred>>& lists, const std::vector<FgLaunchSlot>& order,
+                  size_t i, size_t nf) {
+        if (i + nf > order.size() || order[i].frame != 0 || nf > 65535) return false;
+        const uint32_t index = order[i].index;
+        const Deferred& d0 = lists[0][index];
+        const uint32_t zk = ZKernelOf(d0.kernel);
+        if (!Has(zk) || d0.n != kMconvArgs || d0.groups == 0 || d0.groups > 65535) return false;
+        for (size_t t = 1; t < nf; ++t) {
+            const FgLaunchSlot& s = order[i + t];
+            if (s.frame != t || s.index != index || s.barrier) return false;
+        }
+        std::vector<const uint32_t*> args(nf);
+        for (size_t t = 0; t < nf; ++t) {
+            const Deferred& d = lists[t][index];
+            if (d.kernel != d0.kernel || d.groups != d0.groups || d.n != d0.n) return false;
+            args[t] = d.args;
+        }
+        uint32_t mask = 0;
+        if (!FgPlanZBatch(args.data(), static_cast<uint32_t>(nf), kMconvArgs, kMconvPointers, sc_stride, &mask))
+            return false;
+        uint32_t a[kMaxArgs] = {};
+        std::memcpy(a, d0.args, 4ull * d0.n);
+        a[d0.n] = static_cast<uint32_t>(sc_stride);
+        a[d0.n + 1] = mask;
+        if (order[i].mark_stage) TimeStage(r, d0.stage);
+        EmitDispatch(r, zk, d0.groups, a, d0.n + 2, order[i].barrier, static_cast<uint32_t>(nf));
+        ++counters.net2_z_launches;
+        counters.net2_z_saved += nf - 1;
+        return true;
     }
 
     static bool SameBits(float a, float b) { return FgExecFloatBits(a) == FgExecFloatBits(b); }
@@ -2799,6 +2921,7 @@ FgD3d12Executor::FgD3d12Executor(const FgD3d12ExecutorDesc& desc) : impl_(new Im
     impl_->want_hoist = lever(desc.hoist, "WG_FG_HOIST");
     impl_->want_dualq = lever(desc.dualq, "WG_FG_DUALQ");
     impl_->want_fuse = lever(desc.fuse, "WG_FG_FUSE");
+    impl_->want_netz_env = lever(-1, "WG_FG_NET2_BATCH");   // A18 (also needs the fuse2 bit 1024 and the batch lever)
     // Wave 1B: 0 off, 1 (or unset) the default levers (net1 cells + pyramid tail), any other value a mask of the levers (1 net1
     // cells, 2 net2 pairs, 4 upwarp in L14, 8 W in the blends, 16 pyramid tail, 32 X0 / X1 as RGB; 63 = every lever)
     {
@@ -3283,7 +3406,8 @@ uint32_t FgD3d12Executor::Fuse2Active() const {
     const Impl& m = *impl_;
     return (m.cells_on ? kF2Cells : 0u) | (m.pair64_on || m.pair32_on ? kF2Pair : 0u) | (m.uw_on ? kF2Upwarp : 0u) |
            (m.lite_weights_on || m.full_weights_on ? kF2Weights : 0u) | (m.tail_on || m.l1_on ? kF2Tail : 0u) |
-           (m.x3_on ? kF2X3 : 0u);
+           (m.x3_on ? kF2X3 : 0u) | (m.fill_p2_on ? kF2Fill : 0u) | (m.bil_on ? kF2Bil : 0u) | (m.tile_on ? kF2Tile : 0u) |
+           (m.pow2_on ? kF2Pow2 : 0u) | (m.netz_on && m.batch_on ? kF2NetZ : 0u);
 }
 bool FgD3d12Executor::BatchActive() const { return impl_->batch_on; }
 bool FgD3d12Executor::HoistActive() const { return impl_->hoist_on; }

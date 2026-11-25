@@ -20,6 +20,7 @@
 // @wg-kernel fg_lite_interm_tiled co=- entry=fg_lite_interm block=256 wave=32 args=u,p,p,p,u,u,u,u,u,u,u defines=FG_K=1,FG_TILE=1
 // @wg-kernel fg_lite_interm_both co=- block=256 wave=32 args=p,p,p,p,p,p,u,u,u,u,u,u,u defines=FG_K=3
 // @wg-kernel fg_lite_weights co=- block=256 wave=32 args=p,p,p,p,p,u,u,u,u defines=FG_K=2
+// @wg-kernel fg_lite_weights_b co=- entry=fg_lite_weights block=256 wave=32 args=p,p,p,p,p,u,u,u,u defines=FG_K=2,FG_BIL128=1
 #include "wg_platform.hlsli"
 #include "fg_lite_common.hlsli"
 

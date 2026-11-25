@@ -19,6 +19,12 @@
 //
 // @wg-kernel fg_out_pull co=fg_full.co block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u
 // @wg-kernel fg_out_pull_pack co=- entry=fg_out_pull block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u defines=FGP_PACK=1
+// @wg-kernel fg_out_pull_b co=- entry=fg_out_pull block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u defines=FG_BIL128=1
+// @wg-kernel fg_out_pull_pack_b co=- entry=fg_out_pull block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u defines=FGP_PACK=1,FG_BIL128=1
+// @wg-kernel fg_out_pull_q co=- entry=fg_out_pull block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u defines=FGP_POW2=1
+// @wg-kernel fg_out_pull_pack_q co=- entry=fg_out_pull block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u defines=FGP_PACK=1,FGP_POW2=1
+// @wg-kernel fg_out_pull_bq co=- entry=fg_out_pull block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u defines=FGP_POW2=1,FG_BIL128=1
+// @wg-kernel fg_out_pull_pack_bq co=- entry=fg_out_pull block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u defines=FGP_PACK=1,FGP_POW2=1,FG_BIL128=1
 // @wg-kernel fg_out_pull_mid co=fg_full.co block=256 wave=32 args=p,p,p,p,p,u,u,u,u,u defines=FGP_MID=1
 // @wg-kernel fg_out_pull_x3 co=- entry=fg_out_pull block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u defines=FGP_X3=1
 // @wg-kernel fg_out_pull_pack_x3 co=- entry=fg_out_pull block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u defines=FGP_PACK=1,FGP_X3=1
@@ -35,6 +41,9 @@
 #ifndef FGP_X3
 #define FGP_X3 0
 #endif
+#ifndef FGP_POW2
+#define FGP_POW2 0
+#endif
 
 groupshared float4 fgp_wave_sums[8];
 
@@ -48,8 +57,17 @@ float4 fgp_level(float4 acc, uint m)
     // The first tile receives saturated finite RGB and weights of zero or one.
     // With no contributing pixels RGB is zero, so its denominator can be one.
     const float den = max(acc.w, 1.0f);
-    const float3 rgb = fgf_div_normal3(acc.xyz, den, fgf_div_reciprocal(den));
     const float scale = asfloat((127u - 2u * m) << 23u);
+#if FGP_POW2
+    // A17: a tile with no hole has acc.w = 4^m exactly, a power of two: den = acc.w, its reciprocal is exactly scale and
+    // every refinement step of the division is exact (the residual is 0), so acc.xyz / den = acc.xyz * scale bit for
+    // bit (zeros keep their sign through the select below, as before). Only tiles with a hole divide.
+    float3 rgb = acc.xyz * scale;
+    [branch] if (acc.w != (float)(1u << (2u * m)))
+        rgb = fgf_div_normal3(acc.xyz, den, fgf_div_reciprocal(den));
+#else
+    const float3 rgb = fgf_div_normal3(acc.xyz, den, fgf_div_reciprocal(den));
+#endif
     return float4(select(acc.xyz == 0.0f, acc.xyz, rgb), acc.w * scale);
 #endif
 }

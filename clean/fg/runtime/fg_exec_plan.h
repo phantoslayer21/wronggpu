@@ -199,6 +199,14 @@ struct FgLaunchSlot {
 // is recorded frame after frame with each launch's own barrier flag.
 void FgInterleaveLaunches(const std::vector<std::vector<FgLaunchKey>>& frames, std::vector<FgLaunchSlot>* out);
 
+// A18: whether the same launch of `frames` frames (args[f] = frame f's n argument DWORDs) can be one (groups, 1, frames)
+// launch of a z-sliced kernel, and the mask of the pointer arguments the slices must offset. Every argument is either the
+// same in every frame (weights, null pointers, all scalars), or one of the first `pointers` arguments that frame f has at
+// frame 0's value + f * stride (the scratch banks are `stride` bytes apart). Any other difference refuses; so does a launch
+// with no banked pointer. mask bit i = argument i is banked.
+bool FgPlanZBatch(const uint32_t* const* args, uint32_t frames, uint32_t n, uint32_t pointers, uint64_t stride,
+                  uint32_t* mask);
+
 // net2's 25 convolutions (clean/fg/layout.py NET2): stored input channels, used input channels, outputs.
 struct FgNet2Layer {
     uint32_t cin, cin_used, cout;

@@ -116,8 +116,32 @@ float2 fgf_mix2(FgfTap t, float2 c00, float2 c10, float2 c01, float2 c11)
     return mad(t.w11, c11, mad(t.w01, c01, mad(t.w00, c00, t.w10 * c10)));
 }
 
+#ifndef FG_BIL128
+#define FG_BIL128 0
+#endif
+#if FG_BIL128
+// A16: the two texels of a tap row are adjacent (i10 == i00 + 1) or the same texel (i10 == i00: the frame's left / right
+// border clamps x1 to x0), so one load at i00 covers both: 16 bytes for 4 x float16 texels (8 for 2 x float16), the second
+// texel taken from it unless the border made it the first. The same four texel values reach fgf_mix4 / fgf_mix2, so the
+// result is bit for bit the 4-load version's. (Reads one texel past i00 at the frame's last texel: robust buffer access.)
+float4 fgf_unpack4h(uint2 d) { return float4(wg_h2f_lo(d.x), wg_h2f_hi(d.x), wg_h2f_lo(d.y), wg_h2f_hi(d.y)); }
+float4 fgf_bil4h(uint p, FgfTap t)
+{
+    const uint4 a = wg_ld128(p, (uint)t.i00 * 8u), b = wg_ld128(p, (uint)t.i01 * 8u);
+    const uint2 c10 = select(t.i10 == t.i00, a.xy, a.zw), c11 = select(t.i11 == t.i01, b.xy, b.zw);
+    return fgf_mix4(t, fgf_unpack4h(a.xy), fgf_unpack4h(c10), fgf_unpack4h(b.xy), fgf_unpack4h(c11));
+}
+float2 fgf_unpack2h(uint d) { return float2(wg_h2f_lo(d), wg_h2f_hi(d)); }
+float2 fgf_bil2h(uint p, FgfTap t)
+{
+    const uint2 a = wg_ld64(p, (uint)t.i00 * 4u), b = wg_ld64(p, (uint)t.i01 * 4u);
+    const uint c10 = select(t.i10 == t.i00, a.x, a.y), c11 = select(t.i11 == t.i01, b.x, b.y);
+    return fgf_mix2(t, fgf_unpack2h(a.x), fgf_unpack2h(c10), fgf_unpack2h(b.x), fgf_unpack2h(c11));
+}
+#else
 float4 fgf_bil4h(uint p, FgfTap t) { return fgf_mix4(t, fgf_ld4h(p, t.i00), fgf_ld4h(p, t.i10), fgf_ld4h(p, t.i01), fgf_ld4h(p, t.i11)); }
 float2 fgf_bil2h(uint p, FgfTap t) { return fgf_mix2(t, fgf_ld2h(p, t.i00), fgf_ld2h(p, t.i10), fgf_ld2h(p, t.i01), fgf_ld2h(p, t.i11)); }
+#endif
 
 // ---- output pyramid -----------------------------------------------------------------------------------------------------
 // (sum r, sum g, sum b, sum w) -> (r / max(sum w, 1e-12), ..., sum w / n)

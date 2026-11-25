@@ -24,6 +24,8 @@
 //
 // @wg-kernel fg_full_blend co=fg_full.co block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u
 // @wg-kernel fg_full_blend_merge co=- entry=fg_full_blend block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,p,u defines=FGB_MERGE=1
+// @wg-kernel fg_full_blend_b co=- entry=fg_full_blend block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u defines=FG_BIL128=1
+// @wg-kernel fg_full_blend_merge_b co=- entry=fg_full_blend block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,p,u defines=FGB_MERGE=1,FG_BIL128=1
 // @wg-kernel fg_full_blend_w co=- entry=fg_full_blend block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,p,p defines=FGB_WEIGHTS=1
 // @wg-kernel fg_full_blend_merge_w co=- entry=fg_full_blend block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,p,u,p,p defines=FGB_MERGE=1,FGB_WEIGHTS=1
 // @wg-kernel fg_full_blend_x3 co=- entry=fg_full_blend block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u defines=FGB_X3=1

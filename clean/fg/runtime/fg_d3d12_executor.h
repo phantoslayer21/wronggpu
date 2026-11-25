@@ -186,6 +186,12 @@ struct FgD3d12ExecutorDesc {
     //    (fg_lite_blend_w / _pack_w, fg_full_blend_*_w), 16 the output pyramid's coarse pushes in one workgroup
     //    (fg_out_tail) and level 1 pushed in the fine pass (fg_out_push_fine_l1), 32 X0 / X1 stored as RGB
     //    (fg_full_blend_*_x3, fg_out_pull_x3). Independent of fuse.
+    //    Wave 2 (all bit-exact, in the default; WG_FG_FUSE2=17 is the Wave 1B default without them): 64 fg_lite_fill16_p2 (A15:
+    //    the fill without integer divisions), 128 the bilinear taps of the blends, the light weights and the output pull as
+    //    16 / 8-byte row loads (A16: the _b kernels), 256 the light blend on 32 x 8 tiles with 8-byte pair stores (A17: the _t
+    //    kernels), 512 the output pull's division skipped on hole-free tiles (A17: the _q kernels), 1024 net2's convolutions of
+    //    the indices of a batch as one (groups, 1, N) launch (A18: the _z kernels; needs batch; WG_FG_NET2_BATCH=0 turns it
+    //    off whatever the mask says). The default mask is 2001 = 17 + 64 + 128 + 256 + 512 + 1024; 2047 is every lever.
     int batch = -1, hoist = -1, dualq = -1, fuse = -1, fuse2 = -1;
     // Developer frame dumps (off while dump_dir is empty; the ASI sets it only in a developer build): of the game
     // frames that generate, every dump_every-th one (at most dump_max), the game frame's slot image (game_<n>.ppm) and
@@ -220,6 +226,7 @@ struct FgExecCounters {
     uint64_t lite_frames = 0, full_frames = 0;
     uint64_t game_colour_copies = 0;   // real-only frames copied from the game's back buffer (no shared work)
     uint64_t net2_fast = 0, net2_exact = 0;  // net2 recordings per path
+    uint64_t net2_z_launches = 0, net2_z_saved = 0;   // A18: z-sliced net2 launches recorded, and the launches they replaced (nf - 1 each)
 };
 
 enum class FgExecStage : uint32_t {

@@ -15,8 +15,10 @@
 //       [--batch 0|1] [--hoist 0|1] [--dualq 0|1] [--fuse 0|1] [--fuse2 0|1|MASK]   Turbo v2 levers for paired A / B runs
 //                       (default: on, or the environment WG_FG_BATCH / _HOIST / _DUALQ / _FUSE / _FUSE2 = 0; --fuse2 takes
 //                       a mask of the Wave 1B levers: 1 net1 cells, 2 net2 pairs, 4 upwarp in L14, 8 blend weights,
-//                       16 pyramid tail, 32 X0 / X1 as RGB)
-//       [--turbo-fuse2 MASK]  the Wave 1B mask the --only turbo legs run against all levers off (default 63: every lever)
+//                       16 pyramid tail, 32 X0 / X1 as RGB, and the Wave 2 levers 64 fill16 without divisions, 128 bilinear row
+//                       loads, 256 light blend tiles, 512 output pull power-of-two skip, 1024 net2 z-batching; the default is
+//                       2001 = 17 + all of Wave 2, 17 alone is the Wave 1B default; WG_FG_NET2_BATCH=0 also stops 1024)
+//       [--turbo-fuse2 MASK]  the Wave 1B mask the --only turbo legs run against all levers off (default 2047: every lever)
 //       The report has the per-stage sums and the honest multi-queue numbers: the wall-clock GPU span and the busy
 //       time per game frame over the timed window (overlap between queues is counted once there, twice in the sums).
 //   --reference-dxil <dir>  compare direct-SRV output bytes against the captured path built with these kernels
@@ -165,6 +167,65 @@ void TestSigTable() {
     const uint8_t want[32] = {0x09, 0x90, 0x7d, 0x7f, 0xee, 0x13, 0x7a, 0xe4, 0x69, 0x92, 0x9d, 0xb6, 0x89, 0x55, 0x82, 0x5b,
                               0xff, 0xf2, 0x15, 0xb4, 0x80, 0xe8, 0x2f, 0xed, 0xed, 0xe3, 0x52, 0x11, 0xed, 0x1a, 0x67, 0xb2};
     CHECK(std::memcmp(d.data(), want, 32) == 0);
+}
+
+// Wave 2 A18: when the same launch of several frames can be one z-sliced launch (FgPlanZBatch), and which pointers the
+// slices offset: the scratch banks are `stride` bytes apart, so a pointer argument is banked when frame f holds frame 0's
+// value + f * stride; weights, null pointers and every scalar must be equal; anything else keeps the separate launches.
+void TestZBatchPlan() {
+    g_case = "z-batch-plan";
+    const uint64_t stride = 0x300000;
+    const uint32_t kPtr = 9, kN = 28;
+    const auto frame = [&](uint32_t f) {
+        std::vector<uint32_t> a(kN);
+        for (uint32_t i = 0; i < kN; ++i) a[i] = 100 + i;    // scalars (and shared pointers) the same in every frame
+        a[0] = 0x1000 + f * static_cast<uint32_t>(stride);    // x: banked
+        a[1] = 0x500;                                         // wf: the weights, shared
+        a[3] = 0x2000 + f * static_cast<uint32_t>(stride);    // y: banked
+        a[4] = 0;                                             // skip: null
+        return a;
+    };
+    const auto plan = [&](const std::vector<std::vector<uint32_t>>& fr, uint32_t* mask) {
+        std::vector<const uint32_t*> p;
+        for (const auto& a : fr) p.push_back(a.data());
+        return FgPlanZBatch(p.data(), static_cast<uint32_t>(p.size()), kN, kPtr, stride, mask);
+    };
+    uint32_t mask = 0;
+    for (uint32_t n = 2; n <= 5; ++n) {
+        std::vector<std::vector<uint32_t>> fr;
+        for (uint32_t f = 0; f < n; ++f) fr.push_back(frame(f));
+        mask = 0;
+        CHECK(plan(fr, &mask));
+        CHECK(mask == (1u | 8u));   // x and y
+    }
+    std::vector<std::vector<uint32_t>> fr = {frame(0), frame(1), frame(2)};
+    // a scalar that differs (e.g. a different time bit, a different grid): separate launches
+    auto bad = fr;
+    bad[2][15] += 1;
+    CHECK(!plan(bad, &mask));
+    // a pointer that is not exactly one stride per frame
+    bad = fr;
+    bad[2][3] += 256;
+    CHECK(!plan(bad, &mask));
+    // a pointer banked in frame 1 but not in frame 2, or the other way round
+    bad = fr;
+    bad[2][0] = bad[0][0];
+    CHECK(!plan(bad, &mask));
+    bad = fr;
+    bad[1][3] = bad[0][3];
+    CHECK(!plan(bad, &mask));
+    // a scalar (index >= the pointer count) that moves by a stride is not a bank
+    bad = fr;
+    for (uint32_t f = 0; f < 3; ++f) bad[f][12] = 7 + f * static_cast<uint32_t>(stride);
+    CHECK(!plan(bad, &mask));
+    // nothing banked at all, a single frame, bad arguments
+    CHECK(!plan({frame(0), frame(0)}, &mask));
+    CHECK(!plan({frame(0)}, &mask));
+    CHECK(!FgPlanZBatch(nullptr, 2, kN, kPtr, stride, &mask));
+    // 32-bit wrap of an offset is the same arithmetic as the shader's
+    auto w = fr;
+    for (uint32_t f = 0; f < 3; ++f) w[f][0] = 0xFFF00000u + f * static_cast<uint32_t>(stride);
+    CHECK(plan(w, &mask) && (mask & 1u));
 }
 
 // Turbo v2: the order in which the launches of several indices sharing one command list are recorded, and the shape of an
@@ -568,7 +629,7 @@ struct PipelineClock {
     }
 };
 bool g_debug_layer = false;
-int g_turbo_fuse2 = 63;  // the Wave 1B mask TestTurboExact runs against all levers off (--turbo-fuse2 MASK)
+int g_turbo_fuse2 = 2047;  // the Wave 1B mask TestTurboExact runs against all levers off (--turbo-fuse2 MASK)
 int g_log_lines = 0;
 void PrintLog(void*, const char* line) {
     if (g_log_lines++ < 40) std::printf("      log: %s\n", line);
@@ -1923,7 +1984,7 @@ void TestTurboExact(Gpu& gpu, const std::string& dxil, const FgExecWeights& weig
         ed.weights = &weights;
         ed.enable_full = c.preset != FgPreset::C;
         ed.batch = ed.hoist = ed.dualq = ed.fuse = 1;
-        ed.fuse2 = g_turbo_fuse2;   // 63: every Wave 1B lever (default of the test), --turbo-fuse2 1: the executor's default levers
+        ed.fuse2 = g_turbo_fuse2;   // 2047: every Wave 1B / Wave 2 lever (default of the test), --turbo-fuse2 1: the executor's default levers
         FgD3d12Executor test(ed);
         ed.batch = ed.hoist = ed.dualq = ed.fuse = wave1b_only ? 1 : 0;
         ed.fuse2 = 0;
@@ -2125,6 +2186,9 @@ bool RunBench(Gpu& gpu, const std::string& dxil, const FgExecWeights& weights, F
     std::printf("  levers: batch %s, hoist %s, dualq %s, scratch banks %u, fuse2 mask 0x%x\n", exec.BatchActive() ? "on" : "off",
                 exec.HoistActive() ? "on" : "off", exec.DualQueueActive() ? "on" : "off", exec.ScratchBanks(),
                 exec.Fuse2Active());
+    std::printf("  net2 z-batching: %llu z launches recorded, %llu launches saved (A18, fuse2 bit 1024, WG_FG_NET2_BATCH)\n",
+                static_cast<unsigned long long>(exec.Counters().net2_z_launches),
+                static_cast<unsigned long long>(exec.Counters().net2_z_saved));
     double shared = 0.0, gen = 0.0;
     for (size_t i = 0; i < timing.ms.size(); ++i) {
         const double mean = timing.ms[i] / timed;
@@ -2211,6 +2275,7 @@ int main(int argc, char** argv) {
     TestSigTable();
     TestSchedule();
     TestInterleave();
+    TestZBatchPlan();
     TestNet2FastPlan();
     TestRefusals(weights);
     TestMotionFormats();

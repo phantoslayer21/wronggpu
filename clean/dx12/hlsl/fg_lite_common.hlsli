@@ -14,6 +14,9 @@
 #pragma once
 #include "fg_fp16.hlsli"
 
+#ifndef FG_BIL128
+#define FG_BIL128 0
+#endif
 static uint fg_z_;   // 0 at run time (the grid size is below 2^31), unknown to the compiler
 #define FG_SETUP() (FG_FP16_SETUP(), fg_z_ = wg_grid_ >> 31)
 
@@ -136,8 +139,37 @@ float4 fg_read_linear(uint base, uint kind, int w, int h, float X, float Y)
     float ax = px - fx, ay = py - fy;
     int rx = clamp((int)fx, -1, w - 1), ry = clamp((int)fy, -1, h - 1);
     int x0 = max(rx, 0), x1 = min(rx + 1, w - 1), y0 = max(ry, 0), y1 = min(ry + 1, h - 1);
+#if FG_BIL128
+    // A16 (kinds 4 and 2): x1 is x0 + 1 or x0 itself (the border clamp), so one load per row covers both texels
+    // (16 bytes for float16 x 4, 8 for float16 x 2) and the same four texel values reach the blend below.
+    float4 t00, t10, t01, t11;
+    if (kind == 4u)
+    {
+        const uint4 a = wg_ld128(base, (uint)(y0 * w + x0) * 8u), b = wg_ld128(base, (uint)(y1 * w + x0) * 8u);
+        const uint2 a1 = select(x1 == x0, a.xy, a.zw), b1 = select(x1 == x0, b.xy, b.zw);
+        t00 = float4(f16tof32(a.x), f16tof32(a.x >> 16), f16tof32(a.y), f16tof32(a.y >> 16));
+        t10 = float4(f16tof32(a1.x), f16tof32(a1.x >> 16), f16tof32(a1.y), f16tof32(a1.y >> 16));
+        t01 = float4(f16tof32(b.x), f16tof32(b.x >> 16), f16tof32(b.y), f16tof32(b.y >> 16));
+        t11 = float4(f16tof32(b1.x), f16tof32(b1.x >> 16), f16tof32(b1.y), f16tof32(b1.y >> 16));
+    }
+    else if (kind == 2u)
+    {
+        const uint2 a = wg_ld64(base, (uint)(y0 * w + x0) * 4u), b = wg_ld64(base, (uint)(y1 * w + x0) * 4u);
+        const uint a1 = select(x1 == x0, a.x, a.y), b1 = select(x1 == x0, b.x, b.y);
+        t00 = float4(f16tof32(a.x), f16tof32(a.x >> 16), 0.0f, 0.0f);
+        t10 = float4(f16tof32(a1), f16tof32(a1 >> 16), 0.0f, 0.0f);
+        t01 = float4(f16tof32(b.x), f16tof32(b.x >> 16), 0.0f, 0.0f);
+        t11 = float4(f16tof32(b1), f16tof32(b1 >> 16), 0.0f, 0.0f);
+    }
+    else
+    {
+        t00 = fg_texel(base, kind, (uint)(y0 * w + x0)); t10 = fg_texel(base, kind, (uint)(y0 * w + x1));
+        t01 = fg_texel(base, kind, (uint)(y1 * w + x0)); t11 = fg_texel(base, kind, (uint)(y1 * w + x1));
+    }
+#else
     float4 t00 = fg_texel(base, kind, (uint)(y0 * w + x0)), t10 = fg_texel(base, kind, (uint)(y0 * w + x1));
     float4 t01 = fg_texel(base, kind, (uint)(y1 * w + x0)), t11 = fg_texel(base, kind, (uint)(y1 * w + x1));
+#endif
     float4 r0 = mad(ax.xxxx, t10 - t00, t00);
     float4 r1 = mad(ax.xxxx, t11 - t01, t01);
     return mad(ay.xxxx, r1 - r0, r0);

@@ -19,6 +19,12 @@
 //
 // @wg-kernel fg_lite_blend co=- block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u
 // @wg-kernel fg_lite_blend_pack co=- entry=fg_lite_blend block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_PACK=1
+// @wg-kernel fg_lite_blend_b co=- entry=fg_lite_blend block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_BIL128=1
+// @wg-kernel fg_lite_blend_pack_b co=- entry=fg_lite_blend block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_PACK=1,FG_BIL128=1
+// @wg-kernel fg_lite_blend_t co=- entry=fg_lite_blend block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_TILE=1
+// @wg-kernel fg_lite_blend_pack_t co=- entry=fg_lite_blend block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_PACK=1,FG_TILE=1
+// @wg-kernel fg_lite_blend_bt co=- entry=fg_lite_blend block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_TILE=1,FG_BIL128=1
+// @wg-kernel fg_lite_blend_pack_bt co=- entry=fg_lite_blend block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_PACK=1,FG_TILE=1,FG_BIL128=1
 // @wg-kernel fg_lite_blend_mut co=- entry=fg_lite_blend block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_MUT=1
 // @wg-kernel fg_lite_blend_w co=- entry=fg_lite_blend block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,p,p,u,u defines=FG_WEIGHTS=1
 // @wg-kernel fg_lite_blend_pack_w co=- entry=fg_lite_blend block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,p,p,u,u defines=FG_PACK=1,FG_WEIGHTS=1
@@ -34,6 +40,9 @@
 #endif
 #ifndef FG_WEIGHTS
 #define FG_WEIGHTS 0
+#endif
+#ifndef FG_TILE
+#define FG_TILE 0
 #endif
 #if FG_WEIGHTS
 #include "fg_weights.hlsli"
@@ -160,6 +169,18 @@ WG_KERNEL(fg_lite_blend)
     }
     wg_barrier_lds();
     if (!live) return;
+#elif FG_TILE
+    // A17: 32 x 8 pixel tiles (tiles_x = ceil(wo / 32), the launch is tiles_x * ceil(ho / 8) workgroups, one wave per tile
+    // row) instead of 256-pixel scanlines: no per-pixel division, and the vertical bilinear taps of a tile share cache
+    // lines. A lane past the frame computes the nearest valid pixel (the wave's quad exchange needs every lane) and does
+    // not store. Every pixel is independent, so the bits are the scanline kernel's.
+    const uint lane = wg_lane_id(), tile = wg_block_id(), tiles_x = (wo + 31u) >> 5u;
+    const uint tile_y = tile / tiles_x;
+    const uint xr = ((tile - tile_y * tiles_x) << 5u) + (lane & 31u), yr = (tile_y << 3u) + (lane >> 5u);
+    const bool live = xr < wo && yr < ho;
+    const uint x = min(xr, wo - 1u), y = min(yr, ho - 1u);
+    const uint idx = y * wo + x;
+    const float u = fg_centre(x, wo), v = fg_centre(y, ho);
 #else
     const uint idx = wg_block_id() * 256u + wg_lane_id();
     if (idx >= wo * ho) return;
@@ -205,8 +226,23 @@ WG_KERNEL(fg_lite_blend)
     }
 #if FG_PACK
     const uint2 h = uint2(fg_pack_h2(o.x, o.y), fg_pack_h2(o.z, 1.0f));
-    wg_st32(outp, (oy + y) * ostride + x * 4u, fgx_pack_pixel(h, ox));
+#if FG_TILE
+    // adjacent lanes are a horizontal pair (the tile origin is a multiple of 32): one 8-byte store per pair
+    const uint word = fgx_pack_pixel(h, ox);
+    const uint pair = QuadReadAcrossX(word);
+    if (live && (xr & 1u) == 0u)
+    {
+        const uint at = (oy + y) * ostride + x * 4u;
+        if (x + 1u < wo) wg_st64(outp, at, uint2(word, pair));
+        else wg_st32(outp, at, word);
+    }
 #else
+    wg_st32(outp, (oy + y) * ostride + x * 4u, fgx_pack_pixel(h, ox));
+#endif
+#else
+#if FG_TILE
+    if (live)
+#endif
     fg_st_h4(outp, (oy + y) * ostride + ox + x, float4(o, 1.0f));
 #endif
 }

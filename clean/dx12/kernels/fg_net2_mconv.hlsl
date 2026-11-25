@@ -77,6 +77,20 @@
 // @wg-kernel fg_net2_mconv_h3b1u co=fg_net2_mma.co entry=fg_net2_mconv block=256 wave=32 args=p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_MT=1,FG_NB=1,FG_UP=1,FG_FUSED_HEADS=1
 // @wg-kernel fg_net2_mconv_h3b1u_s3 co=fg_net2_mma.co entry=fg_net2_mconv block=256 wave=32 args=p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_MT=1,FG_NB=1,FG_UP=1,FG_FUSED_HEADS=1,FG_STAGE_ALL=1
 // @wg-kernel fg_net2_mconv_h3b2u co=fg_net2_mma.co entry=fg_net2_mconv block=256 wave=32 args=p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_MT=1,FG_NB=2,FG_UP=1,FG_FUSED_HEADS=1
+// @wg-kernel fg_net2_mconv_m1b1_z co=- entry=fg_net2_mconv block=256 wave=32 args=p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_MT=1,FG_NB=1,FG_ZB=1,WG_Z_GRID=1
+// @wg-kernel fg_net2_mconv_m1b2_z co=- entry=fg_net2_mconv block=256 wave=32 args=p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_MT=1,FG_NB=2,FG_ZB=1,WG_Z_GRID=1
+// @wg-kernel fg_net2_mconv_m2b1_z co=- entry=fg_net2_mconv block=256 wave=32 args=p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_MT=2,FG_NB=1,FG_ZB=1,WG_Z_GRID=1
+// @wg-kernel fg_net2_mconv_m2b2_z co=- entry=fg_net2_mconv block=256 wave=32 args=p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_MT=2,FG_NB=2,FG_ZB=1,WG_Z_GRID=1
+// @wg-kernel fg_net2_mconv_m2b4_z co=- entry=fg_net2_mconv block=256 wave=32 args=p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_MT=2,FG_NB=4,FG_ZB=1,WG_Z_GRID=1
+// @wg-kernel fg_net2_mconv_m1b4s_z co=- entry=fg_net2_mconv block=128 wave=32 args=p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_MT=1,FG_NB=4,FG_ZB=1,WG_Z_GRID=1
+// @wg-kernel fg_net2_mconv_m1b2s_z co=- entry=fg_net2_mconv block=128 wave=32 args=p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_MT=1,FG_NB=2,FG_ZB=1,WG_Z_GRID=1
+// @wg-kernel fg_net2_mconv_m1b1u_z co=- entry=fg_net2_mconv block=256 wave=32 args=p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_MT=1,FG_NB=1,FG_UP=1,FG_ZB=1,WG_Z_GRID=1
+// @wg-kernel fg_net2_mconv_m1b2u_z co=- entry=fg_net2_mconv block=256 wave=32 args=p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_MT=1,FG_NB=2,FG_UP=1,FG_ZB=1,WG_Z_GRID=1
+// @wg-kernel fg_net2_mconv_m2b4u_z co=- entry=fg_net2_mconv block=128 wave=32 args=p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_MT=2,FG_NB=4,FG_UP=1,FG_ZB=1,WG_Z_GRID=1
+// @wg-kernel fg_net2_mconv_m3b2u_z co=- entry=fg_net2_mconv block=256 wave=32 args=p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_MT=3,FG_NB=2,FG_UP=1,FG_ZB=1,WG_Z_GRID=1
+// @wg-kernel fg_net2_mconv_m3b4u_z co=- entry=fg_net2_mconv block=128 wave=32 args=p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_MT=3,FG_NB=4,FG_UP=1,FG_ZB=1,WG_Z_GRID=1
+// @wg-kernel fg_net2_mconv_h3b1u_z co=- entry=fg_net2_mconv block=256 wave=32 args=p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_MT=1,FG_NB=1,FG_UP=1,FG_FUSED_HEADS=1,FG_ZB=1,WG_Z_GRID=1
+// @wg-kernel fg_net2_mconv_h3b1u_s3_z co=- entry=fg_net2_mconv block=256 wave=32 args=p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_MT=1,FG_NB=1,FG_UP=1,FG_FUSED_HEADS=1,FG_STAGE_ALL=1,FG_ZB=1,WG_Z_GRID=1
 #include "wg_platform.hlsli"
 #include "fg_net2.hlsli"
 
@@ -114,6 +128,34 @@ static uint fg_wf_cur, fg_b_cur;         // the layer's weights and bias
 #define FG_B fg_b_cur
 #define FG_WF_SET(w, bias) fg_wf_cur = (w); fg_b_cur = (bias);
 #else
+#ifndef FG_ZB
+#define FG_ZB 0
+#endif
+#if FG_ZB
+// A18 (the _z kernels, WG_Z_GRID = 1): N frames' launches of one layer in one (groups, 1, N) dispatch. The N frames' scratch
+// banks are bank_stride bytes apart, so slice z addresses frame z's activations by adding z * zstride to each pointer whose
+// bit is set in zmask (bit i = the i-th pointer: x, wf, b, y, skip, y1, y2, skip1, skip2); the weights wf, b are the same
+// in every frame (bits clear). Everything after the pointers is the single-frame kernel, so each slice computes the same
+// bits as its own launch.
+#if FG_UPWARP_STAGE
+#error "FG_ZB is for the launches without the upwarp staging"
+#endif
+WG_ARGS_BEGIN
+    uint a_x, a_wf, a_b, a_y, a_skip, a_y1, a_y2, a_skip1, a_skip2;    // pointers (arena byte offsets), frame 0's
+    int in_cs, in_co, cin, H, W, co_lo, co_n, out_cs, out_co, pool, leaky, clamp_from, res;
+    uint res_mul;
+    int skip_cs, skip_co, tiles_x, tiles_y, heads;
+    uint zstride, zmask;
+WG_ARGS_END
+static uint x, wf, b, y, skip, y1, y2, skip1, skip2;   // this slice's pointers
+#define FG_ZB_SETUP() \
+    { const uint zo_ = wg_gid_z() * zstride; \
+      x = a_x + ((zmask & 1u) != 0u ? zo_ : 0u); wf = a_wf + ((zmask & 2u) != 0u ? zo_ : 0u); \
+      b = a_b + ((zmask & 4u) != 0u ? zo_ : 0u); y = a_y + ((zmask & 8u) != 0u ? zo_ : 0u); \
+      skip = a_skip + ((zmask & 16u) != 0u ? zo_ : 0u); y1 = a_y1 + ((zmask & 32u) != 0u ? zo_ : 0u); \
+      y2 = a_y2 + ((zmask & 64u) != 0u ? zo_ : 0u); skip1 = a_skip1 + ((zmask & 128u) != 0u ? zo_ : 0u); \
+      skip2 = a_skip2 + ((zmask & 256u) != 0u ? zo_ : 0u); }
+#else
 WG_ARGS_BEGIN
     uint x, wf, b, y, skip, y1, y2, skip1, skip2;    // pointers (arena byte offsets)
     int in_cs, in_co, cin, H, W, co_lo, co_n, out_cs, out_co, pool, leaky, clamp_from, res;
@@ -123,6 +165,8 @@ WG_ARGS_BEGIN
     uint ib, ic, ia, a4, a1, a3, u4, u1, u3, fbits;
 #endif
 WG_ARGS_END
+#define FG_ZB_SETUP()
+#endif
 #define FG_WF wf
 #define FG_B b
 #endif
@@ -673,6 +717,7 @@ WG_KERNEL(fg_net2_mconv)
 WG_KERNEL(fg_net2_mconv)
 {
     WG_SETUP();
+    FG_ZB_SETUP();
     const uint lane = wg_lane_id() & 31u;
     const int blk = (int)wg_block_id();
     const int tx = blk % tiles_x, rest = blk / tiles_x;
