@@ -344,15 +344,24 @@ def kernels(out):
     # clean/rr-f-a14-frame E24: the read-only cache warm-up pass (WG_RR_TOUCH at creation; not dispatched by default)
     res.append(("rt.touch", 24, own(os.path.join(RT, "kernels", "rr_touch.hlsl"), "rr_rt_touch", {"WG_BLOCK": 256, "WG_WAVE": 32}, [], "rr_rt_touch")))
     res.append(("rt.blkcopy", 24, own(os.path.join(RT, "kernels", "rr_touch.hlsl"), "rr_rt_blkcopy", {"WG_BLOCK": 256, "WG_WAVE": 32}, [], "rr_rt_blkcopy")))
-    # clean/rr-f-wave5 (fast mode only; runtime WG_RR_W5, default 0x1f; NOT exact, network arithmetic relaxed, the history logic unchanged):
-    # bit 0 head.fast.rx.f.w64 = head.fast.rx.w64 with RR_HFAST_ALU (the 13 table gathers as bounded f32 ALU work, branchless Q8, no
-    # dead CANDW store / subnormal-band check; rr_d0r_w64.hlsl); bits 1 .. 4 the stagef.* kernels (gpu/stage.py W5_KERNELS: the
-    # wave64 body stages with the packed-f16 elementwise forms and the branchless Q8). Appended after every existing kernel; the
-    # kernels above (accurate / exact / fast before wave 5) keep their cache keys (OWN_KEY_SKIP lists the files that changed).
+    # clean/rr-f-wave5b (fast mode only; runtime WG_RR_W5, default 0x7f; NOT exact, network/tail arithmetic relaxed, history logic exact):
+    #   bit 0 head.fast.rx.f.w64 (RR_HFAST_ALU=2: bounded f32 ALU head tail, per-head Q8 reducing VGPR 96->84, branchless Q8, no dead CANDW)
+    #   bit 1 output.fast.w5 (OFX_W5_ALU=1 on output.fast.f0 base: native f16, FMA bilinear, 16-tap half exp2, 3-cmp max, no fallback pass)
+    #   bit 2 resolve.fast2.w5 / resolve.fast3.w5 (RFX_W5_ALU=1: f32 uniforms, uint2 half4 taps, FP16 3x3 clamp before E, no fixup pass)
+    #   bit 3 input.features.w5 (RR_IN_W5_ALU=1, wave64, 0 B LDS, vectorized tex loads, DLANE + MDD)
+    #   bits 4..6 stagef.* (gpu/stage.py W5_KERNELS: pure f32 RR_B32=1 + branchless clamped RR_Q8_FAST=1, zero narrow-EXEC WMMAs).
+    # Appended after every wave-4c kernel; all 172 wave-4c kernels above keep bit-identical cache keys and DXIL.
     res.append(("head.fast.rx.f.w64", 48, own(os.path.join(RRF, "head", "dx12", "rr_d0r_w64.hlsl"), "rr_d0r_head",
-                                              dict(hrx, WG_WAVE=64, RR_HSTM=1, RR_HQ8S=1, RR_HFAST_ALU=1,
+                                              dict(hrx, WG_WAVE=64, RR_HSTM=1, RR_HQ8S=1, RR_HFAST_ALU=2,
                                                    **json.loads(os.environ.get("WG_RR_HEADRX_W4_DEFS", "{}"))),
                                               hinc, "rr_d0r_head_w64_f_zexact_oprep")))
+    res.append(("output.fast.w5", GO.NARGS,
+                GO.kernel_set(defines=dict(FAST_OUT_DEFINES, OFX_W5_ALU=1), fast=True, names=("fast",), spec=True)["fast"][0]))
+    res.append(("resolve.fast2.w5", GRF.NARGS, GRF.fast_kernel(spec=2, extra=dict(rfd, RFX_W5_ALU=1))))
+    res.append(("resolve.fast3.w5", GRF.NARGS, GRF.fast_kernel(spec=3, extra=dict(rfd, RFX_W5_ALU=1))))
+    res.append(("input.features.w5", 1,
+                GI.features_kernel("lite+RR_IN_FAST=31+RR_IN_LDST=0+RR_IN_KCB=1+RR_IN_W5_ALU=1+RR_IN_M24=1+RR_IN_DLANE=1+RR_IN_MDD=1+WG_WAVE=64",
+                                   srv=1)))
     for name, st, kind, defs in stage.W5_KERNELS:
         # (a non-relaxed library repeats stagee.<n>'s DXIL under the names, as the wave-4 kernels)
         res.append((name, 37, stage.kernel_w5(st, ez, step="E", ldsw=1) if b32 else stage.kernel_for(st, ez, step="E", ldsw=1)))

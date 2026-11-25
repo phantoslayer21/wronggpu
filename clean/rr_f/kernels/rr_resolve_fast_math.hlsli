@@ -192,7 +192,11 @@ float rf_accx(float w, float v, float acc)
 // ---- conversions ---------------------------------------------------------------------------------------------------
 // f32 -> binary16 bits, round to nearest even (= wg_f2h for every f32): the driver channel's hardware conversion
 // (op 0x1C, immediate 1: v_cvt_f16_f32 in the default rounding mode; any control flow).
+#if defined(RFX_W5_ALU) && RFX_W5_ALU
+uint rf_f2h(float x) { return (uint)asuint16((half)x); }
+#else
 uint rf_f2h(float x) { return wg_ags_call(0x1Cu, 0u, 1u, asuint(x), 0u) & 0xffffu; }
+#endif
 float rf_h(float x) { return f16tof32(rf_f2h(x)); }          // = H(x)
 
 // Unorm read code / maxc rounded once to f32 (= cv / wg_div for every code 0 <= code <= maxc of the formats):

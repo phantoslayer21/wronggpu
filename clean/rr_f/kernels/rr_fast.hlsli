@@ -364,23 +364,6 @@ rrbv bv_attn(rrbv s, RrWx k)
 #define bv_q8s q8h_slow
 #define bv_d8 d8h
 #define bv_mad pk_mad
-#if RR_SMAJOR >= 2
-#define bv_act(V_, C_) act2_4(V_, C_)   // clean/rr-f-wave5: stage-major activation of the packed forms (the same per-value operations)
-#else
 #define bv_act(V_, C_) uint4(act2(V_.x, C_), act2(V_.y, C_), act2(V_.z, C_), act2(V_.w, C_))
-#endif
 #define bv_attn(V_, C_) uint4(attn_w2(V_.x, C_), attn_w2(V_.y, C_), attn_w2(V_.z, C_), attn_w2(V_.w, C_))
-#endif
-// clean/rr-f-wave5: helpers of the wave64 body kernels for both forms of rrbv (RR_B32: f32 values; otherwise packed f16, the
-// RR_B16R forms). RR_BCV(x): the rrbv form of an f32 accumulator (the f32 form itself, or the packed round-toward-zero f16
-// pairs); RR_CHAIN: the type of a matrix-step chain that stays f32 between its steps (f32 either way); RR_BVK(h): the scalar
-// constant of a residual add (h x: float, or the half2 splat h).
-#if RR_B32
-#define RR_BCV(x_) x_
-#define RR_CHAIN rrbv
-#define RR_BVK(h_) h_##x
-#else
-#define RR_BCV(x_) rr_h16(x_)
-#define RR_CHAIN v8f
-#define RR_BVK(h_) h_
 #endif

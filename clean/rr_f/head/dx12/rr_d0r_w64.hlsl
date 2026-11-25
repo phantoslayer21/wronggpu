@@ -136,6 +136,15 @@ uint U2(half2 h) { return wg_h2_bits(h); }
 half2 HF(half2 h) { return H2(rr_fence(U2(h))); }            // fenced f16 pair: a rounding point stays a rounding point
 float FF(float f) { return asfloat(rr_fence(asuint(f))); }
 uint rr_u(uint p) { return WaveReadLaneFirst(p); }       // a pointer argument read as wave-uniform (store-merge hazard)
+#if RR_HFAST_ALU >= 2
+uint rr_f2h(float x) { return (uint)asuint16((half)x); }
+float rr_ofence(float x) { return x; }
+float rr_ocf(float x)
+{
+    return log2(max(mad(x, asfloat(k_o4), 1.0f), asfloat(k_o5))) * (asfloat(0x3e9a209bu) * asfloat(k_o7));
+}
+float rr_od255(uint b) { return (float)b * asfloat(0x3b808081u); }
+#else
 uint rr_f2h(float x) { return wg_ags_call(0x1cu, 0u, 1u, asuint(x), 0u); }   // hardware RNE f32 -> f16 (op 0x1C imm 1)
 // rr_output.hlsl / rr_output_fast.hlsli's fence, Cf, Mq and of_d255, operation for operation
 float rr_ofence(float x) { return asfloat(asuint(x) ^ (0u - (wg_grid_ >> 31))); }
@@ -143,6 +152,13 @@ float rr_ocf(float x)
 {
     return rr_ofence(rr_ofence(log2(max(mad(x, asfloat(k_o4), 1.0f), asfloat(k_o5))) * asfloat(0x3e9a209bu)) * asfloat(k_o7));
 }
+float rr_od255(uint b)
+{
+    const float a = (float)b, rc = asfloat(0x3b808081u);
+    const float q = a * rc;
+    return mad(mad(-255.0f, q, a), rc, q);
+}
+#endif
 float rr_omq(float a, float b, inout bool rare)
 {
     const float r = rr_ofence(a * b);
@@ -151,12 +167,6 @@ float rr_omq(float a, float b, inout bool rare)
         rare = or(rare, and(abs(s2) >= asfloat(0x207ffff0u), abs(s2) <= asfloat(0x20800000u)));
     }
     return r;
-}
-float rr_od255(uint b)
-{
-    const float a = (float)b, rc = asfloat(0x3b808081u);
-    const float q = a * rc;
-    return mad(mad(-255.0f, q, a), rc, q);
 }
 half2 rr_c2(uint b) { return H2((b & 0xffffu) * 0x10001u); }
 
@@ -374,7 +384,11 @@ WG_KERNEL(rr_d0r_head)
     const half2 as2 = rr_c2(k_as), acl2 = rr_c2(k_acl), acln2 = rr_c2(k_acln), p12 = rr_c2(k_p1), p02 = rr_c2(k_p0);
     const half2 one2 = H2(0x3c003c00u);
     const bool tl1 = hh != 0u;
+#if RR_HFAST_ALU >= 2
+    uint2 of[4];   // quantise per head right after step 5 (drops 12 live VGPRs across head 1; bit-identical to post-loop RR_Q8!)
+#else
     v8f ot[4];    // O_h tiles before Q8: [2h + ft]
+#endif
     [unroll] for (uint h = 0; h < 2; ++h) {
         uint kq[4][2], vt[4][2];
         v8f bc[4];
@@ -424,11 +438,19 @@ WG_KERNEL(rr_d0r_head)
             a = wg_wmma_fp8(uint2(vt[1][f1], vt[1][f1]), pf[1], a);
             a = wg_wmma_fp8(uint2(vt[2][f1], vt[2][f1]), pf[2], a);
             a = wg_wmma_fp8(uint2(vt[3][f1], vt[3][f1]), pf[3], a);
+#if RR_HFAST_ALU >= 2
+            v8f qc_;
+            [unroll] for (uint qi_ = 0; qi_ < 8; ++qi_) qc_.v[qi_] = max(min(a.v[qi_], 448.0f), -448.0f);
+            of[2u * h + f1] = wg_pack_q8_nc_ags(qc_);
+#else
             ot[2u * h + f1] = a;
+#endif
         }
     }
+#if RR_HFAST_ALU < 2
     uint2 of[4];
     RR_Q8(4u, ot, of);
+#endif
 
     // ---------------------------------------------------------------- step 6: Dp, chain over the heads, start bo
     uint fo[8];
@@ -651,10 +673,14 @@ WG_KERNEL(rr_d0r_head)
     const float px = FF(f16tof32(Q0 & 0xffffu) * s1);              // hf0: Px
     const float p2 = FF(px * po) * RHO;                            // hf0: PREC 2 = (Px Py) rho
 #endif
+#if RR_HFAST_ALU >= 2
+    const uint cv16 = rr_f2h(cv), sq16 = rr_f2h(sq), p216 = rr_f2h(p2);
+#else
     v8f cf = zero8();
     cf.v[0] = cv; cf.v[1] = sq; cf.v[2] = p2;
     const uint4 c16 = wg_to_f16_ags(cf);
     const uint cv16 = c16.x & 0xffffu, sq16 = c16.x >> 16, p216 = c16.y & 0xffffu;
+#endif
 
     // ---------------------------------------------------------------- stores
     const bool inT = X >= 0 && Y >= 0 && X < (int)Wt && Y < (int)Ht;
@@ -696,6 +722,13 @@ WG_KERNEL(rr_d0r_head)
 #if !RR_HFAST_ALU
         bool orare = false;
 #endif
+#if RR_HFAST_ALU >= 2
+        const uint4 o16 = uint4(
+            rr_f2h(rr_ocf(f16tof32(hn & 0xffffu))) | (rr_f2h(rr_ocf(f16tof32(hn >> 16))) << 16),
+            rr_f2h(f16tof32(sq16) * asfloat(k_o2n)) | (rr_f2h(h0 ? (f16tof32(p216) * asfloat(k_o2x2n)) : rr_od255(u8b)) << 16),
+            rr_f2h(rr_od255(u8a)) | (rr_f2h(rr_od255(h0 ? u8b : u80)) << 16),
+            rr_f2h(rr_od255(u81)) | (rr_f2h(rr_od255(u82)) << 16));
+#else
         v8f e = zero8();
         e.v[0] = rr_ocf(f16tof32(hn & 0xffffu));
         e.v[1] = rr_ocf(f16tof32(hn >> 16));
@@ -711,6 +744,7 @@ WG_KERNEL(rr_d0r_head)
         e.v[5] = rr_od255(h0 ? u8b : u80);                                                       // hf0: W half 1
         e.v[6] = rr_od255(u81); e.v[7] = rr_od255(u82);
         const uint4 o16 = wg_to_f16_ags(e);
+#endif
         if (inI) {
             const uint opw = (o_wh + 1u) / 2u, olb = 256u + opw * ((o_hh + 1u) / 2u) * 4u;
             const uint ra = p_oscr + ((olb + 255u) & ~255u), rb = ra + Wr * Hr * 16u, rw = rb + ((Wr * Hr * 4u + 15u) & ~15u);

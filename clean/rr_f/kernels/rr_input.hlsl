@@ -387,9 +387,45 @@ float tx(Tex t, int x, int y, uint c)
     // constant word in memory was intact. A constant index cannot address anything but the 16-entry table.
     if (t.srv != 0u) return in_ftz(rr_in_srv[t.r].Load(int3(x + t.ox, y + t.oy, 0))[c]);
 #endif
+#if RR_IN_W5_ALU
+    const uint idx = (((uint)(y + t.oy) & 0xffffffu) * (t.w & 0xffffffu) + (uint)(x + t.ox)) * (t.ch & 0xffffffu) + c;
+    return asfloat(wg_ld32(t.off, idx * 4u));
+}
+float4 tx4(Tex t, int x, int y)
+{
+#if RR_IN_SRV
+    [branch] if (t.srv != 0u) return rr_in_srv[t.r].Load(int3(x + t.ox, y + t.oy, 0));
+#endif
+    const uint base = (((uint)(y + t.oy) & 0xffffffu) * (t.w & 0xffffffu) + (uint)(x + t.ox)) * (t.ch & 0xffffffu);
+    return float4(asfloat(wg_ld32(t.off, base * 4u)),
+                  t.ch > 1u ? asfloat(wg_ld32(t.off, (base + 1u) * 4u)) : 0.0f,
+                  t.ch > 2u ? asfloat(wg_ld32(t.off, (base + 2u) * 4u)) : 0.0f,
+                  t.ch > 3u ? asfloat(wg_ld32(t.off, (base + 3u) * 4u)) : 0.0f);
+}
+float3 tx3(Tex t, int x, int y)
+{
+#if RR_IN_SRV
+    [branch] if (t.srv != 0u) return rr_in_srv[t.r].Load(int3(x + t.ox, y + t.oy, 0)).xyz;
+#endif
+    const uint base = (((uint)(y + t.oy) & 0xffffffu) * (t.w & 0xffffffu) + (uint)(x + t.ox)) * (t.ch & 0xffffffu);
+    return float3(asfloat(wg_ld32(t.off, base * 4u)),
+                  t.ch > 1u ? asfloat(wg_ld32(t.off, (base + 1u) * 4u)) : 0.0f,
+                  t.ch > 2u ? asfloat(wg_ld32(t.off, (base + 2u) * 4u)) : 0.0f);
+}
+float2 tx2(Tex t, int x, int y)
+{
+#if RR_IN_SRV
+    [branch] if (t.srv != 0u) return rr_in_srv[t.r].Load(int3(x + t.ox, y + t.oy, 0)).xy;
+#endif
+    const uint base = (((uint)(y + t.oy) & 0xffffffu) * (t.w & 0xffffffu) + (uint)(x + t.ox)) * (t.ch & 0xffffffu);
+    return float2(asfloat(wg_ld32(t.off, base * 4u)),
+                  t.ch > 1u ? asfloat(wg_ld32(t.off, (base + 1u) * 4u)) : 0.0f);
+}
+#else
     const uint idx = ((uint)(y + t.oy) * t.w + (uint)(x + t.ox)) * t.ch + c;
     return in_ftz(asfloat(wg_ld32(t.off, idx * 4u)));
 }
+#endif
 
 // ---- per-frame values (uniform) --------------------------------------------------------------------------------
 static int Wr, Hr, Wt, Ht;
@@ -423,6 +459,19 @@ float BW(float a, float b) { return FN(a * b); }
 #endif
 Bil bil_setup(float u, float v, uint Wi, uint Hi)
 {
+#if RR_IN_W5_ALU
+    u = saturate(u); v = saturate(v);
+    const float s = mad(u, (float)Wi, -0.5f), t = mad(v, (float)Hi, -0.5f);
+    const float fs = floor(s), ft = floor(t);
+    Bil b;
+    b.fx = s - fs;
+    b.fy = t - ft;
+    const int i0 = (int)fs, j0 = (int)ft;
+    const uint wm = min(Wi - 1u, 0xffffffu), hm = min(Hi - 1u, 0xffffffu);
+    b.i0 = min((uint)max(i0, 0), wm); b.i1 = min((uint)max(i0 + 1, 0), wm);
+    b.j0 = min((uint)max(j0, 0), hm); b.j1 = min((uint)max(j0 + 1, 0), hm);
+    return b;
+#else
     u = min(max(in_nan0(u), 0.0f), 1.0f);
     v = min(max(in_nan0(v), 0.0f), 1.0f);
     const float s = S(BW(u, (float)Wi), 0.5f), t = S(BW(v, (float)Hi), 0.5f);
@@ -442,6 +491,7 @@ Bil bil_setup(float u, float v, uint Wi, uint Hi)
     b.j0 = (uint)clamp(j0, 0, (int)Hi - 1); b.j1 = (uint)clamp(j0 + 1, 0, (int)Hi - 1);
 #endif
     return b;
+#endif
 }
 // The products of bmix never round a nonzero product to zero (so the fast pass needs no zero-result test there): the
 // weights fx, 1 - fx are 0 or in [2^-25, 1] (s = M(u, W) - 1/2 is a multiple of 2^-25), the texels are decoded unorm10
@@ -458,15 +508,25 @@ float MW(float a, float b) { return FN(a * b); }
 #endif
 float bmix(float t00, float t10, float t01, float t11, Bil b)
 {
+#if RR_IN_W5_ALU
+    const float ofx = 1.0f - b.fx, ofy = 1.0f - b.fy;
+    return mad(b.fy, mad(b.fx, t11, ofx * t01), ofy * mad(b.fx, t10, ofx * t00));
+#else
     const float ofx = S(1.0f, b.fx), ofy = S(1.0f, b.fy);
     const float r0 = A(MW(ofx, t00), MW(b.fx, t10));
     const float r1 = A(MW(ofx, t01), MW(b.fx, t11));
     return A(MW(ofy, r0), MW(b.fy, r1));
+#endif
 }
 float4 bmix4(float4 t00, float4 t10, float4 t01, float4 t11, Bil b)
 {
+#if RR_IN_W5_ALU
+    const float ofx = 1.0f - b.fx, ofy = 1.0f - b.fy;
+    return mad(b.fy, mad(b.fx, t11, ofx * t01), ofy * mad(b.fx, t10, ofx * t00));
+#else
     return float4(bmix(t00.x, t10.x, t01.x, t11.x, b), bmix(t00.y, t10.y, t01.y, t11.y, b),
                   bmix(t00.z, t10.z, t01.z, t11.z, b), bmix(t00.w, t10.w, t01.w, t11.w, b));
+#endif
 }
 // PH1 / PH2 / HID are read from their decoded f32 copies (rr_input_decode, once per frame: the same values as the
 // per-texel conversion of 52.1.4 step 3, made once instead of at every tap)
@@ -481,7 +541,12 @@ float3 ph_sample(uint which, float u, float v)
     const Bil q = bil_setup(u, v, w, h);
     const float3 a = ph_texel(off, w, q.i0, q.j0), bb = ph_texel(off, w, q.i1, q.j0);
     const float3 c = ph_texel(off, w, q.i0, q.j1), d = ph_texel(off, w, q.i1, q.j1);
+#if RR_IN_W5_ALU
+    const float ofx = 1.0f - q.fx, ofy = 1.0f - q.fy;
+    return mad(q.fy, mad(q.fx, d, ofx * c), ofy * mad(q.fx, bb, ofx * a));
+#else
     return float3(bmix(a.x, bb.x, c.x, d.x, q), bmix(a.y, bb.y, c.y, d.y, q), bmix(a.z, bb.z, c.z, d.z, q));
+#endif
 }
 float4 hid_texel(uint i, uint j)
 {
@@ -606,6 +671,18 @@ float mdiff2(int X, int Y, float2 mh, float dq, out float r1, out bool a1)
 float mdiff_core(Bil q, float2 t00, float2 t10, float2 t01, float2 t11, float mrx, float mry, float dq)
 {
     md_approx = false;
+#if RR_IN_W5_ALU
+    const float ofx = 1.0f - q.fx, ofy = 1.0f - q.fy;
+    const float2 p = mad(q.fy, mad(q.fx, t11, ofx * t01), ofy * mad(q.fx, t10, ofx * t00));
+    const float dx = mad(-p.x, rWrWh, mrx), dy = mad(-p.y, rHrHh, mry);
+    const float mdl = SY(S_MDL), mdln = SY(S_MDLN);
+    const float cdx = clamp(dx, mdln, mdl), cdy = clamp(dy, mdln, mdl);
+    const float gm = SY(S_GM);
+    const float dxs = cdx * gm, dys = cdy * gm;
+    const float n2 = mad(dxs, dxs, dys * dys);
+    const float L = n2 > 0.0f ? sqrt(n2) : n2;
+    return min(log2((1.0f + L) + dq) * (LN_2 * SY(S_GD)), mdl);
+#else
     const float p0 = bmix(t00.x, t10.x, t01.x, t11.x, q), p1 = bmix(t00.y, t10.y, t01.y, t11.y, q);
     const float dx = FM(-p0, rWrWh, mrx), dy = FM(-p1, rHrHh, mry);
     const float mdl = SY(S_MDL), mdln = SY(S_MDLN);
@@ -624,11 +701,17 @@ float mdiff_core(Bil q, float2 t00, float2 t10, float2 t01, float2 t11, float mr
 #else
     return min(M(M(log2_cr(A(A(1.0f, L), dq)), LN_2), SY(S_GD)), mdl);
 #endif
+#endif
 }
 
 float2 mv(Tex t, int x, int y)
 {
+#if RR_IN_W5_ALU
+    const float2 v = tx2(t, x, y);
+    return float2((v.x + KF(K_MOX)) * KF(K_MSHX), (v.y + KF(K_MOY)) * KF(K_MSHY));
+#else
     return float2(M(A(tx(t, x, y, 0u), KF(K_MOX)), KF(K_MSHX)), M(A(tx(t, x, y, 1u), KF(K_MOY)), KF(K_MSHY)));
+#endif
 }
 
 // ---- 52.7.2 ------------------------------------------------------------------------------------------------------
@@ -764,7 +847,11 @@ uint f2h_ags(float x) { return wg_f2h(x); }   // wave64 builds: the fragment con
 // round 13: f32 -> f16 bits, round to nearest even, as one v_cvt_f16_f32 through the driver channel (op 0x1C, immediate
 // 1; rr_fast.hlsli f2h_hw): the bits of wg_f2h for every one of the 2^32 inputs, NaN included (gpu/input_stage.py
 // --f2hcheck with RR_F2HC_HW 1). The argument is fenced (no fold of its producer into the conversion).
+#if RR_IN_W5_ALU
+uint in_f2h_hw(float x) { return (uint)asuint16((half)x); }
+#else
 uint in_f2h_hw(float x) { return wg_ags_call(0x1cu, 0u, 1u, asuint(x) ^ (0u - (wg_grid_ >> 31)), 0u) & 0xffffu; }
+#endif
 #ifndef RR_IN_TF2H
 #define RR_IN_TF2H 1         // round 13: the tail's hold / 52.7 conversions through in_f2h_hw (fast pass only)
 #endif
@@ -833,7 +920,12 @@ uint quant_code(uint u, float v) { return q8code_ags(asfloat(((u << 20) + 0x3800
 uint quant(float v, uint d)
 {
     const uint xb = QF2H(v);
-#if RR_IN_QHW && RR_IN_AGSH && !RR_IN_EXACT && RR_IN_QNAN && RR_IN_QFOLD
+#if RR_IN_W5_ALU && RR_IN_QHW && RR_IN_AGSH && !RR_IN_EXACT
+    // Bounded finite clamp (ur <= 190 -> max 448, never emits FP8 NaN 0x7f/0xff)
+    const uint wq = (xb & 0x7fffu) + d;
+    const uint u = min((wq + ((wq >> 1) & 1u)) >> 7, 190u);
+    return q8code_ags(asfloat(((u << 20) + 0x38000000u) | (asuint(v) & 0x80000000u)));
+#elif RR_IN_QHW && RR_IN_AGSH && !RR_IN_EXACT && RR_IN_QNAN && RR_IN_QFOLD
     // a quiet binary16 NaN has (xb & 0x7fff) >= 0x7e00, so ur >= 252; inf and finite values give ur <= 249
     const uint wq = (xb & 0x7fffu) + d;
     const uint ur = (wq + ((wq >> 1) & 1u)) >> 7;
@@ -897,7 +989,9 @@ static const uint HIDK[8] = {22u, 23u, 26u, 27u, 45u, 48u, 49u, 52u};
 #define RR_IN_GSW 14
 #endif
 #endif
+#if !RR_IN_W5_ALU
 groupshared uint gs_codes[RR_IN_GSW * WG_BLOCK];
+#endif
 #if RR_IN_CSLOT == 2
 static uint in_gq;      // guide codes 30, 31, 32 (bytes 0, 1, 2)
 static float in_x3;     // feature 36's value (X3)
@@ -921,6 +1015,7 @@ static uint dith;
 static uint dbg_base;
 static uint lane_;
 static uint2 dbg_approx = uint2(0u, 0u);   // features (bit k) whose debug f32 value is a certified approximation
+#if !RR_IN_W5_ALU
 #if RR_IN_CSLOT == 2
 uint gs_code_word(uint z, uint lane)
 {
@@ -961,6 +1056,11 @@ void put_guide(uint gd, float v)
 }
 #else
 void put_guide(uint gd, float v) { put(30u + gd, v); }
+#endif
+#else
+void put_code(uint k, uint code, float v) {}
+void put(uint k, float v) {}
+void put_guide(uint gd, float v) {}
 #endif
 #if RR_IN_DBG
 void approx_bit(uint k) { if (k < 32u) dbg_approx.x |= 1u << k; else dbg_approx.y |= 1u << (k - 32u); }
@@ -1210,6 +1310,244 @@ WG_KERNEL(rr_input_features)
 
 void in_token(uint t)
 {
+#if RR_IN_W5_ALU
+    // clean/rr-f-wave5b (Fast mode only, VG_OUT): register-packed codes (0 B LDS, 0 InterlockedOr),
+    // vectorized tx4/tx2 texture fetches, scalar-folded history/colour/guide/mdiff ALU, native half f2h.
+    // Temporal history reprojection, MV reconstruction (recon), m2, depth 3x3 (DLANE), and ordered dither are exact.
+    if (t >= (uint)(Wt * Ht)) return;
+    Whf = (float)KW(K_WH); Hhf = (float)KW(K_HH);
+    flags = KW(K_FLAGS);
+    reset = (flags & F_RESET) != 0u;
+    const uint pex = KW(K_EXPO);
+    E = pex != 0u ? asfloat(KU(wg_ld32(pex, 0u))) : KF(K_E);
+    rcpEp = pex != 0u ? rcp(asfloat(KU(wg_ld32(pex, 4u)))) : KF(K_RCPEP);
+    const float X3 = pex != 0u ? asfloat(KU(wg_ld32(pex, 12u))) : KF(K_X3);
+    jx = KF(K_JX); jy = KF(K_JY); pjx = KF(K_PJX); pjy = KF(K_PJY);
+    rWhWr = KF(K_RWHWR); rHhHr = KF(K_RHHHR); rWrWh = KF(K_RWRWH); rHrHh = KF(K_RHRHH);
+    invWr = KF(K_INVWR); invHr = KF(K_INVHR);
+    const int X = (int)(t % (uint)Wt), Y = (int)(t / (uint)Wt);
+    const int xc = min(X, Wr - 1), yc = min(Y, Hr - 1);
+    const uint fc = KW(K_FC);
+    dith = wg_ld16(KW(K_D), (((fc * 16u + ((uint)Y & 15u)) * 16u + ((uint)X & 15u)) * 2u)) >> 9;
+    const float amax = SY(S_AMAX), fclip = SY(S_FCLIP);
+    const float k4 = SY(S_K4), k5 = SY(S_K5), k10 = SY(S_K10);
+    const float s_cc = LOG10_2 * SY(S_K7), s_ccn = LOG10_2 * SY(S_K7N);
+    const float s_hC = SY(S_K8) * LOG2_10;
+    const float s_hP = (SY(S_K12) * rcpEp) * E * k4;
+    const float s_hQ = s_cc * SY(S_GH);
+    const uint pc = (uint)wg_uniform((int)KW(K_CODES));
+
+    // Vectorized primary texture reads (C, Dd, Ds, N/rough) -> early pack of w0..w4, w7
+    const float3 C = tx3(tex(R_C), xc, yc);
+    const float3 EC = float3(min(in_nan0(E * C.x), F16MAX), min(in_nan0(E * C.y), F16MAX), min(in_nan0(E * C.z), F16MAX));
+    const float3 ccv = log2(max(mad(EC, k4, 1.0f), k5)) * s_cc;
+    const float3 dd = tx3(tex(R_DD), xc, yc);
+    const float3 ds = tx3(tex(R_DS), xc, yc);
+    const Tex tN = tex(R_N);
+    const float4 n4 = tx4(tN, xc, yc);
+    float3 nrm = n4.xyz;
+    if ((flags & F_NRMDEC) != 0u) nrm = mad(nrm, 2.0f, -1.0f);
+    float rough;
+    if ((flags & F_RGHPK) != 0u) rough = n4.w;
+    else {
+        const Tex tR = tex(R_R);
+        const bool pad = X >= Wr || Y >= Hr;
+        const uint ly = ((uint)Y + KW(K_SY)) & 7u;
+        if (pad && ly < 4u) rough = (uint)(X + tR.ox) < tR.w ? tx(tR, X, yc, 0u) : 0.0f;
+        else rough = tx(tR, xc, yc, 0u);
+    }
+    const uint w0 = quant(ccv.x, dith) | (quant(ccv.y, dith) << 8)
+                  | (quant(min(dd.y, amax), dith) << 16) | (quant(min(dd.z, amax), dith) << 24);
+    uint w1 = quant(ccv.z, dith) | (quant(min(ds.x, amax), dith) << 16) | (quant(min(ds.y, amax), dith) << 24);
+    uint w2 = (quant(min(ds.z, amax), dith) << 16) | (quant(min(nrm.x, amax), dith) << 24);
+    uint w3 = (quant(min(nrm.y, amax), dith) << 16) | (quant(min(nrm.z, amax), dith) << 24);
+    uint w4 = quant(min(rough, amax), dith) << 16;
+    uint w7 = quant(min(dd.x, amax), dith) << 8;
+
+    // 52.3.3 depth neighbourhood (with lane sharing RR_IN_DLANE)
+    const Tex tZ = tex(R_Z);
+    const bool rev = (flags & F_REV) != 0u;
+    int2 nT = int2(xc, yc), fT = nT;
+    float bn = tx(tZ, xc, yc, 0u), bf = bn;
+    const float z0c = bn;
+#if RR_IN_DLANE
+    {
+        const int ym = clamp(yc - 1, 0, Hr - 1), yp = clamp(yc + 1, 0, Hr - 1);
+        const float zo0 = tx(tZ, xc, ym, 0u), zo1 = bn, zo2 = tx(tZ, xc, yp, 0u);
+        const uint ln = WaveGetLaneIndex(), nl = WaveGetLaneCount();
+        const uint4 act = WaveActiveBallot(true);
+        const uint lL = ln == 0u ? 0u : ln - 1u, lR = ln + 1u < nl ? ln + 1u : ln;
+        const bool aL = ((act[lL >> 5] >> (lL & 31u)) & 1u) != 0u, aR = ((act[lR >> 5] >> (lR & 31u)) & 1u) != 0u;
+        const int xL = clamp(xc - 1, 0, Wr - 1), xR = clamp(xc + 1, 0, Wr - 1);
+        const int nxL = WaveReadLaneAt(xc, lL), nyL = WaveReadLaneAt(yc, lL), nxR = WaveReadLaneAt(xc, lR), nyR = WaveReadLaneAt(yc, lR);
+        float zL0 = WaveReadLaneAt(zo0, lL), zL1 = WaveReadLaneAt(zo1, lL), zL2 = WaveReadLaneAt(zo2, lL);
+        float zR0 = WaveReadLaneAt(zo0, lR), zR1 = WaveReadLaneAt(zo1, lR), zR2 = WaveReadLaneAt(zo2, lR);
+        if (xL == xc) { zL0 = zo0; zL1 = zo1; zL2 = zo2; }
+        else if (!(aL && lL != ln && nxL == xL && nyL == yc)) { zL0 = tx(tZ, xL, ym, 0u); zL1 = tx(tZ, xL, yc, 0u); zL2 = tx(tZ, xL, yp, 0u); }
+        if (xR == xc) { zR0 = zo0; zR1 = zo1; zR2 = zo2; }
+        else if (!(aR && lR != ln && nxR == xR && nyR == yc)) { zR0 = tx(tZ, xR, ym, 0u); zR1 = tx(tZ, xR, yc, 0u); zR2 = tx(tZ, xR, yp, 0u); }
+        const float zk[8] = {zL0, zo0, zR0, zL1, zR1, zL2, zo2, zR2};
+        const int qxk[8] = {xL, xc, xR, xL, xR, xL, xc, xR};
+        const int qyk[8] = {ym, ym, ym, yc, yc, yp, yp, yp};
+        [unroll] for (uint k = 0; k < 8u; ++k) {
+            const float z = zk[k];
+            if (rev ? (z > bn) : (z < bn)) { bn = z; nT = int2(qxk[k], qyk[k]); }
+            if (rev ? (z < bf) : (z > bf)) { bf = z; fT = int2(qxk[k], qyk[k]); }
+        }
+    }
+#else
+    [loop] for (uint k9 = 1; k9 < 9u + (wg_grid_ >> 31); ++k9) {
+        const int dx = (int)(k9 == 1u || k9 == 4u || k9 == 6u) * -1 + (int)(k9 == 3u || k9 == 5u || k9 == 8u);
+        const int dy = (k9 <= 3u) ? -1 : (k9 <= 5u ? 0 : 1);
+        const int qx = clamp(xc + dx, 0, Wr - 1), qy = clamp(yc + dy, 0, Hr - 1);
+        const float z = tx(tZ, qx, qy, 0u);
+        if (rev ? (z > bn) : (z < bn)) { bn = z; nT = int2(qx, qy); }
+        if (rev ? (z < bf) : (z > bf)) { bf = z; fT = int2(qx, qy); }
+    }
+#endif
+    const Tex tV = tex(R_V);
+    const float2 mO = mv(tV, xc, yc), mN = mv(tV, nT.x, nT.y), mF = mv(tV, fT.x, fT.y);
+
+    // 52.7.1 the second vector (exact recon)
+    float2 m2 = mO;
+    const uint mode = (flags >> 5) & 3u;
+    if (mode == 1u) m2 = mv(tex(R_SV), xc, yc);
+    else if (mode == 2u) {
+        const Tex tH = tex(R_HD);
+        const float px = (float)(xc + tZ.ox) + 0.5f, py = (float)(yc + tZ.oy) + 0.5f;
+        float2 r;
+        float hd = tx(tH, xc, yc, 0u);
+        if ((flags & F_HDF) != 0u) hd = hd_run4(tH, X, yc, hd);
+        if (recon(z0c, nrm, hd, px, py, r)) m2 = r;
+    }
+
+    // 52.3.2 history features (rolled 5-tap loop into 5 packed 24-bit uint registers -> 0 B LDS, 1x ph_sample!)
+    const float cxp = ((float)X + 0.5f) - jx, cyp = ((float)Y + 0.5f) - jy;
+    const float2 pos0 = float2(mad(cxp, rWhWr, mO.x), mad(cyp, rHhHr, mO.y));
+    const float2 pos1 = float2(mad(cxp, rWhWr, mN.x), mad(cyp, rHhHr, mN.y));
+    const float2 pos2 = float2(mad(cxp, rWhWr, mF.x), mad(cyp, rHhHr, mF.y));
+    const float2 pos3 = float2(mad(cxp, rWhWr, m2.x), mad(cyp, rHhHr, m2.y));
+    const bool inv0 = or(reset, outside(pos0.x, pos0.y));
+    const bool inv1 = or(reset, outside(pos1.x, pos1.y));
+    const bool inv2 = or(reset, outside(pos2.x, pos2.y));
+    const bool inv3 = or(reset, outside(pos3.x, pos3.y));
+    const bool anyinv = or(or(inv0, inv1), or(inv2, inv3));
+    uint fbpk = 0u;
+    if (anyinv) {
+        const float3 fbv = min(in_nan0(log2(max(mad(E * C, k4, 1.0f), k5)) * s_hQ), fclip);
+        fbpk = quant(fbv.x, dith) | (quant(fbv.y, dith) << 8) | (quant(fbv.z, dith) << 16);
+    }
+    const float hcsx = KF(K_HCSX), hcsy = KF(K_HCSY), hdec_s = SY(S_HDEC);
+    const bool dt1 = WaveActiveAllTrue(in_same2(pos1, pos0));
+    const bool dt2 = WaveActiveAllTrue(in_same2(pos2, pos0));
+    const bool dt3 = WaveActiveAllTrue(in_same2(pos3, pos0));
+    uint sc0 = 0u, sc1 = 0u, sc2 = 0u, sc3 = 0u, sc4 = 0u;
+    [loop] for (uint sm = 0; sm < 5u + (wg_grid_ >> 31); ++sm) {
+        const uint tap = sm <= 1u ? 0u : sm - 1u;
+        const bool dup = sm >= 2u && (tap == 1u ? dt1 : (tap == 2u ? dt2 : dt3));
+        uint pk = sc0;
+        [branch] if (!dup) {
+            const bool iv = tap == 0u ? inv0 : (tap == 1u ? inv1 : (tap == 2u ? inv2 : inv3));
+            const float2 ps = tap == 0u ? pos0 : (tap == 1u ? pos1 : (tap == 2u ? pos2 : pos3));
+            if (iv) {
+                pk = fbpk;
+            } else {
+                const float3 h = ph_sample(sm == 1u ? 1u : 0u, ps.x * hcsx, ps.y * hcsy);
+                const float3 hp = clamp(h * hdec_s, k5, k10);
+                const float3 hv = min(in_nan0(log2(max(mad(exp2(hp * s_hC) - 1.0f, s_hP, 1.0f), k5)) * s_hQ), fclip);
+                pk = quant(hv.x, dith) | (quant(hv.y, dith) << 8) | (quant(hv.z, dith) << 16);
+            }
+        }
+        if (sm == 0u) sc0 = pk;
+        else if (sm == 1u) sc1 = pk;
+        else if (sm == 2u) sc2 = pk;
+        else if (sm == 3u) sc3 = pk;
+        else sc4 = pk;
+    }
+    w3 |= (sc0 & 0xffffu);
+    w4 |= (sc0 >> 16) | ((sc1 & 0xffu) << 8);
+    uint w5 = (sc1 >> 8) & 0xffffu;
+    w1 |= (sc2 & 0xffu) << 8;
+    w2 |= (sc2 >> 8) & 0xffffu;
+    // Words 0..3 complete -> store early to free 4 VGPRs!
+    wg_st128(pc, t * 64u, uint4(w0, w1, w2, w3));
+    uint w6 = sc3 & 0xffffu;
+    w7 |= (sc3 >> 16) & 0xffu;
+    const uint w9 = quant(X3, dith) | ((sc4 & 0xffu) << 8);
+    const uint w10 = (sc4 >> 8) & 0xffffu;
+
+    // 52.3.6 hidden features (near, m2) & 52.3.7 motion differences (with dedup + MDD)
+    const float dq = (flags & F_DIS) != 0u ? tx(tex(R_Q), xc, yc, 0u) : 0.0f;
+    const bool dth = WaveActiveAllTrue(in_same2(pos3, pos1));
+    const float4 hd0 = hidf(pos1);
+    w5 |= (quant(hd0.x, dith) << 16) | (quant(hd0.y, dith) << 24);
+    w6 |= (quant(hd0.z, dith) << 16) | (quant(hd0.w, dith) << 24);
+    float4 hd1 = hd0;
+    [branch] if (!dth) hd1 = hidf(pos3);
+    const uint w12 = quant(hd1.y, dith) | (quant(hd1.z, dith) << 8);
+    const uint w13 = quant(hd1.w, dith);
+    wg_st128(pc, t * 64u + 48u, uint4(w12, w13, 0u, 0u));
+
+    float md0, md1;
+#if RR_IN_MDD
+    const bool mdd = WaveActiveAllTrue(in_same2(mN, m2));
+    [branch] if (mdd) {
+        bool a1_unused;
+        md0 = mdiff2(X, Y, mN, dq, md1, a1_unused);
+    } else {
+        md0 = mdiff(X, Y, mN, false, dq);
+        md1 = mdiff(X, Y, m2, true, dq);
+    }
+#else
+    md0 = mdiff(X, Y, mN, false, dq);
+    md1 = mdiff(X, Y, m2, true, dq);
+#endif
+    w4 |= quant(md0, dith) << 24;
+    const uint w11 = quant(md1, dith) | (quant(hd1.x, dith) << 8);
+
+    // 52.3.5 guides (30, 31, 32) + feature 33
+    const float gcl = SY(S_GCL), gcln = SY(S_GCLN);
+    float g0 = 0.0f, g1 = 0.0f, g2 = 0.0f;
+    if ((flags & F_B) != 0u) {
+        const float3 bv = tx3(tex(R_B), xc, yc);
+        const float3 dv = mad(-E, bv, EC);
+        const float sv = mad(dv.z, SY(S_LWRB), mad(dv.x, SY(S_LWRB), dv.y * SY(S_LWG)));
+        const float r = log2(mad(abs(sv), k4, 1.0f)) * select(sv >= 0.0f, s_cc, s_ccn);
+        g0 = min(clamp(in_nan0(r), gcln, gcl), fclip);
+    }
+    if ((flags & F_G1) != 0u) {
+        const float sv = E * tx(tex(R_G1), xc, yc, 0u);
+        const float r = log2(mad(abs(sv), k4, 1.0f)) * select(sv >= 0.0f, s_cc, s_ccn);
+        g1 = min(clamp(in_nan0(r), gcln, gcl), fclip);
+    }
+    if ((flags & F_G2) != 0u) {
+        const float sv = E * tx(tex(R_G2), xc, yc, 0u);
+        const float r = log2(mad(abs(sv), k4, 1.0f)) * select(sv >= 0.0f, s_cc, s_ccn);
+        g2 = min(clamp(in_nan0(r), gcln, gcl), fclip);
+    }
+    w7 |= (quant(g0, dith) << 16) | (quant(g1, dith) << 24);
+    const uint w8 = quant(g2, dith) | (quant(min(0.0f, fclip), dith) << 8);
+    wg_st128(pc, t * 64u + 16u, uint4(w4, w5, w6, w7));
+    wg_st128(pc, t * 64u + 32u, uint4(w8, w9, w10, w11));
+
+    // hold [Ht][Wt][4] f16
+    const uint ph = (uint)wg_uniform((int)KW(K_HOLD));
+    wg_st64(ph, t * 8u, uint2(TF2H(EC.x) | (TF2H(EC.y) << 16), TF2H(EC.z)));
+
+    // 52.7 surfaces: PM, Pe, Pn
+    if (X < Wr && Y < Hr) {
+        const int sx_ = X + tV.ox, sy_ = Y + tV.oy;
+        if (sx_ < Wr && sy_ < Hr) {
+            const uint idx = ((uint)sy_ & 0xffffffu) * ((uint)Wr & 0xffffffu) + (uint)sx_;
+            const uint pPM = (uint)wg_uniform((int)KW(K_PMW));
+            const uint pPe = (uint)wg_uniform((int)KW(K_PE));
+            const uint pPn = (uint)wg_uniform((int)KW(K_PN));
+            wg_st64(pPM, idx * 8u, uint2(TF2H(mN.x) | (TF2H(mN.y) << 16), TF2H(m2.x) | (TF2H(m2.y) << 16)));
+            wg_st32(pPe, idx * 4u, TF2H(mF.x) | (TF2H(mF.y) << 16));
+            wg_st32(pPn, idx * 4u, TF2H(mO.x) | (TF2H(mO.y) << 16));
+        }
+    }
+#else
     [unroll] for (uint z = 0; z < RR_IN_GSW; ++z) gs_codes[z * WG_BLOCK + lane_] = 0u;
     in_flag = 0u; in_slow = 0u; in_ziv = 0u; dbg_approx = uint2(0u, 0u);
 #if RR_IN_CSLOT == 2
@@ -1593,6 +1931,7 @@ void in_token(uint t)
         if (in_ziv != 0u) wg_atomic_add(KW(K_DIAG), 0u, in_ziv);
         if (in_slow != 0u) wg_atomic_add(KW(K_DIAG), 4u, in_slow);
     }
+#endif
 #endif
 }
 

@@ -514,18 +514,15 @@ W4C_WIDE_DEFS = {}   # per stage: defines of the wave64 form beyond the wave32 r
 W4C_C32_DEFS = {"IN0": {"RR_DEFER": 1, "RR_W4C": 6, "RR_SMAJOR": 2}, "D0-F": {"RR_W4C": 2}}
 
 
-# clean/rr-f-wave5 (fast mode only; the runtime's WG_RR_W5 mask): the relaxed body's wave64 stages with the packed-f16 elementwise forms
-# (L01_B16R, the bit of the stage in its file's L01_* mask) and the branchless Q8 (RR_Q8_FAST, rr_fast.hlsli): the stagef.* kernels.
-# NOT exact (round toward zero of the packed values, a NaN / out-of-range value takes the clamp's bound); network arithmetic only:
-# the history state keeps its operations (the hidden-state pre-activation rounds to nearest even). Bit 1 IN0 / bit 2 D0-F
-# (rr_block_c32.hlsl: IN0 with the folded MLP as step2_raw chains, RR_W4C 6; D0-F RR_W4C 2, the exchange-buffer overlay RR_OVL 1;
-# the deferred Q8 decision RR_DEFER is not needed once no Q8 group has a slow path), bit 3 E1 / D1-F / D1-R (rr_block_c64_w64.hlsl),
-# bit 4 E2 / D2-F / D2-R (rr_block_wide_w64.hlsl, the route's group count and prefetch mask as for stagee.<n>.w64).
+# clean/rr-f-wave5b (fast mode only; the runtime's WG_RR_W5 mask): the relaxed body's wave64 stages keeping the exact f32
+# elementwise/attention chains (RR_B32 1, RR_WIL 1: 0% RMS error for all finite values in [-448, +448]) with branchless clamped Q8
+# (RR_Q8_FAST 1, rr_fast.hlsli: no slow path, no wave votes, no RR_DEFER duplication; convergent merge guard in c64_w64 / wide_w64
+# keeps narrow-EXEC WMMAs at 0). Bit 4 = level 2 (E2 / D2-F / D2-R), bit 5 = level 0 (IN0 / D0-F), bit 6 = level 1 (E1 / D1-F / D1-R).
 W5_Q8 = {"RR_Q8_FAST": 1}
-W5_C32_DEFS = {"IN0": dict(W5_Q8, L01_B16R=1, RR_FOLD_B32=1, RR_W4C=6, RR_SMAJOR=2),
-               "D0-F": dict(W5_Q8, L01_B16R=2, RR_W4C=2, RR_OVL=1)}
-W5_C64_DEFS = {"E1": dict(W5_Q8, L01_B16R=4), "D1-F": dict(W5_Q8, L01_B16R=8), "D1-R": dict(W5_Q8, L01_B16R=16)}
-W5_WIDE_DEFS = {"E2": dict(W5_Q8, L01_B16R=16), "D2-F": dict(W5_Q8, L01_B16R=8), "D2-R": dict(W5_Q8, L01_B16R=16)}
+W5_C32_DEFS = {"IN0": dict(W5_Q8, RR_W4C=6, RR_SMAJOR=2),
+               "D0-F": dict(W5_Q8, RR_W4C=2, RR_OVL=1)}
+W5_C64_DEFS = {"E1": dict(W5_Q8), "D1-F": dict(W5_Q8), "D1-R": dict(W5_Q8)}
+W5_WIDE_DEFS = {"E2": dict(W5_Q8), "D2-F": dict(W5_Q8), "D2-R": dict(W5_Q8)}
 # runtime kernel name -> (stage, builder, defines)
 W5_KERNELS = (("stagef.IN0.w64", "IN0", "c32", W5_C32_DEFS), ("stagef.D0-F.w64", "D0-F", "c32", W5_C32_DEFS),
               ("stagef.E1.w64", "E1", "c64", W5_C64_DEFS), ("stagef.D1-F.w64", "D1-F", "c64", W5_C64_DEFS),
