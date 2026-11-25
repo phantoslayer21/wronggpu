@@ -130,6 +130,7 @@ struct FgExecOp {
     float t = 0.0f;
     bool flag1 = false, flag2 = false;
     bool ui = false;
+    bool lite_blend = false;  // Weights: the blend that follows is the light blend (else the Full blend)
 };
 
 struct FgExecFrameInfo {
@@ -178,6 +179,33 @@ private:
     bool lite_ = true;
     FgExecFrameInfo frame_;
 };
+
+// The order in which the launches of several generated indices that share one command list are recorded (the executor's
+// RecordGeneratedBatch; plain C++ so that the rule is tested on its own). Every frame is the launch list of one index:
+// its kernels and whether each launch needs a barrier before it (it reads what an earlier launch of the same index wrote).
+struct FgLaunchKey {
+    uint32_t kernel = 0;
+    bool barrier = true;
+};
+struct FgLaunchSlot {
+    uint32_t frame = 0, index = 0;  // frame f's launch `index`
+    bool barrier = true;            // a barrier is recorded before this launch
+    bool mark_stage = true;         // the stage timestamp is written before this launch
+};
+// Frames that run the same plan (equal launch counts, kernels and barrier needs at every position) are interleaved:
+// launch j of every frame back to back, a barrier only before frame 0's launch j and only when it needs one (the frames
+// write disjoint images and read only state that is final before the batch, so the barrier before frame 0's launch j,
+// which waits for every launch recorded before it, also covers the other frames' launch j - 1). Any other set of frames
+// is recorded frame after frame with each launch's own barrier flag.
+void FgInterleaveLaunches(const std::vector<std::vector<FgLaunchKey>>& frames, std::vector<FgLaunchSlot>* out);
+
+// A18: whether the same launch of `frames` frames (args[f] = frame f's n argument DWORDs) can be one (groups, 1, frames)
+// launch of a z-sliced kernel, and the mask of the pointer arguments the slices must offset. Every argument is either the
+// same in every frame (weights, null pointers, all scalars), or one of the first `pointers` arguments that frame f has at
+// frame 0's value + f * stride (the scratch banks are `stride` bytes apart). Any other difference refuses; so does a launch
+// with no banked pointer. mask bit i = argument i is banked.
+bool FgPlanZBatch(const uint32_t* const* args, uint32_t frames, uint32_t n, uint32_t pointers, uint64_t stride,
+                  uint32_t* mask);
 
 // net2's 25 convolutions (clean/fg/layout.py NET2): stored input channels, used input channels, outputs.
 struct FgNet2Layer {

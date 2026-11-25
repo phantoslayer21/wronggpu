@@ -57,7 +57,7 @@ if(WIN32)
     ${WG_FG_PRESENTER_DIR}/fg_dxgi_presenter.cpp
     ${WG_FG_PRESENTER_DIR}/fg_presenter_factory.cpp)
   target_link_libraries(wg_fg_session_deps PUBLIC
-    d3d11.lib d3d12.lib dxgi.lib dcomp.lib gdi32.lib user32.lib mincore.lib)
+    d3d11.lib d3d12.lib dxgi.lib gdi32.lib user32.lib mincore.lib)
   target_compile_definitions(wg_fg_session_deps PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN WG_FG_SESSION_WIN=1)
   list(APPEND WG_FG_SESSION_SOURCES ${WG_FG_RUNTIME_DIR}/fg_session_win.cpp)
 endif()

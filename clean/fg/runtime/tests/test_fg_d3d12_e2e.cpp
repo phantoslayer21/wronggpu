@@ -8,6 +8,21 @@
 //                                           resets), every executor refusal that needs no GPU, and a session whose
 //                                           executor refuses (no presenter is created, nothing falls back)
 //   test_fg_d3d12_e2e --gpu --dxil <dir>    adds the headless GPU leg (no window): a synthetic game drives the game
+//   test_fg_d3d12_e2e --bench --dxil <dir>  reports steady-state 1440p GPU stage timings for presets A and C
+//       [--gen N]       N = 1..5 generated images per game frame (2x .. 6x), really recorded (default 1)
+//       [--preset AC]   which presets (default AC)       [--timed N] [--warmup N]
+//       [--kprof]       per-launch profile: kernel, workgroups, time per call (serialises the queue a little)
+//       [--batch 0|1] [--hoist 0|1] [--dualq 0|1] [--fuse 0|1] [--fuse2 0|1|MASK]   Turbo v2 levers for paired A / B runs
+//                       (default: on, or the environment WG_FG_BATCH / _HOIST / _DUALQ / _FUSE / _FUSE2 = 0; --fuse2 takes
+//                       a mask of the Wave 1B levers: 1 net1 cells, 2 net2 pairs, 4 upwarp in L14, 8 blend weights,
+//                       16 pyramid tail, 32 X0 / X1 as RGB, and the Wave 2 levers 64 fill16 without divisions, 128 bilinear row
+//                       loads, 256 light blend tiles, 512 output pull power-of-two skip, 1024 net2 z-batching; the default is
+//                       593 = 17 + 64 + 512, 17 alone is the Wave 1B default, 2001 = 17 + all of Wave 2;
+//                       WG_FG_NET2_BATCH=0 also stops 1024)
+//       [--turbo-fuse2 MASK]  the Wave 1B mask the --only turbo legs run against all levers off (default 2047: every lever)
+//       The report has the per-stage sums and the honest multi-queue numbers: the wall-clock GPU span and the busy
+//       time per game frame over the timed window (overlap between queues is counted once there, twice in the sums).
+//   --reference-dxil <dir>  compare direct-SRV output bytes against the captured path built with these kernels
 //                                           adapter core, the FG session and this executor on the D3D12 device with
 //                                           the composition back end (unbound surface) and the DXGI back end
 //                                           (composition swap chain): preset C 2x and 6x, presets A / B 2x, a menu
@@ -153,6 +168,144 @@ void TestSigTable() {
     const uint8_t want[32] = {0x09, 0x90, 0x7d, 0x7f, 0xee, 0x13, 0x7a, 0xe4, 0x69, 0x92, 0x9d, 0xb6, 0x89, 0x55, 0x82, 0x5b,
                               0xff, 0xf2, 0x15, 0xb4, 0x80, 0xe8, 0x2f, 0xed, 0xed, 0xe3, 0x52, 0x11, 0xed, 0x1a, 0x67, 0xb2};
     CHECK(std::memcmp(d.data(), want, 32) == 0);
+}
+
+// Wave 2 A18: when the same launch of several frames can be one z-sliced launch (FgPlanZBatch), and which pointers the
+// slices offset: the scratch banks are `stride` bytes apart, so a pointer argument is banked when frame f holds frame 0's
+// value + f * stride; weights, null pointers and every scalar must be equal; anything else keeps the separate launches.
+void TestZBatchPlan() {
+    g_case = "z-batch-plan";
+    const uint64_t stride = 0x300000;
+    const uint32_t kPtr = 9, kN = 28;
+    const auto frame = [&](uint32_t f) {
+        std::vector<uint32_t> a(kN);
+        for (uint32_t i = 0; i < kN; ++i) a[i] = 100 + i;    // scalars (and shared pointers) the same in every frame
+        a[0] = 0x1000 + f * static_cast<uint32_t>(stride);    // x: banked
+        a[1] = 0x500;                                         // wf: the weights, shared
+        a[3] = 0x2000 + f * static_cast<uint32_t>(stride);    // y: banked
+        a[4] = 0;                                             // skip: null
+        return a;
+    };
+    const auto plan = [&](const std::vector<std::vector<uint32_t>>& fr, uint32_t* mask) {
+        std::vector<const uint32_t*> p;
+        for (const auto& a : fr) p.push_back(a.data());
+        return FgPlanZBatch(p.data(), static_cast<uint32_t>(p.size()), kN, kPtr, stride, mask);
+    };
+    uint32_t mask = 0;
+    for (uint32_t n = 2; n <= 5; ++n) {
+        std::vector<std::vector<uint32_t>> fr;
+        for (uint32_t f = 0; f < n; ++f) fr.push_back(frame(f));
+        mask = 0;
+        CHECK(plan(fr, &mask));
+        CHECK(mask == (1u | 8u));   // x and y
+    }
+    std::vector<std::vector<uint32_t>> fr = {frame(0), frame(1), frame(2)};
+    // a scalar that differs (e.g. a different time bit, a different grid): separate launches
+    auto bad = fr;
+    bad[2][15] += 1;
+    CHECK(!plan(bad, &mask));
+    // a pointer that is not exactly one stride per frame
+    bad = fr;
+    bad[2][3] += 256;
+    CHECK(!plan(bad, &mask));
+    // a pointer banked in frame 1 but not in frame 2, or the other way round
+    bad = fr;
+    bad[2][0] = bad[0][0];
+    CHECK(!plan(bad, &mask));
+    bad = fr;
+    bad[1][3] = bad[0][3];
+    CHECK(!plan(bad, &mask));
+    // a scalar (index >= the pointer count) that moves by a stride is not a bank
+    bad = fr;
+    for (uint32_t f = 0; f < 3; ++f) bad[f][12] = 7 + f * static_cast<uint32_t>(stride);
+    CHECK(!plan(bad, &mask));
+    // nothing banked at all, a single frame, bad arguments
+    CHECK(!plan({frame(0), frame(0)}, &mask));
+    CHECK(!plan({frame(0)}, &mask));
+    CHECK(!FgPlanZBatch(nullptr, 2, kN, kPtr, stride, &mask));
+    // 32-bit wrap of an offset is the same arithmetic as the shader's
+    auto w = fr;
+    for (uint32_t f = 0; f < 3; ++f) w[f][0] = 0xFFF00000u + f * static_cast<uint32_t>(stride);
+    CHECK(plan(w, &mask) && (mask & 1u));
+}
+
+// Turbo v2: the order in which the launches of several indices sharing one command list are recorded, and the shape of an
+// index's ops that the hoisted work (the first three) and the batch rely on.
+void TestInterleave() {
+    g_case = "interleave";
+    using Key = FgLaunchKey;
+    std::vector<FgLaunchSlot> out;
+    FgInterleaveLaunches({}, &out);
+    CHECK(out.empty());
+    // one frame: its own order and barrier flags
+    const std::vector<Key> plan = {{1, true}, {2, false}, {3, true}, {4, true}};
+    FgInterleaveLaunches({plan}, &out);
+    CHECK(out.size() == 4);
+    for (uint32_t j = 0; j < out.size(); ++j)
+        CHECK(out[j].frame == 0 && out[j].index == j && out[j].barrier == plan[j].barrier && out[j].mark_stage);
+    // three frames of the same plan: launch j of every frame in turn, one barrier only before frame 0's launch j and
+    // only where the plan needs one; the stage mark only on frame 0
+    FgInterleaveLaunches({plan, plan, plan}, &out);
+    CHECK(out.size() == 12);
+    bool order = true;
+    for (uint32_t j = 0; j < 4; ++j)
+        for (uint32_t f = 0; f < 3; ++f) {
+            const FgLaunchSlot& x = out[j * 3 + f];
+            order = order && x.frame == f && x.index == j && x.mark_stage == (f == 0) &&
+                    x.barrier == (f == 0 && plan[j].barrier);
+        }
+    CHECK(order);
+    // every launch of every frame appears exactly once
+    int seen[3][4] = {};
+    for (const FgLaunchSlot& x : out) ++seen[x.frame][x.index];
+    bool once = true;
+    for (auto& row : seen)
+        for (int n : row) once = once && n == 1;
+    CHECK(once);
+    // frames of different plans (a different kernel, a different barrier need, a different length) are not interleaved:
+    // frame after frame with the frame's own barrier flags
+    const std::vector<Key> other_kernel = {{1, true}, {2, false}, {9, true}, {4, true}};
+    const std::vector<Key> other_barrier = {{1, true}, {2, true}, {3, true}, {4, true}};
+    const std::vector<Key> shorter = {{1, true}, {2, false}};
+    for (const auto& frames : {std::vector<std::vector<Key>>{plan, other_kernel},
+                               std::vector<std::vector<Key>>{plan, other_barrier},
+                               std::vector<std::vector<Key>>{plan, shorter}}) {
+        FgInterleaveLaunches(frames, &out);
+        size_t total = 0, at = 0;
+        for (const auto& f : frames) total += f.size();
+        CHECK(out.size() == total);
+        bool sequential = out.size() == total;
+        for (uint32_t f = 0; f < frames.size(); ++f)
+            for (uint32_t j = 0; sequential && j < frames[f].size(); ++j, ++at)
+                sequential = out[at].frame == f && out[at].index == j && out[at].barrier == frames[f][j].barrier &&
+                             out[at].mark_stage;
+        CHECK(sequential);
+    }
+    // the hoisted work is the first three ops of an index with history (fills of MA / MB, then the intermediate-time
+    // scatters), for every index and preset; a game frame without history has none
+    for (const bool lite : {true, false}) {
+        FgExecSettings st;
+        FgExecGeometry g;
+        std::string why;
+        FgExecMakeGeometry(160, 90, &g, &why);
+        FgExecHost h;
+        h.Configure(st, g);
+        std::vector<FgExecOp> ops;
+        h.BeginFrame(lite, false, true, false, false, true, &ops);
+        std::vector<uint32_t> pairs;
+        h.EndFrame(&pairs);
+        ops.clear();
+        h.BeginFrame(lite, false, true, false, false, false, &ops);
+        CHECK(h.Frame().history);
+        for (uint32_t i = 1; i <= 5; ++i) {
+            std::vector<FgExecOp> idx;
+            h.IndexOps(FgIndexTime(i, 5), true, false, false, &idx);
+            CHECK(idx.size() >= 5 && idx[0].op == FgOp::Fill64 && idx[0].role == kRoleMA && idx[1].op == FgOp::Fill64 &&
+                  idx[1].role == kRoleMB && idx[2].op == FgOp::Interm && idx[3].op == FgOp::Weights);
+            const float t = FgIndexTime(i, 5);
+            CHECK(std::memcmp(&idx[2].t, &t, sizeof(float)) == 0);
+        }
+    }
 }
 
 void TestSchedule() {
@@ -465,7 +618,19 @@ struct FakeChain {
 int g_fn_a = 0, g_fn_b = 0;
 
 FgTicks RealClock(void*) { return FgInterruptNow(); }
+
+struct PipelineClock {
+    FgTicks arrival = 0;
+    static FgTicks Read(void* ctx) {
+        auto& clock = *static_cast<PipelineClock*>(ctx);
+        if (clock.arrival == 0) return FgInterruptNow();
+        const FgTicks arrival = clock.arrival;
+        clock.arrival = 0;
+        return arrival;
+    }
+};
 bool g_debug_layer = false;
+int g_turbo_fuse2 = 2047;  // the Wave 1B mask TestTurboExact runs against all levers off (--turbo-fuse2 MASK)
 int g_log_lines = 0;
 void PrintLog(void*, const char* line) {
     if (g_log_lines++ < 40) std::printf("      log: %s\n", line);
@@ -563,6 +728,7 @@ float Noise(uint32_t frame, uint32_t i, uint32_t c) {
 // optional full-screen menu overlay, a depth plane, motion in pixels, the translation matrices).
 struct Game {
     Gpu* gpu = nullptr;
+    uint32_t width = kW, height = kH;
     ComPtr<ID3D12Resource> colour, hudless, ui, depth, motion;
     DXGI_FORMAT colour_format = DXGI_FORMAT_R16G16B16A16_FLOAT;  // the chain's format (B8G8R8A8 or RGBA16F)
     ComPtr<ID3D12Resource> upload;
@@ -570,26 +736,31 @@ struct Game {
     D3D12_RESOURCE_STATES other_state = D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE;
     float clip_to_prev[16] = {}, prev_to_clip[16] = {};
 
-    ComPtr<ID3D12Resource> Tex(DXGI_FORMAT f) {
+    ComPtr<ID3D12Resource> Tex(DXGI_FORMAT f, D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE) {
         D3D12_HEAP_PROPERTIES hp = {};
         hp.Type = D3D12_HEAP_TYPE_DEFAULT;
         D3D12_RESOURCE_DESC rd = {};
         rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        rd.Width = kW;
-        rd.Height = kH;
+        rd.Width = width;
+        rd.Height = height;
         rd.DepthOrArraySize = 1;
         rd.MipLevels = 1;
         rd.Format = f;
         rd.SampleDesc.Count = 1;
+        rd.Flags = flags;
         ComPtr<ID3D12Resource> r;
         gpu->device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COMMON, nullptr,
                                              IID_PPV_ARGS(&r));
         return r;
     }
-    bool Init(Gpu* g, DXGI_FORMAT cf) {
+    bool Init(Gpu* g, DXGI_FORMAT cf, uint32_t w = kW, uint32_t h = kH) {
         colour_format = cf;
         gpu = g;
-        colour = Tex(cf);
+        width = w;
+        height = h;
+        const uint32_t pitch8 = (width * 8 + 255) & ~255u;
+        colour = Tex(cf, colour_state == D3D12_RESOURCE_STATE_RENDER_TARGET
+                            ? D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET : D3D12_RESOURCE_FLAG_NONE);
         hudless = Tex(DXGI_FORMAT_R16G16B16A16_FLOAT);
         ui = Tex(DXGI_FORMAT_R16G16B16A16_FLOAT);
         depth = Tex(DXGI_FORMAT_R32_FLOAT);
@@ -598,7 +769,7 @@ struct Game {
         hp.Type = D3D12_HEAP_TYPE_UPLOAD;
         D3D12_RESOURCE_DESC rd = {};
         rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        rd.Width = 5ull * 3072 * kH;  // five textures, rows of 3072 bytes (320 x 8 rounded up to 256)
+        rd.Width = 5ull * pitch8 * height;
         rd.Height = 1;
         rd.DepthOrArraySize = 1;
         rd.MipLevels = 1;
@@ -610,27 +781,50 @@ struct Game {
         clip_to_prev[0] = clip_to_prev[5] = clip_to_prev[15] = 1.0f;
         clip_to_prev[11] = 0.0625f;
         std::memcpy(prev_to_clip, clip_to_prev, sizeof(prev_to_clip));
-        const float tx = 12.0f / static_cast<float>(kW);
+        const float tx = 12.0f / static_cast<float>(width);
         clip_to_prev[12] = tx;
         prev_to_clip[12] = -tx;
         return colour && hudless && ui && depth && motion && upload;
+    }
+    FgFramePacket Packet() const {
+        const auto input = [&](ID3D12Resource* tex, D3D12_RESOURCE_STATES state) {
+            FgTextureRef ref;
+            ref.resource = tex;
+            ref.format = tex->GetDesc().Format;
+            ref.state = state;
+            ref.width = width;
+            ref.height = height;
+            ref.rect = {0, 0, width, height};
+            return ref;
+        };
+        FgFramePacket packet;
+        packet.color = input(colour.Get(), colour_state);
+        packet.depth = input(depth.Get(), other_state);
+        packet.motion = input(motion.Get(), other_state);
+        packet.optional[kFgOptHudless] = input(hudless.Get(), other_state);
+        packet.optional[kFgOptUiAlpha] = input(ui.Get(), other_state);
+        packet.optional_present = FgOptBit(kFgOptHudless) | FgOptBit(kFgOptUiAlpha);
+        packet.flags = kFgFlagDepthReversed;
+        std::memcpy(packet.camera_current, clip_to_prev, sizeof(clip_to_prev));
+        std::memcpy(packet.camera_previous, prev_to_clip, sizeof(prev_to_clip));
+        return packet;
     }
     // Writes frame `f` (menu: the overlay) into the textures and waits for the copies.
     bool Upload(uint32_t f, bool menu, bool first) {
         uint8_t* base = nullptr;
         if (FAILED(upload->Map(0, nullptr, reinterpret_cast<void**>(&base)))) return false;
-        const uint32_t p8 = 3072, p4 = 1280, region = p8 * kH;  // row pitches: 8-byte and 4-byte texels
+        const uint32_t p8 = (width * 8 + 255) & ~255u, p4 = (width * 4 + 255) & ~255u, region = p8 * height;
         uint16_t* col = reinterpret_cast<uint16_t*>(base);
         uint16_t* hud = reinterpret_cast<uint16_t*>(base + region);
         uint16_t* uim = reinterpret_cast<uint16_t*>(base + 2 * region);
         float* dep = reinterpret_cast<float*>(base + 3 * region);
         uint16_t* mot = reinterpret_cast<uint16_t*>(base + 4 * region);
         const float pan = 6.0f * static_cast<float>(f);
-        const uint32_t bx0 = static_cast<uint32_t>(kW * 0.3f) + 2 * f, by0 = static_cast<uint32_t>(kH * 0.35f) + f;
-        const uint32_t bw = kW / 5, bh = kH / 4;
-        for (uint32_t y = 0; y < kH; ++y)
-            for (uint32_t x = 0; x < kW; ++x) {
-                const uint32_t i = y * kW + x;
+        const uint32_t bx0 = static_cast<uint32_t>(width * 0.3f) + 2 * f, by0 = static_cast<uint32_t>(height * 0.35f) + f;
+        const uint32_t bw = width / 5, bh = height / 4;
+        for (uint32_t y = 0; y < height; ++y)
+            for (uint32_t x = 0; x < width; ++x) {
+                const uint32_t i = y * width + x;
                 const float fx = static_cast<float>(x), fy = static_cast<float>(y);
                 float rgb[3] = {0.5f + 0.4f * std::sin((fx + pan) * 0.11f) * std::cos(fy * 0.07f),
                                 0.5f + 0.3f * std::cos((fx + pan) * 0.05f + fy * 0.09f),
@@ -643,14 +837,14 @@ struct Game {
                     rgb[2] = 0.15f;
                 }
                 float alpha = 0.0f, uc[3] = {0, 0, 0};
-                const bool panel = x >= kW * 0.62f && x < kW * 0.62f + kW / 4 && y >= kH * 0.08f && y < kH * 0.08f + kH / 5;
+                const bool panel = x >= width * 0.62f && x < width * 0.62f + width / 4 && y >= height * 0.08f && y < height * 0.08f + height / 5;
                 if (panel) {
                     alpha = ((x / 3 + y / 2) % 3 == 0) ? 1.0f : 0.75f;
                     uc[0] = alpha == 1.0f ? 1.0f : 0.1f;
                     uc[1] = alpha == 1.0f ? 1.0f : 0.8f;
                     uc[2] = alpha == 1.0f ? 1.0f : 0.9f;
                 }
-                if (menu && x >= kW * 0.05f && x < kW * 0.95f && y >= kH * 0.03f && y < kH * 0.97f) {
+                if (menu && x >= width * 0.05f && x < width * 0.95f && y >= height * 0.03f && y < height * 0.97f) {
                     alpha = 0.9f;
                     uc[0] = 0.05f;
                     uc[1] = 0.05f;
@@ -676,8 +870,8 @@ struct Game {
                 else
                     cp[3] = 0x3C00;
                 up[3] = FgExecHalfBits(alpha);
-                const float dplane = 0.3f + 0.3f * fy / kH;
-                dep[y * p4 / 4 + x] = 1.0f - (block ? 0.012f + 0.008f * fx / kW : dplane);
+                const float dplane = 0.3f + 0.3f * fy / height;
+                dep[y * p4 / 4 + x] = 1.0f - (block ? 0.012f + 0.008f * fx / width : dplane);
                 const float mx = block ? -4.0f : 6.0f, my = block ? -2.0f : 0.0f;
                 mot[y * p4 / 2 + 2 * x] = FgExecHalfBits(mx + 0.4f * Noise(f, i, 3));
                 mot[y * p4 / 2 + 2 * x + 1] = FgExecHalfBits(my + 0.4f * Noise(f, i, 4));
@@ -705,7 +899,7 @@ struct Game {
             src.pResource = upload.Get();
             src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
             src.PlacedFootprint.Offset = static_cast<uint64_t>(t) * region;
-            src.PlacedFootprint.Footprint = {fmts[t], kW, kH, 1, pitches[t]};
+            src.PlacedFootprint.Footprint = {fmts[t], width, height, 1, pitches[t]};
             gpu->list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
             b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
             b.Transition.StateAfter = st;
@@ -771,7 +965,8 @@ struct HeadlessSource final : public IFgPresenterSource {
         dd.swap_chain = chain.Get();
         dd.pacing = FgDxgiPacing::Tearing;
         dd.max_generated = desc.max_generated;
-        dd.slot_count = desc.max_generated + 5;
+        // Fit two complete intervals and the real reserve while the headless display thread drains.
+        dd.slot_count = 2 * (desc.max_generated + 1) + 1;
         std::unique_ptr<FgDxgiPresenter> p;
         const FgWinResult r = FgDxgiPresenter::Create(dd, &p);
         last = std::string("dxgi tearing: ") + FgWinRefusalName(r.refusal);
@@ -868,6 +1063,7 @@ RunResult RunPipeline(Gpu& gpu, const std::string& dxil, const FgExecWeights& we
     proxy->set_options(WG_FEAT_FRAME_GENERATION, 1, &o, &o);
     proxy->claim_present(kChain, WG_FG_OWNER_NATIVE_ADAPTER);
 
+    PipelineClock clock;
     FgSession session;
     FgSessionDesc sd;
     FgCreateDesc& c = sd.create;
@@ -891,13 +1087,14 @@ RunResult RunPipeline(Gpu& gpu, const std::string& dxil, const FgExecWeights& we
     sd.executor = &exec;
     sd.presenter_source = &source;
     sd.history_banks = 3;
-    sd.clock = &RealClock;
+    sd.clock = &PipelineClock::Read;
+    sd.clock_ctx = &clock;
     sd.log = &PrintLog;
     g_log_lines = 0;
     sd.scheduler.display.min_interval = 1;
     sd.scheduler.display.max_interval = 10000000;
     sd.scheduler.max_lead = 2000000;
-    sd.scheduler.first_image_budget = 600000;
+    sd.scheduler.first_image_budget = dxgi ? 300000 : 600000;
     const FgSessionResult cr = session.Create(sd);
     std::printf("    create: %s (executor %s: %s; presenter %s)\n", FgSessionErrorName(cr.error),
                 FgExecRefusalName(exec.LastRefusal()), exec.LastWhy().c_str(), headless.last.c_str());
@@ -910,9 +1107,11 @@ RunResult RunPipeline(Gpu& gpu, const std::string& dxil, const FgExecWeights& we
     WgFgExecutorV1 h = session.ExecutorHandOff();
     proxy->set_executor(&h);
 
-    const FgTicks period = 333333;  // 30 game frames per second
+    const FgTicks period = dxgi ? 500000 : 333333;
+    const FgTicks first_arrival = FgInterruptNow() + period;
     int errors = 0;
     bool menu_seen = false;
+    uint32_t menu_recorded = 0;
     int off_frames = 0;
     for (int f = 0; f < frames; ++f) {
         const uint64_t tok = static_cast<uint64_t>(f) + 1;
@@ -976,7 +1175,11 @@ RunResult RunPipeline(Gpu& gpu, const std::string& dxil, const FgExecWeights& we
         pd.backbuffer.rect = {0, 0, kW, kH};
         WgFgPresentResult pr = {};
         FgSessionResult r;
+        // Fix the synthetic arrival cadence. The presenter and deadline checks still use wall time.
+        clock.arrival = first_arrival + f * period;
+        while (FgInterruptNow() < clock.arrival) Sleep(1);
         FgSessionPresent(proxy.get(), &session, &pd, &pr, &r);
+        clock.arrival = 0;
         if (r.error != FgSessionError::None) {
             ++errors;
             std::printf("    frame %llu: session %s, executor %s (%s), presenter %s; core status %u reason %u "
@@ -985,9 +1188,14 @@ RunResult RunPipeline(Gpu& gpu, const std::string& dxil, const FgExecWeights& we
                         FgExecRefusalName(exec.LastRefusal()), exec.LastWhy().c_str(), FgStatusName(r.presenter),
                         pr.status, pr.reason, pr.real_only);
         }
-        if (menu) menu_seen = r.menu_detected;
+        if (menu) {
+            menu_seen = r.menu_detected;
+            menu_recorded = r.copies_recorded;
+            if (menu_recorded != n)
+                std::printf("    menu frame: scheduled %u, copied %u, unreserved %u, stale %u\n",
+                            r.scheduled, menu_recorded, r.not_reserved, r.stale_cancelled);
+        }
         ++rr.frames;
-        Sleep(static_cast<DWORD>(period / 10000));
     }
     CHECK(errors == 0);
     CHECK(exec.WaitIdle(5000));
@@ -1083,7 +1291,7 @@ RunResult RunPipeline(Gpu& gpu, const std::string& dxil, const FgExecWeights& we
     CHECK(rr.generated > 0 && gen_ok == rr.generated && finite);
     CHECK(copy_ok == rr.copies + rr.real);
     CHECK(slot_ok == outs.size());
-    if (menu_frame >= 0) CHECK(menu_tok_copies == n);
+    if (menu_frame >= 0) CHECK(menu_recorded == n && menu_tok_copies == menu_recorded);
     // every slot comes back to the DXGI back end once the display path is done (the unbound composition surface
     // never composes, so its slots stay with the display: see HeadlessSource)
     if (FgDxgiPresenter* dp = dynamic_cast<FgDxgiPresenter*>(pres)) {
@@ -1301,23 +1509,774 @@ void TestMotionFormats() {
     CHECK(!FgD3d12MotionFormatAccepted(DXGI_FORMAT_BC1_UNORM));
 }
 
+struct ExecutorSlots final : IFgSlotTarget {
+    ComPtr<ID3D12Resource> textures[8];  // the generated indices' slots and the real endpoint's (benchmarks use up to 6)
+    ID3D12Resource* SlotResource(uint32_t slot) const override {
+        return slot < 8 ? textures[slot].Get() : nullptr;
+    }
+    uint32_t RegisterFence(ID3D12Fence*, std::string*) override { return 1; }
+    bool ReserveRealSlot(uint32_t* slot) override {
+        *slot = 1;
+        return true;
+    }
+};
+
+bool CopiesMatchUpload(Gpu& gpu, const Game& game, const ExecutorSlots& slots) {
+    const UINT pitch = (game.width * 4 + 255) & ~255u;
+    const UINT64 bytes = static_cast<UINT64>(pitch) * game.height;
+    const UINT64 stride = (bytes + 511) & ~511ull;
+    D3D12_HEAP_PROPERTIES hp = {};
+    hp.Type = D3D12_HEAP_TYPE_READBACK;
+    D3D12_RESOURCE_DESC rd = {};
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    rd.Width = stride + bytes;
+    rd.Height = 1;
+    rd.DepthOrArraySize = 1;
+    rd.MipLevels = 1;
+    rd.SampleDesc.Count = 1;
+    rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> readback;
+    if (FAILED(gpu.device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                   nullptr, IID_PPV_ARGS(&readback))) ||
+        FAILED(gpu.alloc->Reset()) || FAILED(gpu.list->Reset(gpu.alloc.Get(), nullptr)))
+        return false;
+    for (uint32_t i = 0; i < 2; ++i) {
+        D3D12_TEXTURE_COPY_LOCATION src = {};
+        src.pResource = slots.textures[i].Get();
+        src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        D3D12_TEXTURE_COPY_LOCATION dst = {};
+        dst.pResource = readback.Get();
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        dst.PlacedFootprint.Offset = i * stride;
+        dst.PlacedFootprint.Footprint = {game.colour_format, game.width, game.height, 1, pitch};
+        // A COMMON texture is implicitly promoted for this read-only copy and decays at the list boundary.
+        gpu.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    }
+    if (FAILED(gpu.list->Close())) return false;
+    ID3D12CommandList* lists[] = {gpu.list.Get()};
+    gpu.queue->ExecuteCommandLists(1, lists);
+    if (!gpu.Wait()) return false;
+    void* expected = nullptr;
+    void* actual = nullptr;
+    if (FAILED(game.upload->Map(0, nullptr, &expected))) return false;
+    const bool mapped = SUCCEEDED(readback->Map(0, nullptr, &actual));
+    bool exact = mapped;
+    if (mapped) {
+        const auto* images = static_cast<const uint8_t*>(actual);
+        const auto* upload = static_cast<const uint8_t*>(expected);
+        for (UINT y = 0; exact && y < game.height; ++y) {
+            const UINT64 row = static_cast<UINT64>(pitch) * y;
+            exact = std::memcmp(images + row, upload + row, game.width * 4) == 0 &&
+                    std::memcmp(images + stride + row, upload + row, game.width * 4) == 0;
+        }
+    }
+    const D3D12_RANGE none = {0, 0};
+    if (mapped) readback->Unmap(0, &none);
+    game.upload->Unmap(0, &none);
+    return exact;
+}
+
+void TestCopyPaths(Gpu& gpu, const std::string& dxil, const FgExecWeights& weights, bool supplied_compute) {
+    g_case = supplied_compute ? "gpu-copy-paths-supplied-compute" : "gpu-copy-paths-direct";
+    constexpr DXGI_FORMAT format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    Game game;
+    game.colour_state = supplied_compute ? D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE : D3D12_RESOURCE_STATE_RENDER_TARGET;
+    game.other_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    const bool game_ready = game.Init(&gpu, format) && game.Upload(0, false, true);
+    CHECK(game_ready);
+    if (!game_ready) return;
+    ExecutorSlots slots;
+    slots.textures[0] = game.Tex(format);
+    slots.textures[1] = game.Tex(supplied_compute ? format : DXGI_FORMAT_B8G8R8A8_TYPELESS);
+    CHECK(slots.textures[0] && slots.textures[1]);
+    if (!slots.textures[0] || !slots.textures[1]) return;
+
+    ComPtr<ID3D12CommandQueue> queue = gpu.queue;
+    if (supplied_compute) {
+        D3D12_COMMAND_QUEUE_DESC desc = {};
+        desc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+        queue.Reset();
+        const HRESULT hr = gpu.device->CreateCommandQueue(&desc, IID_PPV_ARGS(&queue));
+        CHECK(SUCCEEDED(hr));
+        if (FAILED(hr)) return;
+    }
+    FgD3d12ExecutorDesc ed;
+    ed.dxil_dir = dxil;
+    ed.weights = &weights;
+    ed.enable_full = false;
+    FgD3d12Executor exec(ed);
+    FgCreateDesc create = CpuCreate(kW, kH);
+    create.device = gpu.device.Get();
+    create.queue = queue.Get();
+    const auto ok = [&](FgExecResult s) {
+        if (s != FgExecResult::Ok) std::printf("    executor: %s\n", exec.LastWhy().c_str());
+        CHECK(s == FgExecResult::Ok);
+        return s == FgExecResult::Ok;
+    };
+    if (!ok(exec.Configure(create, 3))) return;
+    const bool bound = exec.BindSlotTarget(&slots);
+    CHECK(bound);
+    if (!bound) return;
+
+    const FgFramePacket packet = game.Packet();
+    for (uint64_t token = 1; token <= 2; ++token) {
+        FgSharedDispatchDesc shared;
+        shared.frame_token = token;
+        shared.preset = FgPreset::C;
+        shared.has_previous = token > 1;
+        shared.generates = true;
+        shared.packet = &packet;
+        FgSharedResult result;
+        const uint64_t before = exec.LastComputeValue();
+        if (!ok(exec.RecordSharedGameFrame(shared, &result))) return;
+        CHECK(exec.LastComputeValue() == before + 1 && !result.menu.detected);
+    }
+    FgReadyFence ready;
+    FgIndexDispatchDesc gen;
+    gen.frame_token = 2;
+    gen.index = gen.generated_count = 1;
+    gen.is_last_index = true;
+    gen.preset = FgPreset::C;
+    gen.t = 0.5f;
+    gen.slot.reserved = true;
+    if (!ok(exec.RecordGeneratedIndex(gen, &ready))) return;
+    const uint64_t dispatches = exec.Counters().dispatches;
+    const bool uncaptured = exec.Counters().captures == 0;
+    const uint64_t menu_cost = supplied_compute ? 2 + static_cast<uint64_t>(uncaptured) : 0;
+    // Reuse the generated slot for the menu copy while compute may still be writing it.
+    FgCopyDispatchDesc menu;
+    menu.frame_token = 2;
+    menu.slot.reserved = true;
+    if (!ok(exec.RecordMenuCopy(menu, &ready))) return;
+    CHECK(exec.Counters().dispatches == dispatches + menu_cost);
+
+    FgRealDispatchDesc real;
+    real.frame_token = 2;
+    real.slot.slot = 1;
+    real.slot.reserved = true;
+    if (!ok(exec.RecordRealEndpoint(real, &ready))) return;
+    CHECK(exec.Counters().dispatches == dispatches + menu_cost + (supplied_compute ? 2 : 0));
+    real.frame_token = 3;
+    real.real_only = true;
+    real.game_colour = packet.color;
+    if (!ok(exec.RecordRealEndpoint(real, &ready))) return;
+    CHECK(exec.Counters().dispatches == dispatches + menu_cost + (supplied_compute ? 5 : 0));
+    CHECK(exec.Counters().game_colour_copies == 1);
+    const bool idle = exec.WaitIdle(5000);
+    CHECK(idle && exec.CompletedComputeValue() >= ready.value);
+    if (idle) CHECK(CopiesMatchUpload(gpu, game, slots));
+    const int64_t debug_errors = gpu.DebugErrors();
+    if (debug_errors >= 0) CHECK(debug_errors == 0);
+}
+
+// Upload shader-readable images directly in their declared format. The depth
+// fixture uses an R32 typeless resource with the D32_FLOAT depth-stencil cast.
+enum class FixtureRole { Colour, Depth, Motion, Alpha };
+
+bool UploadFixture(Gpu& gpu, ID3D12Resource* tex, FixtureRole role, uint32_t frame) {
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp = {};
+    const auto d = tex->GetDesc();
+    UINT64 size = 0;
+    gpu.device->GetCopyableFootprints(&d, 0, 1, 0, &fp, nullptr, nullptr, &size);
+    D3D12_HEAP_PROPERTIES hp = {};
+    hp.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC bd = {};
+    bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    bd.Width = size;
+    bd.Height = 1;
+    bd.DepthOrArraySize = 1;
+    bd.MipLevels = 1;
+    bd.SampleDesc.Count = 1;
+    bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> upload;
+    uint8_t* bytes = nullptr;
+    if (FAILED(gpu.device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_GENERIC_READ,
+                                                   nullptr, IID_PPV_ARGS(&upload))) ||
+        FAILED(upload->Map(0, nullptr, reinterpret_cast<void**>(&bytes))))
+        return false;
+    for (uint32_t y = 0; y < d.Height; ++y) {
+        uint8_t* row = bytes + fp.Footprint.RowPitch * y;
+        for (uint32_t x = 0; x < d.Width; ++x) {
+            const uint32_t code = Hash(x + 419u * y + 611953u * frame);
+            const uint16_t half[4] = {static_cast<uint16_t>(0x3000u + (code & 0xbffu)),
+                                      static_cast<uint16_t>(0x3000u + ((code >> 7) & 0xbffu)),
+                                      static_cast<uint16_t>(0x3000u + ((code >> 13) & 0xbffu)),
+                                      static_cast<uint16_t>(0x3400u + ((code >> 21) & 0x7ffu))};
+            if (role == FixtureRole::Depth) {
+                const float z = 0.1f + 0.8f * static_cast<float>(code & 0xffffu) / 65535.0f;
+                std::memcpy(row + 4u * x, &z, 4);
+            } else if (role == FixtureRole::Motion) {
+                const float m[2] = {3.0f + 8.0f * Noise(frame, x + y * 419u, 0),
+                                    2.0f + 6.0f * Noise(frame, x + y * 419u, 1)};
+                const uint16_t h[2] = {FgExecHalfBits(m[0]), FgExecHalfBits(m[1])};
+                if (d.Format == DXGI_FORMAT_R32G32_FLOAT) std::memcpy(row + 8u * x, m, 8);
+                else std::memcpy(row + 4u * x, h, 4);
+            } else if (d.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+                std::memcpy(row + 8u * x, half, 8);
+            } else if (d.Format == DXGI_FORMAT_R8_UNORM) {
+                row[x] = static_cast<uint8_t>(code >> 24u);
+            } else {
+                const uint32_t packed = d.Format == DXGI_FORMAT_R11G11B10_FLOAT
+                    ? ((half[0] >> 4u) | ((half[1] >> 4u) << 11u) | ((half[2] >> 5u) << 22u)) : code;
+                std::memcpy(row + 4u * x, &packed, 4);
+            }
+        }
+    }
+    upload->Unmap(0, nullptr);
+    if (FAILED(gpu.alloc->Reset()) || FAILED(gpu.list->Reset(gpu.alloc.Get(), nullptr))) return false;
+    D3D12_RESOURCE_BARRIER b = {};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition = {tex, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_COMMON,
+                    D3D12_RESOURCE_STATE_COPY_DEST};
+    gpu.list->ResourceBarrier(1, &b);
+    D3D12_TEXTURE_COPY_LOCATION dst = {}, src = {};
+    dst.pResource = tex;
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    src.pResource = upload.Get();
+    src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    src.PlacedFootprint = fp;
+    gpu.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+    b.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
+    gpu.list->ResourceBarrier(1, &b);
+    if (FAILED(gpu.list->Close())) return false;
+    ID3D12CommandList* lists[] = {gpu.list.Get()};
+    gpu.queue->ExecuteCommandLists(1, lists);
+    return gpu.Wait();
+}
+
+bool SlotsMatch(Gpu& gpu, const ExecutorSlots& actual, const ExecutorSlots& expected, uint32_t count = 2) {
+    // Read both sets of textures through identical footprints and compare only the texel bytes.
+    D3D12_RESOURCE_DESC bd = {};
+    bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    bd.Height = 1;
+    bd.DepthOrArraySize = 1;
+    bd.MipLevels = 1;
+    bd.SampleDesc.Count = 1;
+    bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp[8][2] = {};
+    UINT64 row_bytes[8] = {};
+    UINT rows[8] = {};
+    for (uint32_t i = 0; i < count; ++i) {
+        const auto d = actual.textures[i]->GetDesc();
+        for (auto& dest : fp[i]) {
+            UINT64 size = 0;
+            gpu.device->GetCopyableFootprints(&d, 0, 1, (bd.Width + 511u) & ~511ull, &dest,
+                                               &rows[i], &row_bytes[i], &size);
+            bd.Width = dest.Offset + size;
+        }
+    }
+    D3D12_HEAP_PROPERTIES hp = {};
+    hp.Type = D3D12_HEAP_TYPE_READBACK;
+    ComPtr<ID3D12Resource> readback;
+    if (FAILED(gpu.device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                   nullptr, IID_PPV_ARGS(&readback))) ||
+        FAILED(gpu.alloc->Reset()) || FAILED(gpu.list->Reset(gpu.alloc.Get(), nullptr)))
+        return false;
+    for (uint32_t i = 0; i < count; ++i) {
+        ID3D12Resource* srcs[] = {actual.textures[i].Get(), expected.textures[i].Get()};
+        for (uint32_t j = 0; j < 2; ++j) {
+            D3D12_TEXTURE_COPY_LOCATION src = {}, dst = {};
+            src.pResource = srcs[j];
+            src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            dst.pResource = readback.Get();
+            dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            dst.PlacedFootprint = fp[i][j];
+            gpu.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        }
+    }
+    if (FAILED(gpu.list->Close())) return false;
+    ID3D12CommandList* lists[] = {gpu.list.Get()};
+    gpu.queue->ExecuteCommandLists(1, lists);
+    if (!gpu.Wait()) return false;
+    void* mapped = nullptr;
+    if (FAILED(readback->Map(0, nullptr, &mapped))) return false;
+    const auto* bytes = static_cast<const uint8_t*>(mapped);
+    bool exact = true;
+    for (uint32_t i = 0; i < count; ++i)
+        for (uint32_t y = 0; y < rows[i] && exact; ++y)
+            exact = std::memcmp(bytes + fp[i][0].Offset + y * fp[i][0].Footprint.RowPitch,
+                                bytes + fp[i][1].Offset + y * fp[i][1].Footprint.RowPitch,
+                                static_cast<size_t>(row_bytes[i])) == 0;
+    const D3D12_RANGE none = {0, 0};
+    readback->Unmap(0, &none);
+    return exact;
+}
+
+void TestInputSrvPaths(Gpu& gpu, const std::string& dxil, const std::string& reference, const FgExecWeights& weights) {
+    g_case = "gpu-input-srv-formats";
+    std::ifstream shader(dxil + "/fg_lite_mvec_srv.dxil", std::ios::binary);
+    if (!shader) {
+        CHECK(reference.empty());
+        return;
+    }
+    struct FormatCase {
+        DXGI_FORMAT colour, alpha, motion, slot;
+        FgPreset preset;
+        uint32_t height;
+    };
+    const FormatCase cases[] = {
+        {DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R16G16_FLOAT,
+         DXGI_FORMAT_R16G16B16A16_FLOAT, FgPreset::B, 89},
+        {DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R32G32_FLOAT,
+         DXGI_FORMAT_R8G8B8A8_UNORM, FgPreset::C, 91},
+        {DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R16G16_FLOAT,
+         DXGI_FORMAT_R8G8B8A8_UNORM, FgPreset::C, 93},
+        {DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R32G32_FLOAT,
+         DXGI_FORMAT_B8G8R8A8_UNORM, FgPreset::A, 95},
+        {DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R16G16_FLOAT,
+         DXGI_FORMAT_R10G10B10A2_UNORM, FgPreset::C, 97},
+        // the Full path packs the slot rows in the output pyramid (RGBA8 and RGB10A2 slots, odd widths)
+        {DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R16G16_FLOAT,
+         DXGI_FORMAT_R8G8B8A8_UNORM, FgPreset::A, 99},
+        {DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R32G32_FLOAT,
+         DXGI_FORMAT_R10G10B10A2_UNORM, FgPreset::B, 101},
+        {DXGI_FORMAT_R11G11B10_FLOAT, DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R32G32_FLOAT,
+         DXGI_FORMAT_R16G16B16A16_FLOAT, FgPreset::C, 1441},
+        {DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R16G16_FLOAT,
+         DXGI_FORMAT_R16G16B16A16_FLOAT, FgPreset::C, 1443},
+    };
+    for (const auto& c : cases) {
+        Game game;
+        game.gpu = &gpu;
+        game.width = 131;
+        game.height = c.height;
+        game.colour_state = game.other_state = D3D12_RESOURCE_STATE_COMMON;
+        game.colour = game.Tex(c.colour);
+        game.hudless = game.Tex(c.colour);
+        game.ui = game.Tex(c.alpha);
+        game.depth = game.Tex(DXGI_FORMAT_R32_TYPELESS, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+        game.motion = game.Tex(c.motion);
+        const bool ready = game.colour && game.hudless && game.ui && game.depth && game.motion;
+        CHECK(ready);
+        if (!ready) continue;
+        D3D12_DEPTH_STENCIL_VIEW_DESC dsv = {};
+        dsv.Format = DXGI_FORMAT_D32_FLOAT;
+        dsv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+        D3D12_DESCRIPTOR_HEAP_DESC dh = {};
+        dh.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+        dh.NumDescriptors = 1;
+        ComPtr<ID3D12DescriptorHeap> heap;
+        if (FAILED(gpu.device->CreateDescriptorHeap(&dh, IID_PPV_ARGS(&heap)))) {
+            CHECK(false);
+            return;
+        }
+        gpu.device->CreateDepthStencilView(game.depth.Get(), &dsv, heap->GetCPUDescriptorHandleForHeapStart());
+        for (int i = 0; i < 16; i += 5) game.clip_to_prev[i] = game.prev_to_clip[i] = 1.0f;
+
+        ExecutorSlots test_slots, ref_slots;
+        FgD3d12ExecutorDesc ed;
+        ed.dxil_dir = dxil;
+        ed.weights = &weights;
+        ed.enable_full = c.preset != FgPreset::C;
+        FgD3d12Executor test(ed);
+        ed.dxil_dir = reference.empty() ? dxil : reference;
+        ed.keep_outputs = true;
+        FgD3d12Executor ref(ed);
+        FgCreateDesc create = CpuCreate(game.width, game.height);
+        create.device = gpu.device.Get();
+        create.queue = gpu.queue.Get();
+        create.preset = c.preset;
+        auto ok = [&](FgD3d12Executor& exec, FgExecResult status) {
+            if (status != FgExecResult::Ok)
+                std::printf("    input SRV test: %s\n", exec.LastWhy().c_str());
+            CHECK(status == FgExecResult::Ok);
+            return status == FgExecResult::Ok;
+        };
+        for (auto* slots : {&test_slots, &ref_slots})
+            for (auto& tex : slots->textures) tex = game.Tex(c.slot);
+        if (!ok(test, test.Configure(create, 3)) || !ok(ref, ref.Configure(create, 3))) return;
+        if (!test.BindSlotTarget(&test_slots) || !ref.BindSlotTarget(&ref_slots)) {
+            CHECK(false);
+            return;
+        }
+        for (uint64_t token = 1; token <= 2; ++token) {
+            const auto f = static_cast<uint32_t>(token);
+            const bool uploaded = UploadFixture(gpu, game.colour.Get(), FixtureRole::Colour, f) &&
+                                  UploadFixture(gpu, game.hudless.Get(), FixtureRole::Colour, f + 2) &&
+                                  UploadFixture(gpu, game.ui.Get(), FixtureRole::Alpha, f + 4) &&
+                                  UploadFixture(gpu, game.depth.Get(), FixtureRole::Depth, f) &&
+                                  UploadFixture(gpu, game.motion.Get(), FixtureRole::Motion, f);
+            CHECK(uploaded);
+            if (!uploaded) return;
+            auto packet = game.Packet();
+            packet.frame_token = token;
+            packet.motion_scale_x = 8.0f;
+            packet.motion_scale_y = 8.0f;
+            if (c.colour != DXGI_FORMAT_R8G8B8A8_UNORM_SRGB && c.colour != DXGI_FORMAT_R10G10B10A2_UNORM)
+                packet.optional[kFgOptHudless].rect = {1, 3, game.width - 2, game.height - 5};
+            packet.optional[kFgOptUiAlpha].rect = {2, 1, game.width - 4, game.height - 2};
+            FgSharedDispatchDesc shared;
+            shared.frame_token = token;
+            shared.preset = c.preset;
+            shared.has_previous = token == 2;
+            shared.generates = true;
+            shared.packet = &packet;
+            FgSharedResult result;
+            const uint64_t captures = test.Counters().captures;
+            if (!ok(test, test.RecordSharedGameFrame(shared, &result)) ||
+                !ok(ref, ref.RecordSharedGameFrame(shared, &result))) return;
+            CHECK(test.Counters().captures == captures);
+            FgIndexDispatchDesc gen;
+            gen.frame_token = token;
+            gen.index = gen.generated_count = 1;
+            gen.is_last_index = true;
+            gen.preset = c.preset;
+            gen.t = 0.5f;
+            gen.slot.reserved = true;
+            FgRealDispatchDesc real;
+            real.frame_token = token;
+            real.slot.slot = 1;
+            real.slot.reserved = true;
+            FgReadyFence fence;
+            for (auto* exec : {&test, &ref}) {
+                if (!ok(*exec, exec->RecordGeneratedIndex(gen, &fence)) ||
+                    !ok(*exec, exec->RecordRealEndpoint(real, &fence))) return;
+            }
+            const bool idle = test.WaitIdle(5000) && ref.WaitIdle(5000);
+            CHECK(idle);
+            if (!idle) return;
+            const bool exact = SlotsMatch(gpu, test_slots, ref_slots);
+            if (!exact)
+                std::printf("    input SRV mismatch: colour %u, alpha %u, motion %u, slot %u, frame %llu\n",
+                            c.colour, c.alpha, c.motion, c.slot, static_cast<unsigned long long>(token));
+            CHECK(exact);
+        }
+    }
+    const int64_t errors = gpu.DebugErrors();
+    if (errors >= 0) CHECK(errors == 0);
+}
+
+// Turbo v2: every lever on (batched indices, hoisted per-index work on the second queue, the split shared work, the fused
+// and retiled kernels) must give the same bytes as every lever off, in every generated slot and the real one, over several
+// game frames (history, swaps), the presets A / B / C and N = 1 .. 5. Both executors read the same game textures and run
+// the same kernel folder (`dxil`: the Turbo kernels sit beside the ones they replace).
+// wave1b_only: both executors run the Wave 1 levers (batch, hoist, dualq, fuse), only the Wave 1B levers (fuse2) differ:
+// the fused kernels against exactly the kernels they replace.
+void TestTurboExact(Gpu& gpu, const std::string& dxil, const FgExecWeights& weights, bool wave1b_only = false) {
+    g_case = wave1b_only ? "gpu-turbo-exact-wave1b" : "gpu-turbo-exact";
+    {
+        std::ifstream probe(dxil + "/fg_lite_interm_both.dxil", std::ios::binary);
+        if (!probe) std::printf("  turbo: the Turbo v2 kernels are not in %s (batching, hoisting and the split only)\n", dxil.c_str());
+        std::ifstream probe2(dxil + "/fg_net2_mpair_res_c64.dxil", std::ios::binary);
+        if (!probe2) std::printf("  turbo: the Wave 1B kernels are not in %s (fuse2 has nothing to run)\n", dxil.c_str());
+    }
+    struct Case {
+        FgPreset preset;
+        uint32_t n, width, height;
+        DXGI_FORMAT colour;
+    };
+    const Case cases[] = {
+        {FgPreset::C, 1, kW, kH, DXGI_FORMAT_B8G8R8A8_UNORM},   {FgPreset::C, 2, 131, 89, DXGI_FORMAT_B8G8R8A8_UNORM},
+        {FgPreset::C, 5, kW, kH, DXGI_FORMAT_R16G16B16A16_FLOAT}, {FgPreset::A, 1, kW, kH, DXGI_FORMAT_B8G8R8A8_UNORM},
+        {FgPreset::A, 3, 131, 89, DXGI_FORMAT_B8G8R8A8_UNORM},   {FgPreset::A, 5, kW, kH, DXGI_FORMAT_B8G8R8A8_UNORM},
+        {FgPreset::B, 2, kW, kH, DXGI_FORMAT_R16G16B16A16_FLOAT},
+    };
+    for (const Case& c : cases) {
+        char name[96];
+        std::snprintf(name, sizeof(name), "preset %c N=%u %ux%u", c.preset == FgPreset::A ? 'A' : c.preset == FgPreset::B ? 'B' : 'C',
+                      c.n, c.width, c.height);
+        Game game;
+        const bool ready = game.Init(&gpu, c.colour, c.width, c.height) && game.Upload(1, false, true);
+        CHECK(ready);
+        if (!ready) return;
+        FgD3d12ExecutorDesc ed;
+        ed.dxil_dir = dxil;
+        ed.weights = &weights;
+        ed.enable_full = c.preset != FgPreset::C;
+        ed.batch = ed.hoist = ed.dualq = ed.fuse = 1;
+        ed.fuse2 = g_turbo_fuse2;   // 2047: every Wave 1B / Wave 2 lever (default of the test), --turbo-fuse2 1: the executor's default levers
+        FgD3d12Executor test(ed);
+        ed.batch = ed.hoist = ed.dualq = ed.fuse = wave1b_only ? 1 : 0;
+        ed.fuse2 = 0;
+        FgD3d12Executor ref(ed);
+        FgCreateDesc create = CpuCreate(c.width, c.height);
+        create.device = gpu.device.Get();
+        create.queue = gpu.queue.Get();
+        create.preset = c.preset;
+        create.max_generated = c.n;
+        const auto ok = [&](FgD3d12Executor& exec, FgExecResult status) {
+            if (status != FgExecResult::Ok) std::printf("    turbo %s: %s (%s)\n", name, FgExecRefusalName(exec.LastRefusal()), exec.LastWhy().c_str());
+            CHECK(status == FgExecResult::Ok);
+            return status == FgExecResult::Ok;
+        };
+        ExecutorSlots test_slots, ref_slots;
+        for (uint32_t i = 0; i <= c.n; ++i) {
+            test_slots.textures[i] = game.Tex(c.colour);
+            ref_slots.textures[i] = game.Tex(c.colour);
+        }
+        if (!ok(test, test.Configure(create, 3)) || !ok(ref, ref.Configure(create, 3))) return;
+        if (!test.BindSlotTarget(&test_slots) || !ref.BindSlotTarget(&ref_slots)) {
+            CHECK(false);
+            return;
+        }
+        std::printf("  turbo%s %s: batch %d hoist %d dualq %d banks %u fuse2 0x%x (reference: batch %d hoist %d dualq %d fuse2 0x%x)\n",
+                    wave1b_only ? " (wave 1B)" : "", name, test.BatchActive(), test.HoistActive(), test.DualQueueActive(),
+                    test.ScratchBanks(), test.Fuse2Active(), ref.BatchActive(), ref.HoistActive(), ref.DualQueueActive(),
+                    ref.Fuse2Active());
+        CHECK(ref.Fuse2Active() == 0);
+        if (!wave1b_only) CHECK(!ref.BatchActive() && !ref.HoistActive() && !ref.DualQueueActive());
+        bool exact_all = true;
+        for (uint64_t token = 1; token <= 4; ++token) {
+            // (the textures already hold frame 1's state from the upload above: `first` would claim COMMON again)
+            if (!game.Upload(static_cast<uint32_t>(token), false, false)) {
+                CHECK(false);
+                return;
+            }
+            FgFramePacket packet = game.Packet();
+            packet.frame_token = token;
+            packet.motion_scale_x = 8.0f;
+            packet.motion_scale_y = 8.0f;
+            FgSharedDispatchDesc shared;
+            shared.frame_token = token;
+            shared.preset = c.preset;
+            shared.has_previous = token > 1;
+            shared.generated_count = c.n;
+            shared.generates = token > 1;
+            shared.packet = &packet;
+            FgSharedResult result;
+            if (!ok(test, test.RecordSharedGameFrame(shared, &result)) ||
+                !ok(ref, ref.RecordSharedGameFrame(shared, &result)))
+                return;
+            FgReadyFence fences[kFgMaxGenerated + 1];
+            if (token > 1) {
+                FgIndexDispatchDesc gens[kFgMaxGenerated];
+                for (uint32_t k = 0; k < c.n; ++k) {
+                    gens[k].frame_token = token;
+                    gens[k].index = k + 1;
+                    gens[k].generated_count = c.n;
+                    gens[k].is_last_index = k + 1 == c.n;
+                    gens[k].preset = c.preset;
+                    gens[k].t = FgIndexTime(k + 1, c.n);
+                    gens[k].slot.slot = k;
+                    gens[k].slot.reserved = true;
+                }
+                uint32_t done = 0;
+                const FgExecResult batched = c.n > 1 ? test.RecordGeneratedBatch(gens, c.n, fences, &done)
+                                                     : test.RecordGeneratedIndex(gens[0], &fences[0]);
+                if (!ok(test, batched)) return;
+                for (uint32_t k = 0; k < c.n; ++k)
+                    if (!ok(ref, ref.RecordGeneratedIndex(gens[k], &fences[k]))) return;
+            }
+            FgRealDispatchDesc real;
+            real.frame_token = token;
+            real.slot.slot = c.n;
+            real.slot.reserved = true;
+            if (!ok(test, test.RecordRealEndpoint(real, &fences[c.n])) ||
+                !ok(ref, ref.RecordRealEndpoint(real, &fences[c.n])))
+                return;
+            const bool idle = test.WaitIdle(30000) && ref.WaitIdle(30000);
+            CHECK(idle);
+            if (!idle) return;
+            const bool exact = SlotsMatch(gpu, test_slots, ref_slots, c.n + 1);
+            if (!exact) std::printf("    turbo %s: slots differ at game frame %llu\n", name, static_cast<unsigned long long>(token));
+            exact_all = exact_all && exact;
+            CHECK(exact);
+        }
+        if (exact_all) std::printf("    turbo %s: 4 game frames, 0 byte differences\n", name);
+    }
+    const int64_t errors = gpu.DebugErrors();
+    if (errors >= 0) CHECK(errors == 0);
+}
+
+struct BenchOptions {
+    uint32_t gen = 1, warmup = 8, timed = 30;
+    std::string presets = "AC";
+    bool kprof = false;
+    int batch = -1, hoist = -1, dualq = -1, fuse = -1, fuse2 = -1;  // -1: the environment (default on)
+};
+
+bool RunBench(Gpu& gpu, const std::string& dxil, const FgExecWeights& weights, FgPreset preset,
+              const BenchOptions& bo) {
+    constexpr uint32_t width = 2560, height = 1440;
+    constexpr uint32_t timeout = 30000;
+    const uint32_t gen_count = bo.gen, warmup = bo.warmup, timed = bo.timed;
+    const char label = preset == FgPreset::A ? 'A' : 'C';
+    Game game;
+    const DXGI_FORMAT format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    if (!game.Init(&gpu, format, width, height) || !game.Upload(0, false, true)) return false;
+    ExecutorSlots slots;
+    for (uint32_t i = 0; i <= gen_count; ++i) {  // slot i - 1 holds index i, slot gen_count the real endpoint
+        slots.textures[i] = game.Tex(format);
+        if (!slots.textures[i]) return false;
+    }
+
+    FgD3d12ExecutorDesc ed;
+    ed.dxil_dir = dxil;
+    ed.weights = &weights;
+    ed.enable_full = preset == FgPreset::A;
+    ed.timing = true;
+    ed.kernel_profile = bo.kprof;
+    ed.batch = bo.batch;
+    ed.hoist = bo.hoist;
+    ed.dualq = bo.dualq;
+    ed.fuse = bo.fuse;
+    ed.fuse2 = bo.fuse2;
+    FgD3d12Executor exec(ed);
+    const auto ok = [&](FgExecResult s) {
+        if (s == FgExecResult::Ok) return true;
+        std::printf("bench %c: %s (%s)\n", label, FgExecRefusalName(exec.LastRefusal()), exec.LastWhy().c_str());
+        return false;
+    };
+    FgCreateDesc create = CpuCreate(width, height);
+    create.device = gpu.device.Get();
+    create.queue = gpu.queue.Get();
+    create.preset = preset;
+    create.max_generated = gen_count;
+    if (!ok(exec.Configure(create, 3)) || !exec.BindSlotTarget(&slots)) return false;
+
+    FgFramePacket packet = game.Packet();
+
+    FgExecTimings timing;
+    std::vector<FgExecKernelProfileRow> profile;
+    for (uint32_t i = 0; i < warmup + timed; ++i) {
+        packet.frame_token = i + 1;
+        FgSharedDispatchDesc shared;
+        shared.frame_token = packet.frame_token;
+        shared.preset = preset;
+        shared.has_previous = i != 0;
+        shared.generated_count = gen_count;
+        shared.generates = true;
+        shared.packet = &packet;
+        FgSharedResult result;
+        if (!ok(exec.RecordSharedGameFrame(shared, &result))) return false;
+        FgIndexDispatchDesc gens[kFgMaxGenerated];
+        FgReadyFence ready[kFgMaxGenerated + 1];
+        for (uint32_t k = 0; k < gen_count; ++k) {
+            FgIndexDispatchDesc& gen = gens[k];
+            gen.frame_token = packet.frame_token;
+            gen.index = k + 1;
+            gen.generated_count = gen_count;
+            gen.is_last_index = k + 1 == gen_count;
+            gen.preset = preset;
+            gen.t = FgIndexTime(k + 1, gen_count);
+            gen.slot.slot = k;
+            gen.slot.reserved = true;
+        }
+        if (gen_count > 1) {  // the executor falls back to one index at a time when batching is off
+            uint32_t done = 0;
+            if (!ok(exec.RecordGeneratedBatch(gens, gen_count, ready, &done)) || done != gen_count) return false;
+        } else if (!ok(exec.RecordGeneratedIndex(gens[0], &ready[0]))) {
+            return false;
+        }
+        FgRealDispatchDesc real;
+        real.frame_token = packet.frame_token;
+        real.slot.slot = gen_count;
+        real.slot.reserved = true;
+        if (!ok(exec.RecordRealEndpoint(real, &ready[gen_count]))) return false;
+        if (i + 1 == warmup) {
+            if (!exec.TakeTimings(&timing, timeout)) {
+                std::printf("bench %c: warmup timestamps unavailable\n", label);
+                return false;
+            }
+            if (bo.kprof && !exec.TakeKernelProfile(&profile, timeout)) {
+                std::printf("bench %c: warmup kernel profile unavailable\n", label);
+                return false;
+            }
+        }
+    }
+    if (!exec.TakeTimings(&timing, timeout)) {
+        std::printf("bench %c: timed timestamps unavailable\n", label);
+        return false;
+    }
+    const char* stages[] = {"capture", "shared_pre_net1", "net1", "shared_post_net1", "gen_pre_net2",
+                            "net2", "out_pyramid", "pack_copy", "real_endpoint"};
+    static_assert(sizeof(stages) / sizeof(*stages) == static_cast<size_t>(FgExecStage::Count));
+    std::printf("bench preset %c %ux (gen %u) %ux%u (%u warmup, %u timed, mean GPU ms per game frame)\n", label,
+                gen_count + 1, gen_count, width, height, warmup, timed);
+    std::printf("  levers: batch %s, hoist %s, dualq %s, scratch banks %u, fuse2 mask 0x%x\n", exec.BatchActive() ? "on" : "off",
+                exec.HoistActive() ? "on" : "off", exec.DualQueueActive() ? "on" : "off", exec.ScratchBanks(),
+                exec.Fuse2Active());
+    std::printf("  net2 z-batching: %llu z launches recorded, %llu launches saved (A18, fuse2 bit 1024, WG_FG_NET2_BATCH)\n",
+                static_cast<unsigned long long>(exec.Counters().net2_z_launches),
+                static_cast<unsigned long long>(exec.Counters().net2_z_saved));
+    double shared = 0.0, gen = 0.0;
+    for (size_t i = 0; i < timing.ms.size(); ++i) {
+        const double mean = timing.ms[i] / timed;
+        std::printf("  %-18s %.6f\n", stages[i], mean);
+        if (i <= static_cast<size_t>(FgExecStage::SharedPostNet1)) shared += mean;
+        else if (i <= static_cast<size_t>(FgExecStage::PackCopy)) gen += mean;
+    }
+    // The stage totals sum GPU execution intervals: work that two queues overlap is counted twice and queue waits
+    // are not counted. The span and busy lines are measured on one clock over the whole timed window.
+    std::printf("  %-18s %.6f\n  %-18s %.6f\n  %-18s %.6f\n", "total_shared", shared, "total_gen", gen,
+                "sum_of_stages", shared + gen + timing.ms[static_cast<size_t>(FgExecStage::RealEndpoint)] / timed);
+    std::printf("  %-18s %.6f   (first start to last end of the window / frames, idle gaps included)\n",
+                "gpu_span_per_frame", timing.span_ms / timed);
+    std::printf("  %-18s %.6f   (time at least one queue ran / frames; %u recordings)\n", "gpu_busy_per_frame",
+                timing.busy_ms / timed, timing.recordings);
+    if (bo.kprof) {
+        if (!exec.TakeKernelProfile(&profile, timeout)) {
+            std::printf("bench %c: kernel profile unavailable\n", label);
+            return false;
+        }
+        std::printf("  per-launch profile (kernel#ordinal, workgroups per call, calls and mean us per game frame):\n");
+        double total = 0.0;
+        for (const FgExecKernelProfileRow& row : profile) {
+            const double calls = static_cast<double>(row.calls) / timed;
+            const double wg = row.calls ? static_cast<double>(row.groups) / static_cast<double>(row.calls) : 0.0;
+            const double per_call = row.calls ? row.ms * 1000.0 / static_cast<double>(row.calls) : 0.0;
+            std::printf("    %-34s #%-2u wg %8.0f  x%-5.2f %9.2f us/call %9.2f us/frame\n", row.name.c_str(),
+                        row.ordinal, wg, calls, per_call, row.ms * 1000.0 / timed);
+            total += row.ms * 1000.0 / timed;
+        }
+        std::printf("    %-34s %55.2f us/frame\n", "(sum of launches)", total);
+    }
+    return gpu.DebugErrors() <= 0;
+}
+
 int main(int argc, char** argv) {
-    bool gpu = false;
-    std::string dxil, scratch = ".", only;
+    bool gpu = false, bench = false;
+    std::string dxil, reference_dxil, scratch = ".", only;
+    BenchOptions bo;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--gpu") == 0) gpu = true;
+        if (std::strcmp(argv[i], "--bench") == 0) bench = true;
+        // --gen N: N generated images per game frame (1..5: 2x .. 6x), really recorded and timed
+        if (std::strcmp(argv[i], "--gen") == 0 && i + 1 < argc) bo.gen = static_cast<uint32_t>(std::atoi(argv[++i]));
+        if (std::strcmp(argv[i], "--timed") == 0 && i + 1 < argc) bo.timed = static_cast<uint32_t>(std::atoi(argv[++i]));
+        if (std::strcmp(argv[i], "--warmup") == 0 && i + 1 < argc) bo.warmup = static_cast<uint32_t>(std::atoi(argv[++i]));
+        if (std::strcmp(argv[i], "--preset") == 0 && i + 1 < argc) bo.presets = argv[++i];
+        if (std::strcmp(argv[i], "--kprof") == 0) bo.kprof = true;
+        // paired A / B levers inside one process (default: the environment, WG_FG_BATCH / _HOIST / _DUALQ = 0 off)
+        if (std::strcmp(argv[i], "--batch") == 0 && i + 1 < argc) bo.batch = std::atoi(argv[++i]);
+        if (std::strcmp(argv[i], "--hoist") == 0 && i + 1 < argc) bo.hoist = std::atoi(argv[++i]);
+        if (std::strcmp(argv[i], "--dualq") == 0 && i + 1 < argc) bo.dualq = std::atoi(argv[++i]);
+        if (std::strcmp(argv[i], "--fuse") == 0 && i + 1 < argc) bo.fuse = std::atoi(argv[++i]);
+        if (std::strcmp(argv[i], "--fuse2") == 0 && i + 1 < argc) bo.fuse2 = static_cast<int>(std::strtol(argv[++i], nullptr, 0));
         if (std::strcmp(argv[i], "--dxil") == 0 && i + 1 < argc) dxil = argv[++i];
+        if (std::strcmp(argv[i], "--reference-dxil") == 0 && i + 1 < argc) reference_dxil = argv[++i];
         if (std::strcmp(argv[i], "--scratch") == 0 && i + 1 < argc) scratch = argv[++i];
         if (std::strcmp(argv[i], "--debug-layer") == 0) g_debug_layer = true;
+        if (std::strcmp(argv[i], "--turbo-fuse2") == 0 && i + 1 < argc) g_turbo_fuse2 = static_cast<int>(std::strtol(argv[++i], nullptr, 0));
         if (std::strcmp(argv[i], "--only") == 0 && i + 1 < argc) only = argv[++i];
     }
     FgExecWeights weights;
     FgExecSyntheticWeights(11, &weights);
+    if (bench) {
+        Gpu g;
+        if (dxil.empty() || !g.Init()) {
+            std::printf("bench requires --dxil <dir> and a D3D12 device\n");
+            return 1;
+        }
+        std::printf("gpu: %s\n", g.name.c_str());
+        if (bo.gen < 1 || bo.gen > 5) {
+            std::printf("--gen takes 1..5\n");
+            return 1;
+        }
+        for (char c : bo.presets) {
+            if ((c == 'A' || c == 'a') && !RunBench(g, dxil, weights, FgPreset::A, bo)) return 1;
+            if ((c == 'C' || c == 'c') && !RunBench(g, dxil, weights, FgPreset::C, bo)) return 1;
+        }
+        if (!gpu) return 0;
+    }
     TestGeometry();
     TestRegionsAndThresholds();
     TestHalf();
     TestSigTable();
     TestSchedule();
+    TestInterleave();
+    TestZBatchPlan();
     TestNet2FastPlan();
     TestRefusals(weights);
     TestMotionFormats();
@@ -1373,6 +2332,16 @@ int main(int argc, char** argv) {
                         want_dxgi);
             if (only.empty()) CHECK(ran_comp == want_comp && ran_dxgi == want_dxgi);  // every configuration ran
             if (only.empty() || only.find("net2") != std::string::npos) TestNet2Paths(g, dxil, weights);
+            if (only.empty() || only.find("copy-paths") != std::string::npos) {
+                TestCopyPaths(g, dxil, weights, false);
+                TestCopyPaths(g, dxil, weights, true);
+            }
+            if (only.empty() || only.find("input-srv") != std::string::npos)
+                TestInputSrvPaths(g, dxil, reference_dxil, weights);
+            if (only.empty() || only.find("turbo") != std::string::npos) {
+                TestTurboExact(g, dxil, weights);
+                TestTurboExact(g, dxil, weights, true);
+            }
             if (only.empty()) TestBrokenKernels(g, dxil, weights, scratch);
         }
     }

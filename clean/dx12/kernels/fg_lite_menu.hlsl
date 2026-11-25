@@ -112,6 +112,6 @@ WG_KERNEL(fg_lite_menu_output)
     const float a = fg_read_nearest(alpha, a_kind, (int)a_w, (int)a_h, AX.x, AX.y)[a_ch];
     const float oma = 1.0f - a;
     const float3 rgb = float3(c.x + fg_mul(g.x - hc.x, oma), c.y + fg_mul(g.y - hc.y, oma), c.z + fg_mul(g.z - hc.z, oma));
-    fg_st_h4(outp, oi, float4(rgb, g.w));
+    wg_st64(outp, oi * 8u, uint2(wg_pack_h2(rgb.x, rgb.y), wg_pack_h2(rgb.z, g.w)));
 }
 #endif

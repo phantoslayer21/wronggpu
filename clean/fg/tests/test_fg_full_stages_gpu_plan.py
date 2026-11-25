@@ -23,7 +23,9 @@ def declarations():
                 m = re.match(r"^//\s*@wg-kernel\s+(\S+)(.*)$", line)
                 if m:
                     kv = dict(t.split("=", 1) for t in m.group(2).split())
-                    out[m.group(1)] = kv
+                    # co=- : D3D12-only variants (the executor's packed-slot output kernels), not stage-check kernels
+                    if kv.get("co") != "-":
+                        out[m.group(1)] = kv
     return out
 
 

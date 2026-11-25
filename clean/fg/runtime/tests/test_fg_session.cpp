@@ -205,6 +205,15 @@ public:
         }
         return FgExecResult::Ok;
     }
+    // A batching executor (the D3D12 one with several scratch banks): the session hands it the consecutive generated
+    // indices of an interval in one call; the records inside are the same as one by one.
+    bool BatchesGenerated() const override { return batch_generated; }
+    FgExecResult RecordGeneratedBatch(const FgIndexDispatchDesc* d, uint32_t n, FgReadyFence* ready,
+                                      uint32_t* done) override {
+        batch_sizes.push_back(n);
+        batch_first.push_back(n ? d[0].index : 0);
+        return IFgKernelExecutor::RecordGeneratedBatch(d, n, ready, done);
+    }
     FgExecResult RecordMenuCopy(const FgCopyDispatchDesc& d, FgReadyFence* ready) override {
         if (Fail('C')) return fail_result;
         ExecEvent e;
@@ -259,6 +268,7 @@ public:
     uint64_t stall_token = 0;
     FgTicks stall_slot = 0;
     bool refuse_configure = false;
+    bool batch_generated = false;  // BatchesGenerated(): the session calls RecordGeneratedBatch
     bool compute_stalled = false;  // the compute timeline reports nothing completed (history banks stay read)
     char fail_kind = 0;        // 'S', 'G', 'C', 'R' or '*' (every record)
     int fail_after = 0;        // calls of that kind that still succeed first
@@ -266,6 +276,7 @@ public:
 
     // observations
     std::vector<ExecEvent> events;
+    std::vector<uint32_t> batch_sizes, batch_first;  // every RecordGeneratedBatch call: its size, its first index
     int configures = 0;
     uint32_t configured_w = 0, configured_h = 0, configured_banks = 0;
     int bad_packets = 0;
@@ -1064,6 +1075,78 @@ void TestLateDrops() {
     CHECK(rig.Shutdown());
 }
 
+// An executor that batches (BatchesGenerated) gets the consecutive generated indices of an interval in one call, in
+// order; copies (menu latch), late cancellation and a refusal inside a batch behave as they do one index at a time, and
+// the history advances once per interval after the batch was recorded.
+void TestBatchedIndices() {
+    {  // every generating interval is one batch of N consecutive indices
+        Rig rig(5, WG_FG_PRESET_A);
+        rig.exec.batch_generated = true;
+        CHECK(rig.Create().error == FgSessionError::None);
+        rig.Frames(10);
+        CHECK(!rig.exec.batch_sizes.empty());
+        bool five = true;
+        for (size_t i = 0; i < rig.exec.batch_sizes.size(); ++i)
+            five = five && rig.exec.batch_sizes[i] == 5 && rig.exec.batch_first[i] == 1;
+        CHECK(five);
+        CHECK(rig.exec.batch_sizes.size() * 5 == static_cast<size_t>(rig.exec.count('G')));
+        const std::vector<ExecEvent> g = IndexEvents(rig.exec, rig.token, 'G');
+        bool order = g.size() == 5;
+        for (uint32_t i = 0; i < g.size(); ++i)
+            order = order && g[i].index == i + 1 && g[i].last == (i + 1 == 5) && g[i].slot_reserved;
+        CHECK(order);
+        CHECK(FrameOrderOk(rig.exec, rig.token, 5, 'G'));
+        const FrameRecord& f = rig.frames.back();
+        CHECK(f.session.error == FgSessionError::None && f.session.generated_recorded == 5 && f.session.history_advanced);
+        CHECK(rig.GeneratedShown(rig.token) == 5 && rig.RealShown(rig.token) == 1);
+        CHECK(rig.session.History()->primes() == 1);
+        CHECK(rig.HistoryOk());
+        CHECK(rig.Shutdown());
+    }
+    {  // a refusal inside a batch: the indices recorded before it count, the session refuses, nothing falls back
+        Rig rig(5, WG_FG_PRESET_A);
+        rig.exec.batch_generated = true;
+        CHECK(rig.Create().error == FgSessionError::None);
+        rig.Frames(10);
+        rig.exec.fail_kind = 'G';
+        rig.exec.fail_after = 2;
+        rig.Frames(1);
+        const FrameRecord& f = rig.frames.back();
+        CHECK(f.session.error == FgSessionError::ExecutorRefused);
+        CHECK(f.session.generated_recorded == 2);
+        CHECK(rig.session.State() == FgSessionState::Refused);
+    }
+    {  // a menu frame records copies, never a batch
+        Rig rig(4, WG_FG_PRESET_A);
+        rig.exec.batch_generated = true;
+        rig.exec.menu_tokens = {12};
+        CHECK(rig.Create().error == FgSessionError::None);
+        rig.Frames(16);
+        CHECK(rig.exec.count('G', 12) == 0 && rig.exec.count('C', 12) == 4 && rig.exec.count('C', 13) == 4);
+        CHECK(rig.exec.count('G', 11) == 4 && rig.exec.count('G', 14) == 4);
+        CHECK(rig.exec.batch_sizes.size() * 4 == static_cast<size_t>(rig.exec.count('G')));
+        CHECK(rig.session.History()->primes() == 1 && rig.HistoryOk());
+        CHECK(rig.Shutdown());
+    }
+    {  // a batching executor and a per-index one record the same indices with the same times
+        Rig batched(3, WG_FG_PRESET_B), single(3, WG_FG_PRESET_B);
+        batched.exec.batch_generated = true;
+        CHECK(batched.Create().error == FgSessionError::None && single.Create().error == FgSessionError::None);
+        batched.Frames(12);
+        single.Frames(12);
+        CHECK(batched.exec.events.size() == single.exec.events.size());
+        bool same = batched.exec.events.size() == single.exec.events.size();
+        for (size_t i = 0; same && i < batched.exec.events.size(); ++i) {
+            const ExecEvent& a = batched.exec.events[i];
+            const ExecEvent& b = single.exec.events[i];
+            same = a.kind == b.kind && a.token == b.token && a.index == b.index && a.slot == b.slot &&
+                   std::memcmp(&a.t, &b.t, sizeof(float)) == 0;
+        }
+        CHECK(same);
+        CHECK(batched.Shutdown() && single.Shutdown());
+    }
+}
+
 // A broken executor: the session refuses explicitly and never falls back; the game frame of the failing interval is
 // still shown when it can be recorded.
 void TestExecutorRefusalNoFallback() {
@@ -1377,6 +1460,7 @@ int main() {
     Run("TestDeviceLost", &TestDeviceLost);
     Run("TestVrrExitAndReentry", &TestVrrExitAndReentry);
     Run("TestLateDrops", &TestLateDrops);
+    Run("TestBatchedIndices", &TestBatchedIndices);
     Run("TestExecutorRefusalNoFallback", &TestExecutorRefusalNoFallback);
     Run("TestCreateRefusals", &TestCreateRefusals);
     Run("TestHandOffArguments", &TestHandOffArguments);

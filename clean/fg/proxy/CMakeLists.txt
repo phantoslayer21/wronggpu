@@ -123,7 +123,7 @@ if(WIN32)
   target_include_directories(wg_fg_asi_runtime PUBLIC ${WG_FG_RT_DIR} ${WG_FG_PR_DIR})
   # (the win32 headers define WIN32_LEAN_AND_MEAN themselves)
   target_compile_definitions(wg_fg_asi_runtime PUBLIC NOMINMAX WG_FG_SESSION_WIN=1)
-  target_link_libraries(wg_fg_asi_runtime PUBLIC wg_fg_win32 d3d11.lib d3d12.lib dxgi.lib dcomp.lib gdi32.lib
+  target_link_libraries(wg_fg_asi_runtime PUBLIC wg_fg_win32 d3d11.lib d3d12.lib dxgi.lib gdi32.lib
                         user32.lib mincore.lib)
   wg_fg_flags(wg_fg_asi_runtime)
 

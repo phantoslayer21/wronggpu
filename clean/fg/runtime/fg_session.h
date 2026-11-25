@@ -143,6 +143,20 @@ public:
     virtual FgExecResult RecordSharedGameFrame(const FgSharedDispatchDesc& desc, FgSharedResult* out) = 0;
     // Once per generated index i = 1..N (preset A / B full blend, C Lite blend), into desc.slot.
     virtual FgExecResult RecordGeneratedIndex(const FgIndexDispatchDesc& desc, FgReadyFence* ready) = 0;
+    // Several consecutive generated indices of one game frame (n >= 1, ascending index, the same frame, preset and
+    // count) recorded together: an executor may interleave their layers so that the barriers sit only between
+    // dependent layers. ready[k] is the fence of descs[k]. *done is the number of indices recorded when it returns
+    // (all of them on Ok); the default records them one by one. A session calls it only when BatchesGenerated().
+    virtual FgExecResult RecordGeneratedBatch(const FgIndexDispatchDesc* descs, uint32_t n, FgReadyFence* ready,
+                                              uint32_t* done) {
+        uint32_t i = 0;
+        FgExecResult r = FgExecResult::Ok;
+        for (; i < n && r == FgExecResult::Ok; ++i) r = RecordGeneratedIndex(descs[i], &ready[i]);
+        if (done) *done = r == FgExecResult::Ok ? i : i - 1;
+        return r;
+    }
+    // True when RecordGeneratedBatch records several indices more cheaply than one by one.
+    virtual bool BatchesGenerated() const { return false; }
     // An exact copy of the game frame into a generated slot (menu latch, priming).
     virtual FgExecResult RecordMenuCopy(const FgCopyDispatchDesc& desc, FgReadyFence* ready) = 0;
     // The game frame of the interval: copied into its reserved slot, or (real-only) its readiness on the queue.

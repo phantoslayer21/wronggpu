@@ -14,6 +14,10 @@
 #endif
 #include <windows.h>
 #include <d3d12.h>
+#include <d3d11_4.h>
+#include <dcomp.h>
+#include <dxgi1_6.h>
+#include <presentation.h>
 #include <wrl/client.h>
 
 #include <atomic>
@@ -98,6 +102,19 @@ private:
 // frame period, unless `period_override` > 0 (the exact period from the display mode). false when the compositor
 // reports no frame.
 bool FgReadCompositorGrid(const FgClockMap& map, FgTicks period_override, FgRefreshGrid* out);
+
+// DirectComposition and presentation entry points, resolved from dcomp.dll when first used (GetProcAddress by name, never a static
+// import: dcomp.lib binds the undocumented statistics exports by ordinal, which a Windows without them (Server 2022)
+// refuses to load the module for). Each returns HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND) when dcomp.dll or the export
+// is absent, so a caller treats it like any other failure.
+HRESULT FgDCompGetFrameId(COMPOSITION_FRAME_ID_TYPE type, COMPOSITION_FRAME_ID* id);
+HRESULT FgDCompGetStatistics(COMPOSITION_FRAME_ID id, COMPOSITION_FRAME_STATS* stats, UINT target_count,
+                             COMPOSITION_TARGET_ID* targets, UINT* actual_count);
+HRESULT FgDCompGetTargetStatistics(COMPOSITION_FRAME_ID id, const COMPOSITION_TARGET_ID* target,
+                                   COMPOSITION_TARGET_STATS* stats);
+HRESULT FgDCompCreateSurfaceHandle(DWORD access, SECURITY_ATTRIBUTES* attributes, HANDLE* handle);
+HRESULT FgDCompCreatePresentationFactory(IUnknown* d3d_device, REFIID iid, void** factory);
+HRESULT FgDCompCreateDevice3(IUnknown* rendering_device, REFIID iid, void** device);
 
 // --- High-resolution waitable timer ------------------------------------------------------------------------------
 

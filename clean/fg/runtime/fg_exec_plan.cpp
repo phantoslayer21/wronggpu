@@ -267,6 +267,43 @@ char FgExecR3Case(const FgExecFlags& f) {
     return f.hudless ? 'H' : '0';
 }
 
+void FgInterleaveLaunches(const std::vector<std::vector<FgLaunchKey>>& frames, std::vector<FgLaunchSlot>* out) {
+    out->clear();
+    if (frames.empty()) return;
+    bool same = true;
+    for (size_t f = 1; f < frames.size() && same; ++f) {
+        same = frames[f].size() == frames[0].size();
+        for (size_t j = 0; same && j < frames[0].size(); ++j)
+            same = frames[f][j].kernel == frames[0][j].kernel && frames[f][j].barrier == frames[0][j].barrier;
+    }
+    if (!same) {
+        for (uint32_t f = 0; f < frames.size(); ++f)
+            for (uint32_t j = 0; j < frames[f].size(); ++j) out->push_back({f, j, frames[f][j].barrier, true});
+        return;
+    }
+    for (uint32_t j = 0; j < frames[0].size(); ++j)
+        for (uint32_t f = 0; f < frames.size(); ++f) out->push_back({f, j, f == 0 && frames[0][j].barrier, f == 0});
+}
+
+bool FgPlanZBatch(const uint32_t* const* args, uint32_t frames, uint32_t n, uint32_t pointers, uint64_t stride,
+                  uint32_t* mask) {
+    if (!args || !mask || frames < 2 || n == 0 || pointers > n || pointers > 32) return false;
+    uint32_t m = 0;
+    for (uint32_t a = 0; a < n; ++a) {
+        const uint32_t d1 = args[1][a] - args[0][a];
+        const bool banked = d1 != 0;
+        if (banked && (a >= pointers || d1 != static_cast<uint32_t>(stride))) return false;
+        for (uint32_t f = 1; f < frames; ++f) {
+            const uint32_t d = args[f][a] - args[0][a];
+            if (d != (banked ? static_cast<uint32_t>(f * stride) : 0u)) return false;
+        }
+        if (banked) m |= 1u << a;
+    }
+    if (m == 0) return false;
+    *mask = m;
+    return true;
+}
+
 const char* FgOpName(FgOp op) {
     switch (op) {
         case FgOp::Clear: return "clear";
@@ -370,7 +407,10 @@ void FgExecHost::IndexOps(float t, bool hudless_now, bool ui4_now, bool out_subr
         o.op = FgOp::Interm;
         o.t = t;
         ops->push_back(o);
-        simple(FgOp::Weights, ops);
+        FgExecOp w;
+        w.op = FgOp::Weights;
+        w.lite_blend = lite_;
+        ops->push_back(w);
         if (out_subrect) simple(FgOp::Prefill, ops);
         if (lite_) {
             FgExecOp b;
@@ -383,6 +423,7 @@ void FgExecHost::IndexOps(float t, bool hudless_now, bool ui4_now, bool out_subr
             FgExecOp b;
             b.op = FgOp::FullBlend;
             b.ui = f.ui_recomp;
+            b.t = t;
             ops->push_back(b);
             FgExecOp n;
             n.op = FgOp::Net2;

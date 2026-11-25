@@ -6,30 +6,28 @@
 // Device side:
 //  - One root signature for every FG kernel (clean/dx12/hlsl/wg_platform.hlsli): the arena as root UAV u0 and its
 //    coherent alias u1, 59 root constants at b0 ([group base, workgroups, arguments...]) and a descriptor table with
-//    the driver channel's raw UAV (u0, space 0x7FFF0ADE, clean/dx12/hlsl/wg_ags.hlsli) and one texture view (t0) for
-//    the input capture. Kernels address the arena by 32-bit byte offsets; offset 0 is never a buffer (null).
+//    the driver channel's raw UAV (u0, space 0x7FFF0ADE, clean/dx12/hlsl/wg_ags.hlsli) and four input texture
+//    views (t0..t3). Kernels address the arena by 32-bit byte offsets; offset 0 is never a buffer (null).
 //  - Configure (off the present path): loads the DXIL of every kernel it needs from FgD3d12ExecutorDesc::dxil_dir
 //    (<dir>/<kernel>.dxil, built by clean/dx12/build_dx12.py --only), builds every pipeline once, sizes the arena for
 //    the frame size (every light-path image, the pyramid, net1's three regions, the input capture areas, the generated
 //    image, and with the Full path its images, net2's tensors, the output pyramid and the logistic table), uploads the
 //    weights (net1's fragments, net2's canonical weights) and creates the shared producer fence, the command
 //    allocators, the descriptor heap and the readback buffer for the menu decision.
-//  - RecordSharedGameFrame: captures the game frame's colour, motion, depth and optional hudless colour / UI alpha
-//    into the arena (fg_exec_io.hlsl fg_exec_capture), then runs the once-per-game-frame stages of fg_exec_plan.h's
-//    schedule: history clears, menu detection, R3 downsample / UI, R4 motion and depth, the previous-to-current scatter
-//    (signed 64-bit atomic minimum), unpack, hole rule, pull / push, the hole mask, and net1's input pack, the fused
-//    11-launch net1 (fg_net1_plan.h FgRecordNet1) and its output, or the quality image without history. The capture
-//    and the detection are submitted first; when a detector ran, the executor waits (bounded) for that submission
-//    only and reads the detection back, so the session gets this frame's decision.
+//  - RecordSharedGameFrame: runs the history clears, R3 downsample / UI and R4 motion and depth. The SRV kernels read
+//    the game textures on the game queue. Menu detection and output readbacks use arena captures. The remaining
+//    work uses the arena: previous-to-current scatter, unpack, hole rule, pull / push, hole mask, and net1's input,
+//    network and output (or the quality image without history). Menu detection waits for its decision readback.
 //  - RecordGeneratedIndex: the per-index stages (intermediate-time scatters MA / MB, blend weights, then the light
 //    blend (preset C) or the Full blend, net2 and the output pyramid (presets A / B), the menu output) into the
 //    generated image, which is written into the presenter slot's texture (fg_exec_pack when the slot is not float16,
 //    then a copy; the slot goes COMMON -> COPY_DEST -> COMMON), followed by a signal of the shared producer fence.
-//  - RecordMenuCopy / RecordRealEndpoint: the game frame's colour, exactly, into the slot; a real-only endpoint only
-//    signals the fence after the game frame's work on the queue.
+//  - RecordMenuCopy / RecordRealEndpoint: copy matching linear UNORM textures on the game queue, or capture colour
+//    on demand and convert it to the slot format. An endpoint without a slot signals the game frame's queue work.
 //  - Every refusal names its reason (LastRefusal / LastWhy); nothing falls back to another path.
-// The executor records on the session's queue (FgCreateDesc::queue), so the game's work that produced the inputs is
-// ordered before it. Single caller (the session's present owner). No lambda captures a copy that can throw.
+// The executor reads game textures on the session's queue (FgCreateDesc::queue), ordered after the game's producers.
+// A direct game queue hands arena work to a dedicated compute queue by default
+// (WRONGGPU_FG_ASYNC_COMPUTE=0 selects the game queue for all work). Single caller (the session's present owner).
 //
 // Conventions the frame contract leaves to the executor (until the adapter contract names them):
 //  - FgFramePacket::camera_current is the clip-to-previous-clip matrix and camera_previous the previous-clip-to-clip
@@ -39,9 +37,10 @@
 //  - net2's scalar input f is the index's intermediate time t.
 //  - A real-only interval shows the game frame from a slot the executor reserves (ReserveRealSlot) and fills with an
 //    exact copy, when the session recorded that frame's shared work, or, for an adapter-side real-only frame (FG off,
-//    menu flag, missing inputs), from the game's back buffer (FgRealDispatchDesc::game_colour: captured, then copied
-//    exactly) when it is a four-channel image of the output size; otherwise only the fence is signalled.
+//    menu flag, missing inputs), from the game's back buffer (FgRealDispatchDesc::game_colour) when it is a
+//    four-channel image of the output size; otherwise only the fence is signalled.
 //  - A frame that carries the distortion field is refused (not modelled) unless the setting ignores it.
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -132,7 +131,7 @@ void FgExecSigTable(std::vector<float>* out);
 enum class FgNet2Path : uint32_t { Fast = 0, Exact = 1 };
 const char* FgNet2PathName(FgNet2Path p);
 
-// One launch of the fast net2 plan for a net2 grid (CPU side, tested on its own): the kernel variant chosen for the
+// One launch of the fast net2 plan for a net2 grid (CPU side, tested on its own): the baseline kernel variant for the
 // layer (clean/fg/runner/fg_net2_mma.py variant()), its workgroup count and the conv grid.
 struct FgNet2FastLaunch {
     uint32_t layer = 0;       // 1..25, 0: the input merge, 26: the upwarp
@@ -147,7 +146,7 @@ bool FgNet2FastPlan(uint32_t W2, uint32_t H2, std::vector<FgNet2FastLaunch>* out
 bool FgNet2SwizzleFast(const std::vector<uint8_t>& canonical, const std::vector<uint8_t>& bias, uint32_t cout,
                        uint32_t cw, std::vector<uint8_t>* fragments, std::vector<uint8_t>* bias_padded);
 
-// The DXIL files (without ".dxil") an executor with these choices loads from FgD3d12ExecutorDesc::dxil_dir.
+// The required DXIL files (without ".dxil") for these choices. The executor also loads available net1 tuning variants.
 std::vector<std::string> FgD3d12ExecutorKernelNames(bool enable_full, FgNet2Path net2);
 
 // Whether a game texture of this DXGI format is accepted as the motion-vector input: it must be readable as a colour
@@ -164,6 +163,38 @@ struct FgD3d12ExecutorDesc {
     uint32_t wait_ms = 2000;                // bounded waits (menu decision, allocator reuse, idle)
     uint32_t allocators = 24;               // command allocators in the ring
     bool keep_outputs = false;              // tests: keep a host copy of every image written into a slot
+    bool timing = false;                    // also enabled by WRONGGPU_FG_TIMING=1
+    // Per-launch profile (TakeKernelProfile): one timestamp before every dispatch of every recording. It serialises
+    // the queue a little, so it is a profile, not a frame time; also enabled by WRONGGPU_FG_KPROF=1 (implies timing).
+    bool kernel_profile = false;
+    // Turbo v2 levers (all exact: every one only changes where and when independent work runs). -1 takes the
+    // environment (default on); 0 / 1 force it (tests, paired A / B runs).
+    //  - batch (WG_FG_BATCH=0 off): RecordGeneratedBatch records layer k of every index back to back, so the barriers
+    //    sit only between dependent layers (needs one scratch bank per index: max_generated banks).
+    //  - hoist (WG_FG_HOIST=0 off): the per-index MA / MB fills and the intermediate-time scatters run on the second
+    //    compute queue while the game frame's net1 runs (needs the second queue and banks).
+    //  - dualq (WG_FG_DUALQ=0 off): the downsample runs on the game queue beside the motion / p2c chain on the
+    //    producer queue (two recordings and a handoff each).
+    //  - fuse (WG_FG_FUSE=0 off): the fused / retiled kernels fg_lite_p2c_fine_mask (fine pass + hole mask),
+    //    fg_lite_p2c_inpaint_tiled and fg_lite_interm_both (both intermediate-time passes, LDS-binned scatters) replace
+    //    their separate kernels when their DXIL is in the kernel folder.
+    //  - fuse2 (WG_FG_FUSE2=0 off; Wave 1B, each exact against the Wave 1 kernels it replaces): 0 off, 1 (the default) the levers
+    //    that won in paired timing (1 + 16: net1 cells and the pyramid tail), any other value a mask of levers (63 = every lever
+    //    whose kernels are in the folder; 2, 4, 8, 32 are exact but cost GPU time): 1 net1_01 builds its cells in LDS
+    //    (fg_mconv2_mid_cells, no net1 input launch), 2 net2's residual pairs in one launch (fg_net2_mpair_res_c64 / _c32),
+    //    4 the upwarp computed in L14's staging (fg_net2_mconv_m1b2_uw), 8 the blend weights built in the blends
+    //    (fg_lite_blend_w / _pack_w, fg_full_blend_*_w), 16 the output pyramid's coarse pushes in one workgroup
+    //    (fg_out_tail) and level 1 pushed in the fine pass (fg_out_push_fine_l1), 32 X0 / X1 stored as RGB
+    //    (fg_full_blend_*_x3, fg_out_pull_x3). Independent of fuse.
+    //    Wave 2 (all bit-exact; 64 and 512 are in the default, the others are opt-in; WG_FG_FUSE2=17 is the Wave 1B default
+    //    without them): 64 fg_lite_fill16_p2 (A15:
+    //    the fill without integer divisions), 128 the bilinear taps of the blends, the light weights and the output pull as
+    //    16 / 8-byte row loads (A16: the _b kernels), 256 the light blend on 32 x 8 tiles with 8-byte pair stores (A17: the _t
+    //    kernels), 512 the output pull's division skipped on hole-free tiles (A17: the _q kernels), 1024 net2's convolutions of
+    //    the indices of a batch as one (groups, 1, N) launch (A18: the _z kernels; needs batch; WG_FG_NET2_BATCH=0 turns it
+    //    off whatever the mask says). The default mask is 593 = 17 + 64 + 512 (paired ABBA at 1440p: 128 and 256 regress, 1024
+    //    is neutral); 2001 is 17 + all of Wave 2 and 2047 is every lever.
+    int batch = -1, hoist = -1, dualq = -1, fuse = -1, fuse2 = -1;
     // Developer frame dumps (off while dump_dir is empty; the ASI sets it only in a developer build): of the game
     // frames that generate, every dump_every-th one (at most dump_max), the game frame's slot image (game_<n>.ppm) and
     // each generated slot image (gen_<n>_<i>.ppm) are copied to a readback buffer after the slot write, and written as
@@ -197,6 +228,32 @@ struct FgExecCounters {
     uint64_t lite_frames = 0, full_frames = 0;
     uint64_t game_colour_copies = 0;   // real-only frames copied from the game's back buffer (no shared work)
     uint64_t net2_fast = 0, net2_exact = 0;  // net2 recordings per path
+    uint64_t net2_z_launches = 0, net2_z_saved = 0;   // A18: z-sliced net2 launches recorded, and the launches they replaced (nf - 1 each)
+};
+
+enum class FgExecStage : uint32_t {
+    Capture, SharedPreNet1, Net1, SharedPostNet1, GenPreNet2, Net2, OutPyramid, PackCopy, RealEndpoint, Count
+};
+
+struct FgExecTimings {
+    // Sum of GPU timestamp intervals for each stage since the previous collection, in milliseconds.
+    std::array<double, static_cast<size_t>(FgExecStage::Count)> ms = {};
+    // The honest multi-queue numbers over the same window (every queue's recordings on one clock): the wall-clock
+    // span from the first recording's start to the last one's end (idle gaps included), the time at least one
+    // recording ran (the union of the recordings' intervals: overlap between queues counted once), and the number
+    // of recordings. The per-stage sums above double count work that two queues overlap.
+    double span_ms = 0.0, busy_ms = 0.0;
+    uint32_t recordings = 0;
+};
+
+// One row of the per-launch profile (kernel_profile), summed over the window since the previous collection. Rows of
+// one kernel are told apart by the ordinal of the launch inside its recording.
+struct FgExecKernelProfileRow {
+    std::string name;
+    uint32_t ordinal = 0;   // n-th launch of this kernel in a recording (net1's repeated kernels: its layers in order)
+    uint64_t calls = 0;     // launches summed
+    uint64_t groups = 0;    // workgroups summed over the calls (groups / calls: the launch's workgroup count)
+    double ms = 0.0;        // summed time from this launch's timestamp to the next one's
 };
 
 class FgD3d12Executor final : public IFgKernelExecutor {
@@ -209,6 +266,9 @@ public:
     FgExecResult Configure(const FgCreateDesc& desc, uint32_t history_banks) override;
     FgExecResult RecordSharedGameFrame(const FgSharedDispatchDesc& desc, FgSharedResult* out) override;
     FgExecResult RecordGeneratedIndex(const FgIndexDispatchDesc& desc, FgReadyFence* ready) override;
+    FgExecResult RecordGeneratedBatch(const FgIndexDispatchDesc* descs, uint32_t n, FgReadyFence* ready,
+                                      uint32_t* done) override;
+    bool BatchesGenerated() const override;
     FgExecResult RecordMenuCopy(const FgCopyDispatchDesc& desc, FgReadyFence* ready) override;
     FgExecResult RecordRealEndpoint(const FgRealDispatchDesc& desc, FgReadyFence* ready) override;
     uint64_t LastComputeValue() const override;
@@ -221,8 +281,23 @@ public:
     const FgExecCounters& Counters() const;
     const FgExecGeometry& Geometry() const;
     uint64_t ArenaBytes() const;
+    // Bounded wait for a value on the producer fence.
+    bool WaitForComputeValue(uint64_t value, uint32_t timeout_ms);
     // Bounded wait until every submission completed.
     bool WaitIdle(uint32_t timeout_ms);
+    // Collect and clear the timings through the latest submission. Returns false when profiling is unavailable.
+    bool TakeTimings(FgExecTimings* out, uint32_t timeout_ms);
+    // kernel_profile: waits idle, collects and clears the per-launch profile (rows in first-seen order). Returns
+    // false when it is off or unavailable.
+    bool TakeKernelProfile(std::vector<FgExecKernelProfileRow>* out, uint32_t timeout_ms);
+    // The levers that are active after Configure (a lever the device or the arena cannot take stays off).
+    bool BatchActive() const;
+    bool HoistActive() const;
+    // The Wave 1B levers that run after Configure (bits as FgD3d12ExecutorDesc::fuse2 lists them: 1 net1 cells, 2 net2
+    // pairs, 4 upwarp in L14, 8 blend weights, 16 pyramid tail, 32 X0 / X1 as RGB); 0 when off or their kernels are missing.
+    uint32_t Fuse2Active() const;
+    bool DualQueueActive() const;
+    uint32_t ScratchBanks() const;
     // keep_outputs: waits idle and moves the host copies out (oldest first).
     bool TakeOutputs(std::vector<FgExecOutputRecord>* out);
 

@@ -95,7 +95,7 @@ FgWinResult FgWinCompPresenter::Initialize() {
     if (FAILED(hr = dev.As(&device11_)) || FAILED(hr = ctx.As(&context11_)))
         return FgWinFail(FgStatus::Unsupported, FgWinRefusal::D3D11DeviceFailed, hr);
 
-    hr = CreatePresentationFactory(device11_.Get(), IID_PPV_ARGS(&factory_));
+    hr = FgDCompCreatePresentationFactory(device11_.Get(), IID_PPV_ARGS(&factory_));
     if (FAILED(hr)) return FgWinFail(FgStatus::Unsupported, FgWinRefusal::NoPresentationManager, hr);
     info_.presentation_supported = factory_->IsPresentationSupported() != 0;
     info_.independent_flip_supported = factory_->IsPresentationSupportedWithIndependentFlip() != 0;
@@ -113,7 +113,7 @@ FgWinResult FgWinCompPresenter::Initialize() {
     FgWinResult r = CreateBuffers(desc_.width, desc_.height);
     if (!r.Ok()) return r;
 
-    hr = DCompositionCreateSurfaceHandle(COMPOSITIONOBJECT_ALL_ACCESS, nullptr, &surface_handle_);
+    hr = FgDCompCreateSurfaceHandle(COMPOSITIONOBJECT_ALL_ACCESS, nullptr, &surface_handle_);
     if (FAILED(hr)) return FgWinFail(FgStatus::Refused, FgWinRefusal::CompositionTarget, hr);
     hr = manager_->CreatePresentationSurface(surface_handle_, &surface_);
     if (FAILED(hr)) return FgWinFail(FgStatus::Refused, FgWinRefusal::CompositionTarget, hr);
@@ -124,7 +124,7 @@ FgWinResult FgWinCompPresenter::Initialize() {
         return FgWinFail(FgStatus::Refused, FgWinRefusal::CompositionTarget, hr);
 
     if (desc_.bind_window) {
-        if (FAILED(hr = DCompositionCreateDevice3(nullptr, IID_PPV_ARGS(&dcomp_))) ||
+        if (FAILED(hr = FgDCompCreateDevice3(nullptr, IID_PPV_ARGS(&dcomp_))) ||
             FAILED(hr = dcomp_->CreateTargetForHwnd(desc_.hwnd, TRUE, &target_)) ||
             FAILED(hr = dcomp_->CreateVisual(&visual_)) ||
             FAILED(hr = dcomp_->CreateSurfaceFromHandle(surface_handle_, &dcomp_surface_)) ||
@@ -554,9 +554,9 @@ void FgWinCompPresenter::DrainStatisticsLocked() {
                 COMPOSITION_FRAME_STATS fst = {};
                 COMPOSITION_TARGET_ID targets[4] = {};
                 UINT count = 0;
-                if (FAILED(DCompositionGetStatistics(fid, &fst, 4, targets, &count)) || count == 0) break;
+                if (FAILED(FgDCompGetStatistics(fid, &fst, 4, targets, &count)) || count == 0) break;
                 COMPOSITION_TARGET_STATS ts = {};
-                if (FAILED(DCompositionGetTargetStatistics(fid, &targets[0], &ts)) || ts.presentTime == 0) break;
+                if (FAILED(FgDCompGetTargetStatistics(fid, &targets[0], &ts)) || ts.presentTime == 0) break;
                 if (pid > last_displayed_platform_) last_displayed_platform_ = pid;
                 if (EngineIdForPlatform(pid, &eid, true))
                     engine_.OnPresentDisplayed(eid, clock_map_.FromQpc(static_cast<std::int64_t>(ts.presentTime)));

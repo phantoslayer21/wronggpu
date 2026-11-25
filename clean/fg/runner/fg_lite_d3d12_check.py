@@ -62,8 +62,12 @@ LITE_KERNELS = ["fg_lite_fill16", "fg_lite_copy4", "fg_lite_detect", "fg_lite_me
                 "fg_lite_p2c_inpaint", "fg_lite_p2c_inpaint_mut", "fg_lite_p2c_pull", "fg_lite_p2c_push",
                 "fg_lite_p2c_fine", "fg_lite_hole_mask", "fg_lite_quality_init", "fg_lite_net1_input",
                 "fg_lite_net1_output", "fg_lite_interm", "fg_lite_weights", "fg_lite_blend", "fg_lite_blend_mut"]
+# Turbo v2 (--turbo): the fused / retiled kernels take the place of the ones they replace in the plan (and are built with
+# them: clean/dx12/build_dx12.py --only <KERNELS> includes them); every output is still compared with the CPU reference
+TURBO_KERNELS = ["fg_lite_p2c_fine_mask", "fg_lite_p2c_inpaint_tiled", "fg_lite_interm_both"]
+TURBO = False
 NET1_KERNELS = MMA.MCONV + list(MMA.MPAIR) + MMA.EXACT + ["fg_add_f16"]
-KERNELS = LITE_KERNELS + NET1_KERNELS + ["native_fill"]
+KERNELS = LITE_KERNELS + TURBO_KERNELS + NET1_KERNELS + ["native_fill"]
 MUTANTS = {"fg_lite_p2c_inpaint": "fg_lite_p2c_inpaint_mut", "fg_lite_blend": "fg_lite_blend_mut"}
 # negative controls taken at a given case and call (a launch that writes: the menu output on a latched game frame)
 NEG_AT = {"fg_lite_menu_output": ("menu_latch_3x", "f2_c")}
@@ -158,6 +162,7 @@ class Planner:
             if i != "out":
                 self.bufs["n1a_" + i] = [n, None, SENT]
         self.frame, self.callno = -1, 0
+        self.turbo, self.hole_fused = TURBO, False
         self.n1_frames, self.out_ids, self.dis_ids = [], [], []
         self.tags = []            # per call: (frame, i)
 
@@ -266,8 +271,12 @@ class Planner:
                                                        fb(st.kmax), fb(st.tau)]
                 self.step("fg_lite_p2c_unpack", nsc, a, [self.roles[x] for x in ("F", "E", "Fl", "Vf")], st_tag)
             elif name == "p2c_inpaint":
-                self.step("fg_lite_p2c_inpaint", nsc, [self.r("Fl"), self.r("G"), g.w1, g.h1], [self.roles["G"]],
-                          st_tag)
+                if self.turbo:   # 32 x 8 pixel tiles
+                    self.steps.append(("fg_lite_p2c_inpaint_tiled", (-(-g.w1 // 32)) * (-(-g.h1 // 8)),
+                                       [self.r("Fl"), self.r("G"), g.w1, g.h1], [self.roles["G"]], st_tag))
+                else:
+                    self.step("fg_lite_p2c_inpaint", nsc, [self.r("Fl"), self.r("G"), g.w1, g.h1], [self.roles["G"]],
+                              st_tag)
             elif name == "p2c_pull":
                 for l in range(1, p["top"] + 1):
                     wl, hl = g.levels[l]
@@ -288,12 +297,23 @@ class Planner:
                     self.step("fg_lite_p2c_push", lw * lh, [self.r("P%d" % (l + 1)), pw, ph, self.r("P%d" % l), lw, lh],
                               [self.roles["P%d" % l]], st_tag)
                 pw, ph = g.levels[1]
-                self.step("fg_lite_p2c_fine", nsc, [self.r("P1"), pw, ph, self.r("G"), self.r("F"), g.w1, g.h1],
-                          [self.roles["F"]], st_tag)
+                if self.turbo and g.wd == g.w1 and g.hd == g.h1:
+                    # the net1 grid is the scatter grid: the fine pass runs the hole mask (Hc := 1 first)
+                    self.fill16(self.roles["Hc"], [0x3C00], st_tag)
+                    self.step("fg_lite_p2c_fine_mask", nsc,
+                              [self.r("P1"), pw, ph, self.r("G"), self.r("F"), g.w1, g.h1, self.r("Hc")],
+                              [self.roles["F"], self.roles["Hc"]], st_tag)
+                    self.hole_fused = True
+                else:
+                    self.step("fg_lite_p2c_fine", nsc, [self.r("P1"), pw, ph, self.r("G"), self.r("F"), g.w1, g.h1],
+                              [self.roles["F"]], st_tag)
             elif name == "hole_mask":
-                self.fill16(self.roles["Hc"], [0x3C00], st_tag)
-                self.step("fg_lite_hole_mask", g.wd * g.hd, [self.r("F"), g.w1, g.h1, self.r("Hc"), g.wd, g.hd],
-                          [self.roles["Hc"]], st_tag)
+                if self.hole_fused:
+                    self.hole_fused = False
+                else:
+                    self.fill16(self.roles["Hc"], [0x3C00], st_tag)
+                    self.step("fg_lite_hole_mask", g.wd * g.hd, [self.r("F"), g.w1, g.h1, self.r("Hc"), g.wd, g.hd],
+                              [self.roles["Hc"]], st_tag)
             elif name == "quality_init":
                 self.step("fg_lite_quality_init", g.wd * g.hd, [self.r("Dc"), self.r("Qc"), g.wd * g.hd],
                           [self.roles["Qc"]], st_tag)
@@ -326,6 +346,11 @@ class Planner:
                     [g.wd, g.hd, g.pad_l, g.pad_t, g.W0, g.H0, self.cs, 1 if self.ps == 1 else 16,
                      1 if p["ui_forcing"] else 0]
                 self.step("fg_lite_net1_output", g.wd * g.hd, a, [self.roles[x] for x in ("NA", "NB", "m")], st_tag)
+            elif name == "interm" and self.turbo:   # both passes in one launch, LDS-binned scatters
+                self.steps.append(("fg_lite_interm_both", (-(-g.w1 // 16)) * (-(-g.h1 // 16)),
+                                   [self.r("Mv"), self.r("Zc"), self.r("MA"), self.r("F"), self.r("Zp"), self.r("MB"),
+                                    g.w1, g.h1, fb(p["t"]), fb(st.s_k), int(c.depth_inverted), fb(T2), fb(st.tau)],
+                                   [self.roles["MA"], self.roles["MB"]], st_tag))
             elif name == "interm":
                 for ps_, src, z, tgt in ((0, "Mv", "Zc", "MA"), (1, "F", "Zp", "MB")):
                     self.step("fg_lite_interm", nsc, [ps_, self.r(src), self.r(z), self.r(tgt), g.w1, g.h1,
@@ -746,9 +771,15 @@ def main(argv=None):
     ap.add_argument("--verify", action="store_true")
     ap.add_argument("--report-timing", action="store_true")
     ap.add_argument("--only", default=None, help="comma-separated case names (--plan)")
+    ap.add_argument("--turbo", action="store_true",
+                    help="plan the Turbo v2 kernels (fg_lite_p2c_fine_mask, fg_lite_p2c_inpaint_tiled, "
+                         "fg_lite_interm_both) instead of the kernels they replace; use the same flag for --plan and "
+                         "--verify")
     ap.add_argument("--timeout", type=int, default=85)
     ap.add_argument("--json", default=None)
     a = ap.parse_args(argv)
+    global TURBO
+    TURBO = a.turbo
     res = None
     if a.plan:
         m = plan(a.build, a.work, a.only.split(",") if a.only else None)
