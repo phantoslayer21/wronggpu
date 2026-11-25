@@ -419,7 +419,7 @@ def w64_stages(step="E"):
     return tuple(s for s in os.environ.get("WG_RR_W64", W64_DEFAULT).split(",") if s)
 
 
-def kernel_for(name, zmode, isa=False, step="E", ldsw=1, direct=None, fold=None, dflow=0):
+def kernel_for(name, zmode, isa=False, step="E", ldsw=1, direct=None, fold=None, dflow=0, extra=None):
     """direct (E1 only): the input layout the stage call was built with (StageCall.e1_direct); False keeps E1 on
     rr_block.hlsl with the regrouped input whatever the step (e.g. variant X instead of Y / Z / I on failed checks)."""
     r = route(name, ldsw, step)
@@ -434,6 +434,9 @@ def kernel_for(name, zmode, isa=False, step="E", ldsw=1, direct=None, fold=None,
     d.update(route_def(r)[1])
     if name == "E1" and src == "rr_block_fast.hlsl" and direct is not False and e1_direct(ldsw, step):
         d["RR_ADAPT"] = 2
+    if extra:   # clean/rr-f-wave4: A/B kernels (e.g. {"RR_OVL": 0}: the kernel before the LDS overlay of the relaxed body)
+        d.update(extra)
+        tag += "_" + "_".join(f"{k}{v}" for k, v in sorted(extra.items()))
     fm = (infold(step, ldsw) if fold is None else fold) if name == "IN0" and r == "c32" else 0
     if fm:
         d["RR_INFOLD"] = fm

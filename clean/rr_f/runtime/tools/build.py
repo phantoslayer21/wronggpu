@@ -45,6 +45,12 @@ DEFAULT_OUT = os.path.join(os.environ.get("WG_BUILD_ROOT", os.path.join(ROOT, "b
 EXACT_OUT_DEFINES = {"OFX_FUSE": 1, "OF_UNIF": 1}   # exact, same bits (output_diff PASS): fused 16-tap loop + uniform scratch words
 FAST_OUT_DEFINES = {"OF_HWRCP": 1, "OF_REPROJ_MAX": 1,   # Fast mode's output stage (clean/rr-f-s10-modes; tier B, NOT exact)
                     "OF_UNIF": 1, "OFX_FUSE": 1, "OFX_NOCHK": 1}   # fused 16-tap loop + uniform scratch + no subnormal-band check (fast mode only)
+# clean/rr-f-wave4 R4.3 (same bits as without; rr_output_fast.hlsli, written arguments there): extra defines of output.fast.f
+# alone (output.prep.f / output.fallback.f keep their DXIL): OFX_PH1W (the PH1 pool inside each wave64: no groupshared
+# copy, no barrier), OFX_LD3 (the motion pair / eroded texels as one b64 / b32 load), OFX_QST (two neighbour Q texels as
+# one 12-byte store). WG_RR_OUTF_FASTDEFS (JSON object, build time) replaces them; the runtime kernel output.fast.f0 is
+# the same kernel without them (WG_RR_W4 bit 2 = 0 selects it).
+FAST_OUT_FAST_ONLY = {"OFX_PH1W": 1, "OFX_LD3": 1, "OFX_QST": 1}
 
 
 class _env:
@@ -111,6 +117,9 @@ def kernels(out):
     # the default step E on the struct routes (opt-in WG_RR_BODY=E; E1 reads IN0's y2 directly, as for step X)
     assert stage.e1_direct(1, "E") == stage.e1_direct(1, "X")
     res += [("stagee." + n, 37, stage.kernel_for(n, ez, step="E", ldsw=1)) for n in STAGES]
+    # clean/rr-f-wave4 R4.2b: stagee.E1 / D1-F / D0-F share the exact body's LDS overlay (rr_block_fast.hlsl / rr_block_c32.hlsl
+    # RR_OVL); stagee0.* = the same kernels without it (RR_OVL 0, the kernels of fc16c9d; runtime WG_RR_W4 bit 1 = 0)
+    res += [("stagee0." + n, 37, stage.kernel_for(n, ez, step="E", ldsw=1, extra={"RR_OVL": 0})) for n in ("E1", "D1-F", "D0-F")]
     # clean/rr-f-s12-dflow: staged.* = stagee.* in the dataflow form (rr_dflow.hlsli: row counters instead of the UAV
     # barriers; opt-in WG_RR_DFLOW=1). Only the rr_block_wide.hlsl stages have that form; the others repeat stagee.*'s
     # DXIL (kRrDflowMask: the stages that have it)
@@ -207,8 +216,11 @@ def kernels(out):
     for n, (dxil, nargs) in GO.kernel_set(defines=EXACT_OUT_DEFINES, fast=True, names=GO.FAST_KERNELS + ("prepu",), spec=True).items():   # prep, fast, fallback, prepu
         res.append((f"output.{n}", nargs, dxil))
     # clean/rr-f-s10-modes: Fast mode's output stage (OF_HWRCP + OF_REPROJ_MAX + OFX_FUSE + OFX_NOCHK; tier B, NOT exact), same four kernels
-    for n, (dxil, nargs) in GO.kernel_set(defines=FAST_OUT_DEFINES, fast=True, names=GO.FAST_KERNELS + ("prepu",), spec=True).items():
+    for n, (dxil, nargs) in GO.kernel_set(defines=FAST_OUT_DEFINES, fast=True, names=GO.FAST_KERNELS + ("prepu",), spec=True,
+                                          fast_only=json.loads(os.environ.get("WG_RR_OUTF_FASTDEFS", json.dumps(FAST_OUT_FAST_ONLY)))).items():
         res.append((f"output.{n}.f", nargs, dxil))
+    # clean/rr-f-wave4: output.fast.f before R4.3 (A/B kernel of the runtime's WG_RR_W4 mask)
+    res.append(("output.fast.f0", GO.NARGS, GO.kernel_set(defines=FAST_OUT_DEFINES, fast=True, names=("fast",), spec=True)["fast"][0]))
     for n in ("main", "pool"):
         res.append((f"resolve.{n}", 3, ck("rr_resolve.hlsl", f"rr_resolve_{n}", {"WG_BLOCK": 64, "RR_ELEM_EXACT": 1,
                                                                                 "RR_MUT": 0},
@@ -279,9 +291,14 @@ def kernels(out):
     # object, A/B builds only) = extra defines of head.fast.rx
     # clean/rr-mp1-head (owner decision 2026-11-01): accurate mode runs head.fast.rx too (registry mode row, gate-checked);
     # head.fast (exact) remains mode exact's fast head.
-    res.append(("head.fast.rx", 48, own(head, "rr_d0r_head", dict(hz, RR_OUT_PREP=1, RR_HVARL=7, RR_S9=61,
-                                                                  **json.loads(os.environ.get("WG_RR_HEADRX_DEFS", "{}"))),
+    # clean/rr-f-wave4 R4.1a (same bits as without; rr_d0r.hlsl): RR_HSTM 1 (each record whole from the hf0 lane: b128 / b64 /
+    # b32 stores) and RR_HQ8S 1 (step 1's q / v^T tiles quantised per head: 99 -> 95 VGPRs, under the 96 cliff, 0 spills).
+    # head.fast.rx0 = head.fast.rx of fc16c9d (runtime WG_RR_W4 bit 0 = 0). WG_RR_HEADRX_DEFS replaces nothing: it adds to both
+    hrx = dict(hz, RR_OUT_PREP=1, RR_HVARL=7, RR_S9=61, **json.loads(os.environ.get("WG_RR_HEADRX_DEFS", "{}")))
+    res.append(("head.fast.rx", 48, own(head, "rr_d0r_head", dict(hrx, RR_HSTM=1, RR_HQ8S=1,
+                                                                  **json.loads(os.environ.get("WG_RR_HEADRX_W4_DEFS", "{}"))),
                                         hinc, "rr_d0r_head_zexact_oprep")))
+    res.append(("head.fast.rx0", 48, own(head, "rr_d0r_head", hrx, hinc, "rr_d0r_head_zexact_oprep")))
     rk = os.path.join(RT, "kernels", "rr_runtime.hlsl")
     for name, entry, blk in (("rt.ingest", "rr_rt_ingest", 64), ("rt.fill", "rr_rt_fill", 64),
                              ("rt.store", "rr_rt_store", 64), ("rt.selftest", "rr_rt_selftest", 32),

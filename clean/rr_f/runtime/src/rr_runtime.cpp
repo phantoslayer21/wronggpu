@@ -299,7 +299,10 @@ enum Kid {
   // clean/rr-f-300 R2: the fast resolve specialised for the plain configuration (RF_SPEC 3: no layer / opacity / alpha
   // upscaling; same bits as resolve.fast), hardware elementary functions (Fast) and correctly rounded (.x)
   K_RES_FAST3, K_RES_FAST3_X,
-  K_COUNT
+  // clean/rr-f-wave4: the kernels before the wave-4 levers, for the A/B mask WG_RR_W4 (bit 0 = head R4.1, bit 1 = body R4.2,
+  // bit 2 = output R4.3): head.fast.rx0, output.fast.f0, stagee0.{E1, D1-F, D0-F} (RR_OVL 0); opt-in kernels
+  K_HEAD_FAST_RX0, K_OUT_FAST_F0, K_ESTAGEB0,
+  K_COUNT = K_ESTAGEB0 + 3
 };
 const char* const kKernelNames[] = {
     "stage.IN0", "stage.E1", "stage.E2", "stage.E3", "stage.E4", "stage.E5", "stage.D4-F", "stage.D4-R",
@@ -324,7 +327,8 @@ const char* const kKernelNames[] = {
     "staged.D3-F", "staged.D3-R", "staged.D2-F", "staged.D2-R", "staged.D1-F", "staged.D1-R", "staged.D0-F",
     "stagedx.IN0", "stagedx.E1", "stagedx.E2", "stagedx.E3", "stagedx.E4", "stagedx.E5", "stagedx.D4-F", "stagedx.D4-R",
     "stagedx.D3-F", "stagedx.D3-R", "stagedx.D2-F", "stagedx.D2-R", "stagedx.D1-F", "stagedx.D1-R", "stagedx.D0-F",
-    "rt.touch", "rt.blkcopy", "resolve.fast3", "resolve.fast3.x"};
+    "rt.touch", "rt.blkcopy", "resolve.fast3", "resolve.fast3.x",
+    "head.fast.rx0", "output.fast.f0", "stagee0.E1", "stagee0.D1-F", "stagee0.D0-F"};
 static_assert(sizeof(kKernelNames) / sizeof(kKernelNames[0]) == K_COUNT, "kKernelNames and Kid disagree");
 // clean/rr-f-flow: kernels only the opt-in variants dispatch (exact / strict / debug head, body steps X and Z,
 // WG_RR_PATHS=verified); the default frame (head fast, body E, fast paths) never uses them
@@ -333,6 +337,7 @@ Kid input_features_kernel(int mode) { return mode == 1 ? K_IN_FEAT_LITE : (mode 
 bool kernel_opt_in(int k) {
   if (k >= K_IN0 && k <= K_D0F) return true;                  // body step X
   if (k >= K_ZSTAGE0 && k < K_ZFIX0 + 15) return true;        // body step Z and its fixup
+  if (k >= K_HEAD_FAST_RX0 && k < K_COUNT) return true;       // clean/rr-f-wave4: the A/B kernels of WG_RR_W4
   switch (k) {
     case K_HEAD: case K_HEAD_DEBUG: case K_HEAD_WPL: case K_HEAD_FIXUP: case K_HEAD_STRICT:
     case K_OUT_MAIN: case K_OUT_POOL: case K_RES_MAIN: case K_RES_POOL:
@@ -1687,6 +1692,7 @@ struct Instance {
   // deferred switch is logged once
   uint64_t hold_modes = 0;
   int deferred_logged = -1;
+  unsigned w4 = 7;                 // WG_RR_W4 at creation (hex mask, default 7): clean/rr-f-wave4 levers on (bit 0 head R4.1, bit 1 body R4.2, bit 2 output R4.3); 0 bits select the *0 kernels
   unsigned vbits = 0;              // variant set (mode_vbits, per-knob overrides applied): head relaxed / body exact / output Fast / resolve exact
   bool infold = false;             // stagee.IN0 computes the front-end MLP itself (relaxed body in a build with kRrInFold)
   uint32_t twin = kTimingWindow;           // WG_RR_TIMING_WINDOW=N at creation: frames per timing log line (benches)
@@ -2197,6 +2203,10 @@ uint32_t create_locked(const WgRrCreate* d, void** out) {
     const bool have_iv = GetEnvironmentVariableA("WG_RR_INPUT", iv, sizeof iv) != 0;
     in->input_copy = have_iv && strcmp(iv, "copy") == 0;   // WG_RR_INPUT=copy: exact through f32 copies (diagnostic)
     char av[8] = {};
+    {
+      char w4v[16] = {};
+      if (GetEnvironmentVariableA("WG_RR_W4", w4v, sizeof w4v)) in->w4 = (unsigned)strtoul(w4v, nullptr, 16) & 7u;
+    }
     in->alias = !(GetEnvironmentVariableA("WG_RR_ALIAS", av, sizeof av) && strcmp(av, "0") == 0);
     char dxv[8] = {};
     in->diag_inx = GetEnvironmentVariableA("WG_RR_DIAG_INX", dxv, sizeof dxv) && strcmp(dxv, "1") == 0;
@@ -2287,6 +2297,8 @@ uint32_t create_locked(const WgRrCreate* d, void** out) {
     }
     apply_dflow(in);   // i15: the dataflow body of the mode (shared with the next-frame switch)
     log_line(fmt("instance %u: ingest after body stage %d", in->id, in->ringest));
+    log_line(fmt("instance %u: wave-4 levers (WG_RR_W4) 0x%x: head %s, body %s, output %s", in->id, in->w4, (in->w4 & 1u) ? "on" : "off",
+                 (in->w4 & 2u) ? "on" : "off", (in->w4 & 4u) ? "on" : "off"));
     log_line(fmt("instance %u: rr_mode=%s (%s%s): head %s, input %s, body %s, output %s, resolve %s", in->id, mode_name(in->mode),
                  msrc, vover.c_str(), (in->vbits >> VG_HEAD) & 1 ? "relaxed (RR_HVARL 7)" : "exact",
                  in->input_lite ? "lite" : (in->input_split ? "split (history exact)" : (in->input_copy ? "exact (copy)" : "exact")),
@@ -3406,7 +3418,9 @@ uint32_t evaluate_locked(Instance* in, const WgRrFrame* f, WgRrFrameResult* res)
         a.insert(a.end(), {(uint32_t)P.off(Bf.dfcnt), (uint32_t)s, q[0], q[1], q[2]});
         dispatch(l, (Kid)(((in->vbits >> VG_BODY) & 1 ? K_DXSTAGE0 : K_DSTAGE0) + s), nwx * nwy, a);
       } else {
-        dispatch(l, in->body_e ? (Kid)(((in->vbits >> VG_BODY) & 1 ? K_ESTAGEX0 : K_ESTAGE0) + s) : d.k, nwx * nwy, a);
+        // clean/rr-f-wave4 R4.2: the relaxed body's E1 / D1-F / D0-F before the LDS overlay (WG_RR_W4 bit 1 = 0)
+        const int s0 = (in->w4 & 2u) || ((in->vbits >> VG_BODY) & 1) ? -1 : (s == 1 ? 0 : s == 12 ? 1 : s == 14 ? 2 : -1);
+        dispatch(l, in->body_e ? (s0 >= 0 ? (Kid)(K_ESTAGEB0 + s0) : (Kid)(((in->vbits >> VG_BODY) & 1 ? K_ESTAGEX0 : K_ESTAGE0) + s)) : d.k, nwx * nwy, a);
       }
     }
     // clean/rr-f-s9-host: the resolve's game-input ingest (game textures -> layer / opacity / alpha copies, read
@@ -3460,7 +3474,7 @@ uint32_t evaluate_locked(Instance* in, const WgRrFrame* f, WgRrFrameResult* res)
     if (in->prepu_at < 0) rec_prepu();   // no barrier: the head does not touch its words
     if (nsk) {
     } else if (!in->head_exact) {
-      dispatch(l, in->head_debug ? K_HEAD_DEBUG : in->head_fast ? ((in->vbits >> VG_HEAD) & 1 ? K_HEAD_FAST_RX : K_HEAD_FAST) : K_HEAD_STRICT,
+      dispatch(l, in->head_debug ? K_HEAD_DEBUG : in->head_fast ? ((in->vbits >> VG_HEAD) & 1 ? ((in->w4 & 1u) ? K_HEAD_FAST_RX : K_HEAD_FAST_RX0) : K_HEAD_FAST) : K_HEAD_STRICT,
                nwx * nwy, a);
       if (!(in->dprobe2 & 4)) uav_barrier(l, A);
     } else {   // exact head: weight planes, the integer pass (marks windows it cannot take), strict fixup of those
@@ -3484,7 +3498,7 @@ uint32_t evaluate_locked(Instance* in, const WgRrFrame* f, WgRrFrameResult* res)
         uav_barrier(l, A);
       }
       if (tail_rec && in->hiddec_early) decode1(2);   // a14 E7 f: HID is final after the head barrier
-      dispatch(l, (in->vbits >> VG_OUT) & 1 ? K_OUT_FAST_F : K_OUT_FAST, ((in->Wh + 31) / 32) * ((in->Hh + 7) / 8), a);
+      dispatch(l, (in->vbits >> VG_OUT) & 1 ? ((in->w4 & 4u) ? K_OUT_FAST_F : K_OUT_FAST_F0) : K_OUT_FAST, ((in->Wh + 31) / 32) * ((in->Hh + 7) / 8), a);
       if (!(in->dprobe2 & 8)) uav_barrier(l, A);
       dispatch(l, (in->vbits >> VG_OUT) & 1 ? K_OUT_FALLBACK_F : K_OUT_FALLBACK, kOutFallbackGroups, a);
       if (!(in->dprobe2 & 16)) uav_barrier(l, A);
@@ -3840,7 +3854,7 @@ bool instance_needs_modes(const Instance* in) { return in->vbits != R().start_vb
 bool instance_needs_opt_in(const Instance* in) {
   // the three input-features kernels (exact, lite, split) are all part of the default frame (small, compiled first)
   // clean/rr-f-s10-modes: also an instance whose variants (mode, per-knob overrides) differ from the first pass's
-  return !in->head_fast || !in->body_e || !in->fast_paths;
+  return !in->head_fast || !in->body_e || !in->fast_paths || in->w4 != 7u;
 }
 uint32_t a_evaluate(void*, void* inst, const WgRrFrame* f, WgRrFrameResult* res) {
   Runtime& rt = R();

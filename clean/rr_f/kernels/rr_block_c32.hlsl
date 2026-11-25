@@ -153,13 +153,28 @@ v8f rr_d8(uint2 q)   // e4m3 bytes -> f32 (exact), one conversion per tile
 #if RR_QV1 && RR_WSRC == 0
 #error "RR_QV1 needs RR_WSRC 1"
 #endif
+// clean/rr-f-wave4 R4.2b RR_OVL: the exact body's overlay of the fusion up-projections in head 1's exchange buffer
+// (round-11 item 3, below) for the relaxed body (RR_B32) too, and in the wave64 form. The lifetime argument is the one
+// given below: UP is written and read before the head loop, head 1 first writes its buffer after head 0's barrier, which
+// every wave reaches only after its last UP read; both bodies run the same loop (RR_QV1 / RR_DEFER are 0 with L01_ACC 0).
+// RR_OVL 0 = the relaxed body's kernels as before (A/B; the runtime's WG_RR_W4 bit 1). Not with the dataflow form.
+#ifndef RR_OVL
+#if (RR_Z == 2 || (defined(RR_B32) && RR_B32 && !L01_ACC && !RR_DFLOW))
+#define RR_OVL 1
+#else
+#define RR_OVL 0
+#endif
+#endif
 #if WG_WAVE == 64
 // the same LDS bytes as the wave32 form (rr_xq[1024] / rr_up[256] of uint64), addressed per dword: wave32 slot i
 // (8 bytes) = dwords 2 i, 2 i + 1; a wave64 lane holds dword 2 i + hh of each slot of its tiles
 groupshared uint rr_xq32[2048];
 #define XB(h) ((h) * 512u)
-#if RR_KIND == 2
+#if RR_KIND == 2 && RR_OVL && !RR_QV1
+#define RR_UP32(i) rr_xq32[1024u + (i)]   // head 1's exchange buffer (dwords 1024 .. 2047)
+#elif RR_KIND == 2
 groupshared uint rr_up32[16 * HID / 4];
+#define RR_UP32(i) rr_up32[i]
 #endif
 #elif RR_WSRC == 0
 // two unit buffers (QV_h / MLP chunk j even in buffer 0, Wo_h / MLP chunk j odd in buffer 1) and one q / v exchange
@@ -173,7 +188,7 @@ groupshared uint64_t rr_xq[512];
 // the window's quantised up-projections (fusion halves) in their own buffer.
 groupshared uint64_t rr_xq[1024];
 #define XB(h) ((h) * 512u)
-#if RR_KIND == 2 && RR_Z == 2 && !RR_QV1
+#if RR_KIND == 2 && RR_OVL && !RR_QV1
 // clean/rr-f-s13x-x-l01 (exact body only; round-11 item 3): the up-projections (16 x HID / 8 = 256 slots) live in head
 // 1's exchange buffer. They are written and read before the head loop, and head 1 first writes its buffer after head
 // 0's barrier, which every wave reaches only after its last UP read. Same operations and bits; LDS 10240 -> 8192 B.
@@ -971,8 +986,8 @@ WG_KERNEL(rr_block)
             uint2 uq;
             Q8_TRY uq = q8f(acc, bad);
             Q8_ELSE uq = q8s(acc); Q8_END
-            rr_up32[rr_uo + 4u * ot0] = uq.x;
-            rr_up32[rr_uo + 4u * ot1] = uq.y;
+            RR_UP32(rr_uo + 4u * ot0) = uq.x;
+            RR_UP32(rr_uo + 4u * ot1) = uq.y;
         }
         GroupMemoryBarrierWithGroupSync();
         const uint par0 = wv0 * 4u + (uint)(lx >> 1), par1 = par0 + 4u;
@@ -982,7 +997,7 @@ WG_KERNEL(rr_block)
         uint bad = 0u;
         [unroll] for (uint ct = 0; ct < KS; ++ct) {
             const uint2 sk = rr_tld(pX, tok[0] * RC + 16u * ct, tok[1] * RC + 16u * ct);
-            const uint2 up = uint2(rr_up32[ub0 + 4u * ct], rr_up32[ub1 + 4u * ct]);
+            const uint2 up = uint2(RR_UP32(ub0 + 4u * ct), RR_UP32(ub1 + 4u * ct));
             xr[ct] = bv_mad(bv_d8(sk), f2x, bv_d8(up));
         }
         Q8_TRY [unroll] for (uint c0 = 0; c0 < KS; ++c0) xf[c0] = bv_q8f(xr[c0], bad);

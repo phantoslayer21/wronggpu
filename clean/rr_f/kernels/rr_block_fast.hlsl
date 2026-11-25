@@ -158,6 +158,17 @@ uint64_t rr_2q(uint2 v) { return (uint64_t)v.x | ((uint64_t)v.y << 32); }
 #error "RR_QV1 needs RR_WSRC 1 and H = 2"
 #endif
 // ---- LDS --------------------------------------------------------------------------------------------------------------
+// clean/rr-f-wave4 R4.2b RR_OVL: the exact body's LDS overlays (MY in head 0's exchange buffer, UP in head 1's; round-11)
+// for the relaxed body (RR_B32) too. The lifetime argument below does not mention the row-sum mode: both bodies run the
+// same head loop (one barrier per head, head h writes buffer h & 1) and no deferred rerun (RR_DEFER / RR_QV1 are 0 with
+// L01_ACC 0). RR_OVL 0 = the relaxed body's kernels as before (A/B; the runtime's WG_RR_W4 bit 1). Not with the dataflow form.
+#ifndef RR_OVL
+#if (RR_Z == 2 || (defined(RR_B32) && RR_B32 && !L01_ACC && !RR_DFLOW))
+#define RR_OVL 1
+#else
+#define RR_OVL 0
+#endif
+#endif
 groupshared uint64_t rr_xq[1024];                    // q / v exchange, two head buffers: q [wave][ft][lane], v^T after
 #define XB(h) (((h) & 1u) * 512u)
 #if RR_WSRC == 0
@@ -165,7 +176,7 @@ groupshared uint64_t rr_wb[2 * UNIT / 8];
 #define MY(i) rr_wb[i]
 #define UP(i) rr_wb[UNIT / 8 + (i)]
 #else
-#if RR_CN > 0 && RR_Z == 2 && RH == 2 && 64 * RC / 8 <= 512 && !RR_QV1
+#if RR_CN > 0 && RR_OVL && RH == 2 && 64 * RC / 8 <= 512 && !RR_QV1
 // clean/rr-f-s13x-x-l01 (exact body only; round-11 item 5): the merge buffer lives in head 0's exchange buffer (head 1
 // uses buffer 1). Its last reader is head 0's PV, and every wave passes head 1's barrier only after those reads. Same
 // operations and bits; LDS 12288 -> 8192 B (E1).
@@ -174,7 +185,7 @@ groupshared uint64_t rr_wb[2 * UNIT / 8];
 groupshared uint64_t rr_my[64 * RC / 8];
 #define MY(i) rr_my[i]
 #endif
-#if RR_KIND == 2 && RR_Z == 2 && RH == 2 && 16 * HID / 8 <= 512 && !RR_QV1
+#if RR_KIND == 2 && RR_OVL && RH == 2 && 16 * HID / 8 <= 512 && !RR_QV1
 // clean/rr-f-s13x-x-l01 (exact body only): the fusion up-projections live in head 1's exchange buffer. They are
 // written and read before the head loop, and head 1 first writes its buffer after head 0's barrier, which every wave
 // reaches only after its last UP read. Same operations and bits; LDS 12288 -> 8192 B (D1-F).
