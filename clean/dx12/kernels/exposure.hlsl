@@ -11,7 +11,6 @@
 // @wg-kernel exposure_auto_diet co=exposure.co block=256 wave=32 args=p,p,p,p,p,b36,u
 // @wg-kernel exposure_auto_diet_direct co=exposure.co entry=exposure_auto_diet block=256 wave=32 args=p,p,p,p,p,b36,u rs=direct defines=WG_DIRECT_TEXTURES=1
 // @wg-kernel f16lut_build_direct co=- block=256 wave=32 args=p,p rs=direct defines=WG_DIRECT_TEXTURES=1,F16LUT_BUILD=1
-// @wg-kernel f16lut_build_dec co=- block=256 wave=32 args=p,p,u,u defines=F16LUT_BUILD_DEC=1
 #include "wg_platform.hlsli"
 #if defined(WG_DIRECT_TEXTURES)
 #include "native_direct.hlsli"
@@ -33,27 +32,6 @@ WG_KERNEL(f16lut_build_direct)
     const uint i = wg_block_id() * WG_BLOCK + wg_lane_id();
     if (and(tab != 0u, i < 65536u))
         f16lut_build(tab, i, wg_ldf(ex, 0u), wg_ldf(ex, 16u), nd_color_pi, nd_output_rne16, nd_rw >> 31u);
-}
-#elif defined(F16LUT_BUILD_DEC)
-// Staged path (POST_OUT == 0) per-frame 64K FP16 decode table (hlsl/wg_f16lut.hlsli, 256 KB): skips rebuild when the
-// header already matches (dec_scale, pi_arg, 0).
-#include "wg_f16lut.hlsli"
-WG_ARGS_BEGIN
-    uint tab, ex;
-    float dec_scale_arg, pi_arg;
-WG_ARGS_END
-WG_KERNEL(f16lut_build_dec)
-{
-    WG_SETUP();
-    const uint i = wg_block_id() * WG_BLOCK + wg_lane_id();
-    if (or(tab == 0u, i >= 65536u)) return;
-    const float dec_scale = ex != 0u ? wg_ldf(ex, 16u) : dec_scale_arg;
-    if (f16lut_valid(tab, dec_scale, pi_arg, 0u)) return;
-    wg_mem.Store(tab + WG_F16LUT_DEC + 4u * i, asuint(f16lut_out(i, dec_scale, pi_arg, false, wg_grid_size() >> 31u)));
-    if (i == 0u) {
-        const bool finite = and((asuint(dec_scale) & 0x7f800000u) != 0x7f800000u, (asuint(pi_arg) & 0x7f800000u) != 0x7f800000u);
-        wg_mem.Store4(tab, finite ? uint4(WG_F16LUT_MAGIC, asuint(dec_scale), asuint(pi_arg), 0u) : uint4(0u, 0u, 0u, 0u));
-    }
 }
 #else
 

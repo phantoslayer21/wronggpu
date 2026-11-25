@@ -78,8 +78,6 @@
 #if defined(WG_DIRECT_TEXTURES)
 #include "native_direct.hlsli"
 #include "wg_f16lut.hlsli"
-#elif POST_OUT == 0 && !WG_LZ_ANALYTIC
-#include "wg_f16lut.hlsli"
 #endif
 #if defined(WG_STAGED_PIDIV)
 #include "wg_pidiv.hlsli"
@@ -88,6 +86,52 @@
 // bytes the checks cover (0: 3 x f32 rows, 3: direct); the RGBA16F row forms 1 / 2 keep their previous code
 #define WG_POST_CUTS (POST_OUT == 0 || POST_OUT == 3)
 #define WG_POST_OPT (POST_OUT == 0 || POST_OUT == 3)
+// The WG_POST_OPT instruction cuts, one switch each (experiments: -DWG_PO_x=0). Form 3 (direct) always takes all of them.
+#if POST_OUT == 3
+#define WG_PO_STAGE 1    // staging fetch with per-lane fixed texel row / column (pd_stage_fetch)
+#define WG_PO_EXPO 1     // the exposure-pair loads after the first staging loads
+#define WG_PO_HH 1       // the horizontal pass's lane roles and scratch offsets fixed per lane
+#define WG_PO_VV 1       // the vertical pass's first item fixed per lane (pd_vsplit once)
+#define WG_PO_GATH 1     // unrolled gather
+#define WG_PO_QUAD 1     // display values: partner dwords by QuadReadAcrossX, three packed dwords
+#define WG_PO_RH 1       // reduced history: two code chains
+#else
+// Staged form 0 (POST_OUT == 0; RGA, gfx1201): the three per-lane hoists (STAGE: staging row / column, HH: horizontal
+// roles and offsets, VV: the vertical first item) each keep a few VGPRs live for the whole walk. With all of them
+// post_tf is 96 VGPRs (1 workgroup per CU of 8 waves64; 85 keeps 2), so the 512-lane kernels (NW = 8) leave them out
+// and keep the rest (76 VGPRs; _pf 77). The NW = 4 kernels (two staged texels per lane) keep STAGE and VV, leave out HH
+// (83 VGPRs; _pf 85).
+#if WG_TF_NW == 4
+#define WG_PO_STAGE_D 1
+#define WG_PO_HH_D 0
+#define WG_PO_VV_D 1
+#else
+#define WG_PO_STAGE_D 0
+#define WG_PO_HH_D 0
+#define WG_PO_VV_D 0
+#endif
+#ifndef WG_PO_STAGE
+#define WG_PO_STAGE (WG_POST_OPT && WG_PO_STAGE_D)
+#endif
+#ifndef WG_PO_EXPO
+#define WG_PO_EXPO WG_POST_OPT
+#endif
+#ifndef WG_PO_HH
+#define WG_PO_HH (WG_POST_OPT && WG_PO_HH_D)
+#endif
+#ifndef WG_PO_VV
+#define WG_PO_VV (WG_POST_OPT && WG_PO_VV_D)
+#endif
+#ifndef WG_PO_GATH
+#define WG_PO_GATH WG_POST_OPT
+#endif
+#ifndef WG_PO_QUAD
+#define WG_PO_QUAD WG_POST_OPT
+#endif
+#ifndef WG_PO_RH
+#define WG_PO_RH WG_POST_OPT
+#endif
+#endif
 #if POST_OUT == 2
 RWTexture2D<float4> wg_tex_out : register(u3);   // the output texture (RGBA16F), written through a typed UAV
 #endif
@@ -373,7 +417,7 @@ TfRaw pd_stage_fetch(int lane, int ilast, int st_r, int st_col, float inv_ncol_u
 }
 #endif
 
-#if WG_TF_TWO && !WG_POST_OPT
+#if WG_TF_TWO && !WG_PO_STAGE
 // The buffer forms' second staged texel of the lane: i = mini(lane + kThreads, nstage - 1), the first texel's formula
 TfRaw tf_stage2(int lane, int nstage, float inv_ncol, int r0, int c0, int ncol PD_P)
 {
@@ -871,11 +915,7 @@ void tf_row_sync()
 // urel = 3 pr + 2 dy past the pass's first row pair, and the lane phase's filter weights wa = (w0, w4), wb = (w1, w3) as
 // FP16 bit pairs. post_body calls it with per-lane values fixed for the walk on the first pass (it = lane).
 void pd_vitem(int y, int xg, int xo, int urel, uint wa, uint wb, int p_next, bool interior, int s0, int r_first, bool lut,
-              float dec_scale
-#if POST_OUT == 0
-              , const bool p0_pi1
-#endif
-              PD_P)
+              float dec_scale PD_P)
 {
     if (or(y >= oh, xg >= ow)) return;
     uint t[5][3];
@@ -911,25 +951,17 @@ void pd_vitem(int y, int xg, int xo, int urel, uint wa, uint wb, int p_next, boo
     }
 #else
     const half w0 = hbox(wa), w4 = hbox(wa >> 16), w1 = hbox(wb), w3 = hbox(wb >> 16);
-    if (lut) {   // the output values T[r] (wg_f16lut.hlsli): the chain below, looked up
 #if POST_OUT == 3
+    if (lut) {   // the output values T[r] (wg_f16lut.hlsli, lev-f16lut d7149e2): the chain below, looked up
         float3 res;
         [unroll] for (int c = 0; c < 3; ++c) {
             const uint r = lz5_original(t[0][c], t[1][c], t[2][c], t[3][c], t[4][c], w0, w1, hbox(lz_w2), w3, w4);
             res[c] = asfloat(wg_ld32(color, WG_F16LUT_DEC + (r << 2)));
         }
         native_direct_output[uint2((uint)xg, (uint)y)] = float4(res, 1.0f);
-#else
-        uint3 res;
-        [unroll] for (int c = 0; c < 3; ++c) {
-            const uint r = lz5_original(t[0][c], t[1][c], t[2][c], t[3][c], t[4][c], w0, w1, hbox(lz_w2), w3, w4);
-            res[c] = wg_ld32(B_unused, WG_F16LUT_DEC + (r << 2));
-        }
-        const uint o = mul24((uint)y, (uint)ow * 12u) + mul24((uint)xg, 12u);
-        wg_mem.Store3(out_p + o, res);
-#endif
         return;
     }
+#endif
     float vo[3], qv[3];
     bool vsmall = false;
     [unroll] for (int c = 0; c < 3; ++c) {
@@ -961,13 +993,21 @@ void pd_vitem(int y, int xg, int xo, int urel, uint wa, uint wb, int p_next, boo
     }
 #else
     const uint o = mul24((uint)y, (uint)ow * 12u) + mul24((uint)xg, 12u);
-    if (p0_pi1) {
-        wg_mem.Store3(out_p + o, uint3(asuint(vo[0] * dec_scale), asuint(vo[1] * dec_scale), asuint(vo[2] * dec_scale)));
-    } else {
+#if defined(WG_STAGED_PIDIV)
+    {   // _pf kernels run only when pi != 1: the scale_rgb fold is unconditional (no pi == 1 copy of the store)
         const float3 res = float3(mul_nz(vo[0], dec_scale), mul_nz(vo[1], dec_scale), mul_nz(vo[2], dec_scale));
         const float3 so = float3(m1_scale(res.x, pi_arg), m1_scale(res.y, pi_arg), m1_scale(res.z, pi_arg));
         wg_mem.Store3(out_p + o, uint3(asuint(so.x), asuint(so.y), asuint(so.z)));
     }
+#else
+    [branch] if (pi_arg == 1.0f) {
+        wg_mem.Store3(out_p + o, uint3(asuint(vo[0] * dec_scale), asuint(vo[1] * dec_scale), asuint(vo[2] * dec_scale)));
+    } else {   // the runtime's scale_rgb folded in (m_pf_fold = 0, or a pi whose division window is invalid)
+        const float3 res = float3(mul_nz(vo[0], dec_scale), mul_nz(vo[1], dec_scale), mul_nz(vo[2], dec_scale));
+        const float3 so = float3(m1_scale(res.x, pi_arg), m1_scale(res.y, pi_arg), m1_scale(res.z, pi_arg));
+        wg_mem.Store3(out_p + o, uint3(asuint(so.x), asuint(so.y), asuint(so.z)));
+    }
+#endif
 #endif
 }
 
@@ -996,8 +1036,9 @@ void pd_vsplit(int it, out int yrel, out int xo, out int urel, out uint wa, out 
 void post_body(const bool pd_rc, const bool pd_pi1)   // the direct form's body (its kernel at the end of the file)
 {
 #elif POST_OUT == 0
-void post_body(const bool p0_pi1)   // form 0's body (its kernel at the end of the file)
+WG_KERNEL(post_tf_f32_p12_diet_vsit)
 {
+    WG_SETUP();
 #else
 WG_KERNEL(post_tf_p12_diet_vsit)
 {
@@ -1011,7 +1052,7 @@ WG_KERNEL(post_tf_p12_diet_vsit)
     g_e = P_e;
     g_e_prev = P_e_prev;
     g_ratio = P_ratio;
-#if !WG_POST_OPT
+#if !WG_PO_EXPO
     float dec_scale = dec_scale_arg;
     if (expo != 0u) {   // kDiet: ratio and dec_scale precomputed in the exposure pair
         float e0 = unif(wg_ldf(expo, 0u)), e1 = unif(wg_ldf(expo, 4u));
@@ -1056,7 +1097,7 @@ WG_KERNEL(post_tf_p12_diet_vsit)
         nstage = ncol * nrow < kTfCap ? ncol * nrow : kTfCap;
     }
     TfRaw raw;
-#if WG_POST_OPT
+#if WG_PO_STAGE
     // texel i = mini(lane, nstage - 1) as below, but its footprint row and clamped column are fixed per lane
     // for lane < nstage (opaque: computed once) and wave-uniform for the other lanes (texel nstage - 1: scalar ALU)
     const float inv_ncol_u = unif(inv_ncol);
@@ -1081,7 +1122,7 @@ WG_KERNEL(post_tf_p12_diet_vsit)
     TfRaw raw2 = tf_stage2(lane, nstage, inv_ncol, r0, c0, ncol PD_A);
 #endif
 #endif
-#if WG_POST_OPT
+#if WG_PO_EXPO
     // per-launch values after the first staging loads (lev-f16lut 1a9daed: with the exposure-pair loads
     // first, every wave waited for them before issuing any texel load)
     float dec_scale = dec_scale_arg;
@@ -1092,14 +1133,17 @@ WG_KERNEL(post_tf_p12_diet_vsit)
         g_ratio = unif(wg_ldf(expo, 12u));
         dec_scale = unif(wg_ldf(expo, 16u));
     }
-    // the output table of this frame (wg_f16lut.hlsli; color in form 3, B_unused in form 0; 0 = none), wave-uniform
+#if POST_OUT == 3
+    // the output table of this frame (wg_f16lut.hlsli; color: the table, 0 = none), wave-uniform
 #if WG_LZ_ANALYTIC
     const bool lut = false;   // the table is indexed by an FP16 filter result (the original's); the analytic one is FP32
-#elif POST_OUT == 3
-    const bool lut = WaveReadLaneFirst(f16lut_valid(color, dec_scale, nd_color_pi, nd_output_rne16) ? 1u : 0u) != 0u;
 #else
-    const bool lut = WaveReadLaneFirst(f16lut_valid(B_unused, dec_scale, p0_pi1 ? 1.0f : pi_arg, 0u) ? 1u : 0u) != 0u;
+    const bool lut = WaveReadLaneFirst(f16lut_valid(color, dec_scale, nd_color_pi, nd_output_rne16) ? 1u : 0u) != 0u;
 #endif
+#endif
+#endif
+#if POST_OUT != 3
+    const bool lut = false;
 #endif
 
     // this lane's D column (fixed over the walk)
@@ -1117,7 +1161,7 @@ WG_KERNEL(post_tf_p12_diet_vsit)
     const uint2 mo_dims = uint2(0u, 0u);
 #endif
 
-#if WG_POST_OPT
+#if WG_PO_HH
     // the horizontal pass's lane roles (row hk, channel hc, cell hg) and its scratch offsets: fixed per lane
     const int hk_l = wl >= 30 ? 1 : 0, hrem_l = wl - 30 * hk_l, hc_l = hrem_l >= 20 ? 2 : (hrem_l >= 10 ? 1 : 0),
               hg_l = hrem_l - 10 * hc_l;
@@ -1125,6 +1169,8 @@ WG_KERNEL(post_tf_p12_diet_vsit)
     const uint h_src = ((uint)hk_l * kRowDw + (uint)hc_l * 32u + (uint)hg_l * 3u) ^ g_z;
     const uint h_dst = ((uint)hk_l * kRowDw + (uint)hc_l * (uint)kTfOutX + (uint)hg_l * 4u) ^ g_z;
     const bool h_lane = wl < 60;
+#endif
+#if WG_PO_VV
     // the vertical pass's first item of each step is it = lane: its values, fixed for the walk (opaque: computed once)
     int v_yrel, v_xo, v_urel;
     uint v_wa, v_wb;
@@ -1199,7 +1245,7 @@ WG_KERNEL(post_tf_p12_diet_vsit)
                 // order): each texel's features are read from LDS once for both rows. Row y0 + 1's sums wait in gnext.
                 Gather gk;
                 if (k == 0) {
-#if WG_POST_OPT
+#if WG_PO_GATH
                     // unrolled: the first texel starts the sums from zeros as operands (no zero moves) and the loop's
                     // overhead goes (78 VGPRs). The colour sums start from an opaque +0 (gather_zero_opq): with a
                     // literal 0 the driver turns fma(w, ec, +0) into w * ec (a -0 product would stay -0).
@@ -1245,7 +1291,7 @@ WG_KERNEL(post_tf_p12_diet_vsit)
                     wg_st64(hist_out, mul24((uint)y, (uint)P_dw * 8u) + (uint)x * 8u, he);
                 // display values (FP16) of the 64 columns -> scratch row slot + k: lanes 2m, 2m + 1 share a dword
                 const uint srow = scr + (uint)k * kRowDw;
-#if WG_POST_OPT
+#if WG_PO_QUAD
                 {   // the partner's two dwords (c0 | c1 << 16, c2), then the even lane's three packed dwords (the same bits)
                     const uint nx = QuadReadAcrossX(de.x), ny = QuadReadAcrossX(de.y);
                     const uint d0 = (de.x & 0xffffu) | (nx << 16), d1 = (de.x >> 16) | (nx & 0xffff0000u);
@@ -1270,7 +1316,7 @@ WG_KERNEL(post_tf_p12_diet_vsit)
 #endif
             }
             // reduced history: mean of H^ over the 2 x 2 block, the partner column in lane ^ 1
-#if WG_POST_OPT
+#if WG_PO_RH
             // two code chains for the three channels: chain a is channel 0 on the even lane and channel 1 on the odd lane
             // (its sum hsum_o[1] + hsum_e[1]: the even lane's hsum_e[1] + hsum_o[1] commuted, equal but for a NaN's
             // payload, and every NaN m gives the code of enc_arg = 1e-4), chain b channel 2; the odd lane's code a comes
@@ -1306,7 +1352,7 @@ WG_KERNEL(post_tf_p12_diet_vsit)
             r0 = floor_i(pos_y(ys) - 0.5f) - 1;
             int nrow = floor_i(pos_y(yl) - 0.5f) + 2 - r0 + 1;
             nstage = ncol * nrow < kTfCap ? ncol * nrow : kTfCap;
-#if WG_POST_OPT
+#if WG_PO_STAGE
             raw = pd_stage_fetch(lane, nstage - 1 < 0 ? 0 : nstage - 1, st_rx, st_col, inv_ncol_u, r0, c0, ncol PD_A);
 #if WG_TF_TWO
             raw2 = pd_stage_fetch(lane2, nstage - 1 < 0 ? 0 : nstage - 1, st_rx2, st_col2, inv_ncol_u, r0, c0, ncol PD_A);
@@ -1324,7 +1370,7 @@ WG_KERNEL(post_tf_p12_diet_vsit)
 
         // horizontal pass of the wave's two rows: lane (row hk, channel hc, cell hg), output columns 4 hg ... 4 hg + 3
         tf_row_sync();
-#if WG_POST_OPT
+#if WG_PO_HH
         const bool hact = and(wact, h_lane);
         const int hk = hk_l;
 #else
@@ -1333,13 +1379,13 @@ WG_KERNEL(post_tf_p12_diet_vsit)
         const int hk = hl >= 30 ? 1 : 0, hrem = hl - 30 * hk, hc = hrem >= 20 ? 2 : (hrem >= 10 ? 1 : 0),
                   hg = hrem - 10 * hc;
 #endif
-#if WG_POST_OPT
+#if WG_PO_HH
         uint hv[4];   // set and used on the hact lanes only
 #else
         uint hv[4] = { 0u, 0u, 0u, 0u };
 #endif
         if (hact) {
-#if WG_POST_OPT
+#if WG_PO_HH
             const uint src = scr + h_src;
 #else
             const uint src = scr + (uint)hk * kRowDw + (uint)hc * 32u + (uint)hg * 3u;
@@ -1402,7 +1448,7 @@ WG_KERNEL(post_tf_p12_diet_vsit)
         }
         tf_row_sync();
         if (hact) {
-#if WG_POST_OPT
+#if WG_PO_HH
             const uint dst = scr + h_dst;
 #else
             const uint dst = scr + (uint)hk * kRowDw + (uint)hc * (uint)kTfOutX + (uint)hg * 4u;
@@ -1421,23 +1467,15 @@ WG_KERNEL(post_tf_p12_diet_vsit)
         const int nitems = (p_rdy - p_next) * 2 * kTfOutX;
         const bool interior = and(3 * p_next - 2 >= 0, 3 * p_rdy + 1 <= P_dh - 1);
         const int s0 = interior ? (3 * p_next - 2 - r_first) % kRing : 0;
-#if WG_POST_OPT
+#if WG_PO_VV
         if (lane < nitems)
-            pd_vitem(2 * p_next + v_yrel, v_xg, v_xo, v_urel, v_wa, v_wb, p_next, interior, s0, r_first, lut, dec_scale
-#if POST_OUT == 0
-                     , p0_pi1
-#endif
-                     PD_A);
+            pd_vitem(2 * p_next + v_yrel, v_xg, v_xo, v_urel, v_wa, v_wb, p_next, interior, s0, r_first, lut, dec_scale PD_A);
         [loop] for (int it = lane + kThreads; it < nitems; it += kThreads) {
             int yrel, xo, urel;
             uint wa, wb;
             pd_vsplit(it, yrel, xo, urel, wa, wb);
             pd_vitem(2 * p_next + yrel, strip * kTfOutX + xo, xo, urel, wa, wb, p_next, interior, s0, r_first, lut,
-                     dec_scale
-#if POST_OUT == 0
-                     , p0_pi1
-#endif
-                     PD_A);
+                     dec_scale PD_A);
         }
 #else
 #if POST_OUT == 0
@@ -1544,17 +1582,5 @@ WG_KERNEL(post_tf_f32_p12_diet_vsit_direct)
     [branch] if (and(rc, nd_color_pi == 1.0f)) post_body(true, true);
     else if (rc) post_body(true, false);
     else post_body(false, false);
-}
-#elif POST_OUT == 0
-WG_KERNEL(post_tf_f32_p12_diet_vsit)
-{
-    WG_SETUP();
-#if defined(WG_STAGED_PIDIV)
-    post_body(false);
-#else
-    // launch-uniform: the pi == 1 copy omits m1_scale completely
-    [branch] if (pi_arg == 1.0f) post_body(true);
-    else post_body(false);
-#endif
 }
 #endif

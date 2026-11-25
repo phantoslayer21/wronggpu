@@ -488,9 +488,9 @@ struct Runtime {
   // Staged native D3D12 route (backend 3, buffer resources) with a pre-exposure other than 1: the output scale (scale_rgb) is
   // done by the true-fusion post kernel's store (WG_SCALE_FOLD / option scale_fold, default on): the same bytes, one launch fewer
   bool scale_fold = true;
-  // Staged native D3D12 route (POST_OUT == 0, output_filter=original): per-frame 256 KB FP16 decode LUT (WG_M_POST_LUT,
-  // default on) and dedicated pi != 1 _pf kernels folding color_divide (WG_M_PF_FOLD, default on; pi == 1 DXIL untouched).
-  bool m_post_lut = true, m_pf_fold = true;
+  // Staged native D3D12 route: dedicated pi != 1 _pf kernels fold color_divide into input_encoder and post_tf
+  // (WG_M_PF_FOLD, default on; the pi == 1 kernels are unchanged).
+  bool m_pf_fold = true;
   bool output_quality9 = false;  // private Model M final-resampling quality profile; histories/weights unchanged
   // output_filter=quality5: the 5-tap output filter with WrongGPU's quality5 weights. The post kernels come from
   // post_w64__q5.co (post.hip built with WG_LZ_PROFILE=1: the same kernels with other filter constants), so every
@@ -568,7 +568,6 @@ struct Runtime {
   // not read a colour buffer (they read the game's texture), so it is passed as their colour pointer.
   DevPtr f16lut = 0;
   static constexpr size_t kF16LutBytes = 256 + 65536 * 12;
-  static constexpr size_t kF16LutDecBytes = 256 + 65536 * 4;
   DevPtr mnear[2] = {0, 0}, mfar = 0, mcenter = 0, latent[2] = {0, 0}, reduced = 0;
   DevPtr skip1 = 0, merged1 = 0, skip2 = 0, merged2 = 0, bout[6] = {0}, e2 = 0, out2 = 0, e1 = 0, out1 = 0;
   DevPtr A = 0, B = 0, C = 0, hist[2] = {0, 0}, display = 0, out = 0, color_net = 0;
@@ -1437,7 +1436,6 @@ struct Runtime {
       if (k == "post_bands") post_bands = std::max(1, std::atoi(v.c_str()));
       if (k == "post_tf") post_tf = !(v == "0" || v == "off" || v == "false");
       if (k == "scale_fold") scale_fold = !(v == "0" || v == "off" || v == "false");
-      if (k == "m_post_lut") m_post_lut = !(v == "0" || v == "off" || v == "false");
       if (k == "m_pf_fold") m_pf_fold = !(v == "0" || v == "off" || v == "false");
       if (k == "output_filter") {
         if (v != "default" && v != "original" && v != "analytic" && v != "quality5" && v != "quality9")
@@ -1478,7 +1476,6 @@ struct Runtime {
     if (const char* sr = std::getenv("WG_SWIN_RESIDENT")) swin_resident = std::max(0, std::atoi(sr));
     if (const char* t = std::getenv("WG_POST_TF")) post_tf = !(std::string(t) == "0" || std::string(t) == "off");
     if (const char* t = std::getenv("WG_SCALE_FOLD")) scale_fold = !(std::string(t) == "0" || std::string(t) == "off");
-    if (const char* t = std::getenv("WG_M_POST_LUT")) m_post_lut = !(std::string(t) == "0" || std::string(t) == "off");
     if (const char* t = std::getenv("WG_M_PF_FOLD")) m_pf_fold = !(std::string(t) == "0" || std::string(t) == "off");
     // The output filter (spec 06 draft 4, spec 10 section 5 step 6): the original's weights from the model file by
     // default, the analytic set when the model file has none (noted for the log) or when it is selected.
@@ -1828,9 +1825,7 @@ struct Runtime {
               (native_direct_io || (alloc(&depth, R * 4) && alloc(&motion, R * 8) && alloc(&color_net, R * 16))) &&
               (!own_direct || alloc(&color_net, R * 16)) &&
               alloc(&expo, 32) &&
-              (!(native_direct_io || (d3d12_native && !model_l)) ||
-               (alloc(&f16lut, native_direct_io ? kF16LutBytes : kF16LutDecBytes) &&
-                (dev->memset(f16lut, 0, 256) || dfail()))) &&
+              (!native_direct_io || (alloc(&f16lut, kF16LutBytes) && (dev->memset(f16lut, 0, 256) || dfail()))) &&
               alloc(&expo_partials, 4 * (size_t)cdiv(ny, 4)) && alloc(&expo_computed, 4) && alloc(&expo_sync, 4) &&
               (dev->memset(expo_sync, 0, 4) || dfail()) && alloc(&feat0, t2 * 64) &&
               alloc(&mnear[0], R * 4) && alloc(&mnear[1], R * 4) && alloc(&mfar, R * 4) && alloc(&mcenter, R * 4) &&
@@ -2601,7 +2596,6 @@ struct Runtime {
     const bool fold_scale = scale_fold && staged_tf_any && pi != 1.0f;
     const bool fold_pidiv = m_pf_fold && staged_tf_any && output_original && pi != 1.0f &&
                             wgrt::native_direct_pi_window(pi).hi != 0u;
-    const bool use_post_lut = m_post_lut && staged_tf_any && output_original && f16lut != 0;
     int pidiv_bits = 0;
     if (fold_pidiv) std::memcpy(&pidiv_bits, &pi, 4);
     const int mode = io && io->exposure_mode >= 0 ? io->exposure_mode : (cfg.auto_exposure ? 2 : 0);
@@ -2664,13 +2658,6 @@ struct Runtime {
 
     // the direct path's 64K tables of this frame (dx12/hlsl/wg_f16lut_in.hlsli, wg_f16lut.hlsli): one lane per FP16 pattern
     if (native_direct_io && !launch("f16lut_build_direct", 256, 256, {&f16lut, &expo})) return false;
-    // staged native D3D12 (POST_OUT == 0, output_filter=original): 256 KB FP16 decode LUT, overlapped with input_encoder
-    if (use_post_lut) {
-      float dec_scale_lut = (float)(0.01 / (fr.exposure == 0.0f ? 1.0 : (double)fr.exposure));
-      float pi_lut = fold_scale ? pi : 1.0f;
-      if (!launch("f16lut_build_dec", 256, 256, {&f16lut, &expo, &dec_scale_lut, &pi_lut})) return false;
-      dev->unordered_next();
-    }
 
     // 2. input encoder (spec 03)
     {
@@ -2956,7 +2943,6 @@ struct Runtime {
       p.ratio = 1.0f;
       p.pad0 = pidiv_bits;
       DevPtr w = wdev["post"];
-      DevPtr post_b = use_post_lut ? f16lut : (d3d12_native && !native_direct_io && hp <= 0 && !model_l ? (DevPtr)0 : B);
       if (post_fused) {  // reconstruction + output filter in one launch, straight into the output buffer
         if (!fused_supported(rw, rh, dw, dh))
           return fail(post_kernel + ": render size " + std::to_string(rw) + "x" + std::to_string(rh) +
@@ -2989,7 +2975,7 @@ struct Runtime {
                       " pointer is not 8-byte aligned (the D3D12 port reads it with 8-byte loads, dx12/kernels/post.hlsl)");
 #endif
         if (!launch(("pmo/" + post_last).c_str(), cdiv(ow, 40) * nch, tf_mo4 ? 256 : 512,
-                    with_taps({&cnet, &A, &post_b, &C, &hist[cur], &mnear[nxt], &mhi, &w, &hist[nxt], &reduced, &outp, &p,
+                    with_taps({&cnet, &A, &B, &C, &hist[cur], &mnear[nxt], &mhi, &w, &hist[nxt], &reduced, &outp, &p,
                                &expo, &ow_i, &oh_i, &dec_scale, &p_h, &hpitch, &cp, &k1, &c2, &mop})))
           return false;
         // spec 10 draft 2: the filter's result times pi (folded in with the copy; direct shader stores include it)
@@ -3016,7 +3002,7 @@ struct Runtime {
                       " pointer is not 8-byte aligned (the D3D12 port reads it with 8-byte loads, dx12/kernels/post.hlsl)");
 #endif
         if (!launch((post_pre + post_last).c_str(), cdiv(ow, 40) * nch, tf_block,
-                    with_taps({&cnet, &A, &post_b, &C, &hist[cur], &mnear[nxt], &mcenter, &mfar, &w, &hist[nxt], &reduced,
+                    with_taps({&cnet, &A, &B, &C, &hist[cur], &mnear[nxt], &mcenter, &mfar, &w, &hist[nxt], &reduced,
                                &outp, &p, &expo, &ow_i, &oh_i, &dec_scale, &p_h, &hpitch, &cp, &k1, &c2})))
           return false;
         if (!native_direct_io && hp <= 0 && pi != 1.0f && !fold_scale) {  // direct / folded stores already include this multiply

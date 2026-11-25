@@ -84,7 +84,7 @@ class TestPostTfAlign(unittest.TestCase):
             self.assertIn("post_tf_misaligned(A, hist[cur])", before, "no check right before " + launch)
             self.assertRegex(before, r"return fail\(.*\n?.*is not 8-byte aligned")
             call = src[m.start():m.start() + 300]
-            self.assertIn("&cnet, &A, &post_b, &C, &hist[cur]", call, "the launch no longer passes A and hist[cur] as checked")
+            self.assertIn("&cnet, &A, &B, &C, &hist[cur]", call, "the launch no longer passes A and hist[cur] as checked")
 
 
 if __name__ == "__main__":

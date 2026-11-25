@@ -41,31 +41,6 @@ float f16lut_poly(float qc)
     return (t * y);
 }
 
-// Exact scale with normal-result underflow repair (same bits as native_direct_scale / m1_scale).
-#if !defined(WG_DIRECT_TEXTURES)
-float f16lut_scale_ref(float a, float b)
-{
-    const float r = a * b;
-    const uint ua = asuint(a), ub = asuint(b);
-    const uint ea = (ua >> 23u) & 255u, eb = (ub >> 23u) & 255u;
-    if ((asuint(r) & 0x7fffffffu) == 0u && ea != 0u && eb != 0u && ea + eb == 127u) {
-        const uint64_t product = (uint64_t)((ua & 0x7fffffu) | 0x800000u) * (uint64_t)((ub & 0x7fffffu) | 0x800000u);
-        const uint64_t normal = (uint64_t)1u << 47u;
-        if (product >= normal - ((uint64_t)1u << 23u) && product < normal)
-            return asfloat(((ua ^ ub) & 0x80000000u) | 0x00800000u);
-    }
-    return r;
-}
-float f16lut_scale(float a, float b)
-{
-    float r = a * b;
-    [branch] if (and(abs(r) == 0.0f, abs(a) >= asfloat(0x00800000u))) r = f16lut_scale_ref(a, b);
-    return r;
-}
-#else
-float f16lut_scale(float a, float b) { return native_direct_scale(a, b); }
-#endif
-
 // The output value of FP16 bits r (post.hlsl's vertical pass after lz5): z is an opaque zero (mul_nz's addend -0 the
 // driver cannot drop). For finite dec_scale and pi no value is NaN (v is finite and positive), so the software RNE of
 // the clamped value (wg_f2h) has the bits of the post's driver conversion (v_cvt_f16_f32).
@@ -75,7 +50,7 @@ float f16lut_out(uint r, float dec_scale, float pi, bool rne16, uint z)
     float v = exp2(q * kF16lutDecK) - 1.0f;
     v = q < kF16lutPolyMax ? f16lut_poly(q) : v;
     float x = mad(v, dec_scale, asfloat(z | 0x80000000u));
-    if (pi != 1.0f) x = f16lut_scale(x, pi);
+    if (pi != 1.0f) x = native_direct_scale(x, pi);
     if (rne16) {
         const float c = select(x > 65504.0f, 65504.0f, select(x < -65504.0f, -65504.0f, x));
         x = f16tof32(wg_f2h(c));
