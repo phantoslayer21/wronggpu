@@ -31,6 +31,7 @@
 // @wg-kernel k_stage_e0 co=k_block.co block=128 wave=32 args=s184:p19.b32 defines=KB_LDS_HALFS=6144
 // @wg-kernel k_stage_e1 co=k_block.co block=128 wave=32 args=s184:p19.b32 defines=KB_LDS_HALFS=4096
 // @wg-kernel k_stage_d1 co=k_block.co block=128 wave=32 args=s184:p19.b32
+// @wg-kernel k_stage_d1__rodd co=k_block.co entry=k_stage_d1 block=128 wave=32 args=s184:p19.b32 defines=K_SMX=1
 // @wg-kernel k_stage2_d0_hp co=k_block.co block=128 wave=32 args=s184:p19.b32,p,p,p defines=KB_HIDDEN_ARG=1,KB_COMPACT_HEAD_ARG=1,KB_BIAS32=1,KB_BASE_FORM=1
 // @wg-kernel k_stage2_d0_hidden co=k_block.co block=128 wave=32 args=s184:p19.b32,p defines=KB_HIDDEN_ARG=1
 // The __rodd forms: the same stages with the round-to-odd softmax weights (hlsl/k_smx.hlsli K_SMX 1), launched by the

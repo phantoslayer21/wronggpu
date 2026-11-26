@@ -365,10 +365,12 @@ KBlkParams block_params(const KStageInfo& st, DevPtr blob, DevPtr x, DevPtr y, D
 // k_stage_<name>; *ng = NG (0: not wide), *w2 = two windows per workgroup.
 std::string stage_kernel_base(const KStageInfo& st, bool f16, bool has_y, int nwin, int* ng, bool* w2) {
   *ng = wide_ng(st.name, f16, nwin);
-  // e0, e1, d1, d0: two windows per workgroup (k_stage2_*, k_launch.py WINDOWS2_STAGES; k_net.py WINDOWS2_VARIANTS;
-  // d1's needs its block output map p.y, which the network always gives it)
+  // e0, e1, d0: two windows per workgroup (k_stage2_*, k_launch.py WINDOWS2_STAGES; k_net.py WINDOWS2_VARIANTS).
+  // d1 runs one window per workgroup (k_stage_d1): at 1440p Quality its 1,025 windows as 513 two-window workgroups
+  // fill the 256 slots of four workgroups per CU for two rounds and one more, measured on D3D12 (RX 9070 XT) -14.6 us
+  // per frame with one window per workgroup, the same bytes (the same per-window maths)
   *w2 = !*ng && (std::strcmp(st.name, "e0") == 0 || std::strcmp(st.name, "e1") == 0 ||
-                 (std::strcmp(st.name, "d1") == 0 && has_y) || std::strcmp(st.name, "d0") == 0);
+                 std::strcmp(st.name, "d0") == 0);
   const std::string h = f16 ? "h" : "";
   return (*ng ? "k_stagew" + std::to_string(*ng) : std::string(*w2 ? "k_stage2" : "k_stage")) + h + "_" + st.name;
 }
@@ -846,7 +848,7 @@ struct SmxCase {
   int wb, hb;  // base map size
   int sets;    // independent synthetic data sets, the outputs of all hashed together
 };
-// e2, e3, d3, d2, d1 (k_stage_e2, k_stagew2_e3, k_stagew2_d3, k_stage_d2, k_stage2_d1) and e4 / d4 with NG = 4 (at most 24
+// e2, e3, d3, d2, d1 (k_stage_e2, k_stagew2_e3, k_stagew2_d3, k_stage_d2, k_stage_d1) and e4 / d4 with NG = 4 (at most 24
 // windows: 20 at 512 x 384; on 8 data sets) at a 512 x 384 base map; e4 / d4 with NG = 2 (above 24 windows) and m
 // (k_stagew4_m, 42 or more windows) at 1536 x 1280. Sized so that a one-stage wrong-rounding mutant of either form
 // changes its case's outputs (the mutant runs in the #254 evidence).
