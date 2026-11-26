@@ -128,8 +128,9 @@ float4 ki_color_texel(KFrameIn F, int rx, int ry)
 // k_out.hlsli ko_color_tap (k_out_color) on a raw colour texel, operation for operation: the stored tap (Y, Co, Cg, A) as
 // 2 x 2 FP16 bits and the filter-tap value T. The FP32 products by the uniform kappa and the encode factor e keep their
 // opaque barriers (kf_opq: so the shared factors are not regrouped), every FP32 -> FP16 step is the hardware conversion
-// (ki_f2h, nearest even; k_out.hlsli ko_f2h): outside every divergent branch, as the driver channel requires. This runs
-// for every lane of the tile loop (a wave either runs the loop or not: uniform), the store alone is predicated.
+// (ki_f2h, nearest even; k_out.hlsli ko_f2h): outside every divergent branch, as the driver channel requires. A wave
+// runs it on all its lanes or not at all (the tile loop and the wave's ownership test are uniform), the store alone is
+// predicated.
 void ki_color_tap(KFrameIn F, float4 c, out uint2 tap, out uint tT)
 {
     const bool hdr = (F.flags & KIO_HDR) != 0;
@@ -279,13 +280,18 @@ WG_KERNEL(k_in_tiled)
 #if K_COLOR
         const float4 craw = ki_color_texel(F, rx, ry);
         const KiTiledTap value = ki_tiled_tap_from_raw(F, craw);
-        uint2 ctap;
-        uint ctT;
-        ki_color_tap(F, craw, ctap, ctT);
-        if (raw_x < own_x1 && raw_y < own_y1) {
-            const uint cid = (uint)(raw_y * F.rw + raw_x);
-            wg_st64(P_ctap, cid * 8u, ctap);
-            wg_st16(P_ctapT, cid * 2u, ctT);
+        // the stored taps only in waves that own a pixel of this pass (a wave of halo pixels alone computed them and
+        // dropped them all); the test is wave-uniform, so ki_color_tap's conversions stay outside divergent branches
+        const bool own = raw_x < own_x1 && raw_y < own_y1;
+        [branch] if (WaveActiveAnyTrue(own)) {
+            uint2 ctap;
+            uint ctT;
+            ki_color_tap(F, craw, ctap, ctT);
+            if (own) {
+                const uint cid = (uint)(raw_y * F.rw + raw_x);
+                wg_st64(P_ctap, cid * 8u, ctap);
+                wg_st16(P_ctapT, cid * 2u, ctT);
+            }
         }
 #else
         const KiTiledTap value = ki_tiled_tap_from_raw(F, kio_color(F, rx, ry));

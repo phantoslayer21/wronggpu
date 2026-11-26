@@ -281,7 +281,7 @@ WG_KERNEL(k_out_pixel_c)
     // F2: Ybar of the aligned 2 x 2 group through LDS (lanes lane, lane ^ 1, lane ^ 64, lane ^ 65)
     lds_ybar[lane] = cbar_lo & 0xffffu;
 
-    // 3.6 luma history: the 5 x 5 window of the four sub-samples (25 two-byte loads on interior fast path, 10 unique
+    // 3.6 luma history: the 5 x 5 window of the four sub-samples (five 12-byte row loads on interior fast path, 10 unique
     // row cubics in ko_ellv; Lmax16 < 0x3becu is exact-equivalent to Lmax32 < 0x3F7D8000u on all 65,536 FP16 patterns;
     // computed before Hh so Hh[4] does not stay live across Lw[5][5])
     const KoAxis axx = ko_axis(wx), axy = ko_axis(wy);
@@ -289,13 +289,21 @@ WG_KERNEL(k_out_pixel_c)
     float Lw[5][5];
     uint Lmax16 = 0u;
     [branch] if ((uint)(axx.n - 1) <= (uint)(LW - 5) && (uint)(axy.n - 1) <= (uint)(LH - 5)) {
-        const uint voff = ((uint)(axy.n - 1) * (uint)LW + (uint)(axx.n - 1)) * 2u;
-        [unroll] for (int r = 0; r < 5; ++r)
+        // each row's five FP16 values from the three aligned dwords that hold them (one Load3 per row instead of five
+        // 16-bit loads; the same bytes: a word-aligned start takes halves 0..4 of the dwords, an odd-half start 1..5)
+        const uint a0 = p_L + ((uint)(axy.n - 1) * (uint)LW + (uint)(axx.n - 1)) * 2u;
+        const bool oddh = (a0 & 2u) != 0u;
+        [unroll] for (int r = 0; r < 5; ++r) {
+            const uint3 d = wg_mem.Load3((a0 + (uint)(r * LW) * 2u) & ~3u);
+            const uint e0 = oddh ? (d.x >> 16) | (d.y << 16) : d.x;
+            const uint e1 = oddh ? (d.y >> 16) | (d.z << 16) : d.y;
+            const uint e2 = oddh ? d.z >> 16 : d.z;
+            const uint hv[5] = { e0 & 0xffffu, e0 >> 16, e1 & 0xffffu, e1 >> 16, e2 & 0xffffu };
             [unroll] for (int c = 0; c < 5; ++c) {
-                const uint h = wg_ld16(p_L + (uint)(r * LW) * 2u + 2u * (uint)c, voff);
-                Lmax16 = max(Lmax16, h);
-                Lw[r][c] = f16tof32(h);
+                Lmax16 = max(Lmax16, hv[c]);
+                Lw[r][c] = f16tof32(hv[c]);
             }
+        }
     } else {
         [unroll] for (int r = 0; r < 5; ++r) {
             const uint rb = (uint)ko_clampi(axy.n - 1 + r, LH) * (uint)LW;
@@ -435,7 +443,22 @@ WG_KERNEL(k_out_pixel_c)
             }
         }
     }
-    [unroll] for (int n2 = 0; n2 < 12; ++n2) T[n2] = kh_bits(wg_ld16(p_ctapT, toff[n2]));
+    // row-major taps (O == 0: three consecutive FP16 values per line) of a whole wave: one Load2 of the two aligned
+    // dwords that hold each line's three values instead of three 16-bit loads (the same bytes); wave-uniform test, so
+    // no wave runs both forms
+    [branch] if (WaveActiveAllTrue(tfast && !O)) {
+        [unroll] for (int l3 = 0; l3 < 4; ++l3) {
+            const uint a = p_ctapT + toff[3 * l3];
+            const uint2 d = wg_mem.Load2(a & ~3u);
+            const uint e0 = (a & 2u) != 0u ? (d.x >> 16) | (d.y << 16) : d.x;
+            const uint e1 = (a & 2u) != 0u ? d.y >> 16 : d.y;
+            T[3 * l3] = kh_bits(e0 & 0xffffu);
+            T[3 * l3 + 1] = kh_bits(e0 >> 16);
+            T[3 * l3 + 2] = kh_bits(e1 & 0xffffu);
+        }
+    } else {
+        [unroll] for (int n2 = 0; n2 < 12; ++n2) T[n2] = kh_bits(wg_ld16(p_ctapT, toff[n2]));
+    }
 
     // 5.4 - 5.6 filtered values, 6.1 blend weights (sub-samples (i, 0), (i, 1) as the halves of half2 values)
     const half kux = kh_bits(u_kuxkvy & 0xffffu), kvy = kh_bits(u_kuxkvy >> 16);
