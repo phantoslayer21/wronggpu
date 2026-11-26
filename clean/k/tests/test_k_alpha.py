@@ -251,7 +251,9 @@ class TestAlphaSources(unittest.TestCase):
         self.assertNotIn("KO_ALPHA", o)
         # the stored tap's A: RN16 of the colour's fourth value; the bilinear: RN16(w0 a0), then three FP16 fmas
         self.assertIn("tap = uint2(hY | (hCo << 16), hCg | (ko_f2h(c.w) << 16));", oi)
-        self.assertIn("hi = q == 0 ? kp_mul_s(t.y, w[q]) : kp_fma_s(t.y, w[q], hi);", o)
+        self.assertIn("uint lo = kp_mul_s(tq0.x, w0), hi = kp_mul_s(tq0.y, w0);", o)
+        for q in (1, 2, 3):
+            self.assertIn("hi = kp_fma_s(tq%d.y, w%d, hi);" % (q, q), o)
         self.assertIn("cbar_hi = kp_opq(hi);", o)
         self.assertIn("cbar3 = kp_hi(cbar_hi);", o)
         # every output form stores cbar3 unchanged

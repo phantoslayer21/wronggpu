@@ -35,9 +35,11 @@
 //    0x3bec, the same order on every input) (below 0x3bec = every tap in [0, 0.99): no soft
 //    limit and unclamped row cubics, HIP's ko_cubic_unit; any other window: soft limit and clamped cubics, the same
 //    values as HIP's per-tap decision).
-//  * Loops whose first iteration differs are peeled (DXC kept the 12-tap loop with an n == 0 test rolled, the taps then
-//    lived in indexed register arrays); the non-plain best-E retry recomputes E from opaque inputs (merged with the
-//    main loop's E it kept all of them live: 143 VGPRs).
+//  * Loops whose first iteration differs are peeled or written out (DXC kept the 12-tap loop with an n == 0 test rolled,
+//    the taps then lived in indexed register arrays; the 4.3 bilinear's four taps likewise). HIP's non-plain best-E
+//    retry is folded into the 12-tap loop as a per-sub-sample best-E tap (k_out_pixel_c, 5.4 - 5.6: the same result
+//    for every input, NaN included); the taps' E are formed once per tap for both sub-sample pairs, the pair-independent
+//    values once in waves whose lanes share O (ko_line_E).
 //  * FP32 denormals flush on D3D12 (wg_math.hlsli); HIP keeps them. The stage's values (FP16 data, FP32 colour) do
 //    not produce FP32 denormals; the port check covers the runtime's cases.
 //
@@ -125,39 +127,138 @@ float4 ko_bilinear_hc(int w, int h, float cx, float cy)
     return t0 * omfy + t1 * fy;
 }
 
-// E of the 12 taps (index 3 l + tc) for a sub-sample pair at (us, vs), in the spec's operation order (HIP each_E); FP16
-// pairs as packed words (kp_*). lines[l] = v0 + (half)l to avoid holding 4 extra half VGPRs.
-void ko_each_E(uint us, uint vs, half v0, half cols[4], half tA, half tB, half tC, out uint E[12])
+// E of line l's three taps (index 3 l + tc) for both sub-sample pairs (E0: i2 = 0, E1: i2 = 1), in the spec's operation
+// order (HIP each_E: dv = line - vs, t2v = (dv dv) tA, t3v = dv tB, du = col - us, mm = du t3v + t2v, then per tap
+// du += 1, mm += t3v, E = (du du) tC + mm); FP16 pairs as packed words (kp_*), the line v0 + (half)l. mode 0: per-lane O
+// (us, vs = Ys[i2] in both halves or xs2, chosen per lane). mode 1: a wave whose lanes all have O == 0: vs = Ys[i2] in
+// both halves, so dv, (dv dv) tA and dv tB are one FP16 value per pair (the same operation on the same value as in each
+// half), and us = xs2 for both pairs, so du and du du are formed once; the line is v0u + l (v0u = floor(Uy) - 1: v0 of
+// an O == 0 lane, wave-uniform). mode 2: all O == 1: us = Ys[i2] in both halves (du, du du one value per pair), vs = xs2
+// for both pairs (dv and its products formed once). Every value is the one ko_each_E formed, half by half.
+uint kp_fma_s1(half a, uint b, uint c) { return kh2_u(mad((half2)a, kh2_h(b), kh2_h(c))); }   // a in both halves
+uint kp_fma_ssp(half a, half s, uint c) { return kh2_u(mad((half2)a, (half2)s, kh2_h(c))); }
+half kh_nz() { return asfloat16((uint16_t)(0x8000u ^ ko_z)); }   // -0.0 through the opaque zero (as kp_nz2's halves)
+void ko_line_E(int mode, int l, uint xs2, half Ys0, half Ys1, bool O, half v0, half v0u, half col, half tA, half tB,
+               half tC, out uint E0[3], out uint E1[3])
 {
-    [unroll] for (int l = 0; l < 4; ++l) {
-        const uint dv = kp_rsub_s(v0 + (half)l, vs);
-        const uint t2v = kp_mul_s_n(kp_mul_n(dv, dv), tA);
-        const uint t3v = kp_mul_s(dv, tB);
-        uint du = kp_rsub_s(cols[l], us);
-        uint mm = kp_fma(du, t3v, t2v);
+    const half one = (half)1;
+    if (mode == 0) {
+        [unroll] for (int i = 0; i < 2; ++i) {
+            const uint ys2 = kp_splat(i == 0 ? Ys0 : Ys1);
+            const uint us = O ? ys2 : xs2, vs = O ? xs2 : ys2;
+            const uint dv = kp_rsub_s(v0 + (half)l, vs);
+            const uint t2v = kp_mul_s_n(kp_mul_n(dv, dv), tA);
+            const uint t3v = kp_mul_s(dv, tB);
+            uint du = kp_rsub_s(col, us);
+            uint mm = kp_fma(du, t3v, t2v);
+            [unroll] for (int tc = 0; tc < 3; ++tc) {
+                if (tc > 0) {
+                    du = kp_add_s(du, one);
+                    mm = kp_add(mm, t3v);
+                }
+                const uint e = kp_fma_s(kp_mul_n(du, du), tC, mm);
+                if (i == 0) E0[tc] = e; else E1[tc] = e;
+            }
+        }
+    } else if (mode == 1) {
+        const half ln = v0u + (half)l;
+        const half dv0 = ln - Ys0, dv1 = ln - Ys1;
+        const half t2v0 = (dv0 * dv0) * tA, t2v1 = (dv1 * dv1) * tA;
+        const half t3v0 = mad(dv0, tB, kh_nz()), t3v1 = mad(dv1, tB, kh_nz());
+        uint du = kp_rsub_s(col, xs2);
+        uint mm0 = kp_fma_ss(du, t3v0, t2v0), mm1 = kp_fma_ss(du, t3v1, t2v1);
         [unroll] for (int tc = 0; tc < 3; ++tc) {
             if (tc > 0) {
-                du = kp_add_s(du, (half)1);
-                mm = kp_add(mm, t3v);
+                du = kp_add_s(du, one);
+                mm0 = kp_add_s(mm0, t3v0);
+                mm1 = kp_add_s(mm1, t3v1);
             }
-            E[3 * l + tc] = kp_fma_s(kp_mul_n(du, du), tC, mm);
+            const uint dd = kp_mul_n(du, du);
+            E0[tc] = kp_fma_s(dd, tC, mm0);
+            E1[tc] = kp_fma_s(dd, tC, mm1);
+        }
+    } else {
+        const uint dv = kp_rsub_s(v0 + (half)l, xs2);
+        const uint t2v = kp_mul_s_n(kp_mul_n(dv, dv), tA);
+        const uint t3v = kp_mul_s(dv, tB);
+        half du0 = col - Ys0, du1 = col - Ys1;
+        uint mm0 = kp_fma_s1(du0, t3v, t2v), mm1 = kp_fma_s1(du1, t3v, t2v);
+        [unroll] for (int tc = 0; tc < 3; ++tc) {
+            if (tc > 0) {
+                du0 = du0 + one;
+                du1 = du1 + one;
+                mm0 = kp_add(mm0, t3v);
+                mm1 = kp_add(mm1, t3v);
+            }
+            E0[tc] = kp_fma_ssp(du0 * du0, tC, mm0);
+            E1[tc] = kp_fma_ssp(du1 * du1, tC, mm1);
         }
     }
 }
 
+// 5.4 / 5.5 accumulation of one sub-sample pair over the taps in order: weights 2^E (two v_exp_f16), sum of weight x T,
+// sum of weights, and HIP's best-E tap per half (its non-plain retry, folded in: see k_out_pixel_c)
+struct KoAcc {
+    uint sgT, sg;
+    half bEl, bEh, bTl, bTh;
+};
+void ko_acc(inout KoAcc a, int n, uint E, half T)
+{
+    const uint gg = kh2_u(exp2(kh2_h(E)));   // ko_exp2h2
+    const half el = kp_lo(E), eh = kp_hi(E);
+    if (n == 0) {
+        a.sgT = kp_mul_s(gg, T);
+        a.sg = gg;
+        a.bEl = el; a.bEh = eh; a.bTl = T; a.bTh = T;
+    } else {
+        a.sgT = kp_fma_s(gg, T, a.sgT);
+        a.sg = kp_add(gg, a.sg);
+        const bool tl = !(el < a.bEl), th = !(eh < a.bEh);   // tap n replaces the best unless E[n] < best
+        a.bEl = tl ? el : a.bEl;
+        a.bTl = tl ? T : a.bTl;
+        a.bEh = th ? eh : a.bEh;
+        a.bTh = th ? T : a.bTh;
+    }
+}
+// tap n's filter value T of the packed pairs Tp (T[2 k] in the low half of Tp[k], T[2 k + 1] in the high half)
+half ko_tap(uint Tp[6], int n) { return (n & 1) ? kp_hi(Tp[n >> 1]) : kp_lo(Tp[n >> 1]); }
+void ko_taps(int mode, uint xs2, half Ys0, half Ys1, bool O, half v0, half v0u, half cols[4], half tA, half tB,
+             half tC, uint Tp[6], inout KoAcc A0, inout KoAcc A1)
+{
+    [unroll] for (int l = 0; l < 4; ++l) {
+        uint E0[3], E1[3];
+        ko_line_E(mode, l, xs2, Ys0, Ys1, O, v0, v0u, cols[l], tA, tB, tC, E0, E1);
+        [unroll] for (int tc = 0; tc < 3; ++tc) {
+            ko_acc(A0, 3 * l + tc, E0[tc], ko_tap(Tp, 3 * l + tc));
+            ko_acc(A1, 3 * l + tc, E1[tc], ko_tap(Tp, 3 * l + tc));
+        }
+    }
+}
+
+// a window tap as the 3.6 cubics read it: its FP16 value widened (unit window: every tap in [0, 0.99)), else the soft
+// limit of it (ko_ell; HIP's per-tap form: the FP32 value of the FP16 bits, rounded back exactly, then ko_ell)
+float ko_lw(uint h, bool unit) { return unit ? f16tof32(h) : ko_ell(kh_exact(f16tof32(h))); }
 // 3.6 luma history value of the four sub-samples from the (soft-limited) 5 x 5 window: 10 unique row cubics computed
 // one column j at a time (5 VGPRs rc[5] instead of 10, dropping 6 duplicate row cubics = 30 FMAs, 100% bit-identical).
-void ko_ellv(float Lw[5][5], KoAxis axx, KoAxis axy, bool unit, out float ellv[4])
+// The window is held as its FP16 bits (two per register: Lh[r][c] in the low or high half of Lp[r][c / 2]) and each tap
+// is widened (and soft-limited) where it is read: the same FP32 values as a widened 5 x 5 FP32 window, 13 registers
+// instead of 25 (that window set the kernel's register count).
+uint ko_lh(uint Lp[5][3], int r, int c) { return (c & 1) ? Lp[r][c >> 1] >> 16 : Lp[r][c >> 1] & 0xffffu; }
+void ko_ellv(uint Lp[5][3], KoAxis axx, KoAxis axy, bool unit, out float ellv[4])
 {
     [unroll] for (int j = 0; j < 2; ++j) {
         float rc[5];
-        [unroll] for (int r = 0; r < 5; ++r)
-            rc[r] = unit ? ko_cubic_unit(Lw[r][j], Lw[r][j + 1], Lw[r][j + 2], Lw[r][j + 3], axx)
-                         : ko_cubic(Lw[r][j], Lw[r][j + 1], Lw[r][j + 2], Lw[r][j + 3], axx);
+        [unroll] for (int r = 0; r < 5; ++r) {
+            const float a = ko_lw(ko_lh(Lp, r, j), unit), b = ko_lw(ko_lh(Lp, r, j + 1), unit);
+            const float c = ko_lw(ko_lh(Lp, r, j + 2), unit), d = ko_lw(ko_lh(Lp, r, j + 3), unit);
+            rc[r] = unit ? ko_cubic_unit(a, b, c, d, axx) : ko_cubic(a, b, c, d, axx);
+        }
         [unroll] for (int i = 0; i < 2; ++i) {
             const float val = ko_cubic(rc[i], rc[i + 1], rc[i + 2], rc[i + 3], axy);
-            const float lo = min(min(Lw[i + 1][j + 1], Lw[i + 1][j + 2]), min(Lw[i + 2][j + 1], Lw[i + 2][j + 2]));
-            const float hi = max(max(Lw[i + 1][j + 1], Lw[i + 1][j + 2]), max(Lw[i + 2][j + 1], Lw[i + 2][j + 2]));
+            const float w00 = ko_lw(ko_lh(Lp, i + 1, j + 1), unit), w01 = ko_lw(ko_lh(Lp, i + 1, j + 2), unit);
+            const float w10 = ko_lw(ko_lh(Lp, i + 2, j + 1), unit), w11 = ko_lw(ko_lh(Lp, i + 2, j + 2), unit);
+            const float lo = min(min(w00, w01), min(w10, w11));
+            const float hi = max(max(w00, w01), max(w10, w11));
             ellv[j + 2 * i] = min(max(val, lo), hi);
         }
     }
@@ -213,32 +314,33 @@ WG_KERNEL(k_out_pixel_c)
         const half flx = floor(Ux), fly = floor(Uy);
         const half fx = kh_sat(Ux - flx), fy = kh_sat(Uy - fly);
         const half one = (half)1;
-        half w[4];
-        w[0] = kh_mul(one - fx, one - fy);
-        w[1] = kh_mul(fx, one - fy);
-        w[2] = kh_mul(one - fx, fy);
-        w[3] = kh_mul(fx, fy);
+        const half w0 = kh_mul(one - fx, one - fy);
+        const half w1 = kh_mul(fx, one - fy);
+        const half w2 = kh_mul(one - fx, fy);
+        const half w3 = kh_mul(fx, fy);
         const int bx = (int)(o_x + (float)flx), by = WaveReadLaneFirst((int)(o_y + (float)fly));
-        uint2 tq[4];
+        uint2 tq0, tq1, tq2, tq3;
         // HIP KO_ADDR_FAST: the 2 x 2 taps inside the render image (no clamp): two 128-bit row loads
         [branch] if (bx >= 0 && bx <= f_rw - 2 && by >= 0 && by <= f_rh - 2) {
             const uint voff = ((uint)by * (uint)f_rw + (uint)bx) * 8u;
             const uint4 cr0 = wg_ld128(p_ctap, voff);
             const uint4 cr1 = wg_ld128(p_ctap + (uint)f_rw * 8u, voff);
-            tq[0] = cr0.xy; tq[1] = cr0.zw;
-            tq[2] = cr1.xy; tq[3] = cr1.zw;
+            tq0 = cr0.xy; tq1 = cr0.zw;
+            tq2 = cr1.xy; tq3 = cr1.zw;
         } else {
-            [unroll] for (int q = 0; q < 4; ++q) {
-                const int tx = ko_clampi(bx + (q & 1), f_rw), ty = ko_clampi(by + (q >> 1), f_rh);
-                tq[q] = wg_ld64(p_ctap, ((uint)ty * (uint)f_rw + (uint)tx) * 8u);
-            }
+            const int txa = ko_clampi(bx, f_rw), txb = ko_clampi(bx + 1, f_rw);
+            const uint rya = (uint)ko_clampi(by, f_rh) * (uint)f_rw, ryb = (uint)ko_clampi(by + 1, f_rh) * (uint)f_rw;
+            tq0 = wg_ld64(p_ctap, (rya + (uint)txa) * 8u);
+            tq1 = wg_ld64(p_ctap, (rya + (uint)txb) * 8u);
+            tq2 = wg_ld64(p_ctap, (ryb + (uint)txa) * 8u);
+            tq3 = wg_ld64(p_ctap, (ryb + (uint)txb) * 8u);
         }
-        uint lo = 0u, hi = 0u;
-        [unroll] for (int q = 0; q < 4; ++q) {
-            const uint2 t = tq[q];
-            lo = q == 0 ? kp_mul_s(t.x, w[q]) : kp_fma_s(t.x, w[q], lo);
-            hi = q == 0 ? kp_mul_s(t.y, w[q]) : kp_fma_s(t.y, w[q], hi);
-        }
+        // the four taps written out (a [unroll] loop with the q == 0 select and indexed tq[q] / w[q] stayed rolled in
+        // the ISA: a 4-iteration loop of selects); the same operations in the same order
+        uint lo = kp_mul_s(tq0.x, w0), hi = kp_mul_s(tq0.y, w0);
+        lo = kp_fma_s(tq1.x, w1, lo); hi = kp_fma_s(tq1.y, w1, hi);
+        lo = kp_fma_s(tq2.x, w2, lo); hi = kp_fma_s(tq2.y, w2, hi);
+        lo = kp_fma_s(tq3.x, w3, lo); hi = kp_fma_s(tq3.y, w3, hi);
         // FP16 results converted to FP32 below pass the opaque (kp_opq / koh): the driver folds an FP16 fma / add
         // followed by the conversion into one v_fma_mix_f32 (no FP16 rounding in between)
         cbar_lo = kp_opq(lo);
@@ -286,7 +388,7 @@ WG_KERNEL(k_out_pixel_c)
     // computed before Hh so Hh[4] does not stay live across Lw[5][5])
     const KoAxis axx = ko_axis(wx), axy = ko_axis(wy);
     const int LW = 2 * W16, LH = 2 * H16;
-    float Lw[5][5];
+    uint Lp[5][3];   // the window's FP16 bits, row r, columns 2 k (low half) and 2 k + 1 (high half) in Lp[r][k]
     uint Lmax16 = 0u;
     [branch] if ((uint)(axx.n - 1) <= (uint)(LW - 5) && (uint)(axy.n - 1) <= (uint)(LH - 5)) {
         // each row's five FP16 values from the three aligned dwords that hold them (one Load3 per row instead of five
@@ -299,31 +401,32 @@ WG_KERNEL(k_out_pixel_c)
             const uint e1 = oddh ? (d.y >> 16) | (d.z << 16) : d.y;
             const uint e2 = oddh ? d.z >> 16 : d.z;
             const uint hv[5] = { e0 & 0xffffu, e0 >> 16, e1 & 0xffffu, e1 >> 16, e2 & 0xffffu };
-            [unroll] for (int c = 0; c < 5; ++c) {
-                Lmax16 = max(Lmax16, hv[c]);
-                Lw[r][c] = f16tof32(hv[c]);
-            }
+            [unroll] for (int c = 0; c < 5; ++c) Lmax16 = max(Lmax16, hv[c]);
+            Lp[r][0] = e0;
+            Lp[r][1] = e1;
+            Lp[r][2] = e2 & 0xffffu;
         }
     } else {
         [unroll] for (int r = 0; r < 5; ++r) {
             const uint rb = (uint)ko_clampi(axy.n - 1 + r, LH) * (uint)LW;
+            uint hv[5];
             [unroll] for (int c = 0; c < 5; ++c) {
-                const uint h = wg_ld16(p_L, (rb + (uint)ko_clampi(axx.n - 1 + c, LW)) * 2u);
-                Lmax16 = max(Lmax16, h);
-                Lw[r][c] = f16tof32(h);
+                hv[c] = wg_ld16(p_L, (rb + (uint)ko_clampi(axx.n - 1 + c, LW)) * 2u);
+                Lmax16 = max(Lmax16, hv[c]);
             }
+            Lp[r][0] = hv[0] | (hv[1] << 16);
+            Lp[r][1] = hv[2] | (hv[3] << 16);
+            Lp[r][2] = hv[4];
         }
     }
     float ellv[4];
     [branch] if (Lmax16 < 0x3becu) {
-        ko_ellv(Lw, axx, axy, true, ellv);
+        ko_ellv(Lp, axx, axy, true, ellv);
     } else {
-        [unroll] for (int r = 0; r < 5; ++r)
-            [unroll] for (int c = 0; c < 5; ++c) Lw[r][c] = ko_ell(kh_exact(Lw[r][c]));
-        ko_ellv(Lw, axx, axy, false, ellv);
+        ko_ellv(Lp, axx, axy, false, ellv);
     }
 
-    // 3.5 colour history (after Lw[5][5] is dead)
+    // 3.5 colour history (after the window is dead)
     float4 Hh = ko_bilinear_hc(W16, H16, wx * u_invW16, wy * u_invH16);
 
     // 3.2 blend logit (|t| <= 3 keeps 9 t^2 + 27 in [27, 108]: ko_div_inrange is exact without a wg_div cold branch)
@@ -405,12 +508,12 @@ WG_KERNEL(k_out_pixel_c)
     }
     const half uP = O ? Uy : Ux, vP = O ? Ux : Uy;
 
-    // 5.3 taps (keep T[12] as half so driver doesn't unpack, drop lines[4] via v0 + (half)l, drop us2/vs2/gam[4])
+    // 5.3 taps (T as FP16 pairs Tp, drop lines[4] via v0 + (half)l, drop us2/vs2/gam[4])
     const half one = (half)1;
     const half v0 = floor(vP) - one;
     half cl = uP + kh_mul(v0 - vP, tS);
     half cols[4];
-    half T[12];
+    uint Tp[6];   // the 12 taps' T as FP16 pairs (ko_tap): six registers instead of twelve
     const float o_ln = O ? o_x : o_y, o_cl = O ? o_y : o_x;
     const int n_ln = O ? f_rw : f_rh, n_cl = O ? f_rh : f_rw;
     int as_[4];
@@ -447,17 +550,23 @@ WG_KERNEL(k_out_pixel_c)
     // dwords that hold each line's three values instead of three 16-bit loads (the same bytes); wave-uniform test, so
     // no wave runs both forms
     [branch] if (WaveActiveAllTrue(tfast && !O)) {
+        uint e0[4], e1[4];
         [unroll] for (int l3 = 0; l3 < 4; ++l3) {
             const uint a = p_ctapT + toff[3 * l3];
             const uint2 d = wg_mem.Load2(a & ~3u);
-            const uint e0 = (a & 2u) != 0u ? (d.x >> 16) | (d.y << 16) : d.x;
-            const uint e1 = (a & 2u) != 0u ? d.y >> 16 : d.y;
-            T[3 * l3] = kh_bits(e0 & 0xffffu);
-            T[3 * l3 + 1] = kh_bits(e0 >> 16);
-            T[3 * l3 + 2] = kh_bits(e1 & 0xffffu);
+            e0[l3] = (a & 2u) != 0u ? (d.x >> 16) | (d.y << 16) : d.x;   // T[3 l], T[3 l + 1]
+            e1[l3] = (a & 2u) != 0u ? d.y >> 16 : d.y;                   // T[3 l + 2] (low half)
         }
+        // T pairs (2 k, 2 k + 1) across the lines' triples
+        Tp[0] = e0[0];
+        Tp[1] = (e1[0] & 0xffffu) | (e0[1] << 16);
+        Tp[2] = (e0[1] >> 16) | (e1[1] << 16);
+        Tp[3] = e0[2];
+        Tp[4] = (e1[2] & 0xffffu) | (e0[3] << 16);
+        Tp[5] = (e0[3] >> 16) | (e1[3] << 16);
     } else {
-        [unroll] for (int n2 = 0; n2 < 12; ++n2) T[n2] = kh_bits(wg_ld16(p_ctapT, toff[n2]));
+        [unroll] for (int k2 = 0; k2 < 6; ++k2)
+            Tp[k2] = wg_ld16(p_ctapT, toff[2 * k2]) | (wg_ld16(p_ctapT, toff[2 * k2 + 1]) << 16);
     }
 
     // 5.4 - 5.6 filtered values, 6.1 blend weights (sub-samples (i, 0), (i, 1) as the halves of half2 values)
@@ -465,27 +574,36 @@ WG_KERNEL(k_out_pixel_c)
     const half k_u = O ? kvy : kux, k_v = O ? kux : kvy;
     half Fv[4];
     const uint xs2 = kp_pack(Xs[0], Xs[1]);
-    const uint m12 = 0xca00ca00u;   // (h16)-12 twice
-    bool plain = true;
+    const half m12 = kh_bits(0xca00u);   // (h16)-12
     uint gam2[2];
+    // the taps of both sub-sample pairs, tap by tap (each pair's sums in tap order); waves whose lanes all have the same O
+    // share the pair-independent values (ko_line_E modes 1 / 2)
+    KoAcc acc[2];
+    acc[0] = (KoAcc)0;
+    acc[1] = (KoAcc)0;
+    const half v0u = floor(Uy) - one;
+    [branch] if (WaveActiveAllTrue(!O)) {
+        ko_taps(1, xs2, Ys[0], Ys[1], O, v0, v0u, cols, tA, tB, tC, Tp, acc[0], acc[1]);
+    } else [branch] if (WaveActiveAllTrue(O)) {
+        ko_taps(2, xs2, Ys[0], Ys[1], O, v0, v0u, cols, tA, tB, tC, Tp, acc[0], acc[1]);
+    } else {
+        ko_taps(0, xs2, Ys[0], Ys[1], O, v0, v0u, cols, tA, tB, tC, Tp, acc[0], acc[1]);
+    }
     [unroll] for (int i2 = 0; i2 < 2; ++i2) {
         const uint ys2 = kp_splat(Ys[i2]);
         const uint us = O ? ys2 : xs2, vs = O ? xs2 : ys2;
-        uint E[12];
-        ko_each_E(us, vs, v0, cols, tA, tB, tC, E);
-        uint gg = kh2_u(exp2(kh2_h(E[0])));   // ko_exp2h2: two v_exp_f16
-        uint sgT = kp_mul_s(gg, T[0]), sg = gg, maxE = E[0];
-        [unroll] for (int n = 1; n < 12; ++n) {
-            gg = kh2_u(exp2(kh2_h(E[n])));
-            sgT = kp_fma_s(gg, T[n], sgT);
-            sg = kp_add(gg, sg);
-            maxE = kp_max(maxE, E[n]);
-        }
-        const uint sgTo = kp_opq(sgT), sgo = kp_opq(sg);   // (converted to FP32 by kh_div)
+        const KoAcc a = acc[i2];
+        const uint sgTo = kp_opq(a.sgT), sgo = kp_opq(a.sg);   // (converted to FP32 by kh_div)
         Fv[2 * i2] = kh_div(kp_lo(sgTo), kp_lo(sgo));
         Fv[2 * i2 + 1] = kh_div(kp_hi(sgTo), kp_hi(sgo));
-        plain = plain && kp_lo(maxE) >= kp_lo(m12) && kp_hi(maxE) >= kp_hi(m12) && kp_lo(sg) == kp_lo(sg) &&
-                kp_hi(sg) == kp_hi(sg);
+        // HIP (each_E best retry): if any of the four sub-samples has max E < -12 or a NaN weight sum, every sub-sample
+        // whose sequential best E (tap n replaces the best when E[n] - best is positive, +0 or NaN) is below -12 takes
+        // that tap's T. Folded per sub-sample without the plain test: with no NaN the sequential best is the maximum (the
+        // last one), so best < -12 only when max E < -12; with a NaN the sum is NaN (the retry runs) and both forms end
+        // on tap 11. "Unless E[n] < best" differs from "E[n] - best positive, +0 or NaN" only at E[n] = -0, best = +0,
+        // a best that stays >= -0 (no effect) unless a later NaN, after which both take every tap.
+        if (a.bEl < m12) Fv[2 * i2] = a.bTl;
+        if (a.bEh < m12) Fv[2 * i2 + 1] = a.bTh;
         const uint dvf = kp_sub(kp_rni(vs), vs);
         const uint up = kp_fma_s(dvf, tS, us);
         const uint duf = kp_sub(kp_rni(up), up);
@@ -493,25 +611,6 @@ WG_KERNEL(k_out_pixel_c)
         const uint wu = kp_sat_nz(kp_fma_ss(kp_abs(duf), k_u, c45));
         const uint wv = kp_sat_nz(kp_fma_ss(kp_abs(dvf), k_v, c45));
         gam2[i2] = kp_mul(kp_fma_ss(wv, tK, tk6), wu);
-    }
-    [branch] if (!plain) {
-        [unroll] for (int i3 = 0; i3 < 2; ++i3) {
-            const uint ys2_o = kp_splat(Ys[i3]);
-            const uint us_o = (O ? ys2_o : xs2) ^ (ko_z * 0x10001u), vs_o = (O ? xs2 : ys2_o) ^ (ko_z * 0x10001u);
-            uint E[12];
-            ko_each_E(us_o, vs_o, v0, cols, tA, tB, tC, E);
-            uint bestE = E[0];
-            half bTl = T[0], bTh = T[0];
-            [unroll] for (int n = 1; n < 12; ++n) {
-                const uint d = kp_sub(E[n], bestE);
-                const bool kl = (d & 0xffffu) - 0x8000u <= 0x7c00u, kh = (d >> 16) - 0x8000u <= 0x7c00u;
-                bestE = (kl ? bestE & 0xffffu : E[n] & 0xffffu) | (kh ? bestE & 0xffff0000u : E[n] & 0xffff0000u);
-                bTl = kl ? bTl : T[n];
-                bTh = kh ? bTh : T[n];
-            }
-            if (kp_lo(bestE) < kp_lo(m12)) Fv[2 * i3] = bTl;
-            if (kp_hi(bestE) < kp_hi(m12)) Fv[2 * i3 + 1] = bTh;
-        }
     }
     const half gbar = kh_mul((half)0.25, (kp_lo(gam2[0]) + kp_lo(gam2[1])) + (kp_hi(gam2[0]) + kp_hi(gam2[1])));
     const half mh = kh_bits(ma_r & 0xffffu);
@@ -568,7 +667,9 @@ WG_KERNEL(k_out_pixel_c)
     const float s1 = (Cgo - eps < -Yp) ? eps - Cgo : Yp;
     const float s2 = ((Coo - Cgo) - eps < -s1) ? (Cgo - Coo) + eps : s1;
     const float s3 = ((-Coo - Cgo) - eps < -s2) ? (Coo + Cgo) + eps : s2;
-    const float kk = s3 <= Yp ? 1.0f : ko_div(Yp, s3);
+    // kk = s3 <= Yp ? 1 : Yp / s3, with the division in a branch (as a select it ran on every pixel; s3 <= Yp on most)
+    float kk = 1.0f;
+    [branch] if (!(s3 <= Yp)) kk = ko_div(Yp, s3);
     if (!active)
         return;
     wg_st64(p_Hcout, ((uint)y * (uint)W16 + (uint)x) * 8u,

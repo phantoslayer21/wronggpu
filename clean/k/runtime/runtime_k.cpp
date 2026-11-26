@@ -704,13 +704,15 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
     wdev_[kv.first] = p;
   }
   if (!f16_ && (c.backend == 2 || c.backend == 3)) {
-    for (const char* name : {"e0", "e1", "d1", "d0"}) {
+    // the FP32 bias planes of the narrow stages whose D3D12 kernels take one (KB_BIAS32): the two-window e0 / e1 / d0 and
+    // the one-window e2 / d2 / d1 (network() launches them so, stage_kernel_base)
+    for (const char* name : {"e0", "e1", "d1", "d0", "e2", "d2"}) {
       const KStageInfo& st = *k_stage(name);
       if (f8data_.count(name) || (st.head && !compact_head_)) continue;
-      const std::string kernel = std::string("k_stage2_") + name + (st.head ? "_hp" : "");
+      const bool one = std::strcmp(name, "e0") != 0 && std::strcmp(name, "e1") != 0 && !st.head;
+      const std::string kernel = std::string(one ? "k_stage_" : "k_stage2_") + name + (st.head ? "_hp" : "");
       if (!dev_->require_d3d12_port(kernel, st.head ? "s184:p19.b32,p,p,p" : "s184:p19.b32,p")) return dfail();
-      if (c.backend == 3 && std::strcmp(name, "d1") == 0 &&
-          !dev_->require_d3d12_port(kernel + "__rodd", "s184:p19.b32,p")) return dfail();
+      if (c.backend == 3 && one && !dev_->require_d3d12_port(kernel + "__rodd", "s184:p19.b32,p")) return dfail();
       const auto& weight = blobs_.at(name);
       std::vector<uint8_t> compact;
       if (st.head) {
@@ -916,6 +918,12 @@ std::string KRuntime::smx_case_name(int i, int ox, int oy, bool rodd) const {
          (c.sets > 1 ? "*" + std::to_string(c.sets) : std::string()) + "/o" + std::to_string(ox) + "," + std::to_string(oy);
 }
 
+// the narrow stage kernels (D3D12) that take the FP32 bias plane narrow_bias_[stage] as their second argument (KB_BIAS32)
+bool narrow_bias32_kernel(const std::string& k) {
+  const std::string b = k.size() > 6 && k.compare(k.size() - 6, 6, "__rodd") == 0 ? k.substr(0, k.size() - 6) : k;
+  return b == "k_stage2_e0" || b == "k_stage2_e1" || b == "k_stage_d1" || b == "k_stage_e2" || b == "k_stage_d2";
+}
+
 // One form of every case at its offsets (this model's: all = false; every possible one: all = true): (case name of the
 // mix form, the outputs' SHA-256, first 8 bytes big-endian) into *out.
 bool KRuntime::smx_check(bool rodd, bool all, std::vector<std::pair<std::string, uint64_t>>* out) {
@@ -963,7 +971,7 @@ bool KRuntime::smx_check(bool rodd, bool all, std::vector<std::pair<std::string,
       int ng = 0;
       bool w2 = false;
       const std::string k = stage_kernel_base(st, false, true, p.nwx * p.nwy, &ng, &w2) + (rodd ? "__rodd" : "");
-      const bool use_bias = db && (k == "k_stage2_d1" || k == "k_stage2_d1__rodd");
+      const bool use_bias = db && narrow_bias32_kernel(k);
       wgc::Sha256 sha;
       for (int set = 0; ok && set < c.sets; ++set) {
         ok = load(set);
@@ -1222,7 +1230,7 @@ bool KRuntime::network(int f, const std::function<bool(const char*)>& after) {
     } else {
       const std::string kernel = stage_kernel(k, st.name);
       const auto bias_plane = narrow_bias_.find(st.name);
-      const bool use_bias = k == "k_stage2_e0" || k == "k_stage2_e1" || k == "k_stage2_d1";
+      const bool use_bias = narrow_bias32_kernel(k);
       void* bias = use_bias && bias_plane != narrow_bias_.end() ? &bias_plane->second : nullptr;
       if (!launch(kernel.c_str(), grid, (unsigned)(kThreads * (ng ? ng : 1)), &p, bias)) return false;
     }
@@ -1657,7 +1665,7 @@ std::vector<std::string> KRuntime::d3d12_kernels() const {
       std::string k;
       if (st.head) k = compact_head_ ? "k_stage2_d0_hp" : "k_stage2_d0_hidden";
       else if (ng) k = "k_stagew" + std::to_string(ng) + "_" + n;
-      else k = (n == "e0" || n == "e1" || n == "d1" ? "k_stage2_" : "k_stage_") + n;
+      else k = (n == "e0" || n == "e1" ? "k_stage2_" : "k_stage_") + n;   // d1: k_stage_d1 (stage_kernel_base)
       if (std::find(v.begin(), v.end(), k) == v.end()) v.push_back(k);
       // the round-to-odd form the create-time self-check can select (KRuntime::smx_select)
       if (!st.head && n != "e0" && n != "e1" && std::find(v.begin(), v.end(), k + "__rodd") == v.end())
