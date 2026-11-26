@@ -361,7 +361,8 @@ NARROW = {"k_stage_e2": ("e2", "", None), "k_stage_e0": ("e0", "", None), "k_sta
           "k_stage2_e1": ("e1", "@w2", None), "k_stage2_d1": ("d1", "@w2", None),
           "k_stage2_d1__rodd": ("d1", "@w2", None),
           "k_stage2_d0_hp": ("d0", "@w2", "hp"), "k_stage2_d0_hidden": ("d0", "@w2", "hidden")}
-NARROW_BIAS32 = {"k_stage2_e0", "k_stage2_e1", "k_stage2_d1", "k_stage2_d1__rodd", "k_stage2_d0_hp"}
+NARROW_BIAS32 = {"k_stage2_e0", "k_stage2_e1", "k_stage2_d1", "k_stage2_d1__rodd", "k_stage2_d0_hp", "k_stage_e2",
+                 "k_stage_d2", "k_stage_d1"}
 # block-level sizes (W, H) and window offsets (spec 44: even): grids with fewer than a workgroup's windows among them
 NARROW_SIZES = [(8, 8), (24, 16), (17, 13), (40, 24), (9, 33), (12, 20)]
 NARROW_OFFSETS = [(0, 0), (2, 2), (4, 0), (0, 6), (6, 4)]

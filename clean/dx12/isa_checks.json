@@ -1,8 +1,9 @@
 {
- "_doc": "build_dx12.py ISA check: for each kernel listed, the RGA (gfx1201) ISA must contain exactly the given number of instructions whose mnemonic matches each pattern (a regular expression, matched at the start of the mnemonic). Model K's softmax weights (clean/k/dx12/hlsl/k_smx.hlsli) are exact only when the driver folds the mix form p + e into one v_fma_mixlo/hi_f16 rounding per weight: 32 weights per lane per softmax round, i.e. 32 x heads x windows per workgroup for the narrow stages (e2 / d2: 2 heads, 1 window; d1: 2 heads, 2 windows) and 32 x heads / NG for the wide stages (e3 / d3 and the NG = 2 e4 / d4: 2 rounds; NG = 4 e4 / d4: 1; m: 8 heads / NG 4 = 2; the phase-split m attention k_split_m_attn: one head per workgroup = 1). A missing fold leaves v_cvt_f16_f32 after an FP32 add (a second rounding) and fails here. The __rodd ports (round to odd) must have none. The native D3D12 runtime checks the same fold on the player's driver at create (k_mix_probe). WG_DX12_ISA_CHECK=0 skips the check.",
+ "_doc": "build_dx12.py ISA check: for each kernel listed, the RGA (gfx1201) ISA must contain exactly the given number of instructions whose mnemonic matches each pattern (a regular expression, matched at the start of the mnemonic). Model K's softmax weights (clean/k/dx12/hlsl/k_smx.hlsli) are exact only when the driver folds the mix form p + e into one v_fma_mixlo/hi_f16 rounding per weight: 32 weights per lane per softmax round, i.e. 32 x heads x windows per workgroup for the narrow stages (e2 / d2 / d1: 2 heads, 1 window; the two-window d1: 2 heads, 2 windows) and 32 x heads / NG for the wide stages (e3 / d3 and the NG = 2 e4 / d4: 2 rounds; NG = 4 e4 / d4: 1; m: 8 heads / NG 4 = 2; the phase-split m attention k_split_m_attn: one head per workgroup = 1). A missing fold leaves v_cvt_f16_f32 after an FP32 add (a second rounding) and fails here. The __rodd ports (round to odd) must have none. The native D3D12 runtime checks the same fold on the player's driver at create (k_mix_probe). WG_DX12_ISA_CHECK=0 skips the check.",
  "k_stage_e2": {"v_fma_mix(lo|hi)_f16": 64},
  "k_stage_d2": {"v_fma_mix(lo|hi)_f16": 64},
  "k_stage2_d1": {"v_fma_mix(lo|hi)_f16": 128},
+ "k_stage_d1": {"v_fma_mix(lo|hi)_f16": 64},
  "k_stagew2_e3": {"v_fma_mix(lo|hi)_f16": 64},
  "k_stagew4_e4": {"v_fma_mix(lo|hi)_f16": 32},
  "k_stagew2_e4": {"v_fma_mix(lo|hi)_f16": 64},
@@ -18,6 +19,7 @@
  "k_stage_e2__rodd": {"v_fma_mix(lo|hi)_f16": 0},
  "k_stage_d2__rodd": {"v_fma_mix(lo|hi)_f16": 0},
  "k_stage2_d1__rodd": {"v_fma_mix(lo|hi)_f16": 0},
+ "k_stage_d1__rodd": {"v_fma_mix(lo|hi)_f16": 0},
  "k_stagew2_e3__rodd": {"v_fma_mix(lo|hi)_f16": 0},
  "k_stagew4_e4__rodd": {"v_fma_mix(lo|hi)_f16": 0},
  "k_stagew2_e4__rodd": {"v_fma_mix(lo|hi)_f16": 0},

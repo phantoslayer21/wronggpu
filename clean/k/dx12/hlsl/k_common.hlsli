@@ -37,6 +37,15 @@ uint4 wgk_opq4(uint4 v) { return v ^ (wgk_zero() * 0x10001u); }
 half2 wgk_h2(uint u) { return asfloat16(uint16_t2((uint16_t)(u & 0xffffu), (uint16_t)(u >> 16))); }
 uint wgk_u(half2 h) { uint16_t2 v = asuint16(h); return (uint)v.x | ((uint)v.y << 16); }
 half2 wgk_c2(uint h) { return wgk_h2((h & 0xffffu) * 0x10001u); }   // splatted FP16 constant (bits; no cast rounding)
+// The exact FP16 product behind the opaque barrier in ONE instruction: fma(a, b, -0.0 ^ zero) per half. At run time the
+// addend is -0.0 in both halves (the opaque zero is 0), and fma(a, b, -0) = RN(a b) for every input: the exact product
+// is rounded once as the multiply rounds it, a zero product keeps its sign (+0 + -0 = +0, -0 + -0 = -0), NaN, infinities
+// and denormals are the multiply's. The compiler cannot see the addend: it can neither turn the instruction back into a
+// multiply nor fuse it into a following add or multiply (the barrier the xor of wgk_opq gave, without the xor). Never
+// feed its result straight into an FP16 -> FP32 conversion: the driver folds an FP16 fma followed by the conversion into
+// one v_fma_mix_f32 with no FP16 rounding in between (that is why wgk_sumsq8 keeps the multiply + xor).
+half2 wgk_nz2() { return wgk_h2(0x80008000u ^ (wgk_zero() * 0x10001u)); }
+half2 wgk_fm(half2 a, half2 b) { return mad(a, b, wgk_nz2()); }
 // FP16 element i (0..7) of a fragment, as bits / as FP32 (exact)
 uint wgk_el(uint4 v, uint i) { return (v[i >> 1] >> ((i & 1u) * 16u)) & 0xffffu; }
 float wgk_elf(uint4 v, uint i) { return f16tof32(wgk_el(v, i)); }
@@ -58,7 +67,17 @@ uint wgk_pin(uint v) { return WaveActiveBitOr(v & wgk_zero()); }
 #ifndef KB_LD_A16
 #define KB_LD_A16 0
 #endif
+// KB_LD_A16 = 1 (the kernels' default): the whole address is masked, (base + off) & ~15: RADV's ACO takes the 128-bit
+// alignment from exactly this mask on each load address. 2: the low 4 bits are cleared on the scalar base only ((base & ~15)
+// + off: the same addresses): RGA gfx1201 then shows no per-lane v_and_b32 -16 (-40 .. -100 of them per stage kernel), but
+// DXC writes base + (lane << 4) + c as (base & ~15) + (lane << 4 | c), and ACO does not take that as 16-byte aligned
+// (RADV, measured: +6 .. +16 % instructions in k_stage2_d1 / e1 / e0 / d0_hp and k_stage_e2 / d2, the loads split).
+// ((base & ~15) + (off & ~15) is no remedy: DXC folds the second mask away, the DXIL is that of 2.) 0: none.
+#if KB_LD_A16 == 2
+uint4 wgk_ld128_a16(uint base, uint off) { return wg_mem.Load4((base & ~15u) + off); }
+#else
 uint4 wgk_ld128_a16(uint base, uint off) { return wg_mem.Load4((base + off) & (KB_LD_A16 ? ~15u : ~0u)); }
+#endif
 uint4 wgk_ld8(uint base, uint off_h) { return wgk_ld128_a16(base, off_h * 2u); }
 void wgk_st8(uint base, uint off_h, uint4 v) { wg_st128(base, off_h * 2u, v); }
 uint4 wgk_zero8() { return uint4(0u, 0u, 0u, 0u); }
@@ -96,6 +115,13 @@ uint4 wgk_sub8(uint4 a, uint4 b)
     return r;
 }
 uint4 wgk_mul8(uint4 a, uint4 b)
+{
+    uint4 r;
+    [unroll] for (uint i = 0; i < 4u; ++i) r[i] = wgk_u(wgk_fm(wgk_h2(a[i]), wgk_h2(b[i])));
+    return r;
+}
+// the multiply behind the opaque xor, for a product converted to FP32 straight away (wgk_sumsq8: no fma form there)
+uint4 wgk_mul8x(uint4 a, uint4 b)
 {
     uint4 r;
     [unroll] for (uint i = 0; i < 4u; ++i) r[i] = wgk_opq(wgk_u(wgk_h2(a[i]) * wgk_h2(b[i])));
@@ -174,11 +200,11 @@ uint wgk_act2(uint xu)
     const half2 x = wgk_h2(xu);
     const half2 t = min(max(x, wgk_c2(WGK_H_M2)), wgk_c2(WGK_H_2));
     const half2 at = abs(t);
-    const half2 bt = wgk_h2(wgk_opq(wgk_u(wgk_c2(WGK_ACT_B) * at)));
-    const half2 p = wgk_h2(wgk_opq(wgk_u(wgk_c2(WGK_ACT_A) - bt)));
-    const half2 tp = wgk_h2(wgk_opq(wgk_u(t * p)));
-    const half2 q = wgk_h2(wgk_opq(wgk_u(wgk_c2(WGK_H_HALF) + tp)));
-    return wgk_opq(wgk_u(x * q));
+    const half2 bt = wgk_fm(wgk_c2(WGK_ACT_B), at);   // the two products that feed an addition, and the result: the
+    const half2 p = wgk_c2(WGK_ACT_A) - bt;           // exact fma form; a - b|t| feeds a multiply and 0.5 + t p the last
+    const half2 tp = wgk_fm(t, p);                    // multiply: an addition cannot be fused into those (as wgk_act2n)
+    const half2 q = wgk_c2(WGK_H_HALF) + tp;
+    return wgk_u(wgk_fm(x, q));
 }
 uint4 wgk_act8(uint4 x)
 {
@@ -192,9 +218,9 @@ uint wgk_act2n(uint xu)
     const half2 x = wgk_h2(xu);
     const half2 t = min(max(x, wgk_c2(WGK_H_M2)), wgk_c2(WGK_H_2));
     const half2 at = abs(t);
-    const half2 bt = wgk_h2(wgk_opq(wgk_u(wgk_c2(WGK_ACT_B) * at)));
+    const half2 bt = wgk_fm(wgk_c2(WGK_ACT_B), at);
     const half2 p = wgk_c2(WGK_ACT_A) - bt;
-    const half2 tp = wgk_h2(wgk_opq(wgk_u(t * p)));
+    const half2 tp = wgk_fm(t, p);
     const half2 q = wgk_c2(WGK_H_HALF) + tp;
     return wgk_u(x * q);
 }
@@ -225,7 +251,7 @@ void wgk_softmax_weights(uint4 gg[4], out uint4 pa[4])
 // FP16 squares, then v_fma_mix_f32 x2_half * 1 + ss = the FP32 addition of the exact FP16 value).
 float wgk_sumsq8(uint4 x, float ss)
 {
-    const uint4 q = wgk_mul8(x, x);
+    const uint4 q = wgk_mul8x(x, x);
     [unroll] for (uint j = 0; j < 8u; ++j) ss = ss + wgk_elf(q, j);
     return ss;
 }

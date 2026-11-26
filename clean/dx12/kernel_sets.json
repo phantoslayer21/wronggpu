@@ -513,6 +513,10 @@
    "k_block.co"
   ],
   [
+   "k_stage_d1__rodd",
+   "k_block.co"
+  ],
+  [
    "k_stage_d2",
    "k_block.co"
   ],
@@ -622,6 +626,18 @@
   ],
   [
    "kx/k_in_tiled__a1",
+   "k_io_exact.co"
+  ],
+  [
+   "kx/k_in_tiled_color",
+   "k_io_exact.co"
+  ],
+  [
+   "kx/k_in_tiled_color_direct",
+   "k_io_exact.co"
+  ],
+  [
+   "kx/k_in_tiled_color_uniform",
    "k_io_exact.co"
   ],
   [
