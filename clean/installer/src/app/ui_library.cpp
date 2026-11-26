@@ -1022,6 +1022,7 @@ static wstring BusyNote() {
             case T_RRDATA: doing = L"Converting the Ray Reconstruction data\u2026"; break;
             case T_MODELK: doing = L"Converting the Model K data\u2026"; break;
             case T_MODELL: doing = L"Converting the Model L data\u2026"; break;
+            case T_MODELFG: doing = L"Converting the frame generation data\u2026"; break;
             case T_SELFINSTALL: doing = L"Installing WrongGPU for this user…"; break;  // the toast's and BusyWhy's words
             case T_SELFUNINSTALL: doing = L"Uninstalling the launcher…"; break;
             case T_FIRSTRUN:  // Install for this user, or (portable, no choice) the model and the adoptions only

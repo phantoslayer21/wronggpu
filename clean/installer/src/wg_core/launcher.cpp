@@ -305,6 +305,9 @@ GameEntry EntryFor(Context& ctx, const wstring& exeIn, const wstring& name, cons
     g.proxyPlan = t.coexist.proxy;
     for (auto& f : g.coexist) if (f.decision != Decision::Managed) g.found.push_back(f.what);
     if (exists && !quick) { const RrUse ru = DetectRr(exe); g.rrUses = ru.uses; g.rrWhy = ru.why; g.rrDirect = ru.direct; g.rrNotOffered = ru.notOffered; }  // quick: DeepCheck walks the folder
+#if WRONGGPU_FG
+    if (exists && !quick) g.fgUses = GameHasFgLibrary(Parent(exe), g.dir, t.root);  // (fg.h: the game offers DLSS Frame Generation)
+#endif
     if (const GameRule* rule = exists ? GameRuleFor(exe) : nullptr) {  // what the game needs beyond the usual (gamerules.h)
         g.rrPathTracingOnly = rule->rrOnlyPathTracing;
         g.needsGame = rule->name;
@@ -340,6 +343,7 @@ GameEntry EntryFor(Context& ctx, const wstring& exeIn, const wstring& name, cons
             g.srModel = gp.get("model").empty() ? string("m") : gp.get("model");
             const char* modeKey = ModeKeyOf(g.srModel);
             g.srMode = modeKey ? gp.get(modeKey) : string("fast");
+            g.fgOn = gp.get(kFgKeyEnable) == "on";  // (an empty value in a build without the frame generation choice)
         }
         if (RecordHasRr(rec)) {
             g.rrInstalled = g.rrUses = true;
@@ -348,6 +352,7 @@ GameEntry EntryFor(Context& ctx, const wstring& exeIn, const wstring& name, cons
             g.rrEnabled = rs.enabled;
             g.rrMode = FromUtf8(rs.mode);
         }
+        if (RecordHasFg(rec)) g.fgInstalled = g.fgUses = true;  // frame generation's files (fg.h)
         // rc5 (gamerules.h): a game whose menu has no RR option is never an RR game here, even with an older install's RR
         // files (rrInstalled stays as recorded: a repair or update takes them out); a game whose RR waits for its
         // experimental opt-in holds it off while the setting is off
@@ -434,6 +439,9 @@ static void DeepCheck(GameEntry& g) {
         g.rrWhy = !ru.why.empty() ? ru.why : g.rrInstalled ? wstring(L"installed") : wstring();
         g.rrDirect = ru.direct;
         if (ru.notOffered) { g.rrNotOffered = true; g.rrUses = false; g.rrConfigDue = false; g.rrHeldOff = false; }  // rc6 (rr.cpp)
+#if WRONGGPU_FG
+        g.fgUses = g.fgInstalled || GameHasFgLibrary(Parent(g.exe), g.dir, GameRoot(Parent(g.exe)));
+#endif
     }
     if (!g.hasRecord || !g.exeFound) return;  // a game that is gone has nothing to hash
     Record rec;
@@ -1083,7 +1091,31 @@ Profile GameProfile(const wstring& dir) {
     }
     FoldRrFromGame(dir, p);  // Ray Reconstruction's mode as the player last chose it in the game (OptiScaler's menu)
     FoldSrFromGame(dir, p);  // the model and its mode as the player last chose them in the game
+    FoldFgFromGame(dir, p);  // frame generation's settings as they were last changed in the game's state folder
     return p;
+}
+
+bool FoldFgFromGame(const wstring& dir, Profile& p) {
+    bool changed = false;
+#if WRONGGPU_FG
+    const wgstate::Settings s = wgstate::ReadSettings(dir);
+    // fg=off is what the launcher itself writes while frame generation's data is not on this PC (FgStateKeys): then it is not a
+    // choice made outside the launcher, and the profile keeps the player's
+    const bool dataThere = IsFile(Join(Join(ModelBaseDir(), L"FG"), L"model.wgcm"));
+    for (size_t i = 0; i < kSettingCount; ++i) {
+        const SettingDef& d = kSettings[i];
+        if (d.layer != Layer::Fg) continue;
+        const std::string* v = wgstate::Get(s, d.key);
+        string normal;
+        if (!v || !ValidateSetting(d, *v, &normal, nullptr) || normal == p.get(d.key)) continue;  // (an invalid value: never guessed at)
+        if (!strcmp(d.key, kFgKeyEnable) && normal == "off" && !dataThere) continue;
+        p.v[d.key] = normal;
+        changed = true;
+    }
+#else
+    (void)dir; (void)p;
+#endif
+    return changed;
 }
 
 bool FoldSrFromGame(const wstring& dir, Profile& p) {
@@ -1207,6 +1239,12 @@ void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vecto
                 }
             }
             for (auto& kv : FgStateKeys(q, wgstate::ReadSettings(dir).kv, fgReady)) keys.push_back(kv);
+            // OptiScaler's own frame generation ([FrameGen] in OptiScaler.ini, set in its menu) would take the same frames: the
+            // launcher never changes those keys (they are the player's, OptiScaler's defaults leave it off), but it says so
+            if (q.get(kFgKeyEnable) == "on") {
+                const wstring w = OptiFgConflict(dir);
+                if (!w.empty()) { notes.push_back(w); if (warnings) warnings->push_back(w); }
+            }
         }
         const int w = WriteStateKeys(ctx, dir, keys, &why);
         if (w < 0) Fail(L"Settings not applied: " + why, EXIT_REFUSED);
@@ -1529,6 +1567,7 @@ static void InstallOp(Context& ctx, const OpRequest& r, Ui& ui, OpResult& res) {
     MigrateRrState(ctx, dir);      // #219: an older plugin's or the player's edit of WrongGPU\wronggpu.ini: its mode into the state folder
     FoldRrFromGame(dir, profile);  // a Ray Reconstruction mode chosen in the game stays (the state folder keeps it through the install)
     FoldSrFromGame(dir, profile);  // so do the model and the SR modes chosen in the game (OptiScaler's list, WrongGPU.asi's card)
+    FoldFgFromGame(dir, profile);  // and frame generation's settings as the state folder has them
     if (target.installed && !target.record.version.empty() && ctx.data && !IEq(target.record.version, ctx.data->version)) SavePrevious(ctx, dir, target.record, ui);
     std::vector<IniKeyChange> oldJournal = target.installed ? target.record.inikeys : !wrongDir.empty() ? wrong.inikeys : std::vector<IniKeyChange>{};
     // a game's opt-in keys follow its setting (ApplyProfile), not the old file

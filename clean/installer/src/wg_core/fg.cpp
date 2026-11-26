@@ -2,8 +2,11 @@
 // WrongGPU launcher core: frame generation's per-game settings and its library (fg.h). Written for this project.
 #include "fg.h"
 
+#include "context.h"
 #include "pe.h"
 #include "profile.h"
+#include "record.h"
+#include "settings.h"
 
 namespace wg {
 
@@ -188,6 +191,54 @@ FgEnable CheckFgEnable(const wstring& gameDir, bool dataReady, wstring* library,
     }
     if (library) *library = libs.front().path;
     return FgEnable::CONVERT;
+}
+
+bool RecordHasFg(const Record& m) {
+    for (auto& e : m.e) if (e.action == L"copy" && IsFgPlugin(e.rel)) return true;
+    return false;
+}
+
+bool FgPayloadAvailable(Context& ctx) {
+    if (!ctx.data || !ctx.data->fgFiles) return false;
+    for (size_t i = 0; i < ctx.data->fgCount; ++i)
+        if (IEq(ctx.data->fgFiles[i].rel, kFgPayloadPlugin)) return true;
+    return false;
+}
+
+wstring FgInstallRel(const wstring& pluginRel, const wstring& payloadRel) {
+    const wstring folder = Parent(pluginRel);
+    if (IEq(payloadRel, kFgPayloadPlugin)) return folder.empty() ? wstring(kFgPluginName) : Join(folder, kFgPluginName);
+    const wstring dxilDir = Parent(payloadRel), name = BaseName(payloadRel);
+    if (!IEq(dxilDir, kFgPayloadDxilDir) || !EndsWithI(name, L".dxil") || name.size() <= 5) return L"";
+    return Join(folder.empty() ? wstring(kFgDxilDir) : Join(folder, kFgDxilDir), name);
+}
+
+wstring OptiFgConflictText(const string& optiIni) {
+    wstring set;
+    for (const char* key : {"FGInput", "FGOutput", "FGType", "Enabled"}) {
+        string value;
+        if (!IniHasKey(optiIni, "FrameGen", key, &value)) continue;
+        value = TrimSpaces(value);
+        string low = value;
+        for (char& c : low) c = char(tolower((unsigned char)c));
+        const bool off = !strcmp(key, "Enabled") ? low != "true" : (low.empty() || low == "auto" || low == "nofg");
+        if (!off) set += (set.empty() ? L"" : L", ") + FromUtf8(key) + L"=" + FromUtf8(value);
+    }
+    if (set.empty()) return L"";
+    return L"OptiScaler's own frame generation is set in this game (OptiScaler.ini [FrameGen] " + set + L"). It would take the same frames as "
+           L"WrongGPU's frame generation: turn it off in OptiScaler's menu (Frame Generation) so WrongGPU's runs alone.";
+}
+
+wstring OptiFgConflict(const wstring& dir) {
+    string ini;
+    if (dir.empty() || !ReadAll(Join(dir, L"OptiScaler.ini"), ini)) return L"";
+    return OptiFgConflictText(ini);
+}
+
+bool GameHasFgLibrary(const wstring& exeDir, const wstring& dir, const wstring& root) {
+    for (const wstring& d : {exeDir, dir, root})
+        if (!d.empty() && !GameFgLibraries(d).empty()) return true;
+    return false;
 }
 
 }  // namespace wg

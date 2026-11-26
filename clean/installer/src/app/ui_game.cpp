@@ -11,6 +11,7 @@
 #include "app/ui_shell.h"
 
 #include "wg_core/checks.h"
+#include "wg_core/fg.h"
 #include "wg_core/gamerules.h"
 #include "wg_core/rrconfig.h"
 
@@ -87,11 +88,23 @@ wstring SettingLabel(const string& key) {
     static const std::pair<const char*, const wchar_t*> k[] = {{"wronggpu", L"Use WrongGPU"}, {"executor", L"Runs on"}, {"output_filter", L"Output filter"},
                                                               {"pre_exposure", L"Pre-exposure"}, {"sparkle_guard", L"Sparkle guard"}, {"fps_overlay", L"FPS overlay"},
                                                               {"model", L"Model"}, {"m_mode", L"Model M mode"}, {"k_mode", L"Model K mode"},
-                                                              {"l_mode", L"Model L mode"}};
+                                                              {"l_mode", L"Model L mode"}, {"fg", L"Frame generation"},
+                                                              {"fg_preset", L"Frame generation preset"}, {"fg_multiplier", L"Frame generation multiplier"},
+                                                              {"fg_presenter", L"Frame generation presenter"}};
     for (auto& x : k) if (key == x.first) return x.second;
     return FromUtf8(key);
 }
+// Frame generation's presenters (fg.h fg_presenter), in the order of its pop-up: the value, its name, what it does
+const char* const kFgPresenter[] = {"auto", "dxgi_tearing", "dxgi_vsync", "hwfq"};
+const wchar_t* const kFgPresenterNames[] = {L"Auto", L"DXGI Tearing", L"DXGI VSync", L"HWFQ"};
+const wchar_t* const kFgPresenterHelp[] = {L"Recommended. WrongGPU picks the way frames reach the screen. Works best with OptiScaler's overlay.",
+                                           L"Through DXGI, each frame shown as soon as it is ready (tearing allowed).",
+                                           L"Through DXGI, in step with the display's refresh (VSync).",
+                                           L"Through the hardware flip queue."};
 wstring SettingWords(const string& key, const string& value) {
+    if (key == "fg_multiplier" && value.size() == 1 && value[0] >= '2' && value[0] <= '6') return FromUtf8(value) + L"x";
+    if (key == "fg_presenter")
+        for (size_t i = 0; i < 4; ++i) if (value == kFgPresenter[i]) return kFgPresenterNames[i];
     static const std::pair<const char*, const wchar_t*> w[] = {{"on", L"On"}, {"off", L"Off"}, {"auto", L"Auto"}, {"dx12", L"Direct3D 12"}, {"hip", L"HIP"},
                                                               {"keep", L"Default"}, {"scale", L"Scale"}, {"original", L"Original"}, {"default", L"Default"},
                                                               {"analytic", L"Classic"}, {"quality5", L"Even"}, {"quality9", L"Even (wide)"},
@@ -563,6 +576,7 @@ wstring BusyDoneWords() {
         case T_RRDATA: return L"the Ray Reconstruction data is converted";
         case T_MODELK: return L"the Model K data is converted";
         case T_MODELL: return L"the Model L data is converted";
+        case T_MODELFG: return L"the frame generation data is converted";
         case T_SELFINSTALL: return L"WrongGPU is installed for this user";
         case T_FIRSTRUN: return v.first.installOffer && v.first.choice == 1 ? L"WrongGPU is installed for this user" : L"WrongGPU is set up";  // portable: no install
         case T_SELFUNINSTALL: return L"the launcher is uninstalled";
@@ -627,6 +641,18 @@ std::vector<MenuItem> FilterMenu() {
         const bool hipOnly = NeedsHipRuntime("output_filter", kFilter[i]);  // R1: greyed, with the words
         MenuItem it{kFilterNames[i], M_FILTER0 + i, !hipOnly, false, false, cur == kFilter[i]};
         it.help = hipOnly ? wstring(NotOnDx12Text()) : wstring(kFilterHelp[i]);
+        items.push_back(it);
+    }
+    return items;
+}
+
+// Frame generation's presenters for their pop-up (fg.h): the name, what it does on a second line, the chosen one checked.
+std::vector<MenuItem> FgPresenterMenu() {
+    std::vector<MenuItem> items;
+    const string cur = v.edit.get("fg_presenter");
+    for (int i = 0; i < 4; ++i) {
+        MenuItem it{kFgPresenterNames[i], M_FGPRESENTER0 + i, true, false, false, cur == kFgPresenter[i]};
+        it.help = kFgPresenterHelp[i];
         items.push_back(it);
     }
     return items;
@@ -1732,6 +1758,82 @@ static float RrSection(Gfx& gx, float x, float y, float w) {
     return y + kSectionGap;
 }
 
+// Frame generation (fg.h; a build with its choice): in a game that offers DLSS Frame Generation (its frame generation library,
+// nvngx_dlssg.dll), whose install has frame generation's files, or whose settings turn it on. Its data first (converted once on
+// this PC from a game's DLSS Frame Generation file, 310.1 or newer: Convert, as Ray Reconstruction's), then its files (an install
+// from before this build: Set up), then Use WrongGPU and its three settings, which apply while it is on. The settings go into
+// the game's state folder with Apply (ApplyProfile: fg stays off there while the data is not ready); the plugin reads them when
+// the game starts.
+static bool FgShown() {
+#if WRONGGPU_FG
+    const GameEntry& e = v.cur;
+    return e.fgUses || e.fgInstalled || FgOptedIn(v.edit);
+#else
+    return false;
+#endif
+}
+
+static float FgSection(Gfx& gx, float x, float y, float w) {
+    const GameEntry& e = v.cur;
+    const bool en = CanEdit();
+    y += GroupHeading(gx, x, y, w, L"Frame Generation") + kHeadGap;
+    y += GroupCaption(gx, x, y, w, L"Used when DLSS Frame Generation is turned on in the game's graphics settings.");
+    const bool needData = !v.fgReady, needFiles = Rec() && !e.fgInstalled && v.fgBuild && e.fgUses;
+    const bool on = Rec() && v.edit.get("fg") == "on";
+    y += GroupList(gx, x, y, w, [&](float top) {
+        float yy = top;
+        if (needData) {
+            // as Ray Reconstruction's data: the state in Settings' words and colour, Convert (it searches the games' frame
+            // generation libraries, as Settings' Convert does); while it converts the row says so; it waits for another task
+            const bool working = v.task == T_MODELFG, can = v.task == T_NONE && !v.busy;
+            const wstring why = working || can ? wstring() : BusyWhy(v.cur);
+            yy += NeedRow(gx, x, yy, w, true, working ? L"Converting the frame generation data" : L"Frame generation data isn't converted yet",
+                          L"WrongGPU converts it once from a game's DLSS Frame Generation file (version 310.1 or newer) on this PC. Until then, the game "
+                          L"uses its own frame generation.",
+                          working ? pal.greyDot : (on ? pal.amber : pal.greyDot), pal.text, ID_G_FGCONVERT, working ? L"Converting…" : L"Convert",
+                          on ? B_TINTED : B_PLAIN, can, working ? L"Converting the frame generation data…" : L"Convert the frame generation data", working);
+            if (!why.empty()) { v.tips[ID_G_FGCONVERT] = why; Describe(ID_G_FGCONVERT, why); }
+            return yy - top;
+        }
+        if (needFiles) {  // an install from before this build: an optional addition (a grey dot, a plain button), its operation a repair
+            const bool working = BusyHere();
+            const bool can = !Locked() && e.status != GameStatus::Orphaned;
+            yy += NeedRow(gx, x, yy, w, true, L"Not set up in this game yet", L"Set up adds frame generation to WrongGPU in this game.",
+                          pal.greyDot, pal.text, ID_G_FGREPAIR, working ? v.busyVerb : wstring(L"Set up"), B_PLAIN, can, L"Set up frame generation", working);
+            if (Locked() && !working) { v.tips[ID_G_FGREPAIR] = BusyWhy(e); Describe(ID_G_FGREPAIR, BusyWhy(e)); }
+            return yy - top;
+        }
+        yy += SRow(gx, x, yy, w, true, L"Use WrongGPU",
+                   L"Generates frames between the game's own frames. Off: the game's DLSS Frame Generation isn't WrongGPU's.", kSwitchW, kSwitchH,
+                   [&](const Rc& r) { Switch(gx, ID_G_FGON, r, on, en, L"Use WrongGPU (Frame generation)"); }, !en);
+        // the three settings apply only while it is on: dimmed and unavailable while it is off
+        const bool sub = en && on;
+        const std::vector<wstring> mult{L"2x", L"3x", L"4x", L"5x", L"6x"};
+        const string mv = v.edit.get("fg_multiplier");
+        const int mi = mv.size() == 1 && mv[0] >= '2' && mv[0] <= '6' ? mv[0] - '2' : 0;
+        yy += SRow(gx, x, yy, w, false, L"Multiplier", mi == 0 ? L"One generated frame for each frame the game draws. Recommended."
+                                                                : std::to_wstring(mi + 1) + L" generated frames for each frame the game draws.",
+                   SegmentedW(gx, mult, 40), 36,
+                   [&](const Rc& r) { Segmented(gx, ID_G_FGMULT0, r.r(), r.y, mult, mi, sub, L"Frame generation multiplier", 28, {}, true, 40); }, !sub);
+        const std::vector<wstring> pre{L"A", L"B", L"C"};
+        const string pv = v.edit.get("fg_preset");
+        const int pi = pv == "B" ? 1 : pv == "C" ? 2 : 0;
+        yy += SRow(gx, x, yy, w, false, L"Preset", pi == 0 ? L"WrongGPU's frame generation preset. A is the default."
+                                                            : L"WrongGPU's frame generation preset. A is the default; this game uses " + FromUtf8(pv) + L".",
+                   SegmentedW(gx, pre, 40), 36,
+                   [&](const Rc& r) { Segmented(gx, ID_G_FGPRESET0, r.r(), r.y, pre, pi, sub, L"Frame generation preset", 28, {}, true, 40); }, !sub);
+        int si = 0;
+        for (int i = 0; i < 4; ++i) if (v.edit.get("fg_presenter") == kFgPresenter[i]) si = i;
+        float sw = 170;  // .select min-width 170, wider when a name needs it (as the output filter's)
+        for (auto* n : kFgPresenterNames) sw = std::max(sw, std::ceil(gx.TextW(n, Ts(13, 600, pal.text)) + 12 + 30));
+        yy += SRow(gx, x, yy, w, false, L"Presenter", kFgPresenterHelp[si], sw, 30,
+                   [&](const Rc& r) { Select(gx, ID_G_FGPRESENTER, r, kFgPresenterNames[si], sub, L"Frame generation presenter"); }, !sub);
+        return yy - top;
+    });
+    if (!needData && !needFiles) y += GroupFoot(gx, x, y, w, L"Changes take effect the next time the game starts.");
+    return y + kSectionGap;
+}
+
 // OptiScaler with WrongGPU's setup: what it is (version, the name it loads as), what can be set (the FPS overlay, the
 // editable keys this build has: the menu key first, the rest behind "More OptiScaler settings"), the keys WrongGPU manages
 // under the list.
@@ -2285,6 +2387,7 @@ static float Cards(Gfx& gx, float x0, float cw, float y, float pinAt) {
         ly += GroupHeading(gx, x0, ly, lw, L"Ray Reconstruction") + kHeadGap;
         ly = RrConfigCard(gx, x0, ly, lw) + kSectionGap;
     }
+    if (FgShown()) ly = FgSection(gx, x0, ly, lw);  // frame generation (fg.h), right under Ray Reconstruction
     if (one) {
         if (v.cur.hasRecord) ly = LastRunSection(gx, x0, ly, cw);
         ly = v.opti.have ? OptiSection(gx, x0, ly, cw) : OptiReportSection(gx, x0, ly, cw);

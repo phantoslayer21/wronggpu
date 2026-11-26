@@ -69,15 +69,16 @@ const SettingDef kSettings[] = {
      L"Fast (default): the quickest, with a picture very close to Exact. Exact: Model L's reference result, slower."},
 #endif
 #if WRONGGPU_FG
-    // Frame generation (#96, fg.h; only in a build with its choice, CMake WRONGGPU_FG): strictly off by default. `set` only,
-    // not on the settings page. The values in exactly the spellings of the frame generation proxy's reader (no case folding).
-    {kFgKeyEnable, Layer::Fg, Tier::Advanced, "off", "off|on", L"Frame generation",
+    // Frame generation (#96, fg.h; only in a build with its choice, CMake WRONGGPU_FG): strictly off by default. Basic since
+    // 0.7.0: the game page's Frame Generation section (and `set`). The values in exactly the spellings of the frame generation
+    // proxy's reader (no case folding).
+    {kFgKeyEnable, Layer::Fg, Tier::Basic, "off", "off|on", L"Frame generation",
      L"Off (default): the game's frame generation is not WrongGPU's. On: WrongGPU generates frames, with data converted on this PC "
      L"from the frame generation library of one of your games (version 310.1 or newer)."},
-    {kFgKeyPreset, Layer::Fg, Tier::Advanced, "A", "A|B|C", L"Frame generation preset", L"A (default), B or C."},
-    {kFgKeyMultiplier, Layer::Fg, Tier::Advanced, "2", "2|3|4|5|6", L"Frame generation multiplier",
+    {kFgKeyPreset, Layer::Fg, Tier::Basic, "A", "A|B|C", L"Frame generation preset", L"A (default), B or C."},
+    {kFgKeyMultiplier, Layer::Fg, Tier::Basic, "2", "2|3|4|5|6", L"Frame generation multiplier",
      L"2 (default): one generated frame per game frame; up to 6."},
-    {kFgKeyPresenter, Layer::Fg, Tier::Advanced, "auto", "auto|hwfq|dxgi_tearing|dxgi_vsync", L"Frame generation presenter",
+    {kFgKeyPresenter, Layer::Fg, Tier::Basic, "auto", "auto|hwfq|dxgi_tearing|dxgi_vsync", L"Frame generation presenter",
      L"Auto (default), hwfq, dxgi_tearing or dxgi_vsync."},
 #endif
 };

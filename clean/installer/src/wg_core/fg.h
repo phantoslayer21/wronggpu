@@ -31,6 +31,8 @@
 namespace wg {
 
 struct Profile;
+struct Record;
+struct Context;
 
 // ---- the settings ------------------------------------------------------------------------------------------------
 inline constexpr const char* kFgKeyEnable = "fg";
@@ -100,5 +102,38 @@ inline wstring FgNotReady(const wstring& why) {
     return L"Frame generation's data on this PC is not ready (" + why + L"). Convert it first: WrongGPU.exe model convert --preset=FG "
            L"(optionally --model=<the nvngx_dlssg.dll of one of your games, version 310.1 or newer>).";
 }
+
+// ---- the files (a build with them: tools/make_payload.py --fg, CMake WRONGGPU_FG with WRONGGPU_FG_DIR) ------------------
+// The frame generation plugin (an .asi OptiScaler loads from its plugins folder, beside WrongGPU's own plugin and WrongGPU's RR
+// plugin) and its kernel files, which it reads from wronggpu-setup\fg-dxil next to itself. An install puts the plugin beside
+// WrongGPU's plugin (plugins\, or the plugin's own folder next to Ultimate ASI Loader) and the kernels in that folder's
+// wronggpu-setup\fg-dxil: every one an entry of the install record (staging, rollback, uninstall byte for byte). Only in a game
+// with a frame generation library (GameFgLibraries) and an OptiScaler setup; the plugin does nothing until fg=on is written
+// into the game's state folder (FgStateKeys).
+inline constexpr const wchar_t* kFgPluginName = L"WrongGPU-FG.asi";
+inline constexpr const wchar_t* kFgPayloadPlugin = L"plugins\\WrongGPU-FG.asi";  // as make_payload.py embeds them
+inline constexpr const wchar_t* kFgPayloadDxilDir = L"fg-dxil";                  // ...fg-dxil\<name>.dxil
+inline constexpr const wchar_t* kFgDxilDir = L"wronggpu-setup\\fg-dxil";         // beside the installed plugin
+inline constexpr const wchar_t* kFgLog = L"wronggpu-fg.log";                     // the plugin's log, in the game's (exe) folder
+// WrongGPU's frame generation plugin, WrongGPU-FG.asi in any folder (inline: the restorer and the coexistence checks use it).
+// It is WrongGPU's own: never "another setup's OptiScaler plugin" (coexist.h ForeignPlugins), so it never keeps WrongGPU's RR out.
+inline bool IsFgPlugin(const wstring& rel) { return IEq(BaseName(rel), kFgPluginName); }
+// The install placed frame generation's plugin (a copy entry of WrongGPU-FG.asi).
+bool RecordHasFg(const Record& m);
+// This build has frame generation's files (its plugin among them).
+bool FgPayloadAvailable(Context& ctx);
+// Where an install puts one embedded FG file (`payloadRel`: plugins\WrongGPU-FG.asi or fg-dxil\<name>.dxil), given where
+// WrongGPU's plugin goes (`pluginRel`, relative to the install folder: plugins\WrongGPU.asi or the plugin's own folder's):
+// <its folder>\WrongGPU-FG.asi and <its folder>\wronggpu-setup\fg-dxil\<name>.dxil. Empty for any other file.
+wstring FgInstallRel(const wstring& pluginRel, const wstring& payloadRel);
+// The game has a frame generation library (nvngx_dlssg.dll) in its folder: the exe's folder, the install folder or the game's
+// root (sub-folders too). The game offers DLSS Frame Generation, which WrongGPU's frame generation takes over.
+bool GameHasFgLibrary(const wstring& exeDir, const wstring& dir, const wstring& root);
+// OptiScaler's own frame generation turned on in its settings (OptiScaler.ini [FrameGen]: FGInput, FGOutput or the older FGType
+// set to anything but auto, nofg or empty; Enabled=true): it would take the same frames as WrongGPU's. The launcher never writes
+// those keys (OptiScaler's defaults leave its frame generation off; a value there is the player's choice in OptiScaler's menu):
+// with fg=on it says so. Empty: nothing in the way. OptiFgConflict reads <dir>\OptiScaler.ini.
+wstring OptiFgConflictText(const string& optiIni);
+wstring OptiFgConflict(const wstring& dir);
 
 }  // namespace wg
