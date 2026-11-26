@@ -457,9 +457,14 @@ void l_post_core(LGather g, int x, int y, int fx, int fy, float mx[3], float my[
     const float X = (float)x + 0.5f, Y = (float)y + 0.5f;
     const int ncand = w2 != 0.0f ? 2 : 1;
     float L[2][3];
+    // the second candidate at the first one's motion bits (the common case where the motion candidates agree): the same
+    // position, so the same history (or colour) values, bit for bit; copied instead of a second 12-tap read
+    const bool dup2 = asuint(m2x) == asuint(m1x) && asuint(m2y) == asuint(m1y);
     [unroll] for (int n = 0; n < 2; ++n) {
         L[n][0] = 0.0f; L[n][1] = 0.0f; L[n][2] = 0.0f;
-        if (n < ncand) {
+        if (n == 1 && n < ncand && dup2) {
+            L[1][0] = L[0][0]; L[1][1] = L[0][1]; L[1][2] = L[0][2];
+        } else if (n < ncand) {
             const float qx = X + (n == 0 ? m1x : m2x);
             const float qy = Y + (n == 0 ? m1y : m2y);
 #if LP_MUT == 5
