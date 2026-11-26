@@ -81,6 +81,7 @@ class Trace:
 
     def __init__(self, lines):
         self.create, self.allocs, self.uploads, self.loads, self.frames, self.kernels = lines[0], {}, {}, [], [], {}
+        self.warm_skip = []   # --warm-skip: the kernels the route leaves out of the device's warm-up
         for ln in lines[1:]:
             if ln.startswith("alloc b"):
                 k, n = ln[7:].split(" ")
@@ -93,6 +94,8 @@ class Trace:
                 self.frames[-1]["names"][nm] = addr
             elif ln.startswith("load "):
                 self.loads.append(ln[5:])
+            elif ln.startswith("warm_skip "):
+                self.warm_skip.append(ln[10:])
             elif ln.startswith("frame "):
                 f = ln.split(" ")
                 info = {f[i]: int(f[i + 1]) for i in range(2, len(f) - 1, 2)}

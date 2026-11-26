@@ -492,6 +492,7 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
   }
   uint64_t arena_high_water() const override { return high_; }
   bool hyb_tables() const override { return hyb_; }
+  void warm_up_skip(const std::vector<std::string>& names) override { warm_skip_.insert(names.begin(), names.end()); }
   uint64_t arena_capacity() const override { return arena_bytes_; }
   uint64_t external_recorded() const override { return ext_recorded_; }
   uint64_t external_done() const override {
@@ -506,7 +507,7 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     if (external_) return extension_result(fail("native D3D12 warm_up: recording into the caller's list"), error);
     for (auto& entry : kernels_) {
       NativeKernel& k = entry.second;
-      if (k.pso || !variant_matches(k) || (k.rs != "buffer" && k.rs != "direct")) continue;
+      if (k.pso || warm_skip_.count(entry.first) || !variant_matches(k) || (k.rs != "buffer" && k.rs != "direct")) continue;
       if (!create_pso(k)) return extension_result(false, error);
     }
     return extension_result(true, error);
@@ -1902,6 +1903,7 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
   std::map<uint64_t, NativeAllocation> used_;
   std::map<uintptr_t, Host> hosts_;
   std::multimap<std::string, NativeKernel> kernels_;   // by name; several ports of one name differ in "co"
+  std::set<std::string> warm_skip_;                     // warm_up leaves these out (Device::warm_up_skip)
   std::set<std::string> untagged_cos_;
   std::map<std::string, std::string> tagged_cos_;
   std::vector<NativeEvent> events_;

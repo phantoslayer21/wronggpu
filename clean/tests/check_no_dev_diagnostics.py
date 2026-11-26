@@ -45,6 +45,8 @@ DEV_ONLY_STRINGS = (
     b"/l_q7__hybmut.co",
     b"/l_q7w__hybmut.co",
     b"(WG_L_FORM=hybrid_twin: l_swin_hyb.co, swin_hyb.co)", b"WG_DEV_BNECK_ABORT",
+    # the A/B mask of Model L's l_mode=fast levers (runtime.cpp l_fast_mask, behind WG_DEV_DIAGNOSTICS)
+    b"WG_L_FAST_MASK",
     # the check routes' selector values (WG_L_FORM / WG_M_FORM): a release build does not know their names
     b"hybrid_mutant", b"hybrid_twin", b"__hybmut",
 )
