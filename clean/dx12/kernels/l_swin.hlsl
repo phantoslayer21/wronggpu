@@ -45,7 +45,6 @@
 //                          form, enc0.Win1, enc0.Win2 as the last arguments) and _dec_hyb with l_coef_pack12 as its
 //                          epilogue (SW_OUT_COEF12, COEF_CVT_HW); the same bytes as the launches they replace
 // @wg-kernel l_swin_block_c32_enc_lin_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u,p,p defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_GELU=0,SW_SRC=3,SW_HYB=1,SW_HEAD_UNROLL=1,SW_NORM1_EARLY=1,WG_LD_A16=1,SW_ENTRY_OVERRIDE=l_swin_block_c32_enc_lin_hyb,WG_REV_ORDER=1
-// @wg-kernel l_swin_block_c32_dec_coef12_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u,p,p,p,p,u,u defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=1,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_GELU=0,SW_OUT_F16=1,SW_OUT_COEF12=1,COEF_CVT_HW=1,SW_HYB=1,SW_HEAD_UNROLL=1,WG_LD_A16=1,SW_COEF_ROWS=1,SW_ENTRY_OVERRIDE=l_swin_block_c32_dec_coef12_hyb,WG_REV_ORDER=1
 //   ..._enc_lin_hyb_dump / _dec_coef12_hyb_dump (+ _mutdump: SW_HYB_MUT_ORDER=4)  their stage dumps (probe=1, check only:
 //                          l_hyb_stage_check.py --set fused, the oracle per stage); _scanmut: the fused-square scan's
 //                          mutants (no contraction barrier, built beside every hybrid build, outside the manifest)
@@ -54,7 +53,6 @@
 // @wg-kernel l_swin_block_c32_enc_lin_hyb_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,p,u,u,u,u,p,p defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_GELU=0,SW_SRC=3,SW_HYB=1,SW_HEAD_UNROLL=1,SW_NORM1_EARLY=1,WG_LD_A16=1,HYB_SCAN_MUTANT=1,SW_ENTRY_OVERRIDE=l_swin_block_c32_enc_lin_hyb_scanmut,WG_REV_ORDER=1
 // @wg-kernel l_swin_block_c32_dec_coef12_hyb_dump co=- probe=1 block=256 wave=32 args=p,p,p,p,u,u,u,u,p,p,p,p,u,u,p defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=1,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_GELU=0,SW_OUT_F16=1,SW_OUT_COEF12=1,COEF_CVT_HW=1,SW_HYB=1,SW_HYB_DUMP=1,SW_ENTRY_OVERRIDE=l_swin_block_c32_dec_coef12_hyb_dump
 // @wg-kernel l_swin_block_c32_dec_coef12_hyb_mutdump co=- probe=1 block=256 wave=32 args=p,p,p,p,u,u,u,u,p,p,p,p,u,u,p defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=1,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_GELU=0,SW_OUT_F16=1,SW_OUT_COEF12=1,COEF_CVT_HW=1,SW_HYB=1,SW_HYB_DUMP=1,SW_HYB_MUT_ORDER=4,SW_ENTRY_OVERRIDE=l_swin_block_c32_dec_coef12_hyb_mutdump
-// @wg-kernel l_swin_block_c32_dec_coef12_hyb_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,p,u,u,u,u,p,p,p,p,u,u defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=1,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_GELU=0,SW_OUT_F16=1,SW_OUT_COEF12=1,COEF_CVT_HW=1,SW_HYB=1,SW_HEAD_UNROLL=1,WG_LD_A16=1,HYB_SCAN_MUTANT=1,SW_COEF_ROWS=1,SW_ENTRY_OVERRIDE=l_swin_block_c32_dec_coef12_hyb_scanmut
 //   l_swin_block_c32_enc_hyb_dump / _dec_hyb_dump  check variants (probe=1, never in a model build): the same kernels plus
 //                          the stage dump (SW_HYB_DUMP, the extra pointer argument; l_hyb_stage_check.py)
 // @wg-kernel l_swin_block_c32_enc_hyb_dump co=- probe=1 block=256 wave=32 args=p,p,p,p,u,u,u,u,p defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_GELU=0,SW_SRC=1,SW_HYB=1,SW_HYB_DUMP=1,SW_ENTRY_OVERRIDE=l_swin_block_c32_enc_hyb_dump,WG_REV_ORDER=1

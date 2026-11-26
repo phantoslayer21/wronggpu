@@ -644,20 +644,6 @@ void load_frags_g(uint base, uint off, out uint2 f[KC])
 #define COEF_PACK12 1
 #include "l_coef_px.hlsli"
 #endif
-// SW_COEF_ROWS 1 (the hybrid C32 decoder with the coefficient epilogue): the epilogue reads channels 0..15 only, so the
-// W2 chain runs one 16-row tile instead of two: rows 0..7 = channels 0..7 (tile 0's rows 0..7, the hh = 0 lanes), rows
-// 8..15 = channels 8..15 (tile 1's rows 0..7: the A fragment's lanes t >= 8 read 24 LDS slots further, no repack; the
-// hh = 1 lanes), in place of channels 16..23 and with channels 24..31 dropped. Each output element is the same chain of
-// the same products from the same start (RN16(b2 + z) moved to the hh = 1 lane), so the same bytes; the epilogue takes
-// channels 8..15 back from lane ^ 16.
-#ifndef SW_COEF_ROWS
-#define SW_COEF_ROWS 0
-#endif
-#if SW_COEF_ROWS && (!SW_OUT_COEF12 || !SW_HYB || SW_C != 32 || SW_Q7_CHUNK || SW_HYB_MUT_ORDER || SW_HYB_DUMP || SW_REV_PHI)
-#error "SW_COEF_ROWS: the plain hybrid C32 decoder block with SW_OUT_COEF12 only"
-#endif
-#if SW_OUT_COEF12
-#endif
 #if SW_SRC == 1
 // LHaloF16Src: the lane's channels hh * C/2 + 8 k + j of the member at grid position (pr, pc) (inside the 2-pixel halo),
 // from the FP16 map [H + 4][W + 4][C]
@@ -1586,12 +1572,6 @@ WG_KERNEL(SW_ENTRY)
             acc[k3b] = hyb_add16(hyb_h2f8(acc_h2[k3b]), wg_load8f(b2, 64u * k3b));
 #endif
         }
-#if SW_COEF_ROWS
-        [unroll] for (uint vr = 0; vr < 8; ++vr) {   // channels 8..15 (acc[1] of the hh = 0 lane) to the hh = 1 lane
-            const float ar = asfloat(wg_xor16_u(asuint(acc[1].v[vr])));
-            acc[0].v[vr] = hh != 0u ? ar : acc[0].v[vr];
-        }
-#endif
     }
 #else
     {
@@ -1809,15 +1789,6 @@ WG_KERNEL(SW_ENTRY)
                 hf[0] = hyb_gelu_fin(gp0);
                 hf[1] = hyb_gelu_fin(gp1);
             }
-#if SW_COEF_ROWS
-            {
-                const uint fbr = fb + ((t & 8u) != 0u ? 24u : 0u);   // rows 8..15: tile 1's rows 0..7
-                [unroll] for (uint g4 = 0; g4 < GROUP; ++g4) {
-                    const uint2 f2r = sw_lfrag_b(fbr, g4 * 2u * KC + KC);
-                    acc[0] = wg_wmma_fp8(f2r, hf[g4], acc[0]);
-                }
-            }
-#else
             uint2 f2[GROUP][KC];
             [unroll] for (uint g4 = 0; g4 < GROUP; ++g4)
                 [unroll] for (uint m = 0; m < KC; ++m) f2[g4][m] = sw_lfrag_b(fb, g4 * 2u * KC + KC + m);
@@ -1840,7 +1811,6 @@ WG_KERNEL(SW_ENTRY)
             [unroll] for (uint m2 = 0; m2 < KC; ++m2)
                 [unroll] for (uint g6 = 0; g6 < GROUP; ++g6) acc[m2] = wg_wmma_fp8(f2[g6][m2], hf[g6], acc[m2]);
 #endif
-#endif   // SW_COEF_ROWS
             [unroll] for (uint g8 = 0; g8 < GROUP; ++g8) hcur_h[g8] = hnext_h[g8];
 #if SW_COMMIT_EARLY
             if (more && j0 == GROUP * (SW_COMMIT_EARLY - 1)) st_commit(stage, (buf ^ 1u) * MAXU + 8u * SW_MDZ, MLP_BYTES / 16, tid);
@@ -1986,12 +1956,7 @@ WG_KERNEL(SW_ENTRY)
 #if SW_OUT_COEF12 && COEF_CVT_HW
     // the driver's conversions (the same bits as wg_to_f16 / the software forms): every lane computes, the hh = 0 lanes
     // of real pixels inside the render rectangle store (the conversions need wave-uniform control flow)
-#if SW_COEF_ROWS
-    o16[0] = wg_to_f16_ags(acc[0]);   // hh = 0: channels 0..7; hh = 1: channels 8..15 of the same pixel
-    o16[1] = uint4(wg_xor16_u(o16[0].x), wg_xor16_u(o16[0].y), wg_xor16_u(o16[0].z), wg_xor16_u(o16[0].w));
-#else
     [unroll] for (uint kh = 0; kh < KC; ++kh) o16[kh] = wg_to_f16_ags(acc[kh]);
-#endif
     {
         g_z = wg_grid_ >> 31;
         const float S = wg_ldf(coefW, 320u), T = wg_ldf(coefW, 324u);

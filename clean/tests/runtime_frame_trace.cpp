@@ -382,7 +382,6 @@ int main(int argc, char** argv) {
   bool fail_hyb = false, warm_skip = false;
   float pre_exposure = 1.0f;
   int guard_timeout = -1;
-  float pre_exposure = 1.0f;
   std::vector<std::pair<int, int>> sizes;
   std::set<int> resets;
   for (int a = 8; a < argc; ++a) {

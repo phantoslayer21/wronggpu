@@ -92,6 +92,16 @@
 // @wg-kernel fg_net2_mconv_h3b1u_z co=- entry=fg_net2_mconv block=256 wave=32 args=p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_MT=1,FG_NB=1,FG_UP=1,FG_FUSED_HEADS=1,FG_ZB=1,WG_Z_GRID=1
 // @wg-kernel fg_net2_mconv_h3b1u_s3_z co=- entry=fg_net2_mconv block=256 wave=32 args=p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u,u defines=FG_MT=1,FG_NB=1,FG_UP=1,FG_FUSED_HEADS=1,FG_STAGE_ALL=1,FG_ZB=1,WG_Z_GRID=1
 #include "wg_platform.hlsli"
+#ifndef WG_Z_GRID
+#define WG_Z_GRID 0
+#endif
+#if WG_Z_GRID   // a kernel declared with WG_Z_GRID=1 is launched as (groups, 1, N): wg_gid_z() is the z slice (0 .. N - 1)
+#undef WG_KERNEL
+#define WG_KERNEL(name) [numthreads(WG_BLOCK, 1, 1)] [WaveSize(WG_WAVE)] \
+    void name(uint wg_sv_tid_ : SV_GroupThreadID, uint3 wg_sv_gid3_ : SV_GroupID)
+#define wg_sv_gid_ (wg_sv_gid3_.x)
+#define wg_gid_z() (wg_sv_gid3_.z)
+#endif
 #include "fg_net2.hlsli"
 
 #ifndef FG_MT

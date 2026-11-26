@@ -13,7 +13,7 @@
 //
 // @wg-kernel swin_block_c64_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=64,SW_HEADS=2,SW_MLP=256,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_HEAD_UNROLL=1,SW_MLP_STEP=2,SW_COMMIT_EARLY=1,SW_NORM1_EARLY=1,WG_LD_A16=1,SW_ENTRY_OVERRIDE=swin_block_c64_hyb,WG_REV_ORDER=1
 // @wg-kernel swin_block_c64_add_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=64,SW_HEADS=2,SW_MLP=256,SW_ADD=1,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_HEAD_UNROLL=1,SW_MLP_STEP=2,SW_COMMIT_EARLY=1,SW_NORM1_EARLY=1,WG_LD_A16=1,SW_ENTRY_OVERRIDE=swin_block_c64_add_hyb
-// @wg-kernel swin_block_c96_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_MLP_PAIRS=1,SW_COMMIT_EARLY=1,SW_NORM2_EARLY=1,WG_LD_A16=1,SW_ENTRY_OVERRIDE=swin_block_c96_hyb,WG_REV_ORDER=1
+// @wg-kernel swin_block_c96_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,WG_LD_A16=1,SW_ENTRY_OVERRIDE=swin_block_c96_hyb,WG_REV_ORDER=1
 // @wg-kernel swin_block_c96_add_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=1,SW_SAFE=1,SW_ECL=0,SW_HYB=1,WG_LD_A16=1,SW_ENTRY_OVERRIDE=swin_block_c96_add_hyb
 // @wg-kernel swin_block_c128_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=128,SW_HEADS=4,SW_MLP=512,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,WG_LD_A16=1,SW_ENTRY_OVERRIDE=swin_block_c128_hyb
 //   swin_block_c64_hyb_scanmut / _c128_hyb_scanmut  the fused-square scan's mutants (probe=1, outside the manifest; see
@@ -34,7 +34,7 @@
 // (L_TAIL) holds the expand weights (the section expand_c128_hyb / expand_c96_hyb read), aux unused (null). Byte for byte
 // expand_c128_hyb + swin_block_c96_add_hyb / expand_c96_hyb + swin_block_c64_add_hyb (the expanded map is never stored).
 //   swin_block_c96_add_ex_hyb   dec2 (SW_ECL 128)       swin_block_c64_add_ex_hyb   dec1 (SW_ECL 96)
-// @wg-kernel swin_block_c96_add_ex_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u,p defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=1,SW_SAFE=1,SW_ECL=128,SW_HYB=1,SW_MLP_PAIRS=1,SW_COMMIT_EARLY=1,SW_NORM2_EARLY=1,WG_LD_A16=1,SW_ENTRY_OVERRIDE=swin_block_c96_add_ex_hyb
+// @wg-kernel swin_block_c96_add_ex_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u,p defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=1,SW_SAFE=1,SW_ECL=128,SW_HYB=1,WG_LD_A16=1,SW_ENTRY_OVERRIDE=swin_block_c96_add_ex_hyb
 // @wg-kernel swin_block_c64_add_ex_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u,p defines=SW_C=64,SW_HEADS=2,SW_MLP=256,SW_ADD=1,SW_SAFE=1,SW_ECL=96,SW_HYB=1,SW_HEAD_UNROLL=1,SW_MLP_STEP=2,SW_COMMIT_EARLY=1,SW_NORM1_EARLY=1,WG_LD_A16=1,SW_ENTRY_OVERRIDE=swin_block_c64_add_ex_hyb
 // @wg-kernel swin_block_c96_add_ex_hyb_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,p,u,u,u,u,p defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=1,SW_SAFE=1,SW_ECL=128,SW_HYB=1,SW_MLP_PAIRS=1,SW_COMMIT_EARLY=1,SW_NORM2_EARLY=1,WG_LD_A16=1,HYB_SCAN_MUTANT=1,SW_ENTRY_OVERRIDE=swin_block_c96_add_ex_hyb_scanmut
 // @wg-kernel swin_block_c64_add_ex_hyb_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,p,u,u,u,u,p defines=SW_C=64,SW_HEADS=2,SW_MLP=256,SW_ADD=1,SW_SAFE=1,SW_ECL=96,SW_HYB=1,SW_HEAD_UNROLL=1,SW_MLP_STEP=2,SW_COMMIT_EARLY=1,SW_NORM1_EARLY=1,WG_LD_A16=1,HYB_SCAN_MUTANT=1,SW_ENTRY_OVERRIDE=swin_block_c64_add_ex_hyb_scanmut
