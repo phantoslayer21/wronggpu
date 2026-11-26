@@ -434,6 +434,11 @@ void EntryJson(Json& j, const GameEntry& e) {
         j.Key("rr").Obj().B("found", e.last.rrFound).B("used", e.last.rrUsed).S("mode", e.last.rrMode).S("ms", e.last.rrMs).N("frames", e.last.rrFrames).End();
         j.End();
     }
+#if WRONGGPU_FG
+    // Frame generation (fg.h): only a game that offers it says anything of its files
+    j.B("fg_uses", e.fgUses);
+    if (e.fgUses) j.B("fg_installed", e.fgInstalled);
+#endif
     // Ray Reconstruction (rr.h): only a game that uses it says anything of it
     j.B("rr_uses", e.rrUses);
     if (e.rrUses) j.S("rr_why", e.rrWhy).B("rr_installed", e.rrInstalled).B("rr_enabled", e.rrEnabled).S("rr_mode", e.rrMode).B("rr_path_tracing_only", e.rrPathTracingOnly);

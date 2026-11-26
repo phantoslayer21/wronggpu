@@ -300,8 +300,8 @@ struct Hit {
     bool sticky = false;   // in the game page's right column (View::stickCol): it does not move 1:1 with the scroll
 };
 enum Page { P_LIBRARY, P_GAME, P_SETTINGS, P_COUNT };
-enum Task { T_NONE, T_MODEL, T_SELFINSTALL, T_SELFUNINSTALL, T_FIRSTRUN, T_COLLECT, T_RRDATA, T_MODELK, T_MODELL };  // View::task (T_RRDATA: the Ray
-// Reconstruction data; T_MODELK / T_MODELL: the Model K / Model L data, Settings > Model and runtime)
+enum Task { T_NONE, T_MODEL, T_SELFINSTALL, T_SELFUNINSTALL, T_FIRSTRUN, T_COLLECT, T_RRDATA, T_MODELK, T_MODELL, T_MODELFG };  // View::task (T_RRDATA: the Ray
+// Reconstruction data; T_MODELK / T_MODELL: the Model K / Model L data, Settings > Model and runtime; T_MODELFG: frame generation's)
 // B_PRIMARY: a filled accent capsule (Play, Apply, Continue). B_SECONDARY: a grey capsule (More, Discard in a sheet).
 // B_PLAIN: a grey rounded rectangle, radius 8 (a settings row's buttons: "Choose a DLSS file..."). B_GHOST: no fill until
 // hovered, radius 8 (the toolbar-like Rescan / Add game, Discard on the capsule). B_GLASS: a translucent white capsule with
@@ -378,6 +378,9 @@ enum : int {
     ID_G_RRCFG0 = 3093, ID_G_RRCFG_OPEN = 3095, ID_G_RRCFG_COPY, ID_G_RRCFG_CHECK, ID_G_RRCFG_FIX,
     ID_G_OPTI0 = 3100,  // + editable OptiScaler row (x10: + option)
     ID_G_OPTI_END = ID_G_OPTI0 + 10 * 64,  // room for 64 rows; the Settings ids start above it
+    // Frame generation (fg.h; a build with its choice): its switch, the data's Convert, Set up (an install without its files), the
+    // presenter's pop-up, the multiplier's segments (+ 0..4: 2x..6x) and the preset's (+ 0..2: A, B, C)
+    ID_G_FGON = 3800, ID_G_FGCONVERT, ID_G_FGREPAIR, ID_G_FGPRESENTER, ID_G_FGMULT0 = 3810, ID_G_FGPRESET0 = 3820,
     ID_S_MODELFILE = 4000, ID_S_RECONVERT, ID_S_OPTIFILE, ID_S_OPTIDIR, ID_S_ADDFOLDER, ID_S_CLEARFOLDERS, ID_S_PLAY, ID_S_UPDATE,
     ID_S_URL, ID_S_CHECKNOW, ID_S_SAVEURL, ID_S_SELFINSTALL, ID_S_SELFUNINSTALL,
     ID_S_MODELTEXT, ID_S_HIPTEXT,  // text for UI Automation and a tooltip (not focusable): the model data's and the HIP runtime's files
@@ -391,6 +394,8 @@ enum : int {
     // Settings > Model K data and Model L data (0.7.0): Options... (a menu: Choose a DLSS file..., Convert again), the two ways,
     // the words for UI Automation (not focusable)
     ID_S_KMORE = 4056, ID_S_KFILE, ID_S_KCONVERT, ID_S_KTEXT, ID_S_LMORE = 4060, ID_S_LFILE, ID_S_LCONVERT, ID_S_LTEXT,
+    // Settings > Frame generation data (fg.h; a build with its choice): the same four as Model K's and Model L's
+    ID_S_FGMORE = 4064, ID_S_FGFILE, ID_S_FGCONVERT, ID_S_FGTEXT,
     ID_S_REMOVEDATA = 4070,  // a portable copy's Launcher row: Remove data... (the shared data, its way out: it has no uninstall)
     ID_S_FOLDERRM0 = 4100,  // + index: an added game folder's Remove (kMaxFolderRows of them)
     ID_S_FOLDERTEXT0 = 4400,  // + index: an added game folder's words for UI Automation and its tooltip (its whole path; not focusable)
@@ -404,7 +409,7 @@ enum : int {
     // menu commands
     M_OPEN_FOLDER = 100, M_OPEN_LOG, M_COLLECT, M_REPAIR, M_ROLLBACK, M_UNINSTALL, M_RESET, M_UPDATE, M_INSTALL, M_CLEAN, M_ADOPT,
     M_REMOVEGAME,  // a game added by hand taken out of the Library (its page's More)
-    M_FILTER0 = 200, M_OPTI0 = 300,
+    M_FILTER0 = 200, M_FGPRESENTER0 = 220, M_OPTI0 = 300,  // M_FGPRESENTER0: + 0..3 frame generation's presenters
 };
 constexpr int kTileSpan = ID_TILEQA - ID_TILE;  // the Library draws at most this many games (ui_library.cpp)
 constexpr int kMaxFolderRows = 256;             // Settings lists at most this many added game folders, each with its Remove
@@ -518,6 +523,8 @@ struct View {
     bool rrReady = false, rrBuild = false; wstring rrWhy, rrSource;
     // 0.7.0: the Model K and Model L data (builds with those models; read with the model's, off the UI thread)
     bool modelKReady = false, modelLReady = false; wstring modelKWhy, modelLWhy;
+    // frame generation's data (fg.h; a build with its choice, read with the model's), and whether this build has its files (fgBuild)
+    bool fgReady = false, fgBuild = false; wstring fgWhy;
     // WrongGPU's edition of OptiScaler is what installs use (optiedition.h, downloaded): without it a game whose RR needs it (gamerules.h) can't
     // use WrongGPU's Ray Reconstruction, and its page says so
     bool rrEdition = true;
@@ -559,6 +566,10 @@ extern View v;
 bool RrReadyForGame(const wstring& dir, const wstring& exe, wstring* why = nullptr);
 wstring RrBackgroundWords(const wstring& exe);  // 0.6.0 polish: the game page's RR row while it is prepared again in the background
 static_assert(ID_G_OPTI_END <= ID_S_MODELFILE, "the OptiScaler rows' ids must not reach the Settings page's ids");
+static_assert(ID_G_OPTI_END <= ID_G_FGON && ID_G_FGPRESENTER < ID_G_FGMULT0 && ID_G_FGMULT0 + 5 <= ID_G_FGPRESET0 && ID_G_FGPRESET0 + 3 <= ID_S_MODELFILE,
+              "frame generation's ids must stay between the OptiScaler rows' ids and the Settings page's ids");
+static_assert(ID_S_LTEXT < ID_S_FGMORE && ID_S_FGTEXT < ID_S_REMOVEDATA, "the frame generation data row's ids must stay between Model L's and Remove data");
+static_assert(M_FILTER0 + 5 <= M_FGPRESENTER0 && M_FGPRESENTER0 + 4 <= M_OPTI0, "the presenters' menu commands must stay between the output filter's and OptiScaler's");
 static_assert(ID_G_LEARN < ID_G_EXEC0 && ID_G_RECHECK < ID_G_EXEC0, "the header's ids must stay under Runs on's segments");
 static_assert(ID_G_UNSAVED < ID_G_RRON && ID_G_RRREPAIR < ID_G_RRMODE0 && ID_G_RRPREP < ID_G_RRMODE0 && ID_G_RRMODE0 + 3 <= ID_G_RRCFG0 &&
               ID_G_RRCFG0 + 2 <= ID_G_RRCFG_OPEN && ID_G_RRCFG_FIX < ID_G_OPTI0,
@@ -930,6 +941,7 @@ void NoteFrom(HWND hwnd, const wstring& text, int icon);  // launcher_ui.cpp: a 
 wstring BusyDoneWords();  // what the running operation waits on, for "... once <this>.": "the update is done", "Quarry Nine's repair is done"
 std::vector<MenuItem> MoreMenu();
 std::vector<MenuItem> FilterMenu();     // the output filter's choices (each with its line)
+std::vector<MenuItem> FgPresenterMenu();  // frame generation's presenters (each with its line; a build with its choice)
 wstring KeyName(const string& value);   // "0x2D" -> "Insert"
 extern const int kMenuKeys[20];         // the keys the "Menu key" select offers
 inline Context& Ctx() { return wg::app::g.ctx; }

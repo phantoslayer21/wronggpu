@@ -55,7 +55,8 @@ float SettingRow(Gfx& gx, float x, float y, float w, bool border, wchar_t icon, 
     // a conversion running: an activity indicator beside its button (it has no amount to show), 22 DIPs of the row
     auto working = [](const Act& a) {  // the one "Converting..."
         return (v.task == T_MODEL && (a.id == ID_S_RECONVERT || a.id == ID_S_MODELMORE)) || (v.task == T_RRDATA && (a.id == ID_S_RRCONVERT || a.id == ID_S_RRMORE)) ||
-               (v.task == T_MODELK && (a.id == ID_S_KCONVERT || a.id == ID_S_KMORE)) || (v.task == T_MODELL && (a.id == ID_S_LCONVERT || a.id == ID_S_LMORE));
+               (v.task == T_MODELK && (a.id == ID_S_KCONVERT || a.id == ID_S_KMORE)) || (v.task == T_MODELL && (a.id == ID_S_LCONVERT || a.id == ID_S_LMORE)) ||
+               (v.task == T_MODELFG && (a.id == ID_S_FGCONVERT || a.id == ID_S_FGMORE));
     };
     for (auto& a : acts) { actW += ButtonW(gx, a.text, 0, kBtnH, B_PLAIN) + 8 + (working(a) ? 22.f : 0.f); ctrlH = kBtnH; }
     if (actW > 0) actW -= 8;
@@ -356,7 +357,7 @@ wstring PresetDataFile(wchar_t preset) {
 }
 
 void ConvertPresetData(wchar_t preset, const wstring& dll, bool noScan, wstring& msg, bool& ok, bool& again) {
-    const wstring name = wstring(L"Model ") + preset;
+    const wstring name = preset == L'G' ? wstring(L"Frame generation") : wstring(L"Model ") + preset;  // (L'G': fg.h, preset FG)
     PresetContext p(preset);
     if (!p.ok) { msg = name + L": " + p.error; return; }
     const std::vector<StoreGame> libs = noScan ? std::vector<StoreGame>{} : ScanLibraries();
@@ -575,6 +576,34 @@ void PaintSettings(Gfx& gx, const Rc& area) {
 #endif
 #if WRONGGPU_MODEL_L
     modelRows.push_back(presetRow(L'L', v.modelLReady, v.modelLWhy, ID_S_LMORE, ID_S_LFILE, ID_S_LCONVERT, ID_S_LTEXT, T_MODELL));
+#endif
+#if WRONGGPU_FG
+    // Frame generation data (fg.h, preset FG), in the Model K / L rows' pattern: converted once from a game's DLSS Frame
+    // Generation file (nvngx_dlssg.dll, version 310.1 or newer); optional (a grey dot) until a game turns frame generation on
+    modelRows.push_back([&](float ry, bool b) {
+        const bool ready = v.fgReady;
+        wstring fwhy = v.fixture ? wstring() : v.fgWhy;
+        const bool fAbsent = fwhy.empty() || fwhy.find(L"no converted") != wstring::npos;
+        if (!fwhy.empty()) fwhy[0] = towupper(fwhy[0]);
+        bool wanted = false;
+        for (auto& g0 : v.games) wanted = wanted || (g0.hasRecord && g0.fgOn);
+        std::vector<Act> acts = ready ? std::vector<Act>{{ID_S_FGMORE, L"Options\u2026", false, modelCan, L"Frame generation data options"}}
+                                      : std::vector<Act>{{ID_S_FGFILE, L"Choose a DLSS file\u2026", false, modelCan, L"Choose a DLSS Frame Generation file for the frame generation data"},
+                                                         {ID_S_FGCONVERT, fAbsent ? L"Convert" : L"Convert again", false, modelCan,
+                                                          fAbsent ? L"Convert the frame generation data" : L"Convert the frame generation data again", wanted}};
+        if (v.task == T_MODELFG) acts = {{ready ? ID_S_FGMORE : v.focus == ID_S_FGFILE ? ID_S_FGFILE : ID_S_FGCONVERT, L"Converting\u2026", false, false, L"", !ready && wanted}};
+        const wstring path = v.fixture ? L"C:\\Users\\Player\\AppData\\Local\\WrongGPU\\model\\FG\\model.wgcm" : PresetDataFile(L'G');
+        const wstring tip = (ready || fAbsent ? L"" : L"Why: " + fwhy + L". ") + L"Frame generation data file: " + path;
+        const float h = SettingRow(gx, lx, ry, lw, b, ic::cube, L"Frame generation data",
+                                   ready     ? Status{0, L"Ready", L"Games with frame generation turned on use it."}
+                                   : fAbsent ? Status{wanted ? 1 : 2, L"Not converted yet",
+                                                      wstring(wanted ? L"" : L"Only games with frame generation turned on need it. ") +
+                                                          L"Choose a game's DLSS Frame Generation file (version 310.1\u00a0or\u00a0newer), or Convert finds one in your games."}
+                                             : Status{1, L"Not ready", L"The frame generation data on this PC can't be used. Convert it again."},
+                                   L"", acts, 0, -1, {}, 0, ready || !fAbsent ? ID_S_FGTEXT : 0, ready || !fAbsent ? tip : L"");
+        waits(acts, modelWait, v.task == T_MODELFG);
+        return h;
+    });
 #endif
     if (rrRows) {
         modelRows.push_back([&](float ry, bool b) {

@@ -372,7 +372,7 @@ extern int modalDepth;  // launcher_ui.cpp: the nested modal loops open (a note 
 void ModalClosed();
 void UninstallIfWaiting();
 // The file and folder pickers (split from launcher_ui.cpp: source size)
-bool Browse(int mode, wstring& out) {  // 0 exe, 1 folder, 2 model dll, 3 OptiScaler archive, 4 OptiScaler folder, 5 RR model dll
+bool Browse(int mode, wstring& out) {  // 0 exe, 1 folder, 2 model dll, 3 OptiScaler archive, 4 OptiScaler folder, 5 RR model dll, 6 FG dll
     if (!v.live) return false;
     const bool folder = mode == 1 || mode == 4;
     IFileOpenDialog* d = nullptr;
@@ -381,6 +381,7 @@ bool Browse(int mode, wstring& out) {  // 0 exe, 1 folder, 2 model dll, 3 OptiSc
     if (mode == 1) d->SetTitle(L"Choose a folder that holds games");
     else if (mode == 4) d->SetTitle(L"Choose your unpacked OptiScaler folder");
     else if (mode == 2) { COMDLG_FILTERSPEC spec[] = {{L"DLSS model file (nvngx_dlss.dll)", L"nvngx_dlss.dll"}, {L"DLL files (*.dll)", L"*.dll"}}; d->SetFileTypes(2, spec); d->SetTitle(L"Choose a DLSS file (version 310.5 or newer)"); }
+    else if (mode == 6) { COMDLG_FILTERSPEC spec[] = {{L"DLSS Frame Generation file (nvngx_dlssg.dll)", L"nvngx_dlssg.dll"}, {L"DLL files (*.dll)", L"*.dll"}}; d->SetFileTypes(2, spec); d->SetTitle(L"Choose a game's DLSS Frame Generation file (version 310.1 or newer)"); }
     else if (mode == 5) { COMDLG_FILTERSPEC spec[] = {{L"DLSS Ray Reconstruction file (nvngx_dlssd.dll)", L"nvngx_dlssd.dll"}, {L"DLL files (*.dll)", L"*.dll"}}; d->SetFileTypes(2, spec); d->SetTitle(L"Choose a game's DLSS Ray Reconstruction file"); }
     else if (mode == 3) { COMDLG_FILTERSPEC spec[] = {{L"OptiScaler release (*.7z, *.zip) or its OptiScaler.dll", L"*.7z;*.zip;OptiScaler.dll"}}; d->SetFileTypes(1, spec); d->SetTitle(L"Choose your OptiScaler download"); }
     else {

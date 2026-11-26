@@ -46,6 +46,10 @@ struct EmbeddedData {
     // not in this build.
     int fgMapId = 0;
     const wchar_t* fgMapSha256 = L"";
+    // ...and its files (tools/make_payload.py --fg; CMake WRONGGPU_FG with WRONGGPU_FG_DIR): plugins\WrongGPU-FG.asi and its
+    // kernels fg-dxil\<name>.dxil (fg.h FgInstallRel: where an install puts each). fgCount 0: not in this build.
+    const PayloadFile* fgFiles = nullptr;
+    size_t fgCount = 0;
     const PayloadFile* begin() const { return files; }
     const PayloadFile* end() const { return files + count; }
 };

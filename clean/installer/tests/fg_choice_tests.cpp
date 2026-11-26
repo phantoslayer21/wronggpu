@@ -39,12 +39,12 @@ Profile With(std::initializer_list<std::pair<const char*, const char*>> kv) {
 
 int main() {
     try {
-        // ---- the settings: four keys, off by default, `set` only (not on the settings page) -----------------------------
+        // ---- the settings: four keys, off by default (`set`, and the game page's Frame Generation section) -------------
         const char* const defs[][2] = {{"fg", "off"}, {"fg_preset", "A"}, {"fg_multiplier", "2"}, {"fg_presenter", "auto"}};
         for (auto& kd : defs) {
             const SettingDef* d = FindSetting(kd[0]);
-            require(d && d->layer == Layer::Fg && d->tier == Tier::Advanced && string(d->def) == kd[1] && string(d->values) == FgValues(kd[0]),
-                    "an FG setting: Layer::Fg, Advanced, its default and spellings (fg.h)");
+            require(d && d->layer == Layer::Fg && d->tier == Tier::Basic && string(d->def) == kd[1] && string(d->values) == FgValues(kd[0]),
+                    "an FG setting: Layer::Fg, Basic (on the game page since 0.7.0), its default and spellings (fg.h)");
         }
         const Profile def = DefaultProfile();
         require(def.get("fg") == "off" && def.get("fg_preset") == "A" && def.get("fg_multiplier") == "2" && def.get("fg_presenter") == "auto" &&

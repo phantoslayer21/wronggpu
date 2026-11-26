@@ -114,6 +114,10 @@ struct GameEntry {
                                    // RR runs there only with WrongGPU's edition of OptiScaler
     bool optiEdition = false;      // the install's OptiScaler is WrongGPU's edition (rr.h RecordHasEdition; installed games only)
     bool rrInstalled = false;      // the install placed WrongGPU's RR files
+    // Frame generation (fg.h; a build with its choice, WRONGGPU_FG): only games that offer it show anything of it
+    bool fgUses = false;           // the game has a frame generation library (nvngx_dlssg.dll), or its install has the FG files
+    bool fgInstalled = false;      // the install placed WrongGPU's frame generation plugin and kernels (fg.h RecordHasFg)
+    bool fgOn = false;             // its profile turns frame generation on (fg=on; read with the record)
     // 0.7.0: the SR model ("m", "k", "l") and its mode ("fast", "exact") the game starts with: its profile, with the choices made
     // in the game folded in (FoldSrFromGame); read with the record
     string srModel = "m", srMode = "fast";
@@ -233,6 +237,11 @@ Profile GameProfile(const wstring& dir);  // profile.ini, else the profile its w
 // and never replaces the player's choice), and the SR modes of settings.ini (m_mode / k_mode / l_mode = fast | exact, which
 // WrongGPU.asi's card writes). True when it changed `p`.
 bool FoldSrFromGame(const wstring& dir, Profile& p);
+// Frame generation's four settings (fg.h; a build with its choice) as the game's settings.ini has them, when changed there
+// outside the launcher (each valid value in its exact spelling; an invalid one is never taken). fg=off is not taken while
+// frame generation's data is not on this PC: the launcher writes that itself then, and the profile keeps the player's choice.
+// True when it changed `p`.
+bool FoldFgFromGame(const wstring& dir, Profile& p);
 // #219 (0.6.5): the launcher never rewrites the game's wronggpu.ini after the install (the install's defaults, the player's to
 // edit). The front end's settings it manages go into the game's state folder, wronggpu-setup\settings.ini (wg_state.h), which
 // the front end reads over wronggpu.ini: upscaler (network / amd, from the profile's wronggpu on / off) and every runtime key
