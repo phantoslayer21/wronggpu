@@ -95,7 +95,7 @@ def constant_sets(rng):
     sets = {"sequence-synthetic": SQ.model_synthetic().osym}
     try:
         sets["model-file"] = SQ.model_from_file(SQ.DEFAULT_MODEL, SQ.DEFAULT_MAP).osym
-    except Exception as e:  # noqa: BLE001 - the model file is optional here
+    except (Exception, SystemExit) as e:  # noqa: BLE001 - the model file is optional here (SystemExit: model_from_file refuses)
         print("model file not used:", e)
     base = sets["sequence-synthetic"]
     sets["random-table"] = replace(base, TR=table(rng))

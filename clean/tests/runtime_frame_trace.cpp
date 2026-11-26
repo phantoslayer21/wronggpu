@@ -15,6 +15,7 @@
 //   --geo=<key>=<n>   a Swin / GEMM launch-geometry override in WgRtConfig (nt, gemm_threads, swin_threads, wpw64,
 //                     wpw96, wpw128, wpg0 .. wpg4 = block_wpg[k]); repeatable
 //   --hdr=<0|1>       WgRtConfig.hdr (default 0)
+//   --pre-exposure=<f> WgRtFrame.pre_exposure of every frame (default 1)
 //   --guard-timeout=<frame>  the frame guard (Device::guard_begin, the hybrid bottleneck's wait timeout): in that frame
 //                     the bottleneck "times out" (at the guard's second reading of that frame, the words a timed-out wait
 //                     writes are set first: sync words 12 and 15 + 1). The device models the guard: "guard_begin
@@ -22,6 +23,8 @@
 //                     launch, copy, upload and memset is printed as "skipped <what>" and not done; guard_end copies the
 //                     16 bytes at the word for guard_read; a memset / upload of the word prints "guard_clear" /
 //                     "guard_upload <word 12> <word 15>"
+//   --warm-skip       print "warm_skip <kernel>" for every kernel the route leaves out of the device's warm-up
+//                     (Device::warm_up_skip; Model L's l_mode), before the first frame; without it nothing is printed
 //   --fail-hyb-tables the device refuses the hybrid tables (Device::hyb_reserve returns false: create must refuse a
 //                     Model L hybrid context on the native-D3D12 stand-in, --backend=3); without it the reservation
 //                     succeeds (silently: the trace lines stay those of every other device)
@@ -84,7 +87,10 @@ struct Signature {
 const Signature kSignatures[] = {
     {"input_encoder", "ppppppppppppE"},     // Model M's encoder and Model L's values (q in place of the features)
     {"input_encoder_q20", "ppppppppppppE"},  // Model L's values, q in its 20-byte form (native D3D12, fusion le)
+    {"input_encoder_q20_pf", "ppppppppppppE"},  // the same with the pre-exposure division folded in (WG_L_POST_TF, pi != 1)
     {"coef_decoder", "ppppppppD"},          // Model M's decoder (also its pack12 form)
+    {"swin_block_c96_add_ex_hyb", "ppppiiiip"},  // the fused decoder blocks (WG_L_EXFUSE): the blocks' arguments, then aux
+    {"swin_block_c64_add_ex_hyb", "ppppiiiip"},  // (null: unused by the expand kernels)
     {"swin_block_*", "ppppiiii"},           // Model M's blocks: x, skip, out, w, H, W, ox, oy
     {"swin_bneck6_hyb", "ppppppppppiiiiiii"},  // the hybrid bottleneck in one launch (speed lever 4): x, out, tmp,
                                                // sync, b0 ... b5's blobs, H, W, even / odd offsets, workgroups
@@ -94,6 +100,7 @@ const Signature kSignatures[] = {
                                                     // le): x = q, then enc0.Win1, enc0.Win2
     {"l_swin_block_c32_enc_lin_hyb", "ppppiiiipp"},      // its hybrid twin (speed lever 3; the same arguments)
     {"l_swin_block_c32_dec_coef12_hyb", "ppppiiiippppii"},  // its hybrid twin (speed lever 3; the same arguments)
+    {"l_swin_block_c32_dec_coef12_add_nc", "ppppiiiippppii"},  // l_mode=fast: the same arguments, the skip S = xadd
     {"l_swin_block_c32*", "ppppiiii"},      // Model L's blocks (clean/l/FORMATS.md)
     {"l_q7_block_*", "pppppiiii"},  // the FP16-form blocks (l_q7.co / l_q7w.co, their hybrid builds): x, skip, out,
                                     // w, the tables, H, W, ox, oy
@@ -108,6 +115,8 @@ const Signature kSignatures[] = {
     {"l_post_recon", "ppppppppppppPp"},  // Model M's post_recon arguments (clean/l/FORMATS.md step 5)
     {"l_coef_pack12", "ppppppD"},  // the same arguments (B unused)
     {"l_post_recon_p12", "ppppppppppppPp"},  // the same arguments (A, C: pack12 images; B unused)
+    {"l_post_tf_p12", "ppppppppppppPpiiiiiiii"},     // Model L's true fusion: the post_recon arguments, then ow, oh, dec_scale and pi
+    {"l_post_tf_p12_pf", "ppppppppppppPpiiiiiiii"},  // (their bits), the row pitch (unused), post_tf's chunk plan (cpairs, k1, c2)
     {"post_filter_c1_s4", "ppiiiiip"},  // display, out, dw, dh, ow, oh, dec_scale (its bits), exposure pair
     {"l_post_recon_ldr", "ppppppppppppPp"},      // the LDR forms: the same arguments (the exposure pair not read)
     {"l_post_recon_p12_ldr", "ppppppppppppPp"},
@@ -117,7 +126,17 @@ const Signature kSignatures[] = {
 
 const char* kinds_of(const std::string& kernel) {
   const size_t slash = kernel.find('/');
-  const std::string k = slash == std::string::npos ? kernel : kernel.substr(slash + 1);
+  std::string k = slash == std::string::npos ? kernel : kernel.substr(slash + 1);
+  // a fast-mode kernel (l_mode=fast, launched in place of its base kernel) has the base kernel's arguments:
+  // "<kernel>_fast", "<kernel>_fast3" -> <kernel>; "<stem>_w2p_fast", "<stem>_w2t_fast" -> "<stem>_nc" (build_dx12.py fast_base)
+  const auto ends = [&](const char* suf) {
+    const size_t n = std::strlen(suf);
+    return k.size() > n && k.compare(k.size() - n, n, suf) == 0;
+  };
+  if (ends("_w2p_fast")) k.replace(k.size() - 9, 9, "_nc");
+  else if (ends("_w2t_fast")) k.replace(k.size() - 9, 9, "_nc");
+  else if (ends("_fast3")) k.resize(k.size() - 6);
+  else if (ends("_fast")) k.resize(k.size() - 5);
   // dec1's block fused with the decoder (swin_block_c64_add_dec0*): x, skip, w, H, W, ox, oy, then the decoder's
   // arguments: not the blocks' common form
   if (k.find("_add_dec0") != std::string::npos) return "pppiiii";
@@ -135,7 +154,7 @@ class RecordingDevice : public Device {
   std::map<DevPtr, int> index;  // allocation number of each block
   int allocs = 0, frame = -1, fail_frame = -1;
   std::string fail_kernel;
-  bool fail_hyb = false, hyb = false;
+  bool fail_hyb = false, hyb = false, print_warm_skip = false;
   DevPtr next = 0x10000;
   // the frame guard (see --guard-timeout)
   int guard_timeout = -1, guard_reads = 0;
@@ -189,6 +208,11 @@ class RecordingDevice : public Device {
     return true;
   }
   bool hyb_tables() const override { return hyb; }
+  // the kernels the route leaves out of the device's warm-up (--warm-skip prints them: "warm_skip <name>")
+  void warm_up_skip(const std::vector<std::string>& names) override {
+    if (print_warm_skip)
+      for (const std::string& n : names) log->push_back("warm_skip " + n);
+  }
   bool alloc(DevPtr* p, size_t bytes) override {
     *p = next;
     mem[next].assign(bytes ? bytes : 1, 0);
@@ -355,7 +379,8 @@ int main(int argc, char** argv) {
   cfg.auto_exposure = 0;
   const int frames = std::atoi(argv[7]);
   std::string options, map_path, fail;
-  bool fail_hyb = false;
+  bool fail_hyb = false, warm_skip = false;
+  float pre_exposure = 1.0f;
   int guard_timeout = -1;
   std::vector<std::pair<int, int>> sizes;
   std::set<int> resets;
@@ -377,10 +402,14 @@ int main(int argc, char** argv) {
       for (const std::string& f : split(s.substr(8), ',')) resets.insert(std::atoi(f.c_str()));
     } else if (s.compare(0, 6, "--hdr=") == 0) {
       cfg.hdr = std::atoi(s.c_str() + 6);
+    } else if (s.compare(0, 15, "--pre-exposure=") == 0) {
+      pre_exposure = (float)std::atof(s.c_str() + 15);
     } else if (s.compare(0, 7, "--fail=") == 0) {
       fail = s.substr(7);
     } else if (s == "--fail-hyb-tables") {
       fail_hyb = true;
+    } else if (s == "--warm-skip") {
+      warm_skip = true;
     } else if (s.compare(0, 16, "--guard-timeout=") == 0) {
       guard_timeout = std::atoi(s.c_str() + 16);
     } else if (s.compare(0, 6, "--geo=") == 0) {
@@ -407,6 +436,7 @@ int main(int argc, char** argv) {
   auto dev = std::make_unique<RecordingDevice>(&log);
   RecordingDevice* rec = dev.get();
   rec->fail_hyb = fail_hyb;
+  rec->print_warm_skip = warm_skip;
   rec->guard_timeout = guard_timeout;
   if (!fail.empty()) {
     const size_t at = fail.find('@');
@@ -432,7 +462,7 @@ int main(int argc, char** argv) {
     fr.rh = rh;
     fr.mv_scale[0] = fr.mv_scale[1] = 1.0f;
     fr.exposure = 1.0f;
-    fr.pre_exposure = 1.0f;
+    fr.pre_exposure = pre_exposure;
     fr.reset = resets.count(f) ? 1 : 0;
     const bool ok = runtime_frame(rt, fr, nullptr);
     WgRtFrameInfo info = WgRtFrameInfo();

@@ -11,6 +11,7 @@
 #include "checks.h"  // FindAntiCheat, VersionLess
 #include "gamerules.h"
 #include "optiscaler.h"
+#include "fg.h"
 #include "pe.h"
 #include "rr.h"
 
@@ -213,6 +214,10 @@ static std::vector<wstring> UnrecordedPlugins(const wstring& exeDir, const Recor
     for (auto sub : kPluginDirs)
         for (auto& f : ListFiles(Join(exeDir, sub), L"*.asi")) {
             const wstring rel = f.substr(exeDir.size() + 1), recRel = prefix.empty() ? rel : Join(prefix, rel);
+            // WrongGPU's frame generation plugin (fg.h) is WrongGPU's own, recorded or not (a repair's restore takes it out first,
+            // a release's files dropped in by hand): it hooks frame generation, never Ray Reconstruction, so it never keeps
+            // WrongGPU's RR out and is never moved aside as another setup's
+            if (IsFgPlugin(rel)) continue;
             bool mine = false;
             if (ours)
                 for (auto& e : ours->e)

@@ -100,7 +100,9 @@ void StartFirstRun();
 const UINT WM_APP_FIRSTRUN = WM_APP + 21;
 // the model data's state (off the UI thread: it reads and hashes the model file), and the graphics card when asked
 // seq: when its read began (ReadModelState; 0: not a read, always taken): an older read that ends later is not taken
-struct HealthMsg { bool model = false; wstring why, source, hip; bool gpuDone = false; GpuInfo gpu; bool rr = false; wstring rrWhy, rrSource; unsigned seq = 0; };
+struct HealthMsg { bool model = false; wstring why, source, hip; bool gpuDone = false; GpuInfo gpu; bool rr = false; wstring rrWhy, rrSource; unsigned seq = 0;
+                   bool k = false, l = false; wstring kWhy, lWhy;     // (0.7.0: the Model K / Model L data)
+                   bool fg = false; wstring fgWhy; };                 // (0.7.0: frame generation's data)
 // the first run's checks (only read: nothing on this PC changes before the player chooses and presses Continue; state: 0 ok,
 // 1 note, 2 problem): posted as each part finishes (WPARAM 1, lines only) and once at the end with the games, the model
 // data's state read on the worker (the window's thread never hashes the model file), the DLSS file found and converted in

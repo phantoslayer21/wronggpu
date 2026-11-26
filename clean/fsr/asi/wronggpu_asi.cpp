@@ -34,6 +34,7 @@
 #include "model_choice_record.h"
 #include "opti_module.h"
 #include "opti_resolver.h"
+#include "sr_card.h"
 
 #if defined(_MSC_VER)
 #include <intrin.h>
@@ -353,6 +354,40 @@ extern "C" __declspec(dllexport) void WrongGpuAsiShowModelV1(char model) {
 
 extern "C" __declspec(dllexport) int WrongGpuAsiQueryStatusV1(WrongGpuAsiStatusV1* status, uint32_t caller_size) {
     return g_diagnostics.Query(status, caller_size, g_state.hooked.load(), g_state.model.load());
+}
+
+// The model the card names (sr_card.h): the one the front end reports it runs, else the game's model choice record (read at
+// most once a second), else the plugin's saved entry; 0 while AMD's FSR is selected in the plugin's menu.
+namespace {
+char ActiveModel() {
+    const char shown = g_state.shown.load();
+    if (wgchoice::IsModel(shown)) return shown;
+    if (shown == wgasi::kModelAmd) return 0;
+    static std::mutex m;
+    static uint64_t at = 0;
+    static char cached = 0;
+    std::lock_guard lock(m);
+    const uint64_t now = GetTickCount64();
+    if (at == 0 || now - at >= 1000) {
+        at = now ? now : 1;
+        wgchoice::Record r;
+        std::string why;
+        cached = wgchoice::ReadRecordFile(RecordPath(), &r, &why) == wgchoice::ReadResult::Ok ? r.model : 0;
+    }
+    if (cached) return cached;
+    const char saved = g_state.model.load();
+    return saved == wgasi::kModelAmd ? 0 : saved;
+}
+}  // namespace
+
+// The host's plugin interface (the WrongGPU edition of OptiScaler; clean/wgshared/include/wg_host_menu_abi.h, the same
+// export and table as the RR plugin's): the "WrongGPU Upscaler" card with the SR model's Fast / Exact mode (sr_card.h).
+extern "C" __declspec(dllexport) bool OptiPluginInit(const WgHostMenuApi* api, WgHostMenuPlugin* plugin) {
+    wgasi::card::Hooks hooks;
+    hooks.gameDir = [] { return wgchoice::GameDirOf(RecordPath()).wstring(); };
+    hooks.activeModel = [] { return ActiveModel(); };
+    hooks.log = [](const std::string& line) { AsiLog::Get().Write(line); };
+    return wgasi::card::Init(api, plugin, std::move(hooks));
 }
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {

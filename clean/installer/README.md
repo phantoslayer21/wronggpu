@@ -570,6 +570,32 @@ runtime's `network` and `k_fast` options stay at their defaults; nothing here se
 keeps the product builds K-less) and by `tests/run_model_k_tests.py` (a build with both choices: refusal, both files,
 record hashes, an L control, back to M byte for byte, repair without the data, uninstall).
 
+**Frame generation** (#96; CMake `WRONGGPU_FG`, default `OFF`: strictly off; on only in a build whose payload runs
+WrongGPU's frame generation; `src/wg_core/fg.h`). With it off nothing about frame generation exists: `set <game> fg=...`
+(and the other three keys) is refused by name (exit 10), preset FG's converter map is not embedded (`model ... --preset=FG`
+is a bad command line, exit 10), and no game's files change. With it on:
+- Four profile keys, `set` only (not on the settings page), in exactly the spellings of the frame generation proxy's reader
+  (no case folding; a refusal names the allowed spellings): `fg=off|on` (default off), `fg_preset=A|B|C` (A),
+  `fg_multiplier=2|3|4|5|6` (2), `fg_presenter=auto|hwfq|dxgi_tearing|dxgi_vsync` (auto). profile.ini has a line only for
+  a value away from its default, so a game never opted in keeps its profile.ini as before.
+- They are written into the game's state folder (`wronggpu-setup\settings.ini`), all four, in the same write as the front
+  end's keys, once the profile opts in (or the file already holds one of them, so turning it off is written down too); a
+  game never opted in gets no FG key. They never go into wronggpu.ini or OptiScaler.ini. `fg` is written as off while
+  frame generation's data on this PC is not ready (with a warning saying how to convert it; the profile keeps on). `get`
+  shows the file's values, `fg_issues` lists invalid ones there (the default is used for each); `status <game>` adds an
+  `fg` object (profile, game, data).
+- `set <game> fg=on` needs a frame generation library in the game (`nvngx_dlssg.dll`; none: refused, exit 5, nothing
+  saved). When the data is not ready it is converted first from the game's own library; a library older than 310.1 (for
+  example 3.7) has no frame-generation model and is refused by its version with the version named (exit 5, nothing saved).
+- `model status|convert --preset=FG [--model=<nvngx_dlssg.dll>]` converts with preset FG's map (CMake `WRONGGPU_MAP_FG`,
+  default `data/fg.v1.map.json`, loaded as preset FG) into `%LOCALAPPDATA%\WrongGPU\model\FG\model.wgcm` with its own
+  `model-source.txt`. Its search looks for `nvngx_dlssg.dll` (the ignore lists apply as for every conversion); a file older
+  than 310.1 is refused by its version before it is read.
+
+Tested by `fg-choice` (ctest: profile.cpp built with the choice on; runs in CI, which keeps it off), and by `wg-core` and
+`launcher-core` (the keys and their spellings, settings.ini beside the other keys, the opt-in rule, the library's version
+on synthetic PE files, preset FG by name, and the build without the choice).
+
 **Ignore lists** (`src/wg_core/convert_ignore.*`): WrongGPU converts only the vendor DLL files that came with the player's
 own games, never a copy that another program's installer placed in a game. Such an installer registers the files it placed
 in a list the launcher always reads, and the player does nothing. Every search for a file to convert (the model and the Ray

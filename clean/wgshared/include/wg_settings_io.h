@@ -390,7 +390,8 @@ public:
 
     // Opens Local\WrongGPU.settings.v1.<pid> or creates and seeds it from `iniPath` (module = WG_SS_WRITER_* id of the
     // caller, recorded as creator). `name` overrides the mapping name (tests). Lines for the log go to *log.
-    Status open(uint32_t module, const std::wstring& iniPath, std::string* log, const wchar_t* name = nullptr);
+    // existingOnly: open the block only when another module created it (never create and seed it): Absent otherwise.
+    Status open(uint32_t module, const std::wstring& iniPath, std::string* log, const wchar_t* name = nullptr, bool existingOnly = false);
     void close();
     Status status() const { return status_; }
     bool present() const { return block_ != nullptr; }
@@ -408,6 +409,12 @@ public:
     // no block, or a value out of range.
     bool write_slot(uint32_t slot, int32_t value, bool persist = true);
     bool write_slots(const uint32_t* slots, const int32_t* values, uint32_t n, bool persist = true);
+    // Slot owners (wg_shared_settings.h): the in-game card of WrongGPU.asi owns the SR mode slots (sr_m_mode, sr_l_mode,
+    // sr_k_mode; wg_sr_modes.h) and writes them whether or not its module is the elected writer, in the same seqlock.
+    // Never persisted to wronggpu.ini (the card saves the game's state folder). False: another slot, no block, or a
+    // value out of range.
+    bool write_owned_slot(uint32_t slot, int32_t value);
+    static bool is_owned_slot(uint32_t slot) { return slot == WG_OPT_SR_M_MODE || slot == WG_OPT_SR_L_MODE || slot == WG_OPT_SR_K_MODE; }
     // Text option from the block's text area (key=value, written at seeding).
     bool text(const std::string& key, std::string* out) const;
     const std::wstring& ini() const { return ini_; }
@@ -416,6 +423,7 @@ public:
     WgSharedSettingsBlock* raw_for_tests() { return block_; }
 
 private:
+    void locked_write(const uint32_t* slots, const int32_t* values, uint32_t n);
     void* mapping_ = nullptr;
     WgSharedSettingsBlock* block_ = nullptr;
     Status status_ = Status::Closed;
@@ -591,7 +599,8 @@ void SharedSettings::close() {
 
 std::string SharedSettings::name() const { return narrow(name_); }
 
-SharedSettings::Status SharedSettings::open(uint32_t module, const std::wstring& iniPath, std::string* log, const wchar_t* name) {
+SharedSettings::Status SharedSettings::open(uint32_t module, const std::wstring& iniPath, std::string* log, const wchar_t* name,
+                                            bool existingOnly) {
     close();
     ini_ = iniPath;
     if (name) {
@@ -602,8 +611,14 @@ SharedSettings::Status SharedSettings::open(uint32_t module, const std::wstring&
         name_ = buf;
     }
     auto say = [log](const std::string& line) { if (log) *log += line + "\n"; };
-    HANDLE m = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, WG_SS_SIZE, name_.c_str());
-    const DWORD err = GetLastError();
+    HANDLE m = existingOnly ? OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, name_.c_str())
+                            : CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, WG_SS_SIZE, name_.c_str());
+    const DWORD err = existingOnly && m ? static_cast<DWORD>(ERROR_ALREADY_EXISTS) : GetLastError();
+    if (!m && existingOnly) {
+        say("settings: no shared block " + narrow(name_) + " yet (created by the SR front end or the RR plugin)");
+        status_ = Status::Absent;
+        return status_;
+    }
     if (!m) {
         say("settings: shared block " + narrow(name_) + " not available (error " + std::to_string(err) + "); own ini and environment only");
         status_ = Status::Absent;
@@ -747,6 +762,21 @@ bool SharedSettings::write_slots(const uint32_t* slots, const int32_t* vals, uin
     if (!block_ || !writer_ || !n) return false;
     for (uint32_t i = 0; i < n; ++i)
         if (!value_in_range(slots[i], vals[i])) return false;
+    locked_write(slots, vals, n);
+    if (persist && !ini_.empty()) {
+        for (uint32_t i = 0; i < n; ++i)
+            persist_ini_value(ini_, kWgOptions[slots[i]].ini_section, kWgOptions[slots[i]].key, value_name(slots[i], vals[i]));
+    }
+    return true;
+}
+
+bool SharedSettings::write_owned_slot(uint32_t slot, int32_t value) {
+    if (!block_ || !is_owned_slot(slot) || !value_in_range(slot, value)) return false;
+    locked_write(&slot, &value, 1);
+    return true;
+}
+
+void SharedSettings::locked_write(const uint32_t* slots, const int32_t* vals, uint32_t n) {
     volatile LONG* gen = wg_gen(block_);
     LONG g;
     for (;;) {  // enter the seqlock (CAS even -> odd: also safe for instances that share a writer id)
@@ -761,11 +791,6 @@ bool SharedSettings::write_slots(const uint32_t* slots, const int32_t* vals, uin
         InterlockedOr(reinterpret_cast<volatile LONG*>(&block_->live_mask[slots[i] >> 5]), static_cast<LONG>(1u << (slots[i] & 31)));
     }
     InterlockedExchange(gen, g + 2);
-    if (persist && !ini_.empty()) {
-        for (uint32_t i = 0; i < n; ++i)
-            persist_ini_value(ini_, kWgOptions[slots[i]].ini_section, kWgOptions[slots[i]].key, value_name(slots[i], vals[i]));
-    }
-    return true;
 }
 
 bool SharedSettings::write_slot(uint32_t slot, int32_t value, bool persist) { return write_slots(&slot, &value, 1, persist); }

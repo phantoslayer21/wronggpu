@@ -2449,9 +2449,9 @@ int main(int argc, char** argv) {
         CHECK(Count(log, "interface version 2, flags 0x1 (same-frame split)") == 1);
         // runtime_options reach the runtime after the front end's keys, then the model the create runs (0.6.5's model
         // choice, FrontEnd::ChooseModel): this test folder has no WrongGPU state folder and runtime_options names no model,
-        // so the fallback is Model M
+        // so the fallback is Model M, with its mode (the registry default fast) placed before the model item
         CHECK(Count(log, "fake runtime created (options: view=upscale;filter=bilinear;jitter_compensation=1;warp_weight=0.9;debug_gain=4;"
-                         "split_test=0;timing_log=1;sync=pipelined;model=M)") == 1);
+                         "split_test=0;timing_log=1;sync=pipelined;m_mode=fast;model=M)") == 1);
         CHECK(Count(log, "installing WrongGPU's D3D12 vtable hooks (a backend sets WG_BACKEND_NEEDS_SPLIT)") == 1);
         CHECK(Count(log, "first half on W1 behind order ticket 3,") == 1 && Count(log, "released in ExecuteCommandLists") == (mode=="network_split_stats_twice"?6:3));
         CHECK(Count(log, "refused") == 0 && Count(log, "ERROR:") == 0 && Count(log, " ERROR U") == 0);

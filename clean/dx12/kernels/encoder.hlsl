@@ -16,6 +16,7 @@
 // projection into "tok < ntok" (its only effect is that store); here every lane runs it (the WMMA needs the whole wave)
 // and only the store is conditional: the same bytes.
 // @wg-kernel input_encoder co=encoder.co block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b116
+// @wg-kernel input_encoder_pf co=encoder.co entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b116 defines=WG_STAGED_PIDIV=1
 // @wg-kernel input_encoder_direct co=encoder.co entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b116 rs=direct defines=WG_DIRECT_TEXTURES=1
 //
 // Motion at output resolution (WG_ENC_MO; HIP: input_encoder_mo of kernels/encoder_mo.hip, code object encoder_mo.co
@@ -25,6 +26,7 @@
 // kernel without depth, then WgEncMoParams (mw, mh, pitch, wide, kmx, kmy) after WgEncParams. Buffer form: the raw
 // motion buffer (wg_motion_hi.hlsli); direct form: the game's motion texture (its `motion` pointer is not read).
 // @wg-kernel emo/input_encoder_mo co=encoder_mo.co entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,b116,b24 defines=WG_ENC_MO=1
+// @wg-kernel emo/input_encoder_mo_pf co=encoder_mo.co entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,b116,b24 defines=WG_ENC_MO=1,WG_STAGED_PIDIV=1
 // @wg-kernel emo/input_encoder_mo_direct co=encoder_mo.co entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,b116,b24 rs=direct defines=WG_DIRECT_TEXTURES=1,WG_ENC_MO=1
 //
 // Model L's value kernel (WG_ENC_VALUES_OUT; HIP: encoder.hip built with WG_ENC_VALUES_OUT=1 as l_enc_values.co, issue
@@ -44,6 +46,10 @@
 // runtime fusion le).
 // @wg-kernel lev/input_encoder_q20 co=- entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b116 defines=WG_ENC_VALUES_OUT=1,WG_ENC_Q20=1
 // @wg-kernel lev/input_encoder_direct_q20 co=- entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b116 rs=direct defines=WG_DIRECT_TEXTURES=1,WG_ENC_VALUES_OUT=1,WG_ENC_Q20=1
+// The staged route's pre-exposure division folded in (WG_STAGED_PIDIV; wg_pidiv.hlsli; runtime WG_L_POST_TF with pi != 1):
+// the colour is divided by pi (the bits of EncParams.pad0) as color_divide stores it, so no color_divide launch runs; the
+// post's colour reads (l_post_tf_p12_pf) divide the same way.
+// @wg-kernel lev/input_encoder_q20_pf co=- entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b116 defines=WG_ENC_VALUES_OUT=1,WG_ENC_Q20=1,WG_STAGED_PIDIV=1
 #include "wg_platform.hlsli"
 #ifndef WG_ENC_VALUES_OUT
 #define WG_ENC_VALUES_OUT 0
@@ -64,6 +70,9 @@
 #endif
 #if defined(WG_ENC_MO)
 #include "wg_motion_hi.hlsli"
+#endif
+#if defined(WG_STAGED_PIDIV)
+#include "wg_pidiv.hlsli"
 #endif
 
 WG_ARGS_BEGIN
@@ -182,7 +191,10 @@ void pixel_values(int mode, Uni U, int x, int y, float4 c, float2 mn, float2 mf,
     [unroll] for (uint ch = 0; ch < 3; ++ch) {
         float ec = U.e * c[ch];
         float r = kG * wg_log2(wg_fmax(mad(100.0f, wg_fmin(ec, 32752.0f), 1.0f), k1em4));
-        float g = ec > 32752.0f ? kG * wg_log2(mad(100.0f, ec, 1.0f)) : r;
+        float g = r;
+        [branch] if (WaveActiveAnyTrue(ec > 32752.0f)) {
+            g = ec > 32752.0f ? kG * wg_log2(mad(100.0f, ec, 1.0f)) : r;
+        }
         bool nan = ec != ec;
         v[ch] = nan ? 0.0f : r;
         gc[ch] = nan ? 0.0f : g;
@@ -204,10 +216,35 @@ void pixel_values(int mode, Uni U, int x, int y, float4 c, float2 mn, float2 mf,
         [unroll] for (uint i2 = 15; i2 < 20; ++i2) v[i2] = 0.0f;
         return;
     }
+#if WG_ENC_Q20
+    // Model L's q20 encoders: near / far at the bit pattern of center (no motion change between the three vectors, the
+    // common case) read the same history texels with the same weights, so their values are center's, bit for bit; the
+    // history read and the transfer of that position run only when the whole wave needs them.
+    {
+        float3 h1 = hist_values(mode, U, qx[1], qy[1], valid[1], gc);
+        bool same0 = asuint(qx[0]) == asuint(qx[1]) && asuint(qy[0]) == asuint(qy[1]);
+        bool same2 = asuint(qx[2]) == asuint(qx[1]) && asuint(qy[2]) == asuint(qy[1]);
+        float3 h0 = h1, h2 = h1;
+        [branch] if (WaveActiveAnyTrue(!same0)) {
+            float3 t = hist_values(mode, U, qx[0], qy[0], valid[0], gc);
+            h0 = same0 ? h1 : t;
+        }
+        [branch] if (WaveActiveAnyTrue(!same2)) {
+            float3 t = hist_values(mode, U, qx[2], qy[2], valid[2], gc);
+            h2 = same2 ? h1 : t;
+        }
+        float3 h3 = hist_values(mode, U, qx[3], qy[3], valid[3], gc);
+        v[3] = h0.x; v[4] = h0.y; v[5] = h0.z;
+        v[6] = h1.x; v[7] = h1.y; v[8] = h1.z;
+        v[9] = h2.x; v[10] = h2.y; v[11] = h2.z;
+        v[12] = h3.x; v[13] = h3.y; v[14] = h3.z;
+    }
+#else
     [unroll] for (uint k2 = 0; k2 < 4; ++k2) {
         float3 h = hist_values(mode, U, qx[k2], qy[k2], valid[k2], gc);
         v[3 + 3 * k2] = h.x; v[4 + 3 * k2] = h.y; v[5 + 3 * k2] = h.z;
     }
+#endif
 
     // Motion disagreement (value 15)
     {
@@ -516,9 +553,15 @@ void encoder_main()
     }
 
     // Slot 0, then slot 1: the 20 values -> 5 words of FP8, values 8..15 swapped with the partner lane (lane ^ 16)
+#if defined(WG_STAGED_PIDIV)
+    const PiDiv pd = pidiv_make((uint)P_pad0);
+#endif
     uint q[2][5], x8[2][2];
     [unroll] for (uint dx2 = 0; dx2 < 2; ++dx2) {
         float4 c = cs[dx2];
+#if defined(WG_STAGED_PIDIV)
+        c = float4(asfloat(asuint(pidiv3(c.xyz, pd, (uint)P_rw >> 31u)) ^ ((uint)P_rw >> 31u)), c.w);
+#endif
         float v[20];
         if (U.mode == kHistGeneral)   // uniform
             pixel_values(kHistGeneral, U, (int)xs[dx2], y, c, mn[dx2], mf[dx2], mc[dx2], v

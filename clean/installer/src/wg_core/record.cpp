@@ -14,6 +14,7 @@
 #endif
 
 #include "detect.h"
+#include "fg.h"
 #include "fingerprint.h"
 #include "gamerules.h"
 #include "json_writer.h"
@@ -1337,8 +1338,18 @@ bool PayloadDiffers(Context& ctx, const Record& m) {
     if (m.payloadVersion.empty()) return true;  // no payload line: another build (one that didn't write it)
     Record cur = m;                               // the same entries: the menu plugin counts only where the record copies it
     SetPayloadLine(ctx, cur);
-    return !IEq(m.runtimeSha, cur.runtimeSha) || !IEq(m.frontEndSha, cur.frontEndSha) || !IEq(m.pluginSha, cur.pluginSha) ||
-           !IEq(InstalledRrPluginSha(m), cur.rrPluginSha);
+    if (!IEq(m.runtimeSha, cur.runtimeSha) || !IEq(m.frontEndSha, cur.frontEndSha) || !IEq(m.pluginSha, cur.pluginSha) ||
+        !IEq(InstalledRrPluginSha(m), cur.rrPluginSha))
+        return true;
+    // frame generation's plugin (fg.h): where the install placed it and this build has it, by the record entry's hash (the
+    // payload line has no field of its own for it); another build of it is an update too
+    if (RecordHasFg(m) && FgPayloadAvailable(ctx)) {
+        wstring installed, now;
+        for (auto& e : m.e) if (e.action == L"copy" && IsFgPlugin(e.rel)) installed = e.inst;
+        for (size_t i = 0; i < ctx.data->fgCount; ++i) if (IEq(ctx.data->fgFiles[i].rel, kFgPayloadPlugin)) now = ctx.data->fgFiles[i].sha256;
+        if (!IEq(installed, now)) return true;
+    }
+    return false;
 }
 string OwnedFilesJson(const Record& m) {
     Json j;

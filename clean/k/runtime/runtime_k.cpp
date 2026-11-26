@@ -365,10 +365,12 @@ KBlkParams block_params(const KStageInfo& st, DevPtr blob, DevPtr x, DevPtr y, D
 // k_stage_<name>; *ng = NG (0: not wide), *w2 = two windows per workgroup.
 std::string stage_kernel_base(const KStageInfo& st, bool f16, bool has_y, int nwin, int* ng, bool* w2) {
   *ng = wide_ng(st.name, f16, nwin);
-  // e0, e1, d1, d0: two windows per workgroup (k_stage2_*, k_launch.py WINDOWS2_STAGES; k_net.py WINDOWS2_VARIANTS;
-  // d1's needs its block output map p.y, which the network always gives it)
+  // e0, e1, d0: two windows per workgroup (k_stage2_*, k_launch.py WINDOWS2_STAGES; k_net.py WINDOWS2_VARIANTS).
+  // d1 runs one window per workgroup (k_stage_d1): at 1440p Quality its 1,025 windows as 513 two-window workgroups
+  // fill the 256 slots of four workgroups per CU for two rounds and one more, measured on D3D12 (RX 9070 XT) -14.6 us
+  // per frame with one window per workgroup, the same bytes (the same per-window maths)
   *w2 = !*ng && (std::strcmp(st.name, "e0") == 0 || std::strcmp(st.name, "e1") == 0 ||
-                 (std::strcmp(st.name, "d1") == 0 && has_y) || std::strcmp(st.name, "d0") == 0);
+                 std::strcmp(st.name, "d0") == 0);
   const std::string h = f16 ? "h" : "";
   return (*ng ? "k_stagew" + std::to_string(*ng) : std::string(*w2 ? "k_stage2" : "k_stage")) + h + "_" + st.name;
 }
@@ -400,6 +402,19 @@ bool option_given(const WgRtConfig& c, const std::string& key) {
     a = b + 1;
   }
   return false;
+}
+// the position (item index) of the last key= item in the runtime options followed by WG_RUNTIME_OPTIONS; -1 when absent
+long option_pos(const WgRtConfig& c, const std::string& key) {
+  const char* env = std::getenv("WG_RUNTIME_OPTIONS");
+  const std::string text = std::string(c.runtime_options ? c.runtime_options : "") + ";" + (env ? env : "");
+  long pos = -1, index = 0;
+  for (size_t a = 0; a <= text.size(); ++index) {
+    size_t b = text.find(';', a);
+    if (b == std::string::npos) b = text.size();
+    if (text.compare(a, key.size() + 1, key + "=") == 0) pos = index;
+    a = b + 1;
+  }
+  return pos;
 }
 // a value for a one-line message: control characters as '?'
 std::string one_line(std::string v) {
@@ -504,6 +519,12 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   const std::string kuni = option(c, "k_in_uniforms");
   if (!kuni.empty() && kuni != "0" && kuni != "1") return fail("model K: k_in_uniforms must be 0 or 1");
   input_uniforms_ = kuni != "0";
+  // k_color_fuse (1, the default: on the native D3D12 device the exact tiled input kernel also writes the output colour
+  // taps, kx/k_in_tiled_color[_uniform|_direct], and the separate k_out_color launch is skipped; 0: the separate
+  // k_out_color as before. The same taps either way: a timing switch)
+  const std::string kcf = option(c, "k_color_fuse");
+  if (!kcf.empty() && kcf != "0" && kcf != "1") return fail("model K: k_color_fuse must be 0 or 1");
+  color_fuse_ = kcf != "0";
   const std::string diag = option(c, "k_diag");
   if (!diag.empty() && diag != "input2" && diag != "copyin" && diag != "input2+copyin" && diag != "copyin+input2")
     return fail("model K: unknown k_diag " + diag + " (input2, copyin, input2+copyin)");
@@ -535,7 +556,37 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   // Newton step (kernels k_out_color*__a2, k_out_pixel_c*__a2; clean/k/dx12/hlsl/k_out.hlsli KO_APPROX). A comma list
   // selects several. The native D3D12 device only (HIP and the hybrid device refuse); taking one adds a note of create
   // (not bit-exact).
-  if (option_given(c, "k_approx")) {
+  // k_mode (0.7.0; the SR front end passes the player's Fast / Exact choice, clean/wgshared/include/wg_sr_modes.h):
+  // "fast" takes the k_approx forms this create supports (a1 with the exact input stage, a2 without k_fast=1 and with the
+  // compact head, both on the native D3D12 device only); what it cannot take runs the standard path, said in a note, never
+  // a refusal. "exact": the standard path. A k_approx item after the k_mode item (later in runtime_options, or in
+  // WG_RUNTIME_OPTIONS, which comes after them) decides instead. Neither given: the standard path, as before.
+  const long kmode_at = option_pos(c, "k_mode"), kapprox_at = option_pos(c, "k_approx");
+  if (kmode_at >= 0 && kmode_at > kapprox_at) {
+    const std::string kmode = option(c, "k_mode");
+    if (kmode == "fast") {
+      std::string left;
+      if (c.backend == 3) {
+        approx_a1_ = in_exact_;
+        approx_a2_ = !fast_ && compact_head_;
+        if (!approx_a1_) left += "; a1 not taken (the fast input stage was chosen)";
+        if (!approx_a2_) left += fast_ ? "; a2 not taken (k_fast=1)" : "; a2 not taken (k_head=full)";
+      } else {
+        left = "; the standard path runs (its faster forms need the native D3D12 device)";
+      }
+      approx_note_ = std::string("model K: k_mode=fast") + (approx_a1_ || approx_a2_ ? approx_tag() : std::string()) +
+                     (approx_a1_ || approx_a2_ ? " (the faster mode; Exact is the standard path)" : "") + left +
+                     (approx_a1_ ? std::string("; a1 applies to the tiled input stage, frames on the legacy input path "
+                                               "run the standard input stage")
+                                 : std::string());
+    } else if (kmode == "exact") {
+      approx_note_ = "model K: k_mode=exact (the standard path)";
+    } else {
+      return fail("model K: unknown k_mode " + one_line(kmode) + " (fast or exact)");
+    }
+  } else if (kapprox_at >= 0 && (option(c, "k_approx") == "off" || option(c, "k_approx") == "none")) {
+    approx_note_ = "model K: k_approx=" + option(c, "k_approx") + " (the standard path)";
+  } else if (kapprox_at >= 0) {
     const std::string kapprox = option(c, "k_approx");
     if (kapprox.empty()) return fail("model K: k_approx is empty (a1, a2 or a1,a2)");
     size_t at = 0;
@@ -696,13 +747,15 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
     wdev_[kv.first] = p;
   }
   if (!f16_ && (c.backend == 2 || c.backend == 3)) {
-    for (const char* name : {"e0", "e1", "d1", "d0"}) {
+    // the FP32 bias planes of the narrow stages whose D3D12 kernels take one (KB_BIAS32): the two-window e0 / e1 / d0 and
+    // the one-window e2 / d2 / d1 (network() launches them so, stage_kernel_base)
+    for (const char* name : {"e0", "e1", "d1", "d0", "e2", "d2"}) {
       const KStageInfo& st = *k_stage(name);
       if (f8data_.count(name) || (st.head && !compact_head_)) continue;
-      const std::string kernel = std::string("k_stage2_") + name + (st.head ? "_hp" : "");
+      const bool one = std::strcmp(name, "e0") != 0 && std::strcmp(name, "e1") != 0 && !st.head;
+      const std::string kernel = std::string(one ? "k_stage_" : "k_stage2_") + name + (st.head ? "_hp" : "");
       if (!dev_->require_d3d12_port(kernel, st.head ? "s184:p19.b32,p,p,p" : "s184:p19.b32,p")) return dfail();
-      if (c.backend == 3 && std::strcmp(name, "d1") == 0 &&
-          !dev_->require_d3d12_port(kernel + "__rodd", "s184:p19.b32,p")) return dfail();
+      if (c.backend == 3 && one && !dev_->require_d3d12_port(kernel + "__rodd", "s184:p19.b32,p")) return dfail();
       const auto& weight = blobs_.at(name);
       std::vector<uint8_t> compact;
       if (st.head) {
@@ -840,7 +893,7 @@ struct SmxCase {
   int wb, hb;  // base map size
   int sets;    // independent synthetic data sets, the outputs of all hashed together
 };
-// e2, e3, d3, d2, d1 (k_stage_e2, k_stagew2_e3, k_stagew2_d3, k_stage_d2, k_stage2_d1) and e4 / d4 with NG = 4 (at most 24
+// e2, e3, d3, d2, d1 (k_stage_e2, k_stagew2_e3, k_stagew2_d3, k_stage_d2, k_stage_d1) and e4 / d4 with NG = 4 (at most 24
 // windows: 20 at 512 x 384; on 8 data sets) at a 512 x 384 base map; e4 / d4 with NG = 2 (above 24 windows) and m
 // (k_stagew4_m, 42 or more windows) at 1536 x 1280. Sized so that a one-stage wrong-rounding mutant of either form
 // changes its case's outputs (the mutant runs in the #254 evidence).
@@ -908,6 +961,12 @@ std::string KRuntime::smx_case_name(int i, int ox, int oy, bool rodd) const {
          (c.sets > 1 ? "*" + std::to_string(c.sets) : std::string()) + "/o" + std::to_string(ox) + "," + std::to_string(oy);
 }
 
+// the narrow stage kernels (D3D12) that take the FP32 bias plane narrow_bias_[stage] as their second argument (KB_BIAS32)
+bool narrow_bias32_kernel(const std::string& k) {
+  const std::string b = k.size() > 6 && k.compare(k.size() - 6, 6, "__rodd") == 0 ? k.substr(0, k.size() - 6) : k;
+  return b == "k_stage2_e0" || b == "k_stage2_e1" || b == "k_stage_d1" || b == "k_stage_e2" || b == "k_stage_d2";
+}
+
 // One form of every case at its offsets (this model's: all = false; every possible one: all = true): (case name of the
 // mix form, the outputs' SHA-256, first 8 bytes big-endian) into *out.
 bool KRuntime::smx_check(bool rodd, bool all, std::vector<std::pair<std::string, uint64_t>>* out) {
@@ -955,7 +1014,7 @@ bool KRuntime::smx_check(bool rodd, bool all, std::vector<std::pair<std::string,
       int ng = 0;
       bool w2 = false;
       const std::string k = stage_kernel_base(st, false, true, p.nwx * p.nwy, &ng, &w2) + (rodd ? "__rodd" : "");
-      const bool use_bias = db && (k == "k_stage2_d1" || k == "k_stage2_d1__rodd");
+      const bool use_bias = db && narrow_bias32_kernel(k);
       wgc::Sha256 sha;
       for (int set = 0; ok && set < c.sets; ++set) {
         ok = load(set);
@@ -1214,7 +1273,7 @@ bool KRuntime::network(int f, const std::function<bool(const char*)>& after) {
     } else {
       const std::string kernel = stage_kernel(k, st.name);
       const auto bias_plane = narrow_bias_.find(st.name);
-      const bool use_bias = k == "k_stage2_e0" || k == "k_stage2_e1" || k == "k_stage2_d1";
+      const bool use_bias = narrow_bias32_kernel(k);
       void* bias = use_bias && bias_plane != narrow_bias_.end() ? &bias_plane->second : nullptr;
       if (!launch(kernel.c_str(), grid, (unsigned)(kThreads * (ng ? ng : 1)), &p, bias)) return false;
     }
@@ -1444,8 +1503,13 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
     a1_legacy_noted_ = true;
     frame_note_ = "model K: k_approx=a1 applies to the tiled input stage only; this context's frames on the legacy input path (a render size above 0.68 x the output, a jitter outside [-0.5, 0.5], or input_tiled=0) run the standard input stage (this line once per context)";
   }
-  // k_in_exact: the output colour taps by k_out_color (KFrame's exact plan), not by the tiled input kernel
-  const bool use_tiled_color = use_tiled && !in_exact_ && !reset && 4LL * Bw_ >= W_ && 4LL * Bh_ >= H_;
+  // The output colour taps by the tiled input kernel (HIP k_in_tiled_color[_uniform]) instead of a separate k_out_color:
+  // the fast input stage on every backend; the exact input stage and k_approx=a1 (including k_mode=fast = a1,a2) on the
+  // native D3D12 device (backend 3), whose kx/k_in_tiled_color[_uniform|_direct][__a1] compute the taps of k_out_color
+  // from the colour texels the tile stage loads anyway. Standalone k_approx=a2 without a1 keeps k_out_color__a2; the
+  // pre-breakpoint S fallback (kxs/) has no fused form; k_color_fuse=0 turns it off.
+  const bool exact_color_fuse = color_fuse_ && in_exact_ && cfg_.backend == 3 && (!approx_a2_ || approx_a1_) && !s_breakpoints_fallback_;
+  const bool use_tiled_color = use_tiled && (!in_exact_ || exact_color_fuse) && !reset && 4LL * Bw_ >= W_ && 4LL * Bh_ >= H_;
   KiHost input_host = {};
   const bool use_uniforms = use_tiled && !native_direct_ && input_uniforms_ && input_uniforms_safe(fin, &input_host);
   auto input_stage = [&]() {
@@ -1618,6 +1682,10 @@ std::vector<std::string> KRuntime::d3d12_kernels() const {
     const std::string suffix = approx_a1_ ? "__a1" : "";
     if (!native_direct_ && input_uniforms_) v.push_back(tag + "k_in_tiled_uniform" + suffix);
     v.push_back(tag + "k_in_tiled" + d + suffix);  // input_uniforms_safe refusing the host uniforms
+    if (cfg_.backend == 3 && color_fuse_ && (!approx_a2_ || approx_a1_) && !s_breakpoints_fallback_) {  // the fused forms with the output colour taps (use_tiled_color)
+      if (!native_direct_ && input_uniforms_) v.push_back(tag + "k_in_tiled_color_uniform" + suffix);
+      v.push_back(tag + "k_in_tiled_color" + d + suffix);
+    }
   }
   if (approx_a2_) {  // k_approx=a2 (opt-in)
     v.push_back("k_out_color" + d + "__a2");
@@ -1639,7 +1707,7 @@ std::vector<std::string> KRuntime::d3d12_kernels() const {
       std::string k;
       if (st.head) k = compact_head_ ? "k_stage2_d0_hp" : "k_stage2_d0_hidden";
       else if (ng) k = "k_stagew" + std::to_string(ng) + "_" + n;
-      else k = (n == "e0" || n == "e1" || n == "d1" ? "k_stage2_" : "k_stage_") + n;
+      else k = (n == "e0" || n == "e1" ? "k_stage2_" : "k_stage_") + n;   // d1: k_stage_d1 (stage_kernel_base)
       if (std::find(v.begin(), v.end(), k) == v.end()) v.push_back(k);
       // the round-to-odd form the create-time self-check can select (KRuntime::smx_select)
       if (!st.head && n != "e0" && n != "e1" && std::find(v.begin(), v.end(), k + "__rodd") == v.end())

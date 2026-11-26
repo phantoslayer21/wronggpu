@@ -48,10 +48,10 @@ class TestKernelSets(unittest.TestCase):
         self.assertTrue(m <= full)
         extra = full - m
         self.assertTrue(extra)
-        # Model L's kernels: its code objects, the l_* direct-route kernels, MODEL_L_ONLY, and the hybrid twins (*_hyb:
-        # Model L's route only; build_dx12.py is_model_l)
+        # Model L's kernels: its code objects, the l_* direct-route kernels, MODEL_L_ONLY, the hybrid twins (*_hyb) and the
+        # fast-mode twins (*_fast): Model L's route only; build_dx12.py is_model_l)
         self.assertFalse([k for k in extra if not (k[1].startswith("l_") or k[0].startswith("l_") or k[0] in B.MODEL_L_ONLY
-                                                   or k[0].endswith("_hyb"))])
+                                                   or k[0].endswith("_hyb") or B.fast_base(k[0]) is not None)])
 
 
     def test_model_k_adds_only_model_k_kernels(self):
@@ -89,6 +89,35 @@ class TestKernelSets(unittest.TestCase):
         self.assertTrue(fg, "no frame-generation kernel declared")
         full = set(B.kernel_set(True))
         self.assertFalse([k for k in fg if k in full])
+
+
+    def test_fast_twins_take_their_base_kernels_arguments(self):
+        """A fast-mode kernel (Model L's l_mode=fast: "<kernel>_fast", "<kernel>_fast3", "<stem>_w2p_fast" / "<stem>_w2t_fast" in place of
+        "<stem>_nc", build_dx12.py fast_base) is launched by the runtime in place of its base kernel with the same grid, block
+        and arguments: the declarations agree in block, wave and args, and in group unless the fast kernel is a
+        two-windows-per-wave one (its own 128-lane workgroup per launched workgroup, gscale 1: the device's launch of the
+        same grid); the fast kernel has no HIP code object, and is in Model L's set only."""
+        decls = {}
+        for fn in sorted(os.listdir(B.KERNEL_DIR)):
+            if fn.endswith(".hlsl"):
+                for d in B.kernel_decls(os.path.join(B.KERNEL_DIR, fn)):
+                    decls.setdefault(d["name"], []).append(d)
+        twins = [n for n in decls if B.fast_base(n) is not None]
+        self.assertTrue(twins)
+        self.assertTrue([n for n in twins if n.endswith("_w2p_fast")])
+        self.assertTrue([n for n in twins if n.endswith("_fast3")])
+        full, m = set(B.kernel_set(True)), set(B.kernel_set(False))
+        for n in twins:
+            base = B.fast_base(n)
+            self.assertIn(base, decls, n)
+            (t,) = decls[n]
+            self.assertEqual(t["co"], "-", n)
+            self.assertTrue(B.is_model_l(t), n)
+            self.assertIn((n, "-"), full - m, n)
+            w2 = t.get("group") == 128 and t.get("gscale") == 1 and t["block"] == 256
+            for b in decls[base]:
+                for key in ("block", "wave", "args") + (() if w2 else ("group", "gscale")):
+                    self.assertEqual(t.get(key), b.get(key), (n, key))
 
 
 if __name__ == "__main__":

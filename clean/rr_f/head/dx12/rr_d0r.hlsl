@@ -278,6 +278,9 @@ v8f rr_r16(v8f a) { return rr_widen(wg_to_f16_ags(a)); }
 #define RR_HR16(a) rr_r16(a)
 #endif
 
+#ifndef RR_HQ8S
+#define RR_HQ8S 0   // clean/rr-f-wave4 R4.1a: step 1's q / v^T tiles quantised per head (see there); head.fast.rx only
+#endif
 #if RR_STRICT_STEP == 1
 #include "../../kernels/rr_exact_math.hlsli"
 v8f rr_head_step(uint2 a0, uint2 b0, uint2 a1, uint2 b1, v8f c)
@@ -557,6 +560,32 @@ WG_KERNEL(rr_d0r_head)
     uint2 fq[8], fv[8];
     [unroll] for (uint i0 = 0; i0 < 8; ++i0) { fq[i0] = rr_frag(F_Q + i0, lane); fv[i0] = rr_frag(F_V + i0, lane); }
     RR_AB(AX, xb0, xb1)
+#if RR_HQ8S
+    // clean/rr-f-wave4 R4.1a: the q / v^T tiles of the two heads quantised in two groups of four (RR_Q8 decides its
+    // wave-uniform clamp test per group; both paths give Q8's bits for every value, so each code is the same as
+    // from the one group of eight) with head 0's tiles dead before head 1's are formed: 32 fewer live accumulator VGPRs
+    uint2 qv[8];
+    [unroll] for (uint h0 = 0; h0 < 2; ++h0) {
+        v8f qvt[4];   // [0] q ft0, [1] q ft1, [2] vT ft0, [3] vT ft1 of head h0
+        [unroll] for (uint f0 = 0; f0 < 2; ++f0) {
+            const uint b = (h0 * 2u + f0) * 2u;
+#if RR_STRICT_STEP
+            v8f a = RR_HSTEP(RR_WAB(b >> 1), AX, fq[b], xb0, fq[b + 1u], xb1, sw_zero8());
+            v8f c = RR_HSTEP(AX, RR_WAB(4u + (b >> 1)), xb0, fv[b], xb1, fv[b + 1u], sw_zero8());
+#else
+            v8f a = wg_wmma_fp8(fq[b], xb0, sw_zero8());
+            a = wg_wmma_fp8(fq[b + 1u], xb1, a);
+            v8f c = wg_wmma_fp8(xb0, fv[b], sw_zero8());
+            c = wg_wmma_fp8(xb1, fv[b + 1u], c);
+#endif
+            qvt[f0] = RR_HR16(a);
+            qvt[2u + f0] = RR_HR16(c);
+        }
+        uint2 q4[4];
+        RR_Q8(4u, qvt, q4);
+        [unroll] for (uint i7 = 0; i7 < 4; ++i7) qv[4u * h0 + i7] = q4[i7];
+    }
+#else
     v8f qvt[8];   // per head h: [4h] q ft0, [4h+1] q ft1, [4h+2] vT ft0, [4h+3] vT ft1
     [unroll] for (uint h0 = 0; h0 < 2; ++h0)
         [unroll] for (uint f0 = 0; f0 < 2; ++f0) {
@@ -578,6 +607,7 @@ WG_KERNEL(rr_d0r_head)
         }
     uint2 qv[8];
     RR_Q8(8u, qvt, qv);
+#endif
     [unroll] for (uint s0 = 0; s0 < 8; ++s0) SW_LDS_PUT((((s0 >> 2) * 4u + wv) * 4u + (s0 & 3u)) * 32u + lane, qv[s0]);
     wg_barrier_lds();
 

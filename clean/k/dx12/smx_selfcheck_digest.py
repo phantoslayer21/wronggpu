@@ -27,7 +27,7 @@ INCLUDE_DIRS = [os.path.join("clean", "k", "dx12", "hlsl"), os.path.join("clean"
 GENERATED_BY = os.path.join("clean", "k", "dx12", "gen_k_fp_tables.py")
 RUNTIME_FILES = [os.path.join("clean", "k", "runtime", "runtime_k.cpp"), os.path.join("clean", "k", "runtime", "model_k.cpp")]
 # the softmax stage kernels the self-check runs (runtime_k.cpp kSmxCases), both forms
-BASE = ["k_stage_e2", "k_stagew2_e3", "k_stagew2_d3", "k_stage_d2", "k_stage2_d1", "k_stagew4_e4", "k_stagew4_d4",
+BASE = ["k_stage_e2", "k_stagew2_e3", "k_stagew2_d3", "k_stage_d2", "k_stage_d1", "k_stagew4_e4", "k_stagew4_d4",
         "k_stagew2_e4", "k_stagew2_d4", "k_stagew4_m"]
 # the phase kernels the native D3D12 device runs in place of k_stagew4_m[__rodd] (runtime option k_split, default on
 # backend 3; KRuntime::launch redirects stage m, so the self-check's m case runs them: kernels/k_block_split.hlsl)

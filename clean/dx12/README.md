@@ -20,7 +20,7 @@ as its HIP kernel (`clean/dx12/compare.py` proves it per kernel on synthetic fra
 | `dxil_asm.cpp` | tool used by the build (assembles the rewritten DXIL listing) |
 | `compare.py` | HIP vs hybrid D3D12, every stage output / state buffer byte for byte |
 | `kernels/exposure.hlsl` | the reference port (`exposure_auto_diet`): copy its structure |
-| `kernels/fg_*.hlsl` | frame generation's ports (#96, `co=fg_*.co`): groundwork, built only when `--only` names them, never by a full build (`is_frame_gen`), so the Model M / Model L sets stay as they are; checks: `clean/fg/runner/fg_d3d12_check.py` (each kernel), `clean/fg/runner/fg_net1_gpu.py` (net1's 32 steps as a `kernel_replay` chain), `clean/fg/runner/fg_net1_mma.py` (net1's fast path on the matrix instructions, fused / unfused / exact) |
+| `kernels/fg_*.hlsl` | frame generation's ports (#96, `co=fg_*.co`): groundwork, built only when `--only` names them, never by a full build (`is_frame_gen`), so the Model M / Model L sets stay as they are; checks: `clean/fg/runner/fg_d3d12_check.py` (each kernel), `clean/fg/runner/fg_net1_gpu.py` (net1's 32 steps as a `kernel_replay` chain), `clean/fg/runner/fg_net1_mma.py` (net1's fast path on the matrix instructions, fused / unfused / exact), `clean/fg/runner/fg_full_stages_d3d12_check.py` (the Full path's stage kernels `fg_full_blend`, `fg_out_*`, `fg_dist_*` against the CPU reference, each kernel, the chained stages and full-size frames), `clean/fg/runner/fg_net2_d3d12_check.py` (net2's exact kernels `fg_net2_*` against the CPU reference, each kernel and the whole network) |
 | `tests/kernel_replay.cpp` | replays launches from a case file on the native D3D12 device; `chain` blocks run several launches on buffers that persist between them (a whole network, optionally timed) |
 
 ## Arithmetic mode (why build_dx12.py and nothing else)
@@ -128,6 +128,13 @@ WG_KERNEL(exposure_auto_diet) { WG_SETUP(); ... }   // entry name = HIP kernel n
 * `args` = the HIP kernel's arguments in order: `p` pointer (DWORD: arena byte offset), `u` any 32-bit scalar,
   `b<N>` struct by value (N bytes = N/4 DWORDs, copied verbatim). At most 57 DWORDs. The `WG_ARGS_BEGIN` block must
   declare exactly these DWORDs in order, **32-bit scalars only** (no vectors / arrays / structs: cbuffer packing).
+* A kernel named `<kernel>_fast` is Model L's `l_mode=fast` twin of `<kernel>` (clean/l/SPEED.md "Fast mode"): the runtime
+  launches it in place of the base kernel with the same arguments when the build has it, so it declares the same `args`; it
+  is built with `--model-l` only (`is_model_l`), has no HIP twin (`co=-`), keeps the base kernel's DXIL untouched, and the
+  hybrid route never launches it. Its arithmetic is not bit-exact to the reference by design (the hybrid route is).
+  `<kernel>_fast3` (the 3 x 3 post) and `<stem>_w2p_fast` / `<stem>_w2t_fast` (two windows per wave, in place of
+  `<stem>_nc`; `group=128 gscale=1`, the device's launch of the same grid) are fast-mode kernels too (`build_dx12.py
+  fast_base` names the kernel each one replaces).
 * Output: `<build>/dx12/<tag>__<kernel>.dxil` (`<kernel>.dxil` without a tag) and a `manifest.json` line
   `{"name", "file", "co", "entry", "block", "wave", "args", "arg_dwords", "source", "sha256"}`. Build all kernels at
   once (no `--only`) for a release: `--only` rewrites the shared manifest read-modify-write.

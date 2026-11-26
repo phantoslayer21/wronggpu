@@ -31,6 +31,12 @@
 // @wg-kernel kx/k_in_tiled_uniform co=k_io_exact.co block=256 wave=64 args=s248:p4.b128.p5.b48 defines=K_UNIFORM=1
 // @wg-kernel kx/k_in_tiled co=k_io_exact.co block=256 wave=64 args=s200:p4.b128.p5
 // @wg-kernel kx/k_in_tiled_direct co=k_io_exact.co entry=k_in_tiled block=256 wave=64 args=s200:p4.b128.p5 rs=direct defines=WG_DIRECT_TEXTURES=1
+// The _color forms (HIP k_in_tiled_color[_uniform]) also write the output colour taps (stored tap and filter-tap value T of
+// spec 43 4.2 / 5.3: k_out_color's results) for the render pixels the workgroup owns, from the colour texels the tile
+// stage loads anyway: the runtime then skips the separate k_out_color launch. K_COLOR; same bits as k_out_color (below).
+// @wg-kernel kx/k_in_tiled_color_uniform co=k_io_exact.co entry=k_in_tiled_uniform block=256 wave=64 args=s264:p4.b128.p7.b48 defines=K_UNIFORM=1,K_COLOR=1
+// @wg-kernel kx/k_in_tiled_color co=k_io_exact.co entry=k_in_tiled block=256 wave=64 args=s216:p4.b128.p7 defines=K_COLOR=1
+// @wg-kernel kx/k_in_tiled_color_direct co=k_io_exact.co entry=k_in_tiled block=256 wave=64 args=s216:p4.b128.p7 rs=direct defines=WG_DIRECT_TEXTURES=1,K_COLOR=1
 // The kxs tag is the pre-breakpoint exact S fallback. Its HIP forms are identical to those under kx.
 // @wg-kernel kxs/k_in_tiled_uniform co=k_io_exact.co block=256 wave=64 args=s248:p4.b128.p5.b48 defines=K_UNIFORM=1,KI_EXACT_S=1
 // @wg-kernel kxs/k_in_tiled co=k_io_exact.co block=256 wave=64 args=s200:p4.b128.p5 defines=KI_EXACT_S=1
@@ -40,6 +46,9 @@
 // @wg-kernel kx/k_in_tiled_uniform__a1 co=k_io_exact.co entry=k_in_tiled_uniform block=256 wave=64 args=s248:p4.b128.p5.b48 defines=K_UNIFORM=1,KI_HWMATH=1
 // @wg-kernel kx/k_in_tiled__a1 co=k_io_exact.co entry=k_in_tiled block=256 wave=64 args=s200:p4.b128.p5 defines=KI_HWMATH=1
 // @wg-kernel kx/k_in_tiled_direct__a1 co=k_io_exact.co entry=k_in_tiled block=256 wave=64 args=s200:p4.b128.p5 rs=direct defines=WG_DIRECT_TEXTURES=1,KI_HWMATH=1
+// @wg-kernel kx/k_in_tiled_color_uniform__a1 co=k_io_exact.co entry=k_in_tiled_uniform block=256 wave=64 args=s264:p4.b128.p7.b48 defines=K_UNIFORM=1,K_COLOR=1,KI_HWMATH=1
+// @wg-kernel kx/k_in_tiled_color__a1 co=k_io_exact.co entry=k_in_tiled block=256 wave=64 args=s216:p4.b128.p7 defines=K_COLOR=1,KI_HWMATH=1
+// @wg-kernel kx/k_in_tiled_color_direct__a1 co=k_io_exact.co entry=k_in_tiled block=256 wave=64 args=s216:p4.b128.p7 rs=direct defines=WG_DIRECT_TEXTURES=1,K_COLOR=1,KI_HWMATH=1
 #include "wg_platform.hlsli"
 #ifndef K_UNIFORM
 #define K_UNIFORM 0
@@ -47,21 +56,27 @@
 #ifndef WG_DIRECT_TEXTURES
 #define WG_DIRECT_TEXTURES 0
 #endif
+#ifndef K_COLOR
+#define K_COLOR 0
+#endif
 #if WG_DIRECT_TEXTURES
 #include "native_direct.hlsli"
 #endif
 #ifndef KI_HWMATH
 #define KI_HWMATH 0
 #endif
-// KI_SGPR (the exact direct form only): the frame's uniforms (KiHost and the direct motion factors) are computed once
-// and held in SGPRs (v_readfirstlane), not in VGPRs: kx/k_in_tiled_direct 83 -> <= 72 VGPR (5 workgroups per CU)
-#define KI_SGPR (WG_DIRECT_TEXTURES && !KI_HWMATH)
+// KI_SGPR: hoist frame-uniform motion factors (sp_x, sp_y, of_x, of_y) once per wave in SGPRs instead of
+// recomputing dfold (KIO_M16 / direct) 4x inside ki_fine.
+#define KI_SGPR (!KI_HWMATH)
 #include "k_fp.hlsli"
 #include "k_frame.hlsli"
 
 WG_ARGS_BEGIN
     K_ARGS_FRAME_IN
     K_ARGS_IN_PTRS
+#if K_COLOR
+    uint P_ctap, P_ctapT;   // KInColorParams: the output colour taps (stored tap [rh][rw] x 8 bytes, T [rh][rw] x 2 bytes)
+#endif
 #if K_UNIFORM
     K_ARGS_HOST
 #endif
@@ -101,6 +116,48 @@ KiTiledTap ki_tiled_tap_from_raw(KFrameIn F, float4 c)
     return r;
 }
 KiTiledTap ki_tiled_tap(KFrameIn F, int rx, int ry) { return ki_tiled_tap_from_raw(F, kio_color(F, rx, ry)); }
+#if K_COLOR
+// The colour texel of the tile stage with its alpha: the buffer forms' kio_color already holds it; the direct form's
+// kio_texel returns alpha 0 (the input stage reads RGB only), the output colour taps need the texel's own alpha
+// (k_out.hlsl: k_out_color_direct's Load, a missing alpha channel reads 1). Same texel as kio_color (rx, ry: render coordinates).
+float4 ki_color_texel(KFrameIn F, int rx, int ry)
+{
+#if WG_DIRECT_TEXTURES
+    return native_direct_color_tex.Load(int3((int)nd_rx + kio_tap(rx, 0, F.cbx, F.rw), (int)nd_ry + kio_tap(ry, 0, F.cby, F.rh), 0));
+#else
+    return kio_color(F, rx, ry);
+#endif
+}
+// k_out.hlsli ko_color_tap (k_out_color) on a raw colour texel, operation for operation: the stored tap (Y, Co, Cg, A) as
+// 2 x 2 FP16 bits and the filter-tap value T. The FP32 products by the uniform kappa and the encode factor e keep their
+// opaque barriers (kf_opq: so the shared factors are not regrouped), every FP32 -> FP16 step is the hardware conversion
+// (ki_f2h, nearest even; k_out.hlsli ko_f2h): outside every divergent branch, as the driver channel requires. A wave
+// runs it on all its lanes or not at all (the tile loop and the wave's ownership test are uniform), the store alone is
+// predicated.
+void ki_color_tap(KFrameIn F, float4 c, out uint2 tap, out uint tT)
+{
+    const bool hdr = (F.flags & KIO_HDR) != 0;
+    float Y, Co, Cg;
+    kio_ycocg(max(c.x, 0.0f), max(c.y, 0.0f), max(c.z, 0.0f), Y, Co, Cg);
+    const float kY = kf_pm(F.kappa, Y), kCo = kf_pm(F.kappa, Co), kCg = kf_pm(F.kappa, Cg);
+    uint hY, hCo, hCg;
+    [branch] if (hdr) {
+        const float e = kio_encode(kY);
+        hY = ki_f2h(kY * e);
+        hCo = ki_f2h(kCo * e);
+        hCg = ki_f2h(kCg * e);
+    } else {
+        hY = ki_f2h(kY);
+        hCo = ki_f2h(kCo);
+        hCg = ki_f2h(kCg);
+    }
+    tap = uint2(hY | (hCo << 16), hCg | (ki_f2h(c.w) << 16));
+    const float kL = kf_pm(F.kappa, kio_luma_fma(max(c.x, 0.0f), max(c.y, 0.0f), max(c.z, 0.0f)));
+    float vT = kL;
+    [branch] if (hdr) vT = kL * kio_encode(kL);
+    tT = ki_f2h(vT);
+}
+#endif
 KI_TILED_CHANNEL ki_tiled_ch0(KFrameIn F, int rx, int ry, uint table)
 {
     const float3 rgb = ki_rgb(F, kio_color(F, rx, ry));
@@ -119,17 +176,26 @@ float4 ki_tiled_transpose(float4 v, int lane)
 }
 
 #if KI_SGPR
-// ki_host(F) with the direct form's motion factors (sp = ki_dsp, of = ki_dmo: the values ki_fine computed per fine
-// position) and every field forced to a scalar register: all are wave-uniform (root constants and b1 only). The
-// operations and their order are unchanged, so the values are bit-identical.
-KiHost ki_host_sgpr(KFrameIn F)
+// Wave-uniform motion factors folded once per wave and held in SGPRs (same operations & order as ki_fine).
+KiHost ki_host_fold_sgpr(KFrameIn F, KiHost k)
 {
-    KiHost k = ki_host(F);
+#if WG_DIRECT_TEXTURES
     const bool mvlo = (F.flags & KIO_MVLO) != 0;
     k.sp_x = ki_dsp(F.sx, nd_msx, F.W, mvlo ? F.rw : F.W);
     k.sp_y = ki_dsp(F.sy, nd_msy, F.H, mvlo ? F.rh : F.H);
     k.of_x = ki_dmo(F.mox, nd_mox, nd_msx);
     k.of_y = ki_dmo(F.moy, nd_moy, nd_msy);
+#else
+    k.of_x = F.mox;
+    k.of_y = F.moy;
+    [branch] if ((F.flags & KIO_M16) != 0) {
+        const bool mvlo = (F.flags & KIO_MVLO) != 0;
+        k.sp_x = ki_dsp(F.sx, F.rmsx, F.W, mvlo ? F.rw : F.W);
+        k.sp_y = ki_dsp(F.sy, F.rmsy, F.H, mvlo ? F.rh : F.H);
+        k.of_x = ki_dmo(F.mox, F.rmox, F.rmsx);
+        k.of_y = ki_dmo(F.moy, F.rmoy, F.rmsy);
+    }
+#endif
     k.xi_x = WaveReadLaneFirst(k.xi_x);
     k.xi_y = WaveReadLaneFirst(k.xi_y);
     k.a_x = WaveReadLaneFirst(k.a_x);
@@ -162,22 +228,29 @@ WG_KERNEL(k_in_tiled)
     KInParams P0;
     K_LOAD_IN_PARAMS(P0)
     const KInParams P = ki_params(P0);
-    const KFrameIn F = P.f;
+    KFrameIn F = P.f;
+    F.kappa = WaveReadLaneFirst(F.kappa);
+    F.rho = WaveReadLaneFirst(F.rho);
+    F.lam = WaveReadLaneFirst(F.lam);
 #if K_UNIFORM
-    KiHost hk;
-    K_LOAD_HOST(hk)
+    KiHost hk0;
+    K_LOAD_HOST(hk0)
+#if KI_SGPR
+    const KiHost hk = ki_host_fold_sgpr(F, hk0);
+#else
+    const KiHost hk = hk0;
+#endif
 #elif KI_SGPR
-    const KiHost hk = ki_host_sgpr(F);
+    const KiHost hk = ki_host_fold_sgpr(F, ki_host(F));
 #else
     const KiHost hk = ki_host(F);
 #endif
     const int lane = (int)wg_lane_id();
     const int tiles_x = (F.Bw + 7) / 8, tile = (int)wg_block_id();
-    const int bx0 = (tile % tiles_x) * 8, by0 = (tile / tiles_x) * 8;
-    const int k = lane & 3, local = lane >> 2;
-    const int bx = bx0 + (local & 7), by = by0 + (local >> 3);
-    const bool active = bx < F.Bw && by < F.Bh;
+    const int bx0 = WaveReadLaneFirst((tile % tiles_x) * 8), by0 = WaveReadLaneFirst((tile / tiles_x) * 8);
+    const int bx = bx0 + ((lane >> 2) & 7), by = by0 + (lane >> 5);
     const int id = by * F.Bw + bx;
+    const bool active = bx < F.Bw && by < F.Bh;
     const bool hdr = (F.flags & KIO_HDR) != 0;
     const float c1e4 = kf_bits(0x38D1B717u);
     KI_TILED_CHANNEL ch0 = 0, ch1 = 0;
@@ -185,6 +258,7 @@ WG_KERNEL(k_in_tiled)
     float4 hid = 0.0f;
     if ((F.flags & KIO_RESET) != 0) {
         if (active) {
+            const int k = lane & 3;
             const int u = 2 * bx + (k & 1), v = 2 * by + (k >> 1);
             const int ofx = 2 * u + 1 - (v & 1), ofy = 2 * v + (u & 1);
             const int rx = (int)kf_R(F.jx + kf_fma((float)ofx + 0.5f, hk.a_x, -0.5f));
@@ -194,66 +268,119 @@ WG_KERNEL(k_in_tiled)
         }
         return;
     }
-    const int tx0 = ki_max(ki_min((int)kf_R(F.jx + kf_fma((float)(4 * bx0 + 1), hk.a_x, -0.5f)) - 1, F.rw - 1), 0);
-    const int ty0 = ki_max(ki_min((int)kf_R(F.jy + kf_fma((float)(4 * by0 + 1), hk.a_y, -0.5f)) - 1, F.rh - 1), 0);
-    for (int q = lane; q < 24 * 24; q += 256) {
+    const int tx0 = WaveReadLaneFirst(ki_max(ki_min((int)kf_R(F.jx + kf_fma((float)(4 * bx0 + 1), hk.a_x, -0.5f)) - 1, F.rw - 1), 0));
+    const int ty0 = WaveReadLaneFirst(ki_max(ki_min((int)kf_R(F.jy + kf_fma((float)(4 * by0 + 1), hk.a_y, -0.5f)) - 1, F.rh - 1), 0));
+#if K_COLOR
+    // HIP ki_tiled_body<true>: the render pixels this workgroup owns are those below the next workgroup's tile origin
+    // (consecutive origins partition the render image); the raw producer coordinates are tested, so the replicated clamp
+    // loads never store twice
+    const int own_x1 = WaveReadLaneFirst(bx0 + 8 < F.Bw ? ki_max(ki_min((int)kf_R(F.jx + kf_fma((float)(4 * (bx0 + 8) + 1), hk.a_x, -0.5f)) - 1, F.rw - 1), 0) : F.rw);
+    const int own_y1 = WaveReadLaneFirst(by0 + 8 < F.Bh ? ki_max(ki_min((int)kf_R(F.jy + kf_fma((float)(4 * (by0 + 8) + 1), hk.a_y, -0.5f)) - 1, F.rh - 1), 0) : F.rh);
+#endif
+    [loop] for (int q = lane; q < 24 * 24 + (int)kf_opq_z_; q += 256) {
         const int raw_x = tx0 + q % 24, raw_y = ty0 + q / 24;
         const int rx = ki_min(raw_x, F.rw - 1), ry = ki_min(raw_y, F.rh - 1);
+#if K_COLOR
+        const float4 craw = ki_color_texel(F, rx, ry);
+        const KiTiledTap value = ki_tiled_tap_from_raw(F, craw);
+        // the stored taps only in waves that own a pixel of this pass (a wave of halo pixels alone computed them and
+        // dropped them all); the test is wave-uniform, so ki_color_tap's conversions stay outside divergent branches
+        const bool own = raw_x < own_x1 && raw_y < own_y1;
+        [branch] if (WaveActiveAnyTrue(own)) {
+            uint2 ctap;
+            uint ctT;
+            ki_color_tap(F, craw, ctap, ctT);
+            if (own) {
+                const uint cid = (uint)(raw_y * F.rw + raw_x);
+                wg_st64(P_ctap, cid * 8u, ctap);
+                wg_st16(P_ctapT, cid * 2u, ctT);
+            }
+        }
+#else
         const KiTiledTap value = ki_tiled_tap_from_raw(F, kio_color(F, rx, ry));
+#endif
         tile_cv[q] = value.cv;
         tile_om[q] = value.om;
     }
     wg_barrier_lds();
     if (active) {
-        const int u = 2 * bx + (k & 1), v = 2 * by + (k >> 1);
+        const int u = 2 * bx + (lane & 1), v = 2 * by + ((lane >> 1) & 1);
         // colour neighbourhood first, then each fine position scored as it is produced (the same per-position
         // operations and the same order of the D sum as HIP; nothing of a fine position stays live but the own
         // sample's Yh, nx, ny)
         const int cx = (int)kf_R(F.jx + kf_fma((float)(2 * u + 1), hk.a_x, -0.5f));
         const int cy = (int)kf_R(F.jy + kf_fma((float)(2 * v + 1), hk.a_y, -0.5f));
         float3 A = 0.0f, lo = 0.0f, hi = 0.0f;
-        [unroll] for (int ddy = -1; ddy <= 1; ++ddy) {
-            [unroll] for (int ddx = -1; ddx <= 1; ++ddx) {
-                const int rx = kio_tap(cx, ddx, 0, F.rw), ry = kio_tap(cy, ddy, 0, F.rh);
-                const int lx = rx - tx0, ly = ry - ty0;
-                const bool cached = (uint)lx < 24u && (uint)ly < 24u;
-                float4 cv;
-                float om;
-                [branch] if (cached) {
-                    cv = tile_cv[ly * 24 + lx];
-                    om = tile_om[ly * 24 + lx];
-                } else {  // defensive, as HIP: a footprint wider than the tile (the runtime's guard prevents it)
-                    const KiTiledTap fb = ki_tiled_tap(F, rx, ry);
-                    cv = fb.cv;
-                    om = fb.om;
+        const bool all_cached = (uint)(cx - 1 - tx0) < 22u && (uint)(cy - 1 - ty0) < 22u &&
+                                cx >= 1 && cx <= F.rw - 2 && cy >= 1 && cy <= F.rh - 2;
+        [branch] if (all_cached) {
+            const int l0 = (cy - ty0) * 24 + (cx - tx0);
+            [unroll] for (int ddy = -1; ddy <= 1; ++ddy) {
+                [unroll] for (int ddx = -1; ddx <= 1; ++ddx) {
+                    const int idx_l = l0 + ddy * 24 + ddx;
+                    const float4 cv = tile_cv[idx_l];
+                    const float om = tile_om[idx_l];
+                    A = float3(kf_fma(om, cv.x, A.x), kf_fma(om, cv.y, A.y), kf_fma(om, cv.z, A.z));
+                    const float3 val = cv.xyz * cv.w;
+                    const bool first = ddx == -1 && ddy == -1;
+                    lo = first ? val : min(lo, val);
+                    hi = first ? val : max(hi, val);
                 }
-                A = float3(kf_fma(om, cv.x, A.x), kf_fma(om, cv.y, A.y), kf_fma(om, cv.z, A.z));   // LDR: om = 1
-                const float3 val = cv.xyz * cv.w;
-                const bool first = ddx == -1 && ddy == -1;
-                lo = first ? val : min(lo, val);
-                hi = first ? val : max(hi, val);
+            }
+        } else {
+            [loop] for (int ddy = -1; ddy <= 1 + (int)kf_opq_z_; ++ddy) {
+                [loop] for (int ddx = -1; ddx <= 1 + (int)kf_opq_z_; ++ddx) {
+                    const int rx = kio_tap(cx, ddx, 0, F.rw), ry = kio_tap(cy, ddy, 0, F.rh);
+                    const int lx = rx - tx0, ly = ry - ty0;
+                    const bool cached = (uint)lx < 24u && (uint)ly < 24u;
+                    float4 cv;
+                    float om;
+                    [branch] if (cached) {
+                        cv = tile_cv[ly * 24 + lx];
+                        om = tile_om[ly * 24 + lx];
+                    } else {  // defensive, as HIP: a footprint wider than the tile (the runtime's guard prevents it)
+                        const KiTiledTap fb = ki_tiled_tap(F, rx, ry);
+                        cv = fb.cv;
+                        om = fb.om;
+                    }
+                    A = float3(kf_fma(om, cv.x, A.x), kf_fma(om, cv.y, A.y), kf_fma(om, cv.z, A.z));   // LDR: om = 1
+                    const float3 val = cv.xyz * cv.w;
+                    const bool first = ddx == -1 && ddy == -1;
+                    lo = first ? val : min(lo, val);
+                    hi = first ? val : max(hi, val);
+                }
             }
         }
         float3 mu = A * kf_bits(0x3DE38E39u);   // rounded before 1 - mu (the ISA keeps the products: no kf_opq)
         if (hdr) {
             const float den = kf_max(1.0f - mu.x, c1e4);
-            mu = float3(ki_div(mu.x, den), ki_div(mu.y, den), ki_div(mu.z, den));
+            const KfDivPrep den_p = kf_div_prep(den);
+            mu = float3(kf_div_prepared(mu.x, den_p), kf_div_prepared(mu.y, den_p), kf_div_prepared(mu.z, den_p));
         }
         const float pm = ki_phi(mu.x, hdr);
-        const float3 mp = kf_opq3(mu * pm);
+        const float3 mp = kf_pm3(mu, (float3)pm);
         const float3 eta = 0.5f * (hi - lo);
         const float3 nu = float3(kf_fma(hi.x - lo.x, 8.0f, 1.0f), kf_fma(hi.y - lo.y, 8.0f, 1.0f), kf_fma(hi.z - lo.z, 8.0f, 1.0f));
+        const bool nu_pos_fin = (((asuint(nu.x) >> 23) & 255u) - 1u < 254u) &&
+                                (((asuint(nu.y) >> 23) & 255u) - 1u < 254u) &&
+                                (((asuint(nu.z) >> 23) & 255u) - 1u < 254u) &&
+                                nu.x > 0.0f && nu.y > 0.0f && nu.z > 0.0f;
         const int oq = (1 - (v & 1)) + 2 * (u & 1);  // (2u + 1 - (v mod 2), 2v + (u mod 2)) as a fine position index
         // fine positions of the display position, in the order (2u, 2v), (2u+1, 2v), (2u, 2v+1), (2u+1, 2v+1)
         bool valid = true;
         float D = 0.0f, own_hx = 0.0f, own_nx = 0.0f, own_ny = 0.0f;
-        [unroll] for (int q = 0; q < 4; ++q) {
+        [loop] for (int q = 0; q < 4 + (int)kf_opq_z_; ++q) {
             const KiFine fq = ki_fine(P, hk, 2 * u + (q & 1), 2 * v + (q >> 1));
             valid = valid && fq.valid;
             const float ph = ki_phi(fq.h.x, hdr);
-            const float3 g = max(abs(mp - kf_opq3(fq.h * ph)) - eta, 0.0f);
-            const float3 dl = float3(ki_div(g.x, nu.x), ki_div(g.y, nu.y), ki_div(g.z, nu.z));
-            const float score = kf_min(kf_fma(dl.z, 0.5f, kf_fma(dl.x, 2.0f, 0.5f * dl.y)), 1.0f);
+            const float3 g = max(abs(mp - kf_pm3(fq.h, (float3)ph)) - eta, 0.0f);
+            float score = 0.0f;
+            [branch] if (!(g.x == 0.0f && g.y == 0.0f && g.z == 0.0f && nu_pos_fin)) {
+                const float dx = (g.x == 0.0f && nu_pos_fin) ? g.x : ki_div(g.x, nu.x);
+                const float dy = (g.y == 0.0f && nu_pos_fin) ? g.y : ki_div(g.y, nu.y);
+                const float dz = (g.z == 0.0f && nu_pos_fin) ? g.z : ki_div(g.z, nu.z);
+                score = kf_min(kf_fma(dz, 0.5f, kf_fma(dx, 2.0f, 0.5f * dy)), 1.0f);
+            }
             D = D + score;
             if (q == oq) {
                 own_hx = fq.h.x;
@@ -278,5 +405,6 @@ WG_KERNEL(k_in_tiled)
     if (!active) return;
     float hsum = (hs.x + hs.w) + (hs.y + hs.z);
     hsum = hsum * 0.25f;
-    KI_TILED_STORE(P.x0, id, k, ch0, ch1, kf_finite(hsum) ? hsum : 0.0f, ch3);
+    const int k_out = lane & 3;
+    KI_TILED_STORE(P.x0, id, k_out, ch0, ch1, kf_finite(hsum) ? hsum : 0.0f, ch3);
 }

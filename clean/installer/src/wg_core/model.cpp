@@ -29,9 +29,9 @@ bool ModelFileReady(Context& ctx, wchar_t preset, wstring* why) {
     const wchar_t was = SelectedPreset(ctx);
     if (was == preset) return ExistingModelValid(ctx, why);
     wstring err;
-    if (!SelectPreset(ctx, wstring(1, preset), err)) { if (why) *why = err; return false; }
+    if (!SelectPreset(ctx, PresetName(preset), err)) { if (why) *why = err; return false; }
     const bool ok = ExistingModelValid(ctx, why);
-    SelectPreset(ctx, wstring(1, was), err);
+    SelectPreset(ctx, PresetName(was), err);
     return ok;
 }
 // True when a valid model file may lack a group of this map (preset M, map version 4: the output-filter weights).
@@ -45,20 +45,20 @@ wstring FilterText(Context& ctx, bool present) {
     return present ? L"; output filter: from the DLSS file" : L"; output filter: WrongGPU's own";
 }
 // Search order of spec 30: the file the player picked; the selected game's folder; every game folder of the libraries.
-std::vector<ModelCandidate> ModelCandidates(const GameTarget* t, const wstring& userDll, const std::vector<StoreGame>& libraries) {
+std::vector<ModelCandidate> ModelCandidates(const GameTarget* t, const wstring& userDll, const std::vector<StoreGame>& libraries, const wchar_t* fileName) {
     std::vector<ModelCandidate> c;
     std::set<wstring> seen;
     auto add = [&](const wstring& p, const wstring& origin) { if (seen.insert(Lower(FullPath(p))).second) c.push_back({FullPath(p), origin}); };
     if (!userDll.empty()) add(userDll, L"chosen by you");
-    if (t && !t->root.empty()) for (auto& f : FindFilesNamed(t->root, L"nvngx_dlss.dll")) add(f, L"this game");
-    for (auto& g : libraries) for (auto& f : FindFilesNamed(g.root, L"nvngx_dlss.dll", 30000)) add(f, L"another game (" + g.name + L")");
+    if (t && !t->root.empty()) for (auto& f : FindFilesNamed(t->root, fileName)) add(f, L"this game");
+    for (auto& g : libraries) for (auto& f : FindFilesNamed(g.root, fileName, 30000)) add(f, L"another game (" + g.name + L")");
     return c;
 }
 // ModelCandidates minus the files the ignore lists leave out (the order of the others stays); the files left out and why go to
 // m.ignored, the player's line for a chosen file that is left out to m.chosenSkipped. With no entries it is ModelCandidates.
 std::vector<ModelCandidate> AllowedModelCandidates(Context& ctx, const IgnoreLists& ign, const GameTarget* t, const wstring& userDll,
                                                    const std::vector<StoreGame>& libraries, ModelState& m) {
-    const std::vector<ModelCandidate> all = ModelCandidates(t, userDll, libraries);
+    const std::vector<ModelCandidate> all = ModelCandidates(t, userDll, libraries, ModelSourceName(ctx));
     std::vector<ModelCandidate> cands;
     std::vector<wstring> paths;
     for (auto& c : all) paths.push_back(c.path);
@@ -137,6 +137,14 @@ ModelState FindModel(Context& ctx, const GameTarget* t, const wstring& userDll, 
     std::shared_ptr<wgc::Converted> chosen, without;  // `without`: the first that converts without the weights
     ModelCandidate chosenCand, withoutCand;
     for (auto& cand : cands) {
+        if (ctx.presetFG) {  // frame generation (fg.h): a library older than 310.1 has no frame-generation model; refused by its version
+            const FgLibrary lib = CheckFgLibrary(cand.path);
+            if (lib.verdict == FgLibrary::TOO_OLD) {
+                m.rejections.push_back(cand.path + L": " + lib.why);
+                LogLine(ctx, L"model: rejected " + cand.path + L": " + lib.why);
+                continue;
+            }
+        }
         auto conv = std::make_shared<wgc::Converted>();
         const wgc::Result r = wgc::convert_file(*ctx.map.map, std::filesystem::path(cand.path), opt, *conv,
                                                 [&ctx](const string& s) { LogLine(ctx, L"converter: " + FromUtf8(s)); });
@@ -219,11 +227,20 @@ ModelState FindModel(Context& ctx, const GameTarget* t, const wstring& userDll, 
         return m;
     }
     const wstring skippedText = skipped ? L" " + std::to_wstring(skipped) + L" file(s) on an ignore list were not tried. " + IgnoredExample(ctx, m.ignored) : wstring();
+    const wstring picked = userDll.empty() ? wstring() : FullPath(userDll);
+    wstring pickedWhy;  // the converter's (or the version check's) reason for the file the player chose
+    for (auto& r : m.rejections)
+        if (!picked.empty() && r.size() > picked.size() + 2 && IEq(r.substr(0, picked.size() + 2), picked + L": ")) { pickedWhy = r.substr(picked.size() + 2); break; }
+    if (ctx.presetFG) {  // frame generation (fg.h): said by name, with the reason for the file the player chose
+        m.error = L"Frame generation can't be prepared: no frame generation library with the frame-generation model was found." +
+                  (pickedWhy.empty() ? wstring() : L" The file you chose (" + picked + L"): " + pickedWhy + (pickedWhy.back() == L'.' ? L"" : L".")) +
+                  L" Frame generation is converted from the frame generation library (nvngx_dlssg.dll) of version 310.1 or newer that came "
+                  L"with one of your games. The file stays where it is: only the model data is read, on this PC." + skippedText +
+                  (m.chosenSkipped.empty() ? wstring() : L" " + m.chosenSkipped);
+        LogLine(ctx, L"model: " + m.error);
+        return m;
+    }
     if (ctx.presetL) {  // Model L: said by name, with the converter's reason for the file the player chose
-        const wstring picked = userDll.empty() ? wstring() : FullPath(userDll);
-        wstring pickedWhy;
-        for (auto& r : m.rejections)
-            if (!picked.empty() && r.size() > picked.size() + 2 && IEq(r.substr(0, picked.size() + 2), picked + L": ")) { pickedWhy = r.substr(picked.size() + 2); break; }
         m.error = L"Model L can't be prepared: no DLSS model file with Model L's data was found." +
                   (pickedWhy.empty() ? wstring() : L" The file you chose (" + picked + L"): " + pickedWhy) +
                   L" Model L is converted from the DLSS model file (nvngx_dlss.dll) of version 310.5 or newer. The file stays where it is: "

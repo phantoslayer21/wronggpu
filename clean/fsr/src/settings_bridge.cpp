@@ -10,6 +10,8 @@
 #include <mutex>
 
 #include "settings_bridge.h"
+#include "../../wgshared/include/wg_state.h"  // the game's state folder (wronggpu-setup\settings.ini)
+#include "wg_sr_modes.h"
 
 namespace wgwin {
 
@@ -102,6 +104,35 @@ int32_t Setting(uint32_t slot, std::string* described, bool* isDefault) {
     return v.value;
 }
 
+int32_t SrMode(uint32_t slot, bool liveOnly, std::string* described) {
+    State& s = S();
+    const WgSrModeKey* row = nullptr;
+    for (const WgSrModeKey& k : kWgSrModeKeys)
+        if (k.slot == slot) row = &k;
+    if (!row) return -1;
+    const WgOptionDef& o = kWgOptions[slot];
+    auto say = [&](int32_t v, const std::string& source) {
+        if (described) *described = std::string(o.key) + "=" + wg_sr_mode_name(v) + " (" + source + ")";
+        return v;
+    };
+    wg::Snapshot snap;
+    const bool have = s.block.present() && s.block.snapshot(&snap, 1ull << slot);
+    // the in-game card's write (live): decides, also over the environment (the player's latest choice)
+    if (have && snap.is_live(slot) && wg::value_in_range(slot, snap.values[slot])) return say(snap.values[slot], "OptiScaler's menu");
+    if (liveOnly) return -1;
+    std::string e;
+    if (o.env && *o.env && wg::get_env(o.env, &e) && wg_parse_sr_mode(e) >= 0) return say(wg_parse_sr_mode(e), o.env);
+    // the game's state folder beside wronggpu.ini (the launcher's and the card's saved choice; read at each create)
+    const std::wstring iniDir = Place().ini.substr(0, Place().ini.find_last_of(L"\\/"));
+    const wgstate::Settings st = wgstate::ReadSettings(iniDir);
+    if (const std::string* v = wgstate::Get(st, row->state_key)) {
+        if (wg_parse_sr_mode(*v) >= 0) return say(wg_parse_sr_mode(*v), std::string("wronggpu-setup\\settings.ini ") + row->state_key);
+    }
+    const wg::Value v = wg::resolve(slot, have ? &snap : nullptr, &s.ini);
+    if (v.source != wg::Source::Default) return say(v.value, "wronggpu.ini");
+    return say(o.default_value, "default");
+}
+
 static bool WriteChoice(uint32_t slot, int32_t value, const char* source) {
     State& s = S();
     if (!s.block.present() || !s.block.is_writer()) return false;
@@ -177,6 +208,7 @@ wgfsr::MenuSettings Menu() {
     wgfsr::MenuSettings m;
     m.get = [](uint32_t slot, std::string* described, bool* isDefault) { return Setting(slot, described, isDefault); };
     m.set = [](uint32_t slot, int32_t value, const char* source) { return WriteChoice(slot, value, source); };
+    m.srMode = [](uint32_t slot, bool liveOnly, std::string* described) { return SrMode(slot, liveOnly, described); };
     m.folderEntry = S().folderEntry;
     return m;
 }

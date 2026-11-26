@@ -75,9 +75,9 @@ bool load_wgcm_stages(const std::string& path, const std::string& map_path, cons
                       std::map<std::string, StageTensors>* out, std::string* err, bool* other_map = nullptr);
 
 // Packed weight blob of one stage (enc0, enc1..dec1, dec0); post has no blob of its own (its scalar s is passed to
-// the post kernels).
+// the post kernels). kord_chunk = true packs Swin K axes in ascending kord_drow order for SW_Q7_CHUNK kernels.
 bool pack_stage_blob(const std::string& stage, const StageTensors& t, const DRow& drow, std::vector<uint8_t>* out,
-                     std::string* err);
+                     std::string* err, bool kord_chunk = false);
 
 // Byte offset of the merge / expand section inside a Swin stage blob (packing.stage_sections).
 size_t swin_tail_offset(const std::string& stage);

@@ -63,13 +63,13 @@ def main():
         rows = re.findall(r'^  \{"(\w+)",\s+(.*)\},$', h, re.M)
         words = {name: re.sub(r"\s+", " ", rest) for name, rest in rows}
         check(words.get("dummy") == words.get("accurate") and "dummy" in words, "dummy mode row = accurate's variant words")
-        check("#define WG_OPT_COUNT 12" in h, "no option added")
+        check("#define WG_OPT_COUNT 15" in h, "no option added")
         # every line of the committed header except the comment, hash, counts and the extended tables is unchanged
         keep = [l for l in base.split("\n") if l.startswith("#define WG_OPT_") or l.startswith("  {0x5747") or
                 l.startswith("#define WG_SR_MODEL_") or l.startswith("#define WG_VARIANT_") or
                 (l.startswith("  {") and "WG_KIND_" in l and '"rr_mode"' not in l)]
         check(all(l in h.split("\n") for l in keep), "existing ids, values, entries, option rows and variant words unchanged")
-        check('  {1, "rr_mode", WG_KIND_CHOICE, WG_RR_MODE_ACCURATE, 0, 3, ' in h, "rr_mode row: same default, range grown to 0..3")
+        check('  {1, "rr_mode", WG_KIND_CHOICE, WG_RR_MODE_FAST, 0, 3, ' in h, "rr_mode row: same default, range grown to 0..3")
         ini = read(os.path.join(tmp, "ini", "wronggpu.default.ini"))
         check("Values: exact | accurate | fast | dummy." in ini, "ini comment lists the new mode")
         md = read(os.path.join(tmp, "REGISTRY.md"))

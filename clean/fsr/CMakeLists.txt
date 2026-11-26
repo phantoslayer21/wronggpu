@@ -178,7 +178,7 @@ if(WIN32)
     set(WG_STATIC_RUNTIME -static -static-libgcc -static-libstdc++)
   else()
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-    set_property(TARGET wg_fsr_core test_frontend test_fsr30 PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    set_property(TARGET wg_fsr_core test_amd_provider test_frontend test_fsr30 PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     if(TARGET test_frontend_model_l)
       set_property(TARGET wg_fsr_core_model_l test_frontend_model_l PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     endif()
@@ -306,10 +306,11 @@ if(WIN32)
   # WrongGPU OptiScaler ASI plugin (WrongGPU.asi): our own code only, no third-party hooking library, no OptiScaler
   # code. Loaded by OptiScaler; adds WrongGPU to its main upscaler menu and answers the front end's model query.
   # RETIRED (OptiScaler 10 custom upscaler folder); built only with -DWG_BUILD_ASI=ON.
-  add_library(wronggpu_asi SHARED asi/wronggpu_asi.cpp asi/exports_asi.def asi/version_asi.rc)
+  add_library(wronggpu_asi SHARED asi/wronggpu_asi.cpp asi/sr_card.cpp asi/exports_asi.def asi/version_asi.rc)
   set_target_properties(wronggpu_asi PROPERTIES PREFIX "" OUTPUT_NAME WrongGPU SUFFIX ".asi"
                         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
   target_include_directories(wronggpu_asi PRIVATE src)
+  target_link_libraries(wronggpu_asi PRIVATE wg_shared_headers)
   target_compile_definitions(wronggpu_asi PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX WRONGGPU_MODEL_L=${WG_MODEL_L_VALUE})
   if(MSVC)
     target_compile_options(wronggpu_asi PRIVATE /W4 /wd4100 /Zi)
@@ -337,6 +338,17 @@ if(WIN32)
   add_test(NAME fsr_asi_status_unit COMMAND test_asi_status $<TARGET_FILE:wronggpu_asi>)
   if(MINGW)
     target_link_options(test_asi_status PRIVATE ${WG_STATIC_RUNTIME})
+  endif()
+  # The plugin's "WrongGPU Upscaler" card (asi/sr_card.h) through a stand-in host table: the owned shared-settings slots
+  # and the game's settings.ini. Never invokes InitializeASI.
+  add_executable(test_asi_card tests/test_asi_card.cpp)
+  set_target_properties(test_asi_card PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  target_link_libraries(test_asi_card PRIVATE wg_shared_headers)
+  target_compile_definitions(test_asi_card PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
+  add_dependencies(test_asi_card wronggpu_asi)
+  add_test(NAME fsr_asi_card_unit COMMAND test_asi_card $<TARGET_FILE:wronggpu_asi>)
+  if(MINGW)
+    target_link_options(test_asi_card PRIVATE ${WG_STATIC_RUNTIME})
   endif()
   endif()  # WG_BUILD_ASI
 

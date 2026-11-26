@@ -80,11 +80,23 @@ uint kw_opq(uint v) { return v ^ kw_zero(); }
 uint4 kw_opq4(uint4 v) { return v ^ kw_zero(); }
 half2 kw_h(uint v) { return wg_as_h2(v); }
 uint kw_u(half2 h) { return wg_h2_bits(h); }
+// An FP16 product behind the opaque barrier in one instruction: fma(a, b, -0.0 ^ zero) per half (the addend is -0.0 at
+// run time, and fma(a, b, -0) = RN(a b) on every input: one rounding of the exact product, a zero product keeps its
+// sign, NaN / infinities / denormals as the multiply). The compiler cannot see the addend: no multiply to regroup, no
+// add to fuse it into (k_common.hlsli wgk_fm; the barrier of kw_opq without its xor).
+half2 kw_fm(half2 a, half2 b) { return mad(a, b, kw_h(0x80008000u ^ kw_zero())); }
 
 uint4 kw_add8(uint4 a, uint4 b)
 {
     uint4 r;
     [unroll] for (uint i = 0; i < 4; ++i) r[i] = kw_u(kw_h(a[i]) + kw_h(b[i]));
+    return r;
+}
+// the product behind the barrier (kw_opq4(kw_mul8(a, b))) for a result that feeds a multiply or an add: the fma form
+uint4 kw_mulo8(uint4 a, uint4 b)
+{
+    uint4 r;
+    [unroll] for (uint i = 0; i < 4; ++i) r[i] = kw_u(kw_fm(kw_h(a[i]), kw_h(b[i])));
     return r;
 }
 uint4 kw_mul8(uint4 a, uint4 b)
@@ -106,9 +118,9 @@ uint4 kw_act8(uint4 x)
     [unroll] for (uint i = 0; i < 4; ++i) {
         const half2 xv = kw_h(x[i]);
         const half2 tv = min(max(xv, lo), hi);
-        const half2 bt = kw_h(kw_opq(kw_u(B * abs(tv))));
+        const half2 bt = kw_fm(B, abs(tv));
         const half2 p = A - bt;
-        const half2 tp = kw_h(kw_opq(kw_u(tv * p)));
+        const half2 tp = kw_fm(tv, p);
         const half2 q = half_ + tp;
         r[i] = kw_u(xv * q);
     }
@@ -123,8 +135,8 @@ uint4 kw_softpoly8(uint4 s)
     uint4 r;
     [unroll] for (uint i = 0; i < 4; ++i) {
         const half2 u = min(max(kw_h(s[i]), nc), c);
-        const half2 u2 = kw_h(kw_opq(kw_u(u * u)));
-        const half2 k2 = kw_h(kw_opq(kw_u(kap * u2)));
+        const half2 u2 = kw_fm(u, u);
+        const half2 k2 = kw_fm(kap, u2);
         const half2 o = one - k2;
         r[i] = kw_u(u * o);
     }
@@ -160,7 +172,11 @@ uint4 kw_pin(uint4 v)
 #ifndef KW_LD_A16
 #define KW_LD_A16 0
 #endif
+#if KW_LD_A16 == 2   // as KB_LD_A16 = 2 (k_common.hlsli, which says why it is not the default): the scalar base only
+uint4 kw_ld128(uint base, uint off) { return wg_mem.Load4((base & ~15u) + off); }
+#else
 uint4 kw_ld128(uint base, uint off) { return wg_mem.Load4((base + off) & (KW_LD_A16 ? ~15u : ~0u)); }
+#endif
 uint4 kw_ldg(uint p, uint e) { return kw_ld128(p, e * 2u); }
 void kw_stg(uint p, uint e, uint4 v) { wg_st128(p, e * 2u, v); }
 

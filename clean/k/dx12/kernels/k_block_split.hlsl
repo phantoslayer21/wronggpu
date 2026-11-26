@@ -28,7 +28,9 @@
 // @wg-kernel k_split_m_wo co=k_block_wide.co block=128 wave=32 args=s184:p19.b32,p,p,p,p entry=ks_wo defines=KS_PHASE=2,KW_C=160,KW_HEADS=8,KW_IN=0,KW_CIN=160,KW_CNEXT=0,KW_NG=4
 // @wg-kernel k_split_m_w1 co=k_block_wide.co block=128 wave=32 args=s184:p19.b32,p,p,p,p entry=ks_w1 defines=KS_PHASE=3,KW_C=160,KW_HEADS=8,KW_IN=0,KW_CIN=160,KW_CNEXT=0,KW_NG=4
 // @wg-kernel k_split_m_w2 co=k_block_wide.co block=128 wave=32 args=s184:p19.b32,p,p,p,p entry=ks_w2 defines=KS_PHASE=4,KW_C=160,KW_HEADS=8,KW_IN=0,KW_CIN=160,KW_CNEXT=0,KW_NG=4
-#define KW_LD_A16 1   // 16-byte aligned loads (hlsl/k_wide.hlsli)
+#ifndef KW_LD_A16
+#define KW_LD_A16 1   // 16-byte aligned loads: the whole address masked (hlsl/k_wide.hlsli; 2 = scalar base only: loses RADV's b128 loads)
+#endif
 #include "wg_platform.hlsli"
 
 WG_ARGS_BEGIN
@@ -155,7 +157,7 @@ WG_KERNEL(ks_attn)
         const uint r16 = (s16 & 0x7fffu) == 0u ? 0u : wg_f2h(rsqrt(f16tof32(s16)));
         const uint4 rv = kw_splat8(r16);
         [unroll] for (int kt = 0; kt < KT; ++kt)
-            n[kt] = kw_mul8(n[kt], kw_opq4(kw_mul8(rv, g1v[kt])));
+            n[kt] = kw_mul8(n[kt], kw_mulo8(rv, g1v[kt]));
     }
 
     // q, k, v^T of head hd (k_block_wide.hlsl step 2, one round's group)

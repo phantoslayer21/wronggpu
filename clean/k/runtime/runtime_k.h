@@ -151,6 +151,7 @@ class KRuntime {
   uint64_t tiled_launches_ = 0, tiled_color_launches_ = 0, input_uniform_launches_ = 0;
   uint64_t legacy_color_launches_ = 0, legacy_base_launches_ = 0;
   bool input_uniforms_ = true;  // runtime option k_in_uniforms (0: always k_in_tiled, a port-check diagnostic)
+  bool color_fuse_ = true;      // runtime option k_color_fuse (0: native exact path keeps the separate k_out_color)
   bool diag_input2_ = false, diag_copyin_ = false;  // runtime option k_diag (timing diagnostics)
   // d0 hands the head to k_out_pixel_c as the compact pixel head (k_stage2*_d0_hp; default). Runtime option
   // k_head=full: the 40-channel head map and k_out_pixel as before (same output bits; buffer "k.N" needs it)

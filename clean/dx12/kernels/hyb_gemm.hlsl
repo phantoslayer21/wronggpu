@@ -26,6 +26,18 @@
 // @wg-kernel patch_merge_c96_hyb_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,u,u defines=SW_PM_C=96,SW_PM_CO=128,SW_PM_SPLIT=4,HYB_SCAN_MUTANT=1,SW_ENTRY_OVERRIDE=patch_merge_c96_hyb_scanmut
 // @wg-kernel expand_c96_hyb_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,u,u defines=SW_EX_CL=96,SW_EX_C=64,SW_EX_SPLIT=0,HYB_SCAN_MUTANT=1,SW_ENTRY_OVERRIDE=expand_c96_hyb_scanmut
 // @wg-kernel expand_c128_hyb_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,u,u defines=SW_EX_CL=128,SW_EX_C=96,SW_EX_SPLIT=1,HYB_SCAN_MUTANT=1,SW_ENTRY_OVERRIDE=expand_c128_hyb_scanmut
+// Per-32-chunk FP16-rounded exact q7 twins (SW_Q7_CHUNK=1): kord_drow weight packing.
+// @wg-kernel patch_merge_c64_q7c_hyb co=- block=256 wave=32 args=p,p,p,u,u defines=SW_PM_C=64,SW_PM_CO=96,SW_PM_SPLIT=1,SW_Q7_CHUNK=1,SW_ENTRY_OVERRIDE=patch_merge_c64_q7c_hyb
+// @wg-kernel patch_merge_c96_q7c_hyb co=- block=256 wave=32 args=p,p,p,u,u defines=SW_PM_C=96,SW_PM_CO=128,SW_PM_SPLIT=4,SW_Q7_CHUNK=1,SW_ENTRY_OVERRIDE=patch_merge_c96_q7c_hyb
+// @wg-kernel expand_c96_q7c_hyb co=- block=256 wave=32 args=p,p,p,u,u defines=SW_EX_CL=96,SW_EX_C=64,SW_EX_SPLIT=0,SW_Q7_CHUNK=1,WG_REV_ORDER=1,SW_ENTRY_OVERRIDE=expand_c96_q7c_hyb
+// @wg-kernel expand_c128_q7c_hyb co=- block=256 wave=32 args=p,p,p,u,u defines=SW_EX_CL=128,SW_EX_C=96,SW_EX_SPLIT=1,SW_Q7_CHUNK=1,WG_REV_ORDER=1,SW_ENTRY_OVERRIDE=expand_c128_q7c_hyb
+// @wg-kernel patch_merge_c64_q7c_hyb_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,u,u defines=SW_PM_C=64,SW_PM_CO=96,SW_PM_SPLIT=1,SW_Q7_CHUNK=1,HYB_SCAN_MUTANT=1,SW_ENTRY_OVERRIDE=patch_merge_c64_q7c_hyb_scanmut
+// @wg-kernel patch_merge_c96_q7c_hyb_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,u,u defines=SW_PM_C=96,SW_PM_CO=128,SW_PM_SPLIT=4,SW_Q7_CHUNK=1,HYB_SCAN_MUTANT=1,SW_ENTRY_OVERRIDE=patch_merge_c96_q7c_hyb_scanmut
+// @wg-kernel expand_c96_q7c_hyb_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,u,u defines=SW_EX_CL=96,SW_EX_C=64,SW_EX_SPLIT=0,SW_Q7_CHUNK=1,HYB_SCAN_MUTANT=1,SW_ENTRY_OVERRIDE=expand_c96_q7c_hyb_scanmut
+// @wg-kernel expand_c128_q7c_hyb_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,u,u defines=SW_EX_CL=128,SW_EX_C=96,SW_EX_SPLIT=1,SW_Q7_CHUNK=1,HYB_SCAN_MUTANT=1,SW_ENTRY_OVERRIDE=expand_c128_q7c_hyb_scanmut
+#ifndef SW_Q7_CHUNK
+#define SW_Q7_CHUNK 0
+#endif
 #include "wg_platform.hlsli"
 
 WG_ARGS_BEGIN
@@ -90,10 +102,19 @@ WG_KERNEL(SW_ENTRY)
         const int tk = tok[i] < ntok ? tok[i] : ntok - 1;
         const int r = tk / Wm, c = tk - r * Wm;
         const uint off = (uint)((2 * r + (int)hh) * W + 2 * c) * SW_PM_C;
+#if SW_Q7_CHUNK
+        uint2 zr[KZ];
+        [unroll] for (uint q = 0; q < KZ / 2; ++q) {
+            uint4 v = wg_ld128(in_p, off + 16u * q);
+            zr[2 * q] = v.xy; zr[2 * q + 1] = v.zw;
+        }
+        HYB_Q7C_L2D(KZ, zr, zf[i], hh);
+#else
         [unroll] for (uint q = 0; q < KZ / 2; ++q) {
             uint4 v = wg_ld128(in_p, off + 16u * q);
             zf[i][2 * q] = v.xy; zf[i][2 * q + 1] = v.zw;
         }
+#endif
     }
     const uint bm = w + hh * 32u;
     [unroll] for (uint pass = 0; pass < SW_PM_SPLIT; ++pass) {
@@ -105,12 +126,25 @@ WG_KERNEL(SW_ENTRY)
             uint2 f[KZ];
             [unroll] for (uint g = 0; g < KZ; ++g) f[g] = sw_lfrag_b(sw_lane_base_m(0u, lane), mp * KZ + g);
             const v8f b = wg_load8f(bm, mt * 64u);
+            uint2 res[NT];
+#if SW_Q7_CHUNK
+            v8f acc[NT];
+            [unroll] for (int i2 = 0; i2 < NT; ++i2) acc[i2] = b;
+            [unroll] for (uint g2 = 0; g2 < KZ; g2 += 2u) {
+                [unroll] for (int i3 = 0; i3 < NT; ++i3) {
+                    acc[i3] = wg_wmma_fp8(f[g2], zf[i3][g2], acc[i3]);
+                    acc[i3] = wg_wmma_fp8(f[g2 + 1u], zf[i3][g2 + 1u], acc[i3]);
+                    if (g2 + 2u < KZ) acc[i3] = hyb_round16(acc[i3]);
+                }
+            }
+            [unroll] for (int i4 = 0; i4 < NT; ++i4) res[i4] = hyb_merge_q8(acc[i4]);
+#else
             v8f acc[NT];
             [unroll] for (int i2 = 0; i2 < NT; ++i2) acc[i2] = b;
             [unroll] for (uint g2 = 0; g2 < KZ; ++g2)
                 [unroll] for (int i3 = 0; i3 < NT; ++i3) acc[i3] = wg_wmma_fp8(f[g2], zf[i3][g2], acc[i3]);
-            uint2 res[NT];
             [unroll] for (int i4 = 0; i4 < NT; ++i4) res[i4] = hyb_merge_q8(acc[i4]);
+#endif
             [unroll] for (int i5 = 0; i5 < NT; ++i5)
                 if (tok[i5] < ntok) wg_st64(out_p, (uint)tok[i5] * SW_PM_CO + hh * (SW_PM_CO / 2) + 8u * mt, res[i5]);
         }
@@ -141,10 +175,19 @@ WG_KERNEL(SW_ENTRY)
         tok[i] = tok0 + 16 * i;
         const int tk = tok[i] < ntok ? tok[i] : ntok - 1;
         const uint off = (uint)tk * SW_EX_CL + hh * (SW_EX_CL / 2);
+#if SW_Q7_CHUNK
+        uint2 yr[KC];
+        [unroll] for (uint q = 0; q < KC / 2; ++q) {
+            uint4 v = wg_ld128(in_p, off + 16u * q);
+            yr[2 * q] = v.xy; yr[2 * q + 1] = v.zw;
+        }
+        HYB_Q7C_L2D(KC, yr, yf[i], hh);
+#else
         [unroll] for (uint q = 0; q < KC / 2; ++q) {
             uint4 v = wg_ld128(in_p, off + 16u * q);
             yf[i][2 * q] = v.xy; yf[i][2 * q + 1] = v.zw;
         }
+#endif
     }
 #if !SW_EX_SPLIT
     copy_to_lds(w + WE, SW_LDS_BYTES, tid);
@@ -170,11 +213,24 @@ WG_KERNEL(SW_ENTRY)
             uint2 f[KC];
             [unroll] for (uint kc = 0; kc < KC; ++kc) f[kc] = sw_lfrag_b(sw_lane_base_m(0u, lane), fk + g * KC + kc);
             const v8f b = wg_load8f(be, mt * 64u);
+#if SW_Q7_CHUNK
+            v8f acc[NT];
+            [unroll] for (int i2 = 0; i2 < NT; ++i2) acc[i2] = b;
+            [unroll] for (uint kc2 = 0; kc2 < KC; kc2 += 2u) {
+                [unroll] for (int i3 = 0; i3 < NT; ++i3) {
+                    acc[i3] = wg_wmma_fp8(f[kc2], yf[i3][kc2], acc[i3]);
+                    acc[i3] = wg_wmma_fp8(f[kc2 + 1u], yf[i3][kc2 + 1u], acc[i3]);
+                    if (kc2 + 2u < KC) acc[i3] = hyb_round16(acc[i3]);
+                }
+            }
+            [unroll] for (int i4 = 0; i4 < NT; ++i4) res[i4][g] = hyb_q8_of_chain(acc[i4]);
+#else
             v8f acc[NT];
             [unroll] for (int i2 = 0; i2 < NT; ++i2) acc[i2] = b;
             [unroll] for (uint kc2 = 0; kc2 < KC; ++kc2)
                 [unroll] for (int i3 = 0; i3 < NT; ++i3) acc[i3] = wg_wmma_fp8(f[kc2], yf[i3][kc2], acc[i3]);
             [unroll] for (int i4 = 0; i4 < NT; ++i4) res[i4][g] = hyb_q8_of_chain(acc[i4]);
+#endif
         }
         [unroll] for (int i5 = 0; i5 < NT; ++i5) {
             if (tok[i5] < ntok) {

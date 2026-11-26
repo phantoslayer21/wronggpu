@@ -24,6 +24,13 @@
 #ifndef WRONGGPU_MODEL_K
 #define WRONGGPU_MODEL_K 0
 #endif
+// The frame generation choice in the launcher (CMake option WRONGGPU_FG, default OFF: on only in a build whose payload runs
+// WrongGPU's frame generation; wg_core/fg.h). It makes fg, fg_preset, fg_multiplier and fg_presenter settings of the profile
+// (`set <game> fg=on`, off by default) and embeds the preset-FG converter map (`model convert --preset=FG`). OFF: the four
+// keys are refused by name, the map is not embedded, and nothing about frame generation is written into any game.
+#ifndef WRONGGPU_FG
+#define WRONGGPU_FG 0
+#endif
 
 // UI policy only. Silent installations keep their existing explicit command-line contract.
 namespace wg_wizard {

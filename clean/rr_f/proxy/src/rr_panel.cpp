@@ -75,8 +75,8 @@ void draw(void*) {
       modes[index] != now)
     choose(modes[index]);
   api->item_tooltip(exact ? "Exact: the reference result, the slowest.\nAccurate: nearly the same picture, faster.\n"
-                            "Fast: the quickest, a little less detail."
-                          : "Accurate: the default.\nFast: the quickest, a little less detail.");
+                            "Fast: the default, the quickest, a little less detail."
+                          : "Fast: the default, the quickest, a little less detail.\nAccurate: more detail, slower.");
   if (Settings* s = g_settings.load()) {
     bool on = s->get(kSetHitDistanceFilter) != 0;
     if (WG_HOST_MENU_HAS(api, checkbox) && api->checkbox("Reflection speckle filter##rr_hdf", &on)) {
@@ -99,7 +99,7 @@ int offered_modes(bool exact_allowed, int32_t* out) {
 }
 
 int32_t effective_mode(int32_t mode, bool exact_allowed) {
-  if (mode < 0 || mode >= WG_RR_MODE_COUNT) return WG_RR_MODE_ACCURATE;
+  if (mode < 0 || mode >= WG_RR_MODE_COUNT) return kWgOptions[WG_OPT_RR_MODE].default_value;  // the registry default (fast)
   return mode == WG_RR_MODE_EXACT && !exact_allowed ? WG_RR_MODE_ACCURATE : mode;
 }
 
@@ -113,7 +113,7 @@ const char* mode_title(int32_t mode) {
       if (!titles[m].empty()) titles[m][0] = (char)toupper((unsigned char)titles[m][0]);
     }
   });
-  return mode >= 0 && mode < WG_RR_MODE_COUNT ? titles[mode].c_str() : titles[WG_RR_MODE_ACCURATE].c_str();
+  return mode >= 0 && mode < WG_RR_MODE_COUNT ? titles[mode].c_str() : titles[kWgOptions[WG_OPT_RR_MODE].default_value].c_str();
 }
 
 void start(LogFn log_fn, ActiveFn rr_active, GpuMsFn gpu_ms, PreparingFn preparing) {

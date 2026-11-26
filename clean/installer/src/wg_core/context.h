@@ -42,6 +42,14 @@ struct EmbeddedData {
     // this build.
     int lMapId = 0;
     const wchar_t* lMapSha256 = L"";
+    // Frame generation (#96, fg.h): its converter map (data/fg.v1.map.json; CMake WRONGGPU_FG with WRONGGPU_MAP_FG). fgMapId 0:
+    // not in this build.
+    int fgMapId = 0;
+    const wchar_t* fgMapSha256 = L"";
+    // ...and its files (tools/make_payload.py --fg; CMake WRONGGPU_FG with WRONGGPU_FG_DIR): plugins\WrongGPU-FG.asi and its
+    // kernels fg-dxil\<name>.dxil (fg.h FgInstallRel: where an install puts each). fgCount 0: not in this build.
+    const PayloadFile* fgFiles = nullptr;
+    size_t fgCount = 0;
     const PayloadFile* begin() const { return files; }
     const PayloadFile* end() const { return files + count; }
 };
@@ -78,6 +86,9 @@ struct Context {
     // Model L (#89): the converter map and model folder (<model>\L, the runtime's folder for model=L) are Model L's.
     // Chosen by name (SelectPreset); it takes precedence over presetK.
     bool presetL = false;
+    // Frame generation (#96, fg.h): the converter map is preset FG's, the model folder <model>\FG and the files searched for are
+    // frame generation libraries (nvngx_dlssg.dll). Chosen by name (SelectPreset "FG"); it takes precedence over presetK.
+    bool presetFG = false;
     // The converter map of the selected preset, loaded and validated once (spec 08 section 5; LoadEmbeddedMap).
     wgc::LoadedMap map;
     wstring mapError;
@@ -122,11 +133,13 @@ wstring DefaultLogPath();
 wstring ModelBaseDir();
 int MapResourceId(Context& ctx, bool k);
 const wchar_t* MapSha256(Context& ctx, bool k);
-// The selected model's name: L'L' (presetL), L'K' (presetK) or L'M'.
+// The selected model's name: L'G' (presetFG: frame generation), L'L' (presetL), L'K' (presetK) or L'M'.
 wchar_t SelectedPreset(const Context& ctx);
-// Selects a model by its name (M, L, and K in a build with Preset K; either case) for the converter map, the model folder
-// and the conversion. A different model than before drops the loaded map. False: `error` says why (an unknown name, or a
-// model whose converter data this build does not have); nothing changes.
+// A model's name as the command line and the results write it: "FG" for L'G', else the letter itself.
+wstring PresetName(wchar_t preset);
+// Selects a model by its name (M, L, and K in a build with Preset K, FG in a build with frame generation's converter map;
+// either case) for the converter map, the model folder and the conversion. A different model than before drops the loaded
+// map. False: `error` says why (an unknown name, or a model whose converter data this build does not have); nothing changes.
 bool SelectPreset(Context& ctx, const wstring& name, wstring& error);
 wstring ModelDir(Context& ctx);
 wstring ModelFile(Context& ctx);

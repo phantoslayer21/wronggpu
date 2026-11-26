@@ -4,6 +4,7 @@
 #include "install.h"
 
 #include "coexist.h"
+#include "fg.h"
 #include "gamerules.h"
 #include "optiscaler.h"
 #include "payload.h"
@@ -324,6 +325,16 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
     if (rr)
         for (size_t i = 0; i < ctx.data->rrCount; ++i) {
             const PayloadFile& f = ctx.data->rrFiles[i];
+            DWORD sz = 0; const void* d = PayloadData(f, sz);
+            if (!d || sz != f.size || Sha256Bytes(d, sz) != f.sha256) Fail(L"The installer is damaged (" + wstring(f.rel) + L"). Download it again.", EXIT_DAMAGED);
+        }
+    // Frame generation (fg.h): a game with a frame generation library (nvngx_dlssg.dll: it offers DLSS Frame Generation) gets this
+    // build's frame generation plugin and kernels too (OptiScaler setup only: the plugin is one of OptiScaler's plugins). They do
+    // nothing until the player turns frame generation on (fg=on in the game's state folder). Checked here, before anything changes.
+    const bool fgGame = (!kDirectRoute || ctx.opti.ok()) && FgPayloadAvailable(ctx) && GameHasFgLibrary(target.exeDir, dir, target.root);
+    if (fgGame)
+        for (size_t i = 0; i < ctx.data->fgCount; ++i) {
+            const PayloadFile& f = ctx.data->fgFiles[i];
             DWORD sz = 0; const void* d = PayloadData(f, sz);
             if (!d || sz != f.size || Sha256Bytes(d, sz) != f.sha256) Fail(L"The installer is damaged (" + wstring(f.rel) + L"). Download it again.", EXIT_DAMAGED);
         }
@@ -706,6 +717,28 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
         }
         LogLine(ctx, L"Ray Reconstruction: " + Join(Parent(pluginRel), kRrPluginName) + L", " + kRrRuntime + L" (the RR runtime is part of it), " + kRrIni + L" (data " + RrDataFile() +
                          (rrData ? L")" : L", not converted yet: RR off)") + L", " + kRrSettings);
+    }
+    if (opti && fgGame) {
+        // the frame generation plugin beside WrongGPU's plugin (OptiScaler's plugins folder, or the plugin's own next to Ultimate
+        // ASI Loader) and its kernels in that folder's wronggpu-setup\fg-dxil, where the plugin reads them: from a temporary copy,
+        // like OptiScaler's files (record entries: backed up, rolled back, removed by an uninstall)
+        const wstring tmp = Join(OptiTempDir(ctx), L"fg");
+        size_t kernels = 0;
+        for (size_t i = 0; i < ctx.data->fgCount; ++i) {
+            const PayloadFile& f = ctx.data->fgFiles[i];
+            const wstring rel = FgInstallRel(pluginRel, f.rel);
+            if (rel.empty()) continue;  // (make_payload.py embeds nothing else)
+            DWORD sz = 0; const void* d = PayloadData(f, sz);
+            const wstring src = Join(tmp, f.rel);
+            EnsureDir(Parent(src));
+            WriteFileAtomic(src, d, sz);
+            optiFiles.push_back({rel, src});
+            kernels += IsFgPlugin(rel) ? 0 : 1;
+        }
+        LogLine(ctx, L"Frame generation: " + FgInstallRel(pluginRel, kFgPayloadPlugin) + L" and " + std::to_wstring(kernels) + L" kernel files in " +
+                         Join(Parent(pluginRel), kFgDxilDir) + L" (the game has DLSS Frame Generation; off until frame generation is turned on)");
+    } else if (FgPayloadAvailable(ctx) && opti) {
+        LogLine(ctx, L"Frame generation: not placed (the game has no frame generation library, " + wstring(kFgLibraryName) + L")");
     }
     const Conflicts now = FindConflicts(dir, target.exeDir);
     if (!now.outside.empty() || !now.legacyRecordDir.empty()) Fail(L"Files of another mod or an older install could not be handled automatically: " +

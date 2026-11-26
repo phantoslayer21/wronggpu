@@ -127,7 +127,23 @@ void ActivateWidget(int id) {
     }
     // R1: Runs on offers Auto and Direct3D 12 only (HIP is a diagnostic in wronggpu.ini)
     if (id >= ID_G_EXEC0 && id < ID_G_EXEC0 + 2) { static const char* const x[] = {"auto", "dx12"}; SetSetting(v.edit, "executor", x[id - ID_G_EXEC0], nullptr); Invalidate(); return; }
+    if (id >= ID_G_MODEL0 && id < ID_G_MODEL0 + 3) {  // the Upscaler's Model: the models this build offers, in their order
+        const SettingDef* d = FindSetting("model");
+        if (!d) return;
+        std::vector<string> vals;
+        for (const char* a = d->values; *a;) { const char* b = strchr(a, '|'); vals.push_back(b ? string(a, b) : string(a)); if (!b) break; a = b + 1; }
+        const size_t i = size_t(id - ID_G_MODEL0);
+        if (i < vals.size()) { SetSetting(v.edit, "model", vals[i], nullptr); Invalidate(); }
+        return;
+    }
+    if (id >= ID_G_SRMODE0 && id < ID_G_SRMODE0 + 2) {  // the Upscaler's Mode: the chosen model's mode
+        if (const char* key = ModeKeyOf(v.edit.get("model"))) { SetSetting(v.edit, key, id == ID_G_SRMODE0 ? "fast" : "exact", nullptr); Invalidate(); }
+        return;
+    }
     if (id >= ID_G_PRE0 && id < ID_G_PRE0 + 2) { static const char* const x[] = {"scale", "original"}; SetSetting(v.edit, "pre_exposure", x[id - ID_G_PRE0], nullptr); Invalidate(); return; }
+    // frame generation (fg.h): the multiplier's segments (2x..6x) and the preset's (A, B, C), in the exact spellings
+    if (id >= ID_G_FGMULT0 && id < ID_G_FGMULT0 + 5) { static const char* const x[] = {"2", "3", "4", "5", "6"}; SetSetting(v.edit, "fg_multiplier", x[id - ID_G_FGMULT0], nullptr); Invalidate(); return; }
+    if (id >= ID_G_FGPRESET0 && id < ID_G_FGPRESET0 + 3) { static const char* const x[] = {"A", "B", "C"}; SetSetting(v.edit, "fg_preset", x[id - ID_G_FGPRESET0], nullptr); Invalidate(); return; }
     if (id >= ID_G_RRMODE0 && id < ID_G_RRMODE0 + 3) { static const char* const x[] = {"exact", "accurate", "fast"}; SetSetting(v.edit, "rr_mode", x[id - ID_G_RRMODE0], nullptr); Invalidate(); return; }
     if (id >= ID_G_FPS0 && id < ID_G_FPS0 + 3) { static const char* const x[] = {"keep", "on", "off"}; SetSetting(v.edit, "fps_overlay", x[id - ID_G_FPS0], nullptr); Invalidate(); return; }
     if (id >= ID_G_OPTI0 && id < ID_G_OPTI_END) {
@@ -291,6 +307,13 @@ void ActivateWidget(int id) {
             }
             return;
         case ID_G_RRCONVERT: ConvertRr(L""); return;
+        case ID_G_FGON: SetSetting(v.edit, "fg", v.edit.get("fg") == "on" ? "off" : "on", nullptr); Invalidate(); return;  // (fg.h)
+        case ID_G_FGREPAIR: if (!v.busy) OnInstall(e, Op::Repair); return;  // an install from before this build: a repair adds the FG files
+        case ID_G_FGPRESENTER: {  // each presenter with what it does under its name (FgPresenterMenu)
+            const std::vector<MenuItem> items = FgPresenterMenu();
+            for (auto& h : v.hits) if (h.id == ID_G_FGPRESENTER) OpenMenu(ID_G_FGPRESENTER, h.r, items, true, std::max(330.f, h.r.w));
+            return;
+        }
         case ID_G_RRPREP: if (!v.busy) PrepareRrNow(e.dir, e.exe); return;
         case ID_G_SPARKLE: {
             const bool on = v.edit.get("sparkle_guard") != "off";
@@ -351,6 +374,52 @@ void ActivateWidget(int id) {
             std::vector<MenuItem> items{{L"Choose a DLSS file\u2026", ID_S_RRFILE, !v.busy, false, false, false, ic::cube},
                                         {L"Convert again", ID_S_RRCONVERT, !v.busy, false, false, false, ic::sync}};
             for (auto& h : v.hits) if (h.id == ID_S_RRMORE) OpenMenu(ID_S_RRMORE, h.r, items, true, 230);
+            return;
+        }
+        case ID_S_KMORE: case ID_S_LMORE: case ID_S_FGMORE: {  // ready Model K / Model L / frame generation data's Options...: the same two ways as data that is not ready
+            const bool k = id == ID_S_KMORE, fg = id == ID_S_FGMORE;
+            std::vector<MenuItem> items{{fg ? L"Choose a DLSS Frame Generation file\u2026" : L"Choose a DLSS file\u2026", fg ? ID_S_FGFILE : k ? ID_S_KFILE : ID_S_LFILE, !v.busy, false, false, false, ic::cube},
+                                        {L"Convert again", fg ? ID_S_FGCONVERT : k ? ID_S_KCONVERT : ID_S_LCONVERT, !v.busy, false, false, false, ic::sync}};
+            for (auto& h : v.hits) if (h.id == id) OpenMenu(id, h.r, items, true, 230);
+            return;
+        }
+        case ID_S_KCONVERT: case ID_S_KFILE: case ID_S_LCONVERT: case ID_S_LFILE: case ID_S_FGCONVERT: case ID_S_FGFILE: case ID_G_FGCONVERT: {
+            if (v.busy) return;  // an install may be copying the model file
+            if (ModelGameRunningSaid()) return;  // a running game may hold it: said before the search (and the picker)
+            // (frame generation, fg.h: its data from a game's frame generation library, nvngx_dlssg.dll 310.1 or newer; the game
+            // page's Convert searches as Settings' does)
+            const bool fg = id == ID_S_FGCONVERT || id == ID_S_FGFILE || id == ID_G_FGCONVERT;
+            const wchar_t preset = fg ? L'G' : id == ID_S_KCONVERT || id == ID_S_KFILE ? L'K' : L'L';
+            wstring p;
+            if ((id == ID_S_KFILE || id == ID_S_LFILE) && !Browse(2, p)) return;
+            if (id == ID_S_FGFILE && !Browse(6, p)) return;
+            const bool noScan = g.noScan;
+            RunTask(fg ? T_MODELFG : preset == L'K' ? T_MODELK : T_MODELL, [p, noScan, preset]() -> std::function<void()> {  // off the window's thread
+                wstring msg;
+                bool ok = false, again = false;
+                ConvertPresetData(preset, p, noScan, msg, ok, again);
+                HealthMsg hm;
+                ReadModelState(hm);  // the new data's state read here too (it hashes the file), not on the window's thread
+                return [msg, ok, again, hm, preset, chose = !p.empty()] {
+                    TakeModelState(hm);
+                    const wstring name = preset == L'G' ? wstring(L"frame generation") : wstring(L"Model ") + preset;
+                    if (ok) {
+                        ShowToast(L"The " + name + L" data is converted" + (again ? L" again" : L"") + (chose ? L" from the file you chose." : L"."), 1);
+                        return;
+                    }
+                    if (preset == L'G') {
+                        InformDetails(L"The frame generation data couldn't be converted.\n\n" +
+                                          wstring(chose ? L"That file can't be used. Choose a game's DLSS Frame Generation file (version 310.1 or newer)."
+                                                        : L"No DLSS Frame Generation file WrongGPU can use was found (version 310.1 or newer). Choose one of your games' file."),
+                                      kIconError, msg);
+                        return;
+                    }
+                    const wstring what = chose ? (preset == L'L' ? L"That file can't be used. Choose a DLSS file that has Model L (version 310.5 or newer)."
+                                                                 : L"That file can't be used. Choose the DLSS file of one of your games.")
+                                               : L"No DLSS file WrongGPU can use for " + name + L" was found. Choose one of your games' DLSS file.";
+                    InformDetails(name + L" couldn't be converted.\n\n" + what, kIconError, msg);
+                };
+            });
             return;
         }
         case ID_S_RRCONVERT: ConvertRr(L""); return;
