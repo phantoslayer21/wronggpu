@@ -566,6 +566,90 @@ void TestBindingData() {
 
 // ---- the codec on its own ------------------------------------------------------------------------------------------
 
+// The generic interface 2.x binding (bindings/sl2-generic.json): the same names, GUIDs and buffer types as the title
+// binding, a minor-version range from 2.4, options and state from version 1, the DXGI factory fallback; never a title
+// binding. Its codec takes options versions 1..5 and reads nothing a version does not carry (the UI-recomposition byte
+// only from version 5); the Cyberpunk codec still takes version 5 only.
+void TestGenericBinding() {
+    const FgTitleBinding g = FgSl2GenericBinding();
+    const FgTitleBinding cp = FgCp2077Binding();
+    CHECK(g.valid && g.imports.qualified && g.core.qualified && g.id == "sl2-generic" && g.exe_leaf == "*");
+    CHECK(g.imports.version_major == 2 && g.imports.version_minor == 4 && g.imports.version_minor_max == 99);
+    CHECK(g.core.version_major == 2 && g.core.version_minor == 4 && g.core.version_minor_max == 99);
+    CHECK(cp.imports.version_minor_max == 0 && cp.core.version_minor_max == 0);  // the title binding: exactly 2.14
+    CHECK(g.imports.dxgi_factory_fallback && !cp.imports.dxgi_factory_fallback);
+    CHECK(g.layout.options_version == 1 && g.layout.state_version == 1 && g.layout.options_size == 120 &&
+          g.layout.state_size == 88);
+    CHECK(cp.layout.options_version == 5 && cp.layout.state_version == 4);
+    CHECK(g.fg_feature == cp.fg_feature && g.imports.interposer_leaf == cp.imports.interposer_leaf &&
+          g.imports.factory2_name == cp.imports.factory2_name && g.imports.fn_options == cp.imports.fn_options &&
+          g.imports.fn_state == cp.imports.fn_state && g.imports.abi_max_generated == 5 && g.core.ui_max_generated == 5);
+    for (uint32_t i = 0; i < kFgRoleCount; ++i) CHECK(g.imports.role_names[i] == cp.imports.role_names[i]);
+    for (uint32_t r = 0; r < WG_FG_ROLE_COUNT; ++r) CHECK(g.core.native_type[r] == cp.core.native_type[r]);
+    CHECK(FgGuidEq(g.layout.options_guid, cp.layout.options_guid) && FgGuidEq(g.layout.state_guid, cp.layout.state_guid) &&
+          FgGuidEq(g.layout.tag_guid, cp.layout.tag_guid) && FgGuidEq(g.layout.constants_guid, cp.layout.constants_guid));
+    FgTitleBinding sel;
+    CHECK(!FgSelectShippedBinding(L"SomeOtherGame.exe", &sel) && !FgSelectShippedBinding(L"*", &sel));
+    CHECK(FgSelectShippedBinding(L"Cyberpunk2077.exe", &sel) && sel.id == cp.id);
+    FgAsiConfig applied;
+    FgApplyBinding(g, &applied);
+    CHECK(applied.imports.version_minor_max == 99 && applied.core.binding.version_minor_max == 99 &&
+          applied.imports.dxgi_factory_fallback);
+
+    FgSl214Codec codec(g.layout);
+    const WgViewport vp = MakeViewport(g.layout, 0);
+    for (uint64_t ver = 1; ver <= 5; ++ver) {
+        Raw120 o;
+        MakeOptions(o, g.layout, 1, 2, &vp);
+        Put<uint64_t>(&o, 24, ver);
+        Put<uint8_t>(&o, 112, 1);  // the UI-recomposition byte of version 5 (past the end of an older structure)
+        CHECK(codec.find_options(&o) != nullptr);
+        CHECK(codec.check_options(&vp, &o, 5) == WG_OK);
+        WgFgOptions d = {};
+        d.struct_size = sizeof(d);
+        d.abi_version = WG_FG_ADAPTER_ABI_VERSION;
+        CHECK(codec.options(&vp, &o, &d));
+        CHECK(d.enable == 1 && d.generated_count == 2);
+        CHECK(d.preset == (ver >= 5 ? static_cast<uint32_t>(WG_FG_PRESET_B) : static_cast<uint32_t>(WG_FG_PRESET_NOT_SET)));
+        const std::string text = codec.describe_options(&o);
+        if (ver >= 5)
+            CHECK(text == "mode 1 (on), frames 2, flags 0x8, ui recomposition 1");
+        else
+            CHECK(text == "mode 1 (on), frames 2, flags 0x8, options v" + std::to_string(ver));
+    }
+    {
+        Raw120 o;
+        MakeOptions(o, g.layout, 1, 1, &vp);
+        Put<uint64_t>(&o, 24, 0);  // version 0: not an options structure
+        CHECK(codec.find_options(&o) == nullptr);
+        CHECK(codec.check_options(&vp, &o, 5) == WG_E_MISSING_INPUT_PARAMETER);
+    }
+    {
+        // the title binding's codec: an older structure is still refused
+        FgSl214Codec cpc(cp.layout);
+        const WgViewport cvp = MakeViewport(cp.layout, 0);
+        Raw120 o;
+        MakeOptions(o, cp.layout, 1, 1, &cvp);
+        Put<uint64_t>(&o, 24, 4);
+        CHECK(cpc.find_options(&o) == nullptr);
+        Put<uint64_t>(&o, 24, 5);
+        CHECK(cpc.find_options(&o) != nullptr);
+    }
+    {
+        // a state of version 1: only its own members are written
+        Raw88 st;
+        MakeState(st, g.layout, 1);
+        WgFgState state = {};
+        state.struct_size = sizeof(state);
+        state.abi_version = WG_FG_ADAPTER_ABI_VERSION;
+        state.max_generated = 5;
+        CHECK(codec.write_state(state, &st));
+        CHECK(Get<uint32_t>(&st, 44) == 100);           // v1: the minimum size
+        CHECK(Get<uint32_t>(&st, 52) == 0xcdcdcdcdu);   // v2 member untouched
+        CHECK(Get<uint8_t>(&st, 80) == 0xcd);           // v4 member untouched
+    }
+}
+
 void TestGuidAndLayout() {
     WgGuid g = {};
     CHECK(FgParseGuid("00112233-4455-6677-8899-aabbccddeeff", &g));
@@ -1331,6 +1415,7 @@ void TestNotTaken(const GameModule& game) {
 
 int main() {
     TestBindingData();
+    TestGenericBinding();
     TestGuidAndLayout();
     TestChainWalk();
     TestOptionsCodec();

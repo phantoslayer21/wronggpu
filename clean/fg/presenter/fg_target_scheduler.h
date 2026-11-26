@@ -135,6 +135,11 @@ public:
     std::uint32_t EffectiveCount() const { return effective_; }
     const FgIntervalEstimator& Estimator() const { return estimator_; }
     const FgSchedulerConfig& Config() const { return config_; }
+    // The arrival -> first generated target budget, changed while the timeline runs (a host that sees generated
+    // images finish after their display time gives the GPU more of it). Clamped to [0, max_lead]. The next commit
+    // needs the new lead: a larger lead than the timeline has re-anchors once (one real-only interval), a smaller one
+    // is reached by the bounded lead correction.
+    void SetFirstImageBudget(FgTicks budget);
 
 private:
     FgStatus CommitImpl(const FgGameFrame& frame, FgIntervalPlan* out);

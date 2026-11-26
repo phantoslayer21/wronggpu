@@ -10,7 +10,7 @@
 //  - INSTALL-OFF GATE. FG is off by default (fg=off, fg_settings.h). Taking frame generation needs every route fact,
 //    checked in this order, first failure reported: install switch on, a qualified title binding, an attached entry,
 //    a supported adapter (AMD, RDNA 4, probes passed, a LUID), a validated model, a qualified presenter, and qualified
-//    modes (kFgModesQualified, false until the F5 gate). While any fact fails, every call - frame generation's too -
+//    modes (kFgModesQualified, open from 0.7.0; ../fg_limits.h). While any fact fails, every call - frame generation's too -
 //    goes to the next link with the game's own arguments: zero takeover.
 //  - FEATURE-SCOPED ROUTING. Only the FG feature id is ever answered here. Super resolution, ray reconstruction, the
 //    latency features and every unknown id go to the next link unchanged. Resource tags and constants are shared by all
@@ -28,6 +28,7 @@
 #pragma once
 #include <stdint.h>
 
+#include <atomic>
 #include <map>
 #include <mutex>
 #include <string>
@@ -41,9 +42,8 @@
 
 namespace wgfgp {
 
-// The release gate (the runtime contract's wgfg::kFgModesQualified): no FG mode is advertised or taken until the
-// end-to-end oracle gate (F5) and a qualified presenter pass. Tests override FgProxyConfig::modes_qualified. Only a
-// developer test build (WRONGGPU_FG_DEV_QUALIFIED, ../fg_limits.h) opens it.
+// The release gate (the runtime contract's wgfg::kFgModesQualified): open from 0.7.0 (../fg_limits.h). Tests override
+// FgProxyConfig::modes_qualified to check the closed gate.
 inline constexpr bool kFgModesQualified = WG_FG_MODES_QUALIFIED != 0;
 inline constexpr uint32_t kFgMaxFramesKept = 8;  // per-frame tag / constants sets kept (frames in flight)
 
@@ -62,6 +62,9 @@ struct FgBinding {
     bool qualified = false;            // false: the core forwards everything
     uint32_t version_major = 0;        // the interface file version the binding was qualified on (interposer entry)
     uint32_t version_minor = 0;
+    // a generic binding's range of minor versions [version_minor, version_minor_max] of the same major; 0 (or not above
+    // version_minor): exactly version_minor
+    uint32_t version_minor_max = 0;
     uint32_t native_type[WG_FG_ROLE_COUNT] = {WG_FG_NATIVE_TYPE_UNBOUND, WG_FG_NATIVE_TYPE_UNBOUND,
                                               WG_FG_NATIVE_TYPE_UNBOUND, WG_FG_NATIVE_TYPE_UNBOUND,
                                               WG_FG_NATIVE_TYPE_UNBOUND, WG_FG_NATIVE_TYPE_UNBOUND,
@@ -82,6 +85,11 @@ using FgLogFn = void (*)(void* ctx, const char* line);
 
 // A route / refusal reason (WgFgReason) in words, as the core's log lines name it.
 const char* FgReasonName(uint32_t reason);
+// A real-only reason (WgFgRealOnly) in words.
+const char* FgRealOnlyName(uint32_t real_only);
+// True when the interface version major.minor is inside the binding's version gate (exact, or a generic binding's range).
+bool FgBindingVersionMatches(uint32_t major, uint32_t minor, uint32_t want_major, uint32_t want_minor,
+                             uint32_t want_minor_max);
 
 // The single present owner per swap chain. One registry per process (FgProcessPresentOwners) is shared by every
 // adapter; tests make their own.
@@ -125,6 +133,12 @@ public:
     void set_device(void* device, void* queue);
     void set_runtime_facts(bool model_validated, bool presenter_qualified);
     void set_executor(const WgFgExecutorV1* executor);  // null: none (a taken present then refuses: NO_EXECUTOR)
+    // The player's preset and multiplier changed while the game runs (the host menu). Lock-free and callable from any
+    // thread (a menu drawn inside a present): the values are taken on the game's thread at its next options call or
+    // present, under the core's lock, and the session keeps running (N and the preset may change per game frame). The
+    // game's own preset request still wins over the player's preset, as at start. false (nothing changes): a preset
+    // outside the binding's presets or a multiplier outside 2..6.
+    bool update_live_settings(uint32_t preset, uint32_t multiplier);
 
     // The route decision: WG_FG_REASON_NONE = FG is taken; otherwise the first failing fact.
     uint32_t route_reason() const;
@@ -180,6 +194,7 @@ private:
 
     uint32_t route_reason_locked() const;
     uint32_t effective_max_locked() const;
+    void apply_live_locked();
     void note_route_locked();
     void note_frame_locked(uint32_t reason, uint32_t real_only);
     void log_locked(const std::string& line) const;
@@ -242,6 +257,10 @@ private:
     uint32_t last_options_reason_ = 0;
     uint32_t last_clamped_ = 0;
     mutable std::vector<std::string> log_lines_;
+
+    // live settings (update_live_settings): sequence number << 32 | preset << 8 | multiplier, applied once per change
+    std::atomic<uint64_t> live_{0};
+    uint32_t live_applied_ = 0;
 };
 
 }  // namespace wgfgp

@@ -105,6 +105,13 @@ uint32_t Shape(const T* p) {
 }  // namespace
 
 const char* FgReasonName(uint32_t reason) { return ReasonName(reason); }
+const char* FgRealOnlyName(uint32_t real_only) { return RealOnlyName(real_only); }
+
+bool FgBindingVersionMatches(uint32_t major, uint32_t minor, uint32_t want_major, uint32_t want_minor,
+                             uint32_t want_minor_max) {
+    const uint32_t hi = want_minor_max > want_minor ? want_minor_max : want_minor;
+    return major == want_major && minor >= want_minor && minor <= hi;
+}
 
 // ---- present owners -------------------------------------------------------------------------------------------------
 
@@ -177,7 +184,8 @@ uint32_t FgProxy::attach_interposer(const WgFgChainV1* chain, uint32_t file_majo
                !chain->tag || !chain->constants || !chain->present)
         r = WG_FG_REASON_NULL_HOST;
     else if (cfg_.binding.qualified &&
-             (file_major != cfg_.binding.version_major || file_minor != cfg_.binding.version_minor))
+             !FgBindingVersionMatches(file_major, file_minor, cfg_.binding.version_major, cfg_.binding.version_minor,
+                                      cfg_.binding.version_minor_max))
         r = WG_FG_REASON_VERSION_MISMATCH;
     if (r != WG_FG_REASON_NONE) {
         log_locked(std::string("fg: interposer not attached: ") + ReasonName(r) + " (interface " +
@@ -255,6 +263,52 @@ void FgProxy::set_executor(const WgFgExecutorV1* executor) {
     std::lock_guard<std::recursive_mutex> lock(mu_);
     has_executor_ = executor && Shape(executor) == WG_FG_REASON_NONE && executor->submit;
     executor_ = has_executor_ ? *executor : WgFgExecutorV1{};
+}
+
+bool FgProxy::update_live_settings(uint32_t preset, uint32_t multiplier) {
+    // cfg_.binding is fixed after construction: read without the lock (this call never takes it)
+    if (preset >= WG_FG_PRESET_COUNT || !(cfg_.binding.presets_mask & (1u << preset)) ||
+        FgGeneratedCountOf(multiplier) == 0)
+        return false;
+    uint64_t cur = live_.load(std::memory_order_relaxed);
+    for (;;) {
+        const uint64_t seq = ((cur >> 32) + 1) & 0xffffffffu;
+        const uint64_t next = ((seq ? seq : 1) << 32) | (static_cast<uint64_t>(preset) << 8) | multiplier;
+        if (live_.compare_exchange_weak(cur, next, std::memory_order_release, std::memory_order_relaxed)) return true;
+    }
+}
+
+// The live settings a menu handed over, taken on the game's thread (core lock held): the player's preset and cap, and
+// the effective preset / count of the accepted options re-derived by the same rules as set_options.
+void FgProxy::apply_live_locked() {
+    const uint64_t v = live_.load(std::memory_order_acquire);
+    const uint32_t seq = static_cast<uint32_t>(v >> 32);
+    if (seq == 0 || seq == live_applied_) return;
+    live_applied_ = seq;
+    const uint32_t preset = static_cast<uint32_t>((v >> 8) & 0xffu), multiplier = static_cast<uint32_t>(v & 0xffu);
+    if (preset == cfg_.settings.preset && multiplier == cfg_.settings.multiplier) return;
+    cfg_.settings.preset = preset;
+    cfg_.settings.multiplier = multiplier;
+    std::string game;
+    if (has_options_) {
+        if (options_.preset != WG_FG_PRESET_NOT_SET) {
+            game = std::string("; the game asks for preset ") + (FgPresetSpelling(options_.preset) ? FgPresetSpelling(options_.preset) : "?") +
+                   ", which stays";
+        } else {
+            effective_preset_ = preset;
+        }
+        if (options_.enable) {
+            const uint32_t cap = effective_max_locked();
+            const uint32_t requested =
+                options_.generated_count == WG_FG_COUNT_NOT_SET ? FgGeneratedCountOf(multiplier) : options_.generated_count;
+            effective_count_ = requested > cap ? cap : requested;
+            game += "; generating " + std::to_string(effective_count_) + " per game frame (the game asks for " +
+                    std::to_string(requested) + ")";
+        }
+    }
+    log_locked(std::string("fg: live settings: preset ") + FgPresetSpelling(preset) + ", multiplier " +
+               std::to_string(multiplier) + "x (player cap " + std::to_string(FgGeneratedCountOf(multiplier)) +
+               "), from this frame" + game);
 }
 
 void FgProxy::set_feature_function(const std::string& name, void* fn) {
@@ -380,6 +434,7 @@ int32_t FgProxy::set_options(uint32_t feature, uint32_t viewport_id, const WgFgO
                              const void* native_options) {
     std::lock_guard<std::recursive_mutex> lock(mu_);
     if (is_fg_feature(feature)) note_route_locked();
+    apply_live_locked();
     if (!owns_feature(feature)) {
         if (entry_ == WG_FG_ENTRY_INTERPOSER) return chain_.set_options(chain_.self, feature, viewport_id, native_options);
         return entry_ == WG_FG_ENTRY_NONE ? WG_E_NOT_INITIALISED : WG_E_FEATURE_NOT_SUPPORTED;
@@ -649,6 +704,7 @@ uint32_t FgProxy::assemble_locked(const WgFgPresentDesc& d, WgFgPacket* p, uint3
 
 int32_t FgProxy::present(const WgFgPresentDesc* desc, WgFgPresentResult* out) {
     std::lock_guard<std::recursive_mutex> lock(mu_);
+    apply_live_locked();
     const uint32_t shape = Shape(desc);
     if (!fg_taken()) {
         // zero takeover: the present goes on as if WrongGPU were not here

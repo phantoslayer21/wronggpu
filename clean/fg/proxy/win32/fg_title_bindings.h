@@ -8,10 +8,12 @@
 // (bindings/fg_binding_gen.cmake); this file turns those macros into the transport's structs. No vendor name is written
 // in the code: the names reach the build only through the binding data.
 //
-// Carried: Cyberpunk 2077 on interface build 2.14.1 (bindings/cp2077-2.14.1.json). The plugin selects a binding by the
-// exe's file name; the transport then still checks the loaded interface's version (major.minor) and patches only the
-// import slots that name a bound role. The core takes frame generation only when every route fact holds
-// (fg_proxy_core.h); until then every call keeps forwarding.
+// Carried: Cyberpunk 2077 on interface build 2.14.1 (bindings/cp2077-2.14.1.json), selected by the exe's file name,
+// and the generic interface 2.x binding (bindings/sl2-generic.json: major 2, minor 4 or later), used for any other game
+// that loads the interface. The transport then still checks the loaded interface's version (the title binding's
+// major.minor exactly, the generic binding's range) and patches only the import slots that name a bound role (or the
+// host routes them). The core takes frame generation only when every route fact holds (fg_proxy_core.h); until then
+// every call keeps forwarding.
 // Written for this project.
 #pragma once
 #include <string>
@@ -33,8 +35,11 @@ struct FgTitleBinding {
 
 // Cyberpunk 2077, interface build 2.14.1.
 FgTitleBinding FgCp2077Binding();
+// Any game on interface 2.4 or later without a title binding of its own (options and state from version 1 on).
+FgTitleBinding FgSl2GenericBinding();
 
-// The binding for the running exe (its file name, compared without case); false: this build carries none for it.
+// The title binding for the running exe (its file name, compared without case); false: this build carries none for it
+// (the generic binding is never returned here: FgSl2GenericBinding).
 bool FgSelectShippedBinding(const std::wstring& exe_leaf, FgTitleBinding* out);
 
 // The binding's parts into a transport configuration (imports, the core's binding, the FG feature id). The codec

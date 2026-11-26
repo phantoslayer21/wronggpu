@@ -29,6 +29,11 @@
 //    present it was serving goes to the real chain once unless the callback had already presented.
 //  - CREATION. FgSwapChainHook patches the CreateSwapChainForHwnd slot of a factory's method table (the original kept
 //    and always called first) and wraps the chains it creates; a sink decides per chain whether to attach.
+//  - PRESENT QUEUE. The sink may name a queue of its own to create the real chain on (IFgSwapChainSink::CreationQueue):
+//    every present of the real chain then runs on that queue, never behind the game's rendering on the game's queue.
+//    The game's queue stays the wrapper's Queue(); the present queue is PresentQueue() (a reference kept), and a
+//    ResizeBuffers1 that names queues is given the present queue for every buffer. A creation that fails with it is
+//    retried once with the game's queue (the chain then has no present queue).
 // Written for this project.
 #pragma once
 #define WIN32_LEAN_AND_MEAN
@@ -98,6 +103,11 @@ public:
     // F9: swap-chain flags the callback needs on a chain created while it would attach (for example the frame-latency
     // waitable object of a DXGI flip presenter); the hook ORs them into the creation and every resize. Default none.
     virtual UINT ExtraSwapChainFlags(const DXGI_SWAP_CHAIN_DESC1&) { return 0; }
+    // A queue of the callback's own to create the real chain on instead of the game's queue (see PRESENT QUEUE above;
+    // not owned: the callback keeps it alive). Null (the default): the game's queue.
+    virtual IUnknown* CreationQueue(IUnknown* /*game_queue*/, const DXGI_SWAP_CHAIN_DESC1&) { return nullptr; }
+    // The attached chain presents on this queue of the callback's (its CreationQueue answer); called before Attached.
+    virtual void AttachedPresentQueue(IUnknown*) {}
 };
 
 struct FgSwapChainStats {
@@ -136,6 +146,9 @@ public:
     FgSwapChainStats Stats() const;
     IDXGISwapChain4* Inner() const { return inner_; }  // no reference added
     IUnknown* Queue() const { return queue_; }
+    // The queue the real chain was created on instead of the game's (null: the game's queue); a reference is kept.
+    void SetPresentQueue(IUnknown* queue);
+    IUnknown* PresentQueue() const { return present_queue_; }
     // Flags the creation added to the game's (FgSwapChainHook, IFgSwapChainSink::ExtraCreateFlags): ORed into every
     // ResizeBuffers / ResizeBuffers1 so the chain keeps them.
     void SetExtraFlags(UINT flags) { extra_flags_.store(flags); }
@@ -210,6 +223,7 @@ private:
 
     IDXGISwapChain4* inner_;
     IUnknown* queue_;
+    IUnknown* present_queue_ = nullptr;
     uint64_t id_;
     FgLogFn log_;
     void* log_ctx_;
@@ -237,6 +251,8 @@ public:
     // F9: flags to add to the creation (0: the game's description unchanged). A creation that fails with them is
     // retried once with the game's own description (the chain then carries no extra flags).
     virtual UINT ExtraCreateFlags(HWND, const DXGI_SWAP_CHAIN_DESC1&) { return 0; }
+    // A queue to create the real chain on instead of the game's `game_queue` (null: the game's; see PRESENT QUEUE).
+    virtual IUnknown* CreationQueue(HWND, const DXGI_SWAP_CHAIN_DESC1&, IUnknown* /*game_queue*/) { return nullptr; }
 };
 
 using FgCreateForHwndFn = HRESULT(STDMETHODCALLTYPE*)(IDXGIFactory2* self, IUnknown* device, HWND hwnd,
