@@ -128,6 +128,13 @@ WG_KERNEL(exposure_auto_diet) { WG_SETUP(); ... }   // entry name = HIP kernel n
 * `args` = the HIP kernel's arguments in order: `p` pointer (DWORD: arena byte offset), `u` any 32-bit scalar,
   `b<N>` struct by value (N bytes = N/4 DWORDs, copied verbatim). At most 57 DWORDs. The `WG_ARGS_BEGIN` block must
   declare exactly these DWORDs in order, **32-bit scalars only** (no vectors / arrays / structs: cbuffer packing).
+* A kernel named `<kernel>_fast` is Model L's `l_mode=fast` twin of `<kernel>` (clean/l/SPEED.md "Fast mode"): the runtime
+  launches it in place of the base kernel with the same arguments when the build has it, so it declares the same `args`; it
+  is built with `--model-l` only (`is_model_l`), has no HIP twin (`co=-`), keeps the base kernel's DXIL untouched, and the
+  hybrid route never launches it. Its arithmetic is not bit-exact to the reference by design (the hybrid route is).
+  `<kernel>_fast3` (the 3 x 3 post) and `<stem>_w2p_fast` / `<stem>_w2t_fast` (two windows per wave, in place of
+  `<stem>_nc`; `group=128 gscale=1`, the device's launch of the same grid) are fast-mode kernels too (`build_dx12.py
+  fast_base` names the kernel each one replaces).
 * Output: `<build>/dx12/<tag>__<kernel>.dxil` (`<kernel>.dxil` without a tag) and a `manifest.json` line
   `{"name", "file", "co", "entry", "block", "wave", "args", "arg_dwords", "source", "sha256"}`. Build all kernels at
   once (no `--only`) for a release: `--only` rewrites the shared manifest read-modify-write.
