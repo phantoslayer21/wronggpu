@@ -365,10 +365,12 @@ KBlkParams block_params(const KStageInfo& st, DevPtr blob, DevPtr x, DevPtr y, D
 // k_stage_<name>; *ng = NG (0: not wide), *w2 = two windows per workgroup.
 std::string stage_kernel_base(const KStageInfo& st, bool f16, bool has_y, int nwin, int* ng, bool* w2) {
   *ng = wide_ng(st.name, f16, nwin);
-  // e0, e1, d1, d0: two windows per workgroup (k_stage2_*, k_launch.py WINDOWS2_STAGES; k_net.py WINDOWS2_VARIANTS;
-  // d1's needs its block output map p.y, which the network always gives it)
+  // e0, e1, d0: two windows per workgroup (k_stage2_*, k_launch.py WINDOWS2_STAGES; k_net.py WINDOWS2_VARIANTS).
+  // d1 runs one window per workgroup (k_stage_d1): at 1440p Quality its 1,025 windows as 513 two-window workgroups
+  // fill the 256 slots of four workgroups per CU for two rounds and one more, measured on D3D12 (RX 9070 XT) -14.6 us
+  // per frame with one window per workgroup, the same bytes (the same per-window maths)
   *w2 = !*ng && (std::strcmp(st.name, "e0") == 0 || std::strcmp(st.name, "e1") == 0 ||
-                 (std::strcmp(st.name, "d1") == 0 && has_y) || std::strcmp(st.name, "d0") == 0);
+                 std::strcmp(st.name, "d0") == 0);
   const std::string h = f16 ? "h" : "";
   return (*ng ? "k_stagew" + std::to_string(*ng) : std::string(*w2 ? "k_stage2" : "k_stage")) + h + "_" + st.name;
 }
@@ -745,13 +747,15 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
     wdev_[kv.first] = p;
   }
   if (!f16_ && (c.backend == 2 || c.backend == 3)) {
-    for (const char* name : {"e0", "e1", "d1", "d0"}) {
+    // the FP32 bias planes of the narrow stages whose D3D12 kernels take one (KB_BIAS32): the two-window e0 / e1 / d0 and
+    // the one-window e2 / d2 / d1 (network() launches them so, stage_kernel_base)
+    for (const char* name : {"e0", "e1", "d1", "d0", "e2", "d2"}) {
       const KStageInfo& st = *k_stage(name);
       if (f8data_.count(name) || (st.head && !compact_head_)) continue;
-      const std::string kernel = std::string("k_stage2_") + name + (st.head ? "_hp" : "");
+      const bool one = std::strcmp(name, "e0") != 0 && std::strcmp(name, "e1") != 0 && !st.head;
+      const std::string kernel = std::string(one ? "k_stage_" : "k_stage2_") + name + (st.head ? "_hp" : "");
       if (!dev_->require_d3d12_port(kernel, st.head ? "s184:p19.b32,p,p,p" : "s184:p19.b32,p")) return dfail();
-      if (c.backend == 3 && std::strcmp(name, "d1") == 0 &&
-          !dev_->require_d3d12_port(kernel + "__rodd", "s184:p19.b32,p")) return dfail();
+      if (c.backend == 3 && one && !dev_->require_d3d12_port(kernel + "__rodd", "s184:p19.b32,p")) return dfail();
       const auto& weight = blobs_.at(name);
       std::vector<uint8_t> compact;
       if (st.head) {
@@ -889,7 +893,7 @@ struct SmxCase {
   int wb, hb;  // base map size
   int sets;    // independent synthetic data sets, the outputs of all hashed together
 };
-// e2, e3, d3, d2, d1 (k_stage_e2, k_stagew2_e3, k_stagew2_d3, k_stage_d2, k_stage2_d1) and e4 / d4 with NG = 4 (at most 24
+// e2, e3, d3, d2, d1 (k_stage_e2, k_stagew2_e3, k_stagew2_d3, k_stage_d2, k_stage_d1) and e4 / d4 with NG = 4 (at most 24
 // windows: 20 at 512 x 384; on 8 data sets) at a 512 x 384 base map; e4 / d4 with NG = 2 (above 24 windows) and m
 // (k_stagew4_m, 42 or more windows) at 1536 x 1280. Sized so that a one-stage wrong-rounding mutant of either form
 // changes its case's outputs (the mutant runs in the #254 evidence).
@@ -957,6 +961,12 @@ std::string KRuntime::smx_case_name(int i, int ox, int oy, bool rodd) const {
          (c.sets > 1 ? "*" + std::to_string(c.sets) : std::string()) + "/o" + std::to_string(ox) + "," + std::to_string(oy);
 }
 
+// the narrow stage kernels (D3D12) that take the FP32 bias plane narrow_bias_[stage] as their second argument (KB_BIAS32)
+bool narrow_bias32_kernel(const std::string& k) {
+  const std::string b = k.size() > 6 && k.compare(k.size() - 6, 6, "__rodd") == 0 ? k.substr(0, k.size() - 6) : k;
+  return b == "k_stage2_e0" || b == "k_stage2_e1" || b == "k_stage_d1" || b == "k_stage_e2" || b == "k_stage_d2";
+}
+
 // One form of every case at its offsets (this model's: all = false; every possible one: all = true): (case name of the
 // mix form, the outputs' SHA-256, first 8 bytes big-endian) into *out.
 bool KRuntime::smx_check(bool rodd, bool all, std::vector<std::pair<std::string, uint64_t>>* out) {
@@ -1004,7 +1014,7 @@ bool KRuntime::smx_check(bool rodd, bool all, std::vector<std::pair<std::string,
       int ng = 0;
       bool w2 = false;
       const std::string k = stage_kernel_base(st, false, true, p.nwx * p.nwy, &ng, &w2) + (rodd ? "__rodd" : "");
-      const bool use_bias = db && (k == "k_stage2_d1" || k == "k_stage2_d1__rodd");
+      const bool use_bias = db && narrow_bias32_kernel(k);
       wgc::Sha256 sha;
       for (int set = 0; ok && set < c.sets; ++set) {
         ok = load(set);
@@ -1263,7 +1273,7 @@ bool KRuntime::network(int f, const std::function<bool(const char*)>& after) {
     } else {
       const std::string kernel = stage_kernel(k, st.name);
       const auto bias_plane = narrow_bias_.find(st.name);
-      const bool use_bias = k == "k_stage2_e0" || k == "k_stage2_e1" || k == "k_stage2_d1";
+      const bool use_bias = narrow_bias32_kernel(k);
       void* bias = use_bias && bias_plane != narrow_bias_.end() ? &bias_plane->second : nullptr;
       if (!launch(kernel.c_str(), grid, (unsigned)(kThreads * (ng ? ng : 1)), &p, bias)) return false;
     }
@@ -1698,7 +1708,7 @@ std::vector<std::string> KRuntime::d3d12_kernels() const {
       std::string k;
       if (st.head) k = compact_head_ ? "k_stage2_d0_hp" : "k_stage2_d0_hidden";
       else if (ng) k = "k_stagew" + std::to_string(ng) + "_" + n;
-      else k = (n == "e0" || n == "e1" || n == "d1" ? "k_stage2_" : "k_stage_") + n;
+      else k = (n == "e0" || n == "e1" ? "k_stage2_" : "k_stage_") + n;   // d1: k_stage_d1 (stage_kernel_base)
       if (std::find(v.begin(), v.end(), k) == v.end()) v.push_back(k);
       // the round-to-odd form the create-time self-check can select (KRuntime::smx_select)
       if (!st.head && n != "e0" && n != "e1" && std::find(v.begin(), v.end(), k + "__rodd") == v.end())

@@ -266,9 +266,19 @@ float kio_decode(float t)
     const float e = kf_pm(t + kf_bits(0x3C4FAE29u), 9.0f) * kf_bits(0x3FB8AA3Bu);
     return wg_div(kf_exp2(e) - 1.0f, 9.0f * t);
 }
+// 1 / x correctly rounded (= wg_div(1, x) on every input): one Newton step on v_rcp_f32 for x in [2^-32, 2^32] (the
+// exhaustively GPU-checked reciprocal of k_out.hlsli ko_rcp_refined / k_in_common.hlsli ki_rcp), wg_div elsewhere
+float kio_rcp(float x)
+{
+    [branch] if (x >= asfloat(0x2f800000u) && x <= asfloat(0x4f800000u)) {
+        const float r = rcp(x);
+        return mad(mad(-x, r, 1.0f), r, r);
+    }
+    return wg_div(1.0f, x);
+}
 float kio_encode(float Y)
 {
-    if (Y < K_KIO_ENCODE_NEAR) return wg_div(1.0f, Y + 1.0f);
+    if (Y < K_KIO_ENCODE_NEAR) return kio_rcp(Y + 1.0f);
     return wg_div(wg_div(kf_ln(kf_fma(Y, 9.0f, 1.0f)), 9.0f) - kf_bits(0x3C4FAE29u), Y);
 }
 
