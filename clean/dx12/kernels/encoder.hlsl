@@ -46,6 +46,10 @@
 // runtime fusion le).
 // @wg-kernel lev/input_encoder_q20 co=- entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b116 defines=WG_ENC_VALUES_OUT=1,WG_ENC_Q20=1
 // @wg-kernel lev/input_encoder_direct_q20 co=- entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b116 rs=direct defines=WG_DIRECT_TEXTURES=1,WG_ENC_VALUES_OUT=1,WG_ENC_Q20=1
+// The staged route's pre-exposure division folded in (WG_STAGED_PIDIV; wg_pidiv.hlsli; runtime WG_L_POST_TF with pi != 1):
+// the colour is divided by pi (the bits of EncParams.pad0) as color_divide stores it, so no color_divide launch runs; the
+// post's colour reads (l_post_tf_p12_pf) divide the same way.
+// @wg-kernel lev/input_encoder_q20_pf co=- entry=input_encoder block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,p,p,b116 defines=WG_ENC_VALUES_OUT=1,WG_ENC_Q20=1,WG_STAGED_PIDIV=1
 #include "wg_platform.hlsli"
 #ifndef WG_ENC_VALUES_OUT
 #define WG_ENC_VALUES_OUT 0
@@ -212,10 +216,35 @@ void pixel_values(int mode, Uni U, int x, int y, float4 c, float2 mn, float2 mf,
         [unroll] for (uint i2 = 15; i2 < 20; ++i2) v[i2] = 0.0f;
         return;
     }
+#if WG_ENC_Q20
+    // Model L's q20 encoders: near / far at the bit pattern of center (no motion change between the three vectors, the
+    // common case) read the same history texels with the same weights, so their values are center's, bit for bit; the
+    // history read and the transfer of that position run only when the whole wave needs them.
+    {
+        float3 h1 = hist_values(mode, U, qx[1], qy[1], valid[1], gc);
+        bool same0 = asuint(qx[0]) == asuint(qx[1]) && asuint(qy[0]) == asuint(qy[1]);
+        bool same2 = asuint(qx[2]) == asuint(qx[1]) && asuint(qy[2]) == asuint(qy[1]);
+        float3 h0 = h1, h2 = h1;
+        [branch] if (WaveActiveAnyTrue(!same0)) {
+            float3 t = hist_values(mode, U, qx[0], qy[0], valid[0], gc);
+            h0 = same0 ? h1 : t;
+        }
+        [branch] if (WaveActiveAnyTrue(!same2)) {
+            float3 t = hist_values(mode, U, qx[2], qy[2], valid[2], gc);
+            h2 = same2 ? h1 : t;
+        }
+        float3 h3 = hist_values(mode, U, qx[3], qy[3], valid[3], gc);
+        v[3] = h0.x; v[4] = h0.y; v[5] = h0.z;
+        v[6] = h1.x; v[7] = h1.y; v[8] = h1.z;
+        v[9] = h2.x; v[10] = h2.y; v[11] = h2.z;
+        v[12] = h3.x; v[13] = h3.y; v[14] = h3.z;
+    }
+#else
     [unroll] for (uint k2 = 0; k2 < 4; ++k2) {
         float3 h = hist_values(mode, U, qx[k2], qy[k2], valid[k2], gc);
         v[3 + 3 * k2] = h.x; v[4 + 3 * k2] = h.y; v[5 + 3 * k2] = h.z;
     }
+#endif
 
     // Motion disagreement (value 15)
     {

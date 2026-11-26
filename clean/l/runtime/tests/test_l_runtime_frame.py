@@ -100,10 +100,11 @@ def map_path():
 
 
 def run(options="", frames=4, build_files=(), env=None, model=None, exe=None, flags=(), rw=RW, rh=RH, hdr=1,
-        manifest=None):
+        manifest=None, tf_default=False):
     """The trace program's output lines (WG_* removed from the environment, then env applied). hdr: WgRtConfig.hdr
     (Model L's reconstruction kernel is HDR; Model M does not read the flag). manifest: [(kernel, code object)] for
-    <build>/dx12/manifest.json (the D3D12 ports a build has; backend 3)."""
+    <build>/dx12/manifest.json (the D3D12 ports a build has; backend 3). tf_default: leave WG_L_POST_TF unset (Model L's
+    fused post, the shipped default); otherwise it is 0, the separate launches the other tests trace."""
     build = tempfile.mkdtemp(prefix="wg_lfb_")
     for n in build_files:
         open(os.path.join(build, n), "wb").close()
@@ -112,6 +113,8 @@ def run(options="", frames=4, build_files=(), env=None, model=None, exe=None, fl
         with open(os.path.join(build, "dx12", "manifest.json"), "w") as fh:
             json.dump({"format": 1, "kernels": [{"name": k, "co": co} for k, co in manifest]}, fh)
     e = {k: v for k, v in os.environ.items() if not k.upper().startswith("WG_")}
+    if not tf_default:   # the separate launches (WG_L_POST_TF=0: recon + filter + scale_rgb), unless the test is of the shipped defaults
+        e["WG_L_POST_TF"] = "0"
     e.update(env or {})
     try:
         r = subprocess.run([exe or trace_exe(), build, model or model_dir(), str(rw), str(rh), "120", "72", str(frames),
@@ -187,9 +190,14 @@ NO_FOLD = {"WG_D3D12_FUSION": "pm,xe,mb,rv,xo,xd"}
 NO_LIN = {"WG_D3D12_FUSION": "pm,xe,mb,rv,xo,xd,lc"}
 NO_ENCLIN = {"WG_D3D12_FUSION": "pm,xe,mb,rv,xo,xd,lc,ll"}
 # the D3D12 route's ten shared stages: the twins in launch order (unfused: dec2's and dec1's own blocks and expands)
+TWIN_STAGES_UNFUSED = ("swin_block_c64_hyb", "patch_merge_c64_hyb", "swin_block_c96_hyb", "patch_merge_c96_hyb",
+                       "swin_bneck6_hyb", "expand_c128_hyb", "swin_block_c96_add_hyb", "expand_c96_hyb",
+                       "swin_block_c64_add_hyb")
+# WG_L_EXFUSE (default on when the manifest has the kernels): dec2 and dec1 with their expands fused into the block
+# (hyb_swin.hlsl swin_block_c96_add_ex_hyb / swin_block_c64_add_ex_hyb; the expanded map is never stored)
+EX_HYB = ("swin_block_c96_add_ex_hyb", "swin_block_c64_add_ex_hyb")
 TWIN_STAGES = ("swin_block_c64_hyb", "patch_merge_c64_hyb", "swin_block_c96_hyb", "patch_merge_c96_hyb",
-               "swin_bneck6_hyb", "expand_c128_hyb", "swin_block_c96_add_hyb", "expand_c96_hyb",
-               "swin_block_c64_add_hyb")
+               "swin_bneck6_hyb") + EX_HYB
 
 
 def same_frames(lines):
@@ -390,10 +398,15 @@ def shared_stages(t, f, route, digests=None):
         # sync words: the runtime's scratch, not named), the six blobs, the even (b0) and odd (b1) blocks' offsets
         want.append((BNECK_HYB, 128, 256, [n["enc2.merged"], bouts[5], None, None] + [w("b%d" % i) for i in range(6)] +
                      [str(H8), str(W8)] + off("b0") + off("b1") + ["128"]))
-        want += [("expand_c128_hyb", None, None, None),
-                 blk("swin_block_c96_add_hyb", None, n["enc2.skip"], n["dec2.out"], "dec2", H4, W4),
-                 ("expand_c96_hyb", None, None, None),
-                 blk("swin_block_c64_add_hyb", None, n["enc1.skip"], n["dec1.out"], "dec1", H2, W2)]
+        if EX_HYB[0] in names:   # the fused decoder blocks (WG_L_EXFUSE): x = the low-resolution map, aux null
+            want += [blk(EX_HYB[0], bouts[5], n["enc2.skip"], n["dec2.out"], "dec2", H4, W4),
+                     blk(EX_HYB[1], n["dec2.out"], n["enc1.skip"], n["dec1.out"], "dec1", H2, W2)]
+            want = [(k, g, b_, a_ + ["0"] if k in EX_HYB else a_) for k, g, b_, a_ in want]
+        else:
+            want += [("expand_c128_hyb", None, None, None),
+                     blk("swin_block_c96_add_hyb", None, n["enc2.skip"], n["dec2.out"], "dec2", H4, W4),
+                     ("expand_c96_hyb", None, None, None),
+                     blk("swin_block_c64_add_hyb", None, n["enc1.skip"], n["dec1.out"], "dec1", H2, W2)]
     bad = []
     if [ln.kernel for ln in got] != [k for k, _, _, _ in want]:
         raise AssertionError("shared stages: %s, expected %s" % ([ln.kernel for ln in got], [k for k, *_ in want]))
@@ -406,7 +419,7 @@ def shared_stages(t, f, route, digests=None):
                 continue
             bad += ["%s (launch %d) argument %d: %s, expected %s" % (k, i, j, a_, e) for j, (a_, e) in
                     enumerate(zip(ln.args, args)) if e is not None and a_ != e]
-    if route == "d3d12":   # the maps the twin expansions write (no name, arguments not recorded): new maps
+    if route == "d3d12" and EX_HYB[0] not in names:   # the maps the twin expansions write (no name, arguments not recorded)
         e2, e1 = got[6].args[0], got[8].args[0]
         if e2 == e1 or {e2, e1} & ({"0"} | set(n.values())):
             bad.append("the expanded maps: %s, %s" % (e2, e1))
@@ -583,7 +596,7 @@ class Arguments(unittest.TestCase):
         self.assertEqual(ls[gi + 1].kernel, "swin_block_c64_hyb")
         self.assertEqual(ls[gi + 1].args[0], feat)
         dec1 = ls[di - 1]
-        self.assertEqual(dec1.kernel, "swin_block_c64_add_hyb")
+        self.assertIn(dec1.kernel, ("swin_block_c64_add_hyb", EX_HYB[1]))
         y = dproj.args[1]
         self.assertEqual(dproj.args[0], dec1.args[2])
         fold = "l_dec_block_coef" in k
@@ -662,7 +675,7 @@ class Arguments(unittest.TestCase):
         self.assertEqual(ls[gi + 1].kernel, "l_q7_block_c64" if route == "hip" else "swin_block_c64_hyb")
         self.assertEqual(ls[gi + 1].args[0], feat)  # enc1 reads Model L's features
         dec1 = ls[di - 1]   # dec1's block, right before the decoder
-        self.assertEqual(dec1.kernel, "l_q7_block_c64_dec" if route == "hip" else "swin_block_c64_add_hyb")
+        self.assertIn(dec1.kernel, ("l_q7_block_c64_dec",) if route == "hip" else ("swin_block_c64_add_hyb", EX_HYB[1]))
         y, y2 = dproj.args[1], dec.args[2]
         self.assertEqual(dproj.args[0], dec1.args[2])  # the decoder reads dec1's output
         self.assertEqual(dec.args[0], y)
@@ -932,7 +945,8 @@ class D3D12(unittest.TestCase):
         self.assertNotIn("l_coef_pack12", names)   # (the native route folds every pack12 store)
         self.assertTrue(all(not n.startswith(("d1p12/", "d0p12/")) and n != "input_encoder" for n in names), names)
         stages = [n for n in names if n.split("/")[-1].startswith(("swin_", "l_swin_", "patch_merge", "expand"))]
-        self.assertEqual(stages, [ENC_LIN_HYB] + list(TWIN_STAGES) + [DEC_COEF_HYB if fold else "l_swin_block_c32_dec_hyb"])
+        twins = TWIN_STAGES if EX_HYB[0] in names else TWIN_STAGES_UNFUSED   # (WG_L_EXFUSE on / off)
+        self.assertEqual(stages, [ENC_LIN_HYB] + list(twins) + [DEC_COEF_HYB if fold else "l_swin_block_c32_dec_hyb"])
         self.assertEqual([n for n in names if "l_q7" in n], [])
         lev, coef = Arguments.check_frame(self, t, f)
         if p12:
@@ -952,7 +966,7 @@ class D3D12(unittest.TestCase):
         t = FT.Trace(lines)
         self.assertEqual(t.create, "create ok model L")
         self.assertEqual(t.unknown(), [])
-        self.assertEqual(t.kernels.get("swin_fused"), "none")
+        self.assertEqual(t.kernels.get("swin_fused"), "dec2,dec1")   # WG_L_EXFUSE (default on): dec2, dec1 with expands fused
         self.assertEqual([f["info"]["reset"] for f in t.frames], [1, 0, 1, 0, 1, 1])
         self.assertEqual(len({f["info"]["parity"] for f in t.frames}), 2)
         prev = None
@@ -1208,6 +1222,132 @@ class Refusals(unittest.TestCase):
             shutil.rmtree(d, ignore_errors=True)
 
 
+class FusedPost(unittest.TestCase):
+    """Model L's true-fusion post (WG_L_POST_TF, default on; dx12/kernels/l_post_tf.hlsl) on native D3D12, HDR colour, the staged
+    route: l_post_recon_p12 + post_filter_c1_s4 + scale_rgb in one launch (w64_lc12/l_post_tf_p12), and with pi != 1 the
+    pre-exposure division folded into the encoder and the post (lev/input_encoder_q20_pf + w64_lc12/l_post_tf_p12_pf:
+    no color_divide). Off (WG_L_POST_TF=0), with a missing port, for LDR colour or for a footprint the kernel does not
+    stage: the separate launches."""
+
+    TF = "w64_lc12/l_post_tf_p12"
+    SEPARATE = {"w64/post_filter_c1_s4", "scale_rgb", "color_divide", "lc12/l_post_recon_p12", "lc12/l_post_recon"}
+
+    @staticmethod
+    def bits(x):
+        return str(struct.unpack("<I", struct.pack("<f", x))[0])
+
+    def trace(self, pe=None, ports=None, env=None, hdr=1, frames=3, rw=RW, rh=RH):
+        flags = ("--backend=3",) + (("--pre-exposure=%s" % pe,) if pe is not None else ())
+        t = FT.Trace(run("model=L", frames=frames, build_files=FT.SHIPPING, flags=flags, manifest=ports or full_ports(),
+                         env=env, hdr=hdr, rw=rw, rh=rh, tf_default=True))
+        self.assertEqual(t.create, "create ok model L")
+        self.assertEqual(t.unknown(), [])
+        return t
+
+    @staticmethod
+    def names(f):
+        return [ln.kernel for ln in f["launches"]]
+
+    def check_fused(self, t, pi, fold):
+        """Every frame: the fused post (the _pf form when folded), its arguments, none of the separate launches."""
+        post_name = self.TF + ("_pf" if fold else "")
+        enc_name = "lev/input_encoder_q20" + ("_pf" if fold else "")
+        self.assertEqual(t.kernels["l_post_tf"], "on")
+        self.assertEqual(t.kernels["post_last"], post_name)
+        self.assertEqual(t.kernels["filter_last"], "fused")
+        for f in t.frames:
+            self.assertIsNone(f["error"])
+            names = self.names(f)
+            self.assertEqual(names.count(post_name), 1, names)
+            self.assertEqual(names.count(enc_name), 1, names)
+            self.assertEqual(sorted(set(names) & self.SEPARATE), [], names)
+            self.assertEqual(len([n for n in names if n.startswith("w64_lc12/l_post_tf")]), 1, names)
+            self.assertNotIn("lev/input_encoder_q20" if fold else "lev/input_encoder_q20_pf", names)
+            post = next(ln for ln in f["launches"] if ln.kernel == post_name)
+            # the post_tf chunk plan (runtime.cpp tf_chunks): output 120 x 72, post_tf_cpairs 68
+            npo, strips, cp = 36, cdiv(120, 40), 68
+            c2 = min(36, cp)
+            k1 = max(0, (npo - cdiv(128, strips) * c2) // cp)
+            nch = k1 + cdiv(npo - k1 * cp, c2)
+            self.assertEqual((post.grid, post.block), (strips * nch, 512))
+            a = post.args
+            self.assertEqual(len(a), 22, a)
+            self.assertEqual(a[11], f["names"]["filter.out"])      # the output
+            self.assertEqual(a[13], f["names"]["exposure.pair"])
+            self.assertEqual(a[14:16], ["120", "72"])
+            self.assertEqual(a[16], self.bits(float(np.float32(0.01 / 1.0))))   # dec_scale
+            self.assertEqual(a[17], self.bits(pi))                               # pi: the scale folded in (1: none)
+            self.assertEqual(a[19:22], [str(cp), str(k1), str(c2)])
+
+    def test_default_is_the_fused_post(self):
+        self.check_fused(self.trace(), 1.0, False)
+
+    def test_pre_exposure_folds_the_division(self):
+        for pi in (1.25, 2.0, 0.5, 64.0):
+            with self.subTest(pi=pi):
+                self.check_fused(self.trace(pe=pi), pi, True)
+
+    def test_division_window_invalid_keeps_color_divide(self):
+        """A pi whose division window is invalid (B > 125: no fast form): color_divide stays, the post is the plain form
+        (it still folds scale_rgb), no scale_rgb launch."""
+        pi = 1e38
+        t = self.trace(pe=pi)
+        self.assertEqual(t.kernels["post_last"], self.TF)
+        for f in t.frames:
+            names = self.names(f)
+            self.assertEqual(names.count("color_divide"), 1, names)
+            self.assertNotIn("scale_rgb", names)
+            self.assertNotIn("lev/input_encoder_q20_pf", names)
+            self.assertEqual(names.count(self.TF), 1)
+            post = next(ln for ln in f["launches"] if ln.kernel == self.TF)
+            self.assertEqual(post.args[17], self.bits(float(np.float32(pi))))
+
+    def test_missing_pf_ports_keep_color_divide(self):
+        ports = [kc for kc in full_ports() if kc[0] not in ("w64_lc12/l_post_tf_p12_pf", "lev/input_encoder_q20_pf")]
+        t = self.trace(pe=2.0, ports=ports)
+        for f in t.frames:
+            names = self.names(f)
+            self.assertEqual(names.count("color_divide"), 1, names)
+            self.assertEqual(names.count(self.TF), 1, names)
+            self.assertNotIn("scale_rgb", names)
+
+    def test_toggle_off_runs_the_separate_launches(self):
+        for pi in (None, 2.0):
+            with self.subTest(pi=pi):
+                t = FT.Trace(run("model=L", frames=2, build_files=FT.SHIPPING,
+                                 flags=("--backend=3",) + (() if pi is None else ("--pre-exposure=%s" % pi,)),
+                                 manifest=full_ports(), env={"WG_L_POST_TF": "0"}, tf_default=True))
+                self.assertEqual(t.create, "create ok model L")
+                self.assertEqual(t.kernels["l_post_tf"], "off")
+                for f in t.frames:
+                    names = self.names(f)
+                    self.assertEqual([n for n in names if "l_post_tf" in n or n.endswith("_pf")], [])
+                    self.assertEqual(names.count("lc12/l_post_recon_p12"), 1, names)
+                    self.assertEqual(names.count("w64/post_filter_c1_s4"), 1, names)
+                    self.assertEqual(names.count("scale_rgb"), 0 if pi is None else 1, names)
+                    self.assertEqual(names.count("color_divide"), 0 if pi is None else 1, names)
+
+    def test_bad_toggle_refused(self):
+        got = run("model=L", frames=1, build_files=FT.SHIPPING, flags=("--backend=3",), manifest=full_ports(),
+                  env={"WG_L_POST_TF": "2"}, tf_default=True)
+        self.assertEqual(len(got), 1)
+        self.assertTrue(got[0].startswith("ERR create: WG_L_POST_TF"), got[0])
+
+    def test_without_the_port_the_separate_route(self):
+        ports = [kc for kc in full_ports() if kc[0] not in ("w64_lc12/l_post_tf_p12", "w64_lc12/l_post_tf_p12_pf")]
+        t = self.trace(ports=ports, frames=1)
+        self.assertEqual(t.kernels["l_post_tf"], "off")
+        self.assertIn("lc12/l_post_recon_p12", self.names(t.frames[0]))
+
+    def test_ldr_and_a_footprint_over_the_staging_are_not_fused(self):
+        t = self.trace(hdr=0, frames=1)
+        self.assertEqual([n for n in self.names(t.frames[0]) if "l_post_tf" in n], [])
+        # render = D (180 x 108 for the 120 x 72 output): the 4 x 4 footprint of a step is over 512 staged texels
+        t = self.trace(frames=1, rw=180, rh=108)
+        self.assertEqual([n for n in self.names(t.frames[0]) if "l_post_tf" in n], [])
+        self.assertIn("lc12/l_post_recon", self.names(t.frames[0]))   # (pack12 does not fit D = R: l_coef + l_post_recon)
+
+
 class ReleaseDefault(unittest.TestCase):
     """0.6.5 (oversight 2026-11-15 18:36Z): Model L = hybrid_full when WG_L_FORM is unset. On native D3D12 the fast
     hybrid route (the manifest's "_hyb" twins on the unfused layout, the C1/C2 reconstruction lc12/*); on HIP the scalar
@@ -1228,21 +1368,41 @@ class ReleaseDefault(unittest.TestCase):
     def kernels_text(lines):
         return next(ln for ln in lines if ln.startswith("kernels "))
 
+    def test_exfuse_toggle(self):
+        """WG_L_EXFUSE=0, or a manifest without the fused decoder blocks: the unfused route (standalone expands and decoder
+        blocks, swin_fused=none); any other value is refused at create."""
+        unfused = {"expand_c128_hyb", "expand_c96_hyb", "swin_block_c96_add_hyb", "swin_block_c64_add_hyb"}
+        for label, got in (("env 0", self.d3d12(full_ports(), env={"WG_L_EXFUSE": "0"})),
+                           ("no ports", self.d3d12([kc for kc in full_ports() if kc[0] not in EX_HYB]))):
+            with self.subTest(case=label):
+                self.assertEqual(got[0], "create ok model L")
+                text = self.kernels_text(got)
+                self.assertIn("swin_fused=none", text)
+                self.assertIn("l_exfuse=off", text)
+                names = self.launched(got)
+                self.assertTrue(unfused <= names, sorted(unfused - names))
+                self.assertEqual(set(EX_HYB) & names, set())
+        got = self.d3d12(full_ports(), env={"WG_L_EXFUSE": "2"})
+        self.assertEqual(len(got), 1)
+        self.assertTrue(got[0].startswith("ERR create: WG_L_EXFUSE"), got[0])
+
     def test_default_is_hybrid_full_on_d3d12(self):
         for env in (None, {"WG_L_FORM": "hybrid"}):
             with self.subTest(env=env):
-                got = self.d3d12(full_ports(), env=env)
+                got = self.d3d12(full_ports(), env=env, tf_default=True)
                 self.assertEqual(got[0], "create ok model L")
                 text = self.kernels_text(got)
-                ntwins = sum(k.endswith("_hyb") for k, _ in full_ports())
+                ntwins = sum(k.endswith("_hyb") and not k.endswith("_q7c_hyb") for k, _ in full_ports())
                 for want in ("l_form=hybrid", "l_hyb_d3d12=on", "l_post_c12=on", "hyb_twins=%d" % ntwins,
-                             "swin_fused=none", "hyb_tables=on"):
+                             "swin_fused=dec2,dec1", "l_exfuse=on", "hyb_tables=on"):
                     self.assertIn(want, text)
                 names = self.launched(got)
-                used = set(HYB_TWINS) - {"l_swin_block_c32_enc_hyb", "l_swin_block_c32_dec_hyb",
-                                         "swin_block_c128_hyb"} | {ENC_LIN_HYB, DEC_COEF_HYB, BNECK_HYB}
+                used = (set(HYB_TWINS) - {"l_swin_block_c32_enc_hyb", "l_swin_block_c32_dec_hyb",
+                                          "swin_block_c128_hyb", "swin_block_c96_add_hyb", "swin_block_c64_add_hyb",
+                                          "expand_c128_hyb", "expand_c96_hyb"} | {ENC_LIN_HYB, DEC_COEF_HYB, BNECK_HYB}
+                        | set(EX_HYB))
                 self.assertTrue(used <= names, sorted(used - names))
-                self.assertIn("lc12/l_post_recon_p12", names)
+                self.assertIn("w64_lc12/l_post_tf_p12", names)   # the fused post (WG_L_POST_TF default on)
                 blocks = [n for n in names if n.split("/")[-1].startswith(("swin_", "l_swin_", "patch_merge", "expand"))]
                 self.assertEqual([n for n in blocks if not n.endswith("_hyb")], [])   # no M-form block, merge, expand
                 self.assertEqual([n for n in names if "l_q7" in n], [])               # no q7 reference kernel

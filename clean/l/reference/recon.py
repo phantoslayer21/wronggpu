@@ -320,7 +320,20 @@ def reconstruct(x, s, t=_table.TABLE, ldr=False):
         else:
             codes = None
             disp = _post.clamp(enc(Oh), 0.0, _post.DISPLAY_MAX)
-    return {"history": _post.f16(enc(Hh)), "reduced": (code / 1023.0).astype(np.float32),
+        hist_e = enc(Hh)
+        if not ldr and rc.get("history_round") == "rtz":
+            # Spec 06 draft 6: full-history store rounds FP32 -> FP16 toward zero (RTZ),
+            # keeping FP16 subnormals, +-0, and NaN.
+            f = np.asarray(hist_e, np.float64)
+            h = f.astype(np.float16)
+            back = h.astype(np.float64)
+            over = np.isfinite(f) & (((f > 0) & (back > f)) | ((f < 0) & (back < f)))
+            u = h.view(np.uint16).copy()
+            u[over] -= np.uint16(1)
+            hist_out = u.view(np.float16)
+        else:
+            hist_out = _post.f16(hist_e)
+    return {"history": hist_out, "reduced": (code / 1023.0).astype(np.float32),
             "display": _post.f16(disp),
             "_lin": {"H_hat": Hh, "O_hat": Oh, "W": W, "first": first, "second": second, "w1": w1, "w2": w2,
                      "C_lin": C_lin, "H_lin": H_lin, "beta_h": bh2[..., 0], "beta_o": bo2[..., 0]},

@@ -189,11 +189,13 @@ inputs. `--build` is a `clean/runner/build.py` output and `--model` the converte
 
 ```
 python -m clean.equiv.model_m dump   --build B --model MODEL --render 1706x960 --output 2560x1440 --inputs FRAMES ^
-       (--full --frames 2 | --tiles tiles.json) [--state] [--depth-inverted] [--auto-exposure] --out DUMP
+       (--full --frames 2 | --tiles tiles.json) [--state] [--depth-inverted] [--auto-exposure] [--hdr] ^
+       [--options "m_mode=exact;output_filter=original"] [--map MAP] [--backend d3d12|hip] --out DUMP
 python -m clean.equiv.model_m inputs --dump DUMP --frame 1 --stage dec2 --out dec2.json
 python -m clean.equiv.model_m stage  --build B --model MODEL --spec dec2.json --out ISO
 python -m clean.equiv.model_m replay --build B --model MODEL --render 1706x960 --output 2560x1440 --inputs FRAMES ^
-       --out REPLAY [--then "python cmp.py {path} {frame}"] --delete-after
+       [--hdr] [--options "m_mode=exact;output_filter=original"] [--map MAP] --out REPLAY ^
+       [--then "python cmp.py {path} {frame}"] --delete-after
 ```
 
 **(a) Chained dumps.**

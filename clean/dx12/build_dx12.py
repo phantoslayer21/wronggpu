@@ -32,7 +32,8 @@ calls keep the driver's default (non-precise) lowering, above all mad() = one fu
 and rcp() (fdiv 1.0, x) is the hardware v_rcp_f32; it is reassembled (dxil_asm.cpp, DXC's IDxcAssembler) and signed by
 dxv. Any other float division ('/', which would be an IEEE division) or float remainder is refused: use wg_div.
 
-VGPR check: every Swin / bottleneck kernel built (a name with a swin_ or l_swin_ part) is run through RGA (gfx1201) and its
+VGPR check: every Swin / bottleneck kernel built (a name with a swin_ or l_swin_ part, and Model L's fused post
+w64_lc12/l_post_tf_p12[_pf]) is run through RGA (gfx1201) and its
 USED_VGPRs compared with its bound in clean/dx12/vgpr_limits.json (the count that keeps its present workgroups per CU);
 over the bound, or no bound listed, fails the build. WG_DX12_VGPR_CHECK=0 skips it.
 ISA rules of the hybrid kernels: every hybrid kernel built (a name with a _hyb part) is checked in the same RGA run by
@@ -330,7 +331,8 @@ VGPR_LIMITS = os.path.join(HERE, "vgpr_limits.json")
 
 
 def vgpr_checked(name):
-    return re.search(r"(^|/|l_)swin_", name) is not None   # l_swin_*: Model L's blocks (#89)
+    # l_swin_*: Model L's blocks (#89); l_post_tf_p12[_pf]: Model L's fused post (bound = 96-register tier)
+    return re.search(r"(^|/|l_)swin_|/l_post_tf_p12(_pf)?$", name) is not None
 
 
 def rga_vgprs(dxil, isa=False):
@@ -358,7 +360,8 @@ def hyb_scanned(name):
 
 
 # Model hybrid kernels with no norm tree (no square to fuse): their mutants must fail rule 2 only.
-HYB_NO_NORM = {"patch_merge_c64_hyb", "patch_merge_c96_hyb", "expand_c96_hyb", "expand_c128_hyb"}
+HYB_NO_NORM = {"patch_merge_c64_hyb", "patch_merge_c96_hyb", "expand_c96_hyb", "expand_c128_hyb",
+               "patch_merge_c64_q7c_hyb", "patch_merge_c96_q7c_hyb", "expand_c96_q7c_hyb", "expand_c128_q7c_hyb"}
 
 
 def scan_mutant(name):

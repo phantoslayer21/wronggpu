@@ -65,11 +65,17 @@ written).
 
 The clean team has no GPU, but clang 18 here compiles the kernels for gfx1201, so the instruction mix of every build
 can be counted (static count per lane; the kernels are fully unrolled, so this is close to the dynamic count).
-Cost model from the spec team's measurements (perf-targets, "Vector unit and overlap"): a stage takes its matrix time
-plus its vector time; one vector instruction per wave per cycle, a transcendental (`v_exp_f32`, `v_log_f32`) about
-4 times an FMA. Below, **cost = VALU instructions + 4 × transcendentals per lane** (a lane of enc0 or dec0 handles 2
-pixels). The same compile-time switches that remove one part of the work (ablations) are built for the GPU, so the
-spec team can measure what each part really costs (`perf_variants.py`).
+Cost model note (verified 2026-11-23 on RX 9070 XT `gfx1201`): pure WMMA and VALU (both FMA and TRANS `v_exp_f32`)
+**serialize per SIMD** — both within a single wave (cycle counter: 8× FP8 WMMA = 64 cyc, 8×32 FMA = 286 cyc,
+interleaved = 354 cyc; 8×8 `v_exp_f32` = 283 cyc, interleaved = 349 cyc) and across split waves on the same SIMD.
+What **does** overlap with WMMA on `gfx1201` is **SALU** (`~0.9`), **VMEM** global loads / LUT gathers (`~0.37`), and
+**LDS** latency (`~0.085`), plus higher wave occupancy (e.g. cutting LDS from 32 KiB → 16 KiB to go from 2 → 3 WGs/CU)
+which hides VMEM/LDS/barrier stalls across resident waves. (Note: running `overlap_probe.py` in fixed un-interleaved
+order without warmup allows GPU boost clocks to ramp ~40% mid-run and produces false positive overlap; interleaving
+launch order shows `ov_mma + ov_valu32 ≈ ov_mix32` within every round.) For `enc0`/`dec0` estimation below,
+**cost = VALU instructions + 4 × transcendentals per lane** (a lane of enc0 or dec0 handles 2 pixels). The same
+compile-time switches that remove one part of the work (ablations) are built for the GPU, so the spec team can measure
+what each part really costs (`perf_variants.py`).
 
 Version 1 (as measured: 0.331 ms) at that cost model: 3739 per lane, i.e. about 0.28 ms of vector issue at full
 occupancy plus about 0.02 ms of WMMA (6.8 GFLOP at 372 TFLOPS); the kernel was vector-bound. Where it went:

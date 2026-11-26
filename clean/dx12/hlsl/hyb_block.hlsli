@@ -148,21 +148,106 @@ void hyb_norm(v8f x[KC], v8f gp[KC], uint hh, out v8f y[KC])
     }
 }
 
-// The attention weights of the lane's 8 keys from its 8 scores s (float32 chain values started at B):
-// RN16(s), e = hyb_softmax_e8, the row sum in the original's order (a_t = e_2t + e_8+2t, b_t = e_2t+1 + e_9+2t;
-// a = (a0 + a1) + (a2 + a3), b likewise; sum = a + b), w = RN16(rcp32(sum)), P = RN16(e w) as packed FP16.
-uint4 hyb_softmax_p(v8f s, uint hh)
+hv8 hyb_u4_to_h(uint4 u)
 {
-    const hv8 e = hyb_to_h(hyb_softmax_e8(hyb_round16(s)));   // exact (e is FP16)
-    const hv8 ep = hyb_hxor16(e);
-    // p[t] = (a_t, b_t) = e (keys 2t, 2t+1 of this half) + the partner half's: FP16 addition is commutative, so
-    // e + ep on both lanes is the original's RN16(e_{2t} + e_{8+2t}) (no per-lane select)
-    const hv8 A = hyb_hadd(e, ep);
+    hv8 r;
+    r.p[0] = hyb_u2h(u.x); r.p[1] = hyb_u2h(u.y); r.p[2] = hyb_u2h(u.z); r.p[3] = hyb_u2h(u.w);
+    return r;
+}
+
+// Fast norm from already-packed FP16 tiles xh_u (uint4[KC], e.g. SW_Q7_CHUNK norm2 acc_h):
+// avoids 8*KC v_cvt_f32_f16 + 4*KC v_cvt_pk_rtz round-trip conversions; exact same FP16 ops in the exact same order.
+void hyb_norm_h(uint4 xh_u[KC], v8f gp[KC], uint hh, out v8f y[KC])
+{
+    hv8 xh[KC], q0h[KC], qph[KC];
+#if !(KC == 2 || KC == 4 || KC == 8)
+    hv8 T[2 * KC];
+    const bool h0 = hh == 0u;
+#endif
+    [unroll] for (uint k = 0; k < KC; ++k) {
+        xh[k] = hyb_u4_to_h(xh_u[k]);
+        [unroll] for (uint i = 0; i < 4; ++i) {
+            precise h2 sq = xh[k].p[i] * xh[k].p[i];
+            q0h[k].p[i] = hyb_u2h(hyb_h2u(sq) | HYB_OPAQUE0);
+        }
+        qph[k] = hyb_hxor16(q0h[k]);
+#if !(KC == 2 || KC == 4 || KC == 8)
+#if defined(HYB_SCAN_MUTANT) && HYB_SCAN_MUTANT
+        T[k] = q0h[k];
+        T[KC + k] = q0h[k];
+#else
+        T[k] = hyb_hsel(h0, q0h[k], qph[k]);
+        T[KC + k] = hyb_hsel(h0, qph[k], q0h[k]);
+#endif
+#endif
+    }
+#if KC == 2 || KC == 4 || KC == 8
+    hv8 L;
+#if KC == 2
+    L = hyb_hadd(hyb_hadd(q0h[0], qph[0]), hyb_hadd(q0h[1], qph[1]));
+#else
+    {
+        hv8 ol[KC / 4], orr[KC / 4], pl2[KC / 4], pr2[KC / 4];
+        [unroll] for (uint j2 = 0; j2 < KC; j2 += 4u) {
+            ol[j2 / 4u] = hyb_hadd(q0h[j2], q0h[j2 + 2u]);
+            orr[j2 / 4u] = hyb_hadd(q0h[j2 + 1u], q0h[j2 + 3u]);
+            pl2[j2 / 4u] = hyb_hadd(qph[j2], qph[j2 + 2u]);
+            pr2[j2 / 4u] = hyb_hadd(qph[j2 + 1u], qph[j2 + 3u]);
+        }
+#if KC == 4
+        L = hyb_hadd(hyb_hadd(ol[0], pl2[0]), hyb_hadd(orr[0], pr2[0]));
+#else
+        L = hyb_hadd(hyb_hadd(hyb_hadd(ol[0], ol[1]), hyb_hadd(pl2[0], pl2[1])),
+                     hyb_hadd(hyb_hadd(orr[0], orr[1]), hyb_hadd(pr2[0], pr2[1])));
+#endif
+    }
+#endif
+#else
+    const uint tiles = 2u * KC;
+    hv8 pl[4], pr[4];
+    uint nl = 0u, nr = 0u;
+    [unroll] for (uint j = 0; j < tiles; j += 4u) {
+        pl[nl++] = hyb_hadd(T[j], T[j + 2u]);
+        pr[nr++] = hyb_hadd(T[j + 1u], T[j + 3u]);
+    }
+    const hv8 L = hyb_hadd(hyb_group(pl, nl), hyb_group(pr, nr));
+#endif
+    const h2 u01 = L.p[0] + L.p[1], u23 = L.p[2] + L.p[3];
+    const h2 hv = u01 + u23;
+    const float16_t S = hv.x + hv.y;
+    const float16_t S2 = S + (float16_t)asfloat16((uint16_t)0x0800u);
+    const float16_t r = (float16_t)hyb_rsq16((uint)asuint16(S2));
+    const h2 r2 = h2(r, r);
+    [unroll] for (uint k2 = 0; k2 < KC; ++k2) {
+        const hv8 g = hyb_to_h(gp[k2]);
+        hv8 yh;
+        [unroll] for (uint i2 = 0; i2 < 4; ++i2) yh.p[i2] = xh[k2].p[i2] * (r2 * g.p[i2]);
+        y[k2] = hyb_to_f(yh);
+    }
+}
+
+// The attention weights of the lane's 8 keys from its 8 scores s (float32 chain values started at B):
+// RN16(s), e = hyb_softmax_e8 (float32: exact products so fused == unfused under any FMad / NoContraction lowering),
+// the row sum in the original's order (a_t = e_2t + e_8+2t, b_t = e_2t+1 + e_9+2t; a = (a0 + a1) + (a2 + a3), b
+// likewise; sum = a + b), w = RN16(rcp32(sum)), P = RN16(e w) as packed FP16. Split into hyb_softmax_pre /
+// hyb_softmax_fin so callers can hide hyb_rcp16's global LUT load latency behind independent Wv WMMAs.
+struct HybSmaxPre { hv8 e; float16_t w; };
+HybSmaxPre hyb_softmax_pre(v8f s)
+{
+    HybSmaxPre r;
+    r.e = hyb_to_h(hyb_softmax_e8(hyb_round16(s)));
+    const hv8 ep = hyb_hxor16(r.e);
+    const hv8 A = hyb_hadd(r.e, ep);
     const h2 ab = (A.p[0] + A.p[1]) + (A.p[2] + A.p[3]);                 // (a, b)
     const float16_t sum = ab.x + ab.y;
-    const float16_t w = (float16_t)hyb_rcp16((uint)asuint16(sum));
-    const h2 w2 = h2(w, w);
+    r.w = (float16_t)hyb_rcp16((uint)asuint16(sum));
+    return r;
+}
+uint4 hyb_softmax_fin(HybSmaxPre r)
+{
+    const h2 w2 = h2(r.w, r.w);
     hv8 P;
-    [unroll] for (uint i = 0; i < 4; ++i) P.p[i] = e.p[i] * w2;
+    [unroll] for (uint i = 0; i < 4; ++i) P.p[i] = r.e.p[i] * w2;
     return hyb_hpack(P);
 }
+uint4 hyb_softmax_p(v8f s, uint hh) { return hyb_softmax_fin(hyb_softmax_pre(s)); }
