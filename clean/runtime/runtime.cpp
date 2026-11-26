@@ -336,7 +336,7 @@ struct Runtime {
   // The levers of l_mode=fast (native D3D12): kernels of the build launched in place of a base kernel with the same grid,
   // block and arguments (l_fast_alt: base name -> the kernel launched). A "<kernel>_fast" twin replaces <kernel> when its
   // group's bit is set (l_fast_bit); the alternatives of kLFastAlts (in their order, the first one in the build whose bits
-  // are all set) come before it. All on by default but bits 128, 256 and 2048; a developer build reads the selection from
+  // are all set) come before it. All on by default but bits 8, 128, 256, 2048, 4096, 16384 and 32768; a developer build reads the selection from
   // WG_L_FAST_MASK (an A/B of each lever, below).
   //    1  l_post_tf_p12[_pf]       the true-fusion output kernel without the bit-exactness guards (l_post_tf_fast.hlsl)
   //    2  l_project_gather, l_dec_project   the K blocks accumulated in FP32 and rounded once, in the FP8 pack
@@ -359,7 +359,11 @@ struct Runtime {
   //       table form "_w2t_fast" (the model's GELU bytes)
   // 8192  the width-96 Swin blocks' "_fast" twins (swin_block_c96_pm_rev_nc_fast, swin_block_c96_add_ex_nc_fast:
   //       l_swin_c96_fast.hlsl, the clamped-cubic GELU and the softmax without the maximum, no groupshared table)
-  static constexpr unsigned kLFastAll = 16383u, kLFastDefault = 16383u & ~128u & ~256u & ~2048u;
+  // 16384  with lever 1: the 4 x 4 gather without its four corner taps (12 taps; lever 1: bit 3); off by default: RX 9070 XT
+  //        43.2 dB / SSIM 0.982 HDR 1440p Q, 40.5 dB 640 x 360 HDR against the hybrid route
+  // 32768  with lever 1: two history candidates blended in the encoded domain and decoded once (lever 1: bit 4); off by
+  //        default: no measured gain at 1440p Q
+  static constexpr unsigned kLFastAll = 65535u, kLFastDefault = 16383u & ~8u & ~128u & ~256u & ~2048u & ~4096u;   // 9847
   unsigned l_fast_mask = kLFastDefault;
   std::map<std::string, std::string> l_fast_alt;
   static unsigned l_fast_bit(const std::string& n) {
@@ -3409,7 +3413,8 @@ struct Runtime {
         post_last = l_fold_pidiv ? "w64_lc12/l_post_tf_p12_pf" : "w64_lc12/l_post_tf_p12";
         std::string post_k = post_last;
         if (l_fast_alt.count(post_last)) {
-          hpitch = ((l_fast_mask & 16u) ? 1 : 0) | ((l_fast_mask & 64u) ? 2 : 0) | ((l_fast_mask & 128u) ? 4 : 0);   // the fast kernel's pitch_bytes is its option word
+          hpitch = ((l_fast_mask & 16u) ? 1 : 0) | ((l_fast_mask & 64u) ? 2 : 0) | ((l_fast_mask & 128u) ? 4 : 0) |
+                   ((l_fast_mask & 16384u) ? 8 : 0) | ((l_fast_mask & 32768u) ? 16 : 0);   // the fast kernel's pitch_bytes is its option word
           if (l_is_post3(l_fast_alt[post_last]) && !l_tf3_supported(rw, rh, dw, dh)) post_k = post_last + "_fast";   // the 4 x 4 twin
         }
         filter_last = "fused";

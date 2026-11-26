@@ -71,8 +71,8 @@ ALTS = (("w64_lc12/l_post_tf_p12", "w64_lc12/l_post_tf_p12_fast3", 1 | 256),
         ("l_swin_block_c32_enc_lin_nc", "l_swin_block_c32_enc_lin_w2t_fast", 512),
         ("l_swin_block_c32_dec_coef12_add_nc", "l_swin_block_c32_dec_coef12_add_w2p_fast", 1024 | 4096),
         ("l_swin_block_c32_dec_coef12_add_nc", "l_swin_block_c32_dec_coef12_add_w2t_fast", 1024))
-ALL_MASK = 16383
-DEFAULT_MASK = ALL_MASK & ~128 & ~256 & ~2048
+ALL_MASK = 65535
+DEFAULT_MASK = 16383 & ~8 & ~128 & ~256 & ~2048 & ~4096   # 9847
 
 
 def lever_bit(base):
@@ -459,12 +459,12 @@ class FastKernels(unittest.TestCase):
         for k in t:
             self.assertIn(fast_base(k), [x for x, _ in F.full_ports()], k)   # every fast kernel replaces a base kernel
         # the default selection: the 4 x 4 post (lever 256, the 3 x 3 gather, is off), the two-windows-per-wave width-32
-        # blocks with the clamped-cubic GELU, the c64 twins, the c96 twins of the build
+        # blocks with the table GELU (lever 4096 is off), no c64 twins (lever 8 is off), the c96 twins of the build
         alt = selection()[0]
         self.assertEqual(alt["w64_lc12/l_post_tf_p12"], "w64_lc12/l_post_tf_p12_fast")
-        self.assertEqual(alt[ENC_LIN], "l_swin_block_c32_enc_lin_w2p_fast")
-        self.assertEqual(alt[FOLD_ADD], "l_swin_block_c32_dec_coef12_add_w2p_fast")
-        self.assertEqual(alt["swin_block_c64_nc"], "swin_block_c64_nc_fast")
+        self.assertEqual(alt[ENC_LIN], "l_swin_block_c32_enc_lin_w2t_fast")
+        self.assertEqual(alt[FOLD_ADD], "l_swin_block_c32_dec_coef12_add_w2t_fast")
+        self.assertNotIn("swin_block_c64_nc", alt)
         self.assertEqual(alt["swin_block_c96_add_ex_nc"], "swin_block_c96_add_ex_nc_fast")
         self.assertEqual(alt["swin_block_c96_pm_rev_nc"], "swin_block_c96_pm_rev_nc_fast")
         self.assertNotIn("bneck/swin_bneck6_mb_nc", alt)   # (lever 2048: no bottleneck twin)
@@ -477,7 +477,7 @@ class FastKernels(unittest.TestCase):
         self.assertEqual(shape(a), shape(b))   # the same launches with the same arguments, twins or not
         alt = selection()[0]
         for f in a.frames:
-            for k in self.LEVERS + (FOLD_ADD, "swin_block_c64_nc", "swin_block_c64_add_ex_nc"):
+            for k in self.LEVERS + (FOLD_ADD, "swin_block_c96_pm_rev_nc", "swin_block_c96_add_ex_nc"):
                 self.assertIn(alt[k], f["fast"], f["fast"])
         for f in b.frames:
             self.assertEqual(f["fast"], [])
@@ -542,7 +542,8 @@ class FastMask(unittest.TestCase):
     DEC_W2T = {"l_swin_block_c32_dec_coef12_add_w2t_fast"}
     MID = {"swin_block_c64_nc_fast", "swin_block_c64_add_ex_nc_fast"}
     C96 = {"swin_block_c96_add_ex_nc_fast", "swin_block_c96_pm_rev_nc_fast"}
-    DEFAULT = POST | PROJECT | ENC_W2 | DEC_W2 | MID | C96
+    DEFAULT = POST | PROJECT | ENC_W2T | DEC_W2T | C96
+    ALL = POST3 | PROJECT | ENC_W2 | DEC_W2 | MID | C96
 
     def launched(self, mask, exe, **kw):
         t = FastTrace(l_run("model=L,l_mode=fast", frames=2, tf_default=True, exe=exe, env={"WG_L_FAST_MASK": str(mask)},
@@ -554,11 +555,11 @@ class FastMask(unittest.TestCase):
 
     def test_developer_mask(self):
         exe = dev_exe()
-        for mask, want in ((DEFAULT_MASK, self.DEFAULT), (ALL_MASK, (self.DEFAULT - self.POST) | self.POST3),
+        for mask, want in ((DEFAULT_MASK, self.DEFAULT), (ALL_MASK, self.ALL),
                            (127, self.POST | self.PROJECT | self.ENC | self.MID), (8192, self.C96), (2048, set()),
                            (0, set()), (1, self.POST), (1 | 256, self.POST3), (256, set()), (2, self.PROJECT), (4, self.ENC),
                            (4 | 512, self.ENC_W2T), (512 | 4096, self.ENC_W2), (1024, self.DEC_W2T), (1024 | 4096, self.DEC_W2),
-                           (4096, set()), (8, self.MID), (16 | 64 | 128, set())):
+                           (4096, set()), (8, self.MID), (16 | 64 | 128, set()), (16384 | 32768, set())):
             with self.subTest(mask=mask):
                 got, t = self.launched(mask, exe)
                 self.assertEqual(got, want)

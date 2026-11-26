@@ -106,6 +106,8 @@ static bool g_secbl;     // bit 0: the weaker history candidate (n = 1, weight <
 static bool g_w2hi;      // bit 2 (off by default): a weaker candidate of weight below 0.05 is dropped (the hybrid route's threshold: 1 / 255)
 static bool g_secsame;   // bit 1: a weaker candidate whose motion is within 0.01 render pixel of the first one's is the same sample
                          // (the weights add to 1: the first candidate alone); static and smooth regions skip the second history read
+static bool g_oct;       // bit 3: the 4 x 4 gather without its four corner taps (12 taps: the inner 2 x 2 and the axial ones)
+static bool g_encbl;     // bit 4: two valid history candidates blended in the encoded domain, one decode (3 exponentials, not 6)
 
 float unif(float x) { return asfloat(WaveReadLaneFirst(asuint(x))); }
 uint mul24(uint a, uint b) { return (a & 0xffffffu) * (b & 0xffffffu); }
@@ -122,14 +124,19 @@ float rn16(float x) { return asfloat(asuint(x) + 0x1000u); }                    
 float enc_log(float v) { return log2(max(mad(100.0f, v, 1.0f), k1em4)); }
 float enc_in_r(float v) { return isnan(v) ? 0.0f : kEncKr * enc_log(min(v, 32752.0f)); }
 
+// 8-byte-aligned loads (every history texel and A8 texel is 8 bytes from a 256-byte-aligned arena base): the mask tells the
+// compiler the alignment so each span is one 128-bit / 64-bit load instead of 32-bit pieces
+uint2 ld64_a8(uint a) { return wg_mem.Load2(a & ~7u); }
+uint4 ld128_a8(uint a) { return wg_mem.Load4(a & ~7u); }
+
 // ---- the staged texel -------------------------------------------------------------------------------------------------
 struct LRaw { float4 c; uint2 d; uint c01; };
 LRaw raw_fetch(int idx)
 {
     LRaw r;
     const uint ui = (uint)idx;
-    r.c = wg_ld4f(color, ui * 16u);
-    r.d = wg_ld64(A, ui * 8u);
+    r.c = asfloat(wg_mem.Load4((color + ui * 16u) & ~15u));   // 16-byte texels of a 256-byte-aligned base
+    r.d = ld64_a8(A + ui * 8u);
     r.c01 = wg_ld32(C, ui * 4u);
     return r;
 }
@@ -191,13 +198,14 @@ void tap_acc(inout LGather g, uint t[kTexDw], half w)
     }
 }
 // one column i of the 4 x 4 gather (taps j = -1 ... 2 for both rows of the pair) from the staged texels
+// (rows jj = j_lo ... j_hi: the full column, or with lever bit 3 the edge columns' middle rows / their corners alone)
 void gather_col(int i, half dx, int tb0, int rstride, half v0[kLWin], half v1[kLWin], half vv0[kLWin], half vv1[kLWin],
-                inout LGather g0, inout LGather g1)
+                inout LGather g0, inout LGather g1, int j_lo = 0, int j_hi = kLWin - 1, int j_step = 1)
 {
     const half u = dx + (half)(float)i;
     const half uu = u * u;
     const int col_base = tb0 + (i + 1) * kTexDw;
-    [unroll] for (int jj = 0; jj < kLWin; ++jj) {
+    [unroll] for (int jj = j_lo; jj <= j_hi; jj += j_step) {
         const int base = col_base + jj * rstride;
         uint t[kTexDw];
         [unroll] for (int d = 0; d < kTexDw; ++d) t[d] = sh_tex[base + d];
@@ -269,8 +277,8 @@ float3 history_cr(float qx, float qy)
     [branch] if (WaveActiveAllTrue(interior)) {
         const uint b0 = hist_prev + (uint)(ix - 1) * 8u + (uint)(iy - 1) * pitch;
         const uint b1 = b0 + pitch, b2 = b0 + 2u * pitch, b3 = b0 + 3u * pitch;
-        const uint4 a0 = wg_mem.Load4(b0 + 8u), a10 = wg_mem.Load4(b1), a11 = wg_mem.Load4(b1 + 16u);
-        const uint4 a20 = wg_mem.Load4(b2), a21 = wg_mem.Load4(b2 + 16u), a3 = wg_mem.Load4(b3 + 8u);
+        const uint4 a0 = ld128_a8(b0 + 8u), a10 = ld128_a8(b1), a11 = ld128_a8(b1 + 16u);
+        const uint4 a20 = ld128_a8(b2), a21 = ld128_a8(b2 + 16u), a3 = ld128_a8(b3 + 8u);
         const float3 q0 = mad(wx.z, h3(a0.zw), wx.y * h3(a0.xy));
         const float3 q1 = mad(wx.w, h3(a11.zw), mad(wx.z, h3(a11.xy), mad(wx.y, h3(a10.zw), wx.x * h3(a10.xy))));
         const float3 q2 = mad(wx.w, h3(a21.zw), mad(wx.z, h3(a21.xy), mad(wx.y, h3(a20.zw), wx.x * h3(a20.xy))));
@@ -284,12 +292,12 @@ float3 history_cr(float qx, float qy)
         co[k] = hist_prev + (uint)clampi(ix - 1 + k, 0, P_dw - 1) * 8u;
         ro[k] = (uint)clampi(iy - 1 + k, 0, P_dh - 1) * pitch;
     }
-    const float3 r0 = mad(wx.z, h3(wg_mem.Load2(ro[0] + co[2])), wx.y * h3(wg_mem.Load2(ro[0] + co[1])));
-    const float3 r1 = mad(wx.w, h3(wg_mem.Load2(ro[1] + co[3])), mad(wx.z, h3(wg_mem.Load2(ro[1] + co[2])),
-                      mad(wx.y, h3(wg_mem.Load2(ro[1] + co[1])), wx.x * h3(wg_mem.Load2(ro[1] + co[0])))));
-    const float3 r2 = mad(wx.w, h3(wg_mem.Load2(ro[2] + co[3])), mad(wx.z, h3(wg_mem.Load2(ro[2] + co[2])),
-                      mad(wx.y, h3(wg_mem.Load2(ro[2] + co[1])), wx.x * h3(wg_mem.Load2(ro[2] + co[0])))));
-    const float3 r3 = mad(wx.z, h3(wg_mem.Load2(ro[3] + co[2])), wx.y * h3(wg_mem.Load2(ro[3] + co[1])));
+    const float3 r0 = mad(wx.z, h3(ld64_a8(ro[0] + co[2])), wx.y * h3(ld64_a8(ro[0] + co[1])));
+    const float3 r1 = mad(wx.w, h3(ld64_a8(ro[1] + co[3])), mad(wx.z, h3(ld64_a8(ro[1] + co[2])),
+                      mad(wx.y, h3(ld64_a8(ro[1] + co[1])), wx.x * h3(ld64_a8(ro[1] + co[0])))));
+    const float3 r2 = mad(wx.w, h3(ld64_a8(ro[2] + co[3])), mad(wx.z, h3(ld64_a8(ro[2] + co[2])),
+                      mad(wx.y, h3(ld64_a8(ro[2] + co[1])), wx.x * h3(ld64_a8(ro[2] + co[0])))));
+    const float3 r3 = mad(wx.z, h3(ld64_a8(ro[3] + co[2])), wx.y * h3(ld64_a8(ro[3] + co[1])));
     const float3 acc = mad(wy.w, r3, mad(wy.z, r2, mad(wy.y, r1, wy.x * r0)));
     const float norm = mad(wx.y + wx.z, wy.x + wy.w, wy.y + wy.z);
     return acc * rcp(norm);
@@ -305,8 +313,8 @@ float3 history_bilinear(float qx, float qy)
     const uint pitch = (uint)P_dw * 8u;
     const uint ca = hist_prev + (uint)clampi(ix, 0, P_dw - 1) * 8u, cb = hist_prev + (uint)clampi(ix + 1, 0, P_dw - 1) * 8u;
     const uint ra = (uint)clampi(iy, 0, P_dh - 1) * pitch, rb = (uint)clampi(iy + 1, 0, P_dh - 1) * pitch;
-    const float3 t0 = mad(fx, h3(wg_mem.Load2(ra + cb)) - h3(wg_mem.Load2(ra + ca)), h3(wg_mem.Load2(ra + ca)));
-    const float3 t1 = mad(fx, h3(wg_mem.Load2(rb + cb)) - h3(wg_mem.Load2(rb + ca)), h3(wg_mem.Load2(rb + ca)));
+    const float3 t0 = mad(fx, h3(ld64_a8(ra + cb)) - h3(ld64_a8(ra + ca)), h3(ld64_a8(ra + ca)));
+    const float3 t1 = mad(fx, h3(ld64_a8(rb + cb)) - h3(ld64_a8(rb + ca)), h3(ld64_a8(rb + ca)));
     return mad(fy, t1 - t0, t0);
 }
 
@@ -349,6 +357,8 @@ void l_post_core(LGather g, int x, int y, int fx, int fy, float mx[3], float my[
     const float X = (float)x + 0.5f, Y = (float)y + 0.5f;
     const int ncand = w2 != 0.0f ? 2 : 1;
     float L[2][3];
+    bool hvalid[2] = {false, false};
+    const bool encm = and(g_encbl, ncand == 2);   // L[n] of a valid history candidate holds its encoded value until the blend
     [unroll] for (int n = 0; n < 2; ++n) {
         L[n][0] = 0.0f; L[n][1] = 0.0f; L[n][2] = 0.0f;
         if (n < ncand) {
@@ -357,9 +367,10 @@ void l_post_core(LGather g, int x, int y, int fx, int fy, float mx[3], float my[
             const bool valid = and(and(and(and(P_reset == 0, qx >= 0.0f), qx <= (float)P_dw), qy >= 0.0f), qy <= (float)P_dh);
             if (valid) {
                 const float3 h = (n == 1 && g_secbl) ? history_bilinear(qx, qy) : history_cr(qx, qy);
-                L[n][0] = dec_hist(h.x);
-                L[n][1] = dec_hist(h.y);
-                L[n][2] = dec_hist(h.z);
+                hvalid[n] = true;
+                L[n][0] = encm ? h.x : dec_hist(h.x);
+                L[n][1] = encm ? h.y : dec_hist(h.y);
+                L[n][2] = encm ? h.z : dec_hist(h.z);
             } else {
                 float4 c = wg_ld4f(color, (uint)(fy * P_rw + fx) * 16u);
 #if LP_PIDIV
@@ -371,10 +382,18 @@ void l_post_core(LGather g, int x, int y, int fx, int fy, float mx[3], float my[
         }
     }
     float Hl[3], Cl[3];
-    [unroll] for (int i = 0; i < 3; ++i) {
-        Hl[i] = ncand == 2 ? mad(w1, L[0][i], w2 * L[1][i]) : w1 * L[0][i];
-        Cl[i] = dec_cur(inv * (float)g.F[i]);
+    if (and(encm, and(hvalid[0], hvalid[1]))) {   // two history candidates: one decode of the encoded blend
+        [unroll] for (int i = 0; i < 3; ++i) Hl[i] = dec_hist(mad(w1, L[0][i], w2 * L[1][i]));
+    } else {
+        if (encm) {   // one of the two is the colour fallback: decode the history one, then the blend below
+            [unroll] for (int n = 0; n < 2; ++n)
+                if (hvalid[n]) {
+                    [unroll] for (int i = 0; i < 3; ++i) L[n][i] = dec_hist(L[n][i]);
+                }
+        }
+        [unroll] for (int i = 0; i < 3; ++i) Hl[i] = ncand == 2 ? mad(w1, L[0][i], w2 * L[1][i]) : w1 * L[0][i];
     }
+    [unroll] for (int i = 0; i < 3; ++i) Cl[i] = dec_cur(inv * (float)g.F[i]);
     const float f7 = inv * (float)g.F[7], f8 = inv * (float)g.F[8];
     const float alpha = clampf(s * (float)g.F[6], 0.0f, 1.0f);   // s W (F6 / W) = s F6: the total weight cancels
     const float bh2 = mad(alpha, 1.0f - f7, f7);
@@ -472,6 +491,8 @@ WG_KERNEL(l_post_tf_p12_fast)
     g_secbl = (pitch_bytes & 1) != 0;
     g_secsame = (pitch_bytes & 2) != 0;
     g_w2hi = (pitch_bytes & 4) != 0;
+    g_oct = (pitch_bytes & 8) != 0;
+    g_encbl = (pitch_bytes & 16) != 0;
 #if LP_PIDIV
     g_ipi = unif(rcp(asfloat((uint)P_pad0)));
 #endif
@@ -584,8 +605,15 @@ WG_KERNEL(l_post_tf_p12_fast)
             // taps column by column (i outer, j inner), both rows' gathers in one pass over the staged texels
             LGather g0 = gather_zero(), g1 = gather_zero();
             const int tb0 = ((b - 1 - r0c) * ncol + (ax - 1 - c0)) * kTexDw, rstride = ncol * kTexDw;
-            [loop] for (int i = -1; i <= (kLWin - 2); ++i)
-                gather_col(i, dx, tb0, rstride, v0, v1, vv0, vv1, g0, g1);
+            [branch] if (g_oct) {   // lever bit 3: the inner columns whole, the edge columns' middle rows (12 taps)
+                [loop] for (int i = 0; i <= 1; ++i)
+                    gather_col(i, dx, tb0, rstride, v0, v1, vv0, vv1, g0, g1);
+                [loop] for (int i = -1; i <= 2; i += 3)
+                    gather_col(i, dx, tb0, rstride, v0, v1, vv0, vv1, g0, g1, 1, 2);
+            } else {
+                [loop] for (int i = -1; i <= (kLWin - 2); ++i)
+                    gather_col(i, dx, tb0, rstride, v0, v1, vv0, vv1, g0, g1);
+            }
 #endif
 
             float r[3] = {0.0f, 0.0f, 0.0f};

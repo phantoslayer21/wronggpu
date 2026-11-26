@@ -37,10 +37,10 @@
 //     block's FP32 output (no FP16 rounding of y2, no RN16 of the sigmas, tanh as 1 - 2 / (2^(2 t log2 e) + 1) for
 //     every t: no polynomial branch), the FP16 products by the native conversion with the scale folded in.
 //
-// @wg-kernel l_swin_block_c32_enc_lin_w2p_fast co=- block=256 group=128 gscale=1 wave=32 args=p,p,p,p,u,u,u,u,p,p defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_SRC=3,WG_LD_A16=1,WG_REV_ORDER=1,LF_NAME=l_swin_block_c32_enc_lin_w2p_fast,LF_GELU=1
-// @wg-kernel l_swin_block_c32_enc_lin_w2t_fast co=- block=256 group=128 gscale=1 wave=32 args=p,p,p,p,u,u,u,u,p,p defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_SRC=3,WG_LD_A16=1,WG_REV_ORDER=1,LF_NAME=l_swin_block_c32_enc_lin_w2t_fast,LF_GELU=2,SW_GELU_PAT=13333
-// @wg-kernel l_swin_block_c32_dec_coef12_add_w2p_fast co=- block=256 group=128 gscale=1 wave=32 args=p,p,p,p,u,u,u,u,p,p,p,p,u,u defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=1,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_SRC=2,SW_OUT_F16=1,SW_OUT_COEF12=1,WG_LD_A16=1,LF_NAME=l_swin_block_c32_dec_coef12_add_w2p_fast,LF_GELU=1
-// @wg-kernel l_swin_block_c32_dec_coef12_add_w2t_fast co=- block=256 group=128 gscale=1 wave=32 args=p,p,p,p,u,u,u,u,p,p,p,p,u,u defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=1,SW_SAFE=1,SW_ECL=0,SW_HPU=8,SW_SRC=2,SW_OUT_F16=1,SW_OUT_COEF12=1,WG_LD_A16=1,LF_NAME=l_swin_block_c32_dec_coef12_add_w2t_fast,LF_GELU=2,SW_GELU_PAT=13333
+// @wg-kernel l_swin_block_c32_enc_lin_w2p_fast co=- block=256 group=128 gscale=1 wave=32 args=p,p,p,p,u,u,u,u,p,p defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=4,SW_SRC=3,WG_LD_A16=1,WG_REV_ORDER=1,LF_NAME=l_swin_block_c32_enc_lin_w2p_fast,LF_GELU=1
+// @wg-kernel l_swin_block_c32_enc_lin_w2t_fast co=- block=256 group=128 gscale=1 wave=32 args=p,p,p,p,u,u,u,u,p,p defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HPU=4,SW_SRC=3,WG_LD_A16=1,WG_REV_ORDER=1,LF_NAME=l_swin_block_c32_enc_lin_w2t_fast,LF_GELU=2,SW_GELU_PAT=13333
+// @wg-kernel l_swin_block_c32_dec_coef12_add_w2p_fast co=- block=256 group=128 gscale=1 wave=32 args=p,p,p,p,u,u,u,u,p,p,p,p,u,u defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=1,SW_SAFE=1,SW_ECL=0,SW_HPU=4,SW_SRC=2,SW_OUT_F16=1,SW_OUT_COEF12=1,WG_LD_A16=1,LF_NAME=l_swin_block_c32_dec_coef12_add_w2p_fast,LF_GELU=1
+// @wg-kernel l_swin_block_c32_dec_coef12_add_w2t_fast co=- block=256 group=128 gscale=1 wave=32 args=p,p,p,p,u,u,u,u,p,p,p,p,u,u defines=SW_C=32,SW_HEADS=2,SW_MLP=128,SW_ADD=1,SW_SAFE=1,SW_ECL=0,SW_HPU=4,SW_SRC=2,SW_OUT_F16=1,SW_OUT_COEF12=1,WG_LD_A16=1,LF_NAME=l_swin_block_c32_dec_coef12_add_w2t_fast,LF_GELU=2,SW_GELU_PAT=13333
 //
 // Arguments as the kernels they replace: l_swin_block_c32_enc_lin_nc (x = the FP8 q halo map in its 20-byte form, xadd and
 // out_p unused / the output map, w, H, W, ox, oy, enc0.Win1, enc0.Win2) and l_swin_block_c32_dec_coef12_add_nc (y, S, out
@@ -74,6 +74,10 @@
 #error "LF_PM: enc2's block with enc1's patch merge (C = 96, source 0; aux and aux2 appended to the arguments: l_swin_c96_fast.hlsl)"
 #endif
 #define LF_LIN (SW_SRC == 3)   // the encoder block's input linears (Model L's enc0)
+// LF_W2_ONE (the coefficient store at C = 32): the store reads channels 0..12 only, so W2 runs one output tile, tile 0
+// remapped to channels 0..15 in order (rows 8..15: tile 1's rows 0..7, the residual from lane t, the weight fragment from
+// lane l - 8): half the W2 WMMAs, the same products and the same accumulation order for every channel stored
+#define LF_W2_ONE (SW_OUT_COEF12 && SW_C == 32 && KC == 2)
 #if LF_PM
 #define LF_PM_W (16 * 6 * 256)   // the 24 KB of merge fragments: both staging buffers
 #if LF_PM_W > 2 * MAXU
@@ -399,6 +403,14 @@ WG_KERNEL(LF_NAME)
         }
     }
 
+#if LF_W2_ONE
+    [unroll] for (uint iw = 0; iw < NWW; ++iw)
+        [unroll] for (uint v = 0; v < 8; ++v) {
+            const float x = wg_xor16(acc[iw][1].v[v]);   // lane t's tile 1 row v: channel 8 + v
+            acc[iw][0].v[v] = hh != 0u ? x : acc[iw][0].v[v];
+        }
+    const bool w2_hi = (lane & 8u) != 0u;   // fragment rows 8..15 of the remapped tile
+#endif
     // Steps 9-10: x2 = x1 + W2 q8(GELU(W1 m + b1)) + b2, GROUP hidden tiles of 16 at a time (both windows per group: the
     // other window's chain is the independent work under each GELU).
     const uint b1 = w + L_B1 + hh * 32u;
@@ -431,9 +443,18 @@ WG_KERNEL(LF_NAME)
             [unroll] for (uint ib = 0; ib < NWW; ++ib)
                 [unroll] for (uint gb = 0; gb < GROUP; ++gb) hf[ib][gb] = lf_gelu_q8(hcur[ib][gb]);
 #endif
+#if LF_W2_ONE
+            [unroll] for (uint g5 = 0; g5 < GROUP; ++g5) {
+                const uint2 t1 = uint2(wg_xor_u(f2[g5][1].x, 8u), wg_xor_u(f2[g5][1].y, 8u));
+                f2[g5][0] = w2_hi ? t1 : f2[g5][0];
+            }
+            [unroll] for (uint i6 = 0; i6 < NWW; ++i6)
+                [unroll] for (uint g6 = 0; g6 < GROUP; ++g6) acc[i6][0] = wg_wmma_fp8(f2[g6][0], hf[i6][g6], acc[i6][0]);
+#else
             [unroll] for (uint m2 = 0; m2 < KC; ++m2)
                 [unroll] for (uint i6 = 0; i6 < NWW; ++i6)
                     [unroll] for (uint g6 = 0; g6 < GROUP; ++g6) acc[i6][m2] = wg_wmma_fp8(f2[g6][m2], hf[i6][g6], acc[i6][m2]);
+#endif
             if (more && j0 == 0u) st_commit(stage, (buf ^ 1u) * MAXU, MLP_BYTES / 16, tid);   // the other buffer is free
         }
         if (more) {
@@ -449,9 +470,17 @@ WG_KERNEL(LF_NAME)
         float a[13];
         const uint ch[13] = {0u, 1u, 6u, 7u, 8u, 9u, 10u, 11u, 12u, 2u, 3u, 4u, 5u};   // L_DEC_VALUES
         [unroll] for (uint q = 0; q < 13u; ++q) {
+#if LF_W2_ONE
+            // tile 0 = channels 0..7 (lane t) and 8..15 (lane t + 16): the window's own half, the other from lane t ^ 16
+            const uint vq = ch[q] & 7u;
+            const float own = hh != 0u ? acc[1][0].v[vq] : acc[0][0].v[vq];
+            const float recv = wg_xor16(hh != 0u ? acc[0][0].v[vq] : acc[1][0].v[vq]);
+            a[q] = ((ch[q] < 8u) == (hh == 0u)) ? own : recv;
+#else
             const float own = acc[0][ch[q] >> 3].v[ch[q] & 7u];
             const float other = wg_xor16(acc[1][ch[q] >> 3].v[ch[q] & 7u]);
             a[q] = hh != 0u ? other : own;
+#endif
 #if LF_G2
             a[q] = a[q] * 0.5f;   // the doubled accumulator (exact)
 #endif
