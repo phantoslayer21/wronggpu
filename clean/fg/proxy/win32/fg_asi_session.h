@@ -27,6 +27,36 @@
 //    presented as the game asked. A session that cannot be created is logged; after three failures the host stops
 //    trying for the process (the game keeps running on the copy path). Resize, fullscreen changes and the chain's
 //    release destroy the session (bounded waits); the next present creates it again.
+//  - HOST OVERLAY (OptiScaler). When OptiScaler hosts the plugin (SetHostOverlay: OptiPluginInit was called, or its
+//    proxy loaded the plugin), fg_presenter=auto takes a DXGI flip presenter (tearing when the chain and the system
+//    have it, else v-sync): every real and generated image then goes through the chain OptiScaler wraps, so its menu
+//    and overlay are drawn on every frame. The composition presenter shows its images through a window target of its
+//    own and never presents the wrapped chain, which would hide that overlay; an explicit fg_presenter=hwfq still
+//    takes it. The session is created with the route's highest N (not the player's cap), so a multiplier changed in
+//    the menu applies from the next game frame without a new session.
+//  - LATENESS. A generated image is shown only if the GPU finished it before its display time, which the scheduler
+//    puts at the game present plus a first-image budget. A game whose GPU still renders the frame it just presented
+//    (GPU bound, frames queued) finishes most images after a fixed short budget, so they are dropped and only the game
+//    frames reach the display. The host therefore measures, every 60 generating frames, the share of generated images
+//    that missed (the presenter's late and no-slot drops) and raises the budget (4 ms at start, up to 30 ms) while
+//    more than 1 in 10 miss; after 16 windows with 1 in 50 or fewer it eases back by 0.5 ms. A larger budget adds the
+//    same latency to every frame; each change is logged. The presenter has 12 slots (three intervals in flight at 6x).
+//  - PRESENT QUEUE. A chain created while FG is taken is created on a direct queue of the host's own (high priority,
+//    CreationQueue), not on the game's queue: the presenter's copies and presents (and the copy path's) then never wait
+//    behind the game's rendering of its next frame, which in a GPU-bound game would hold every generated image until
+//    after the next game frame. The copy path's present queue waits for the game's work on the facade buffer (a fence
+//    the host signals on the game's queue); the executor keeps recording its game-queue work on the game's queue.
+//  - DISPLAY RATE. The scheduler's output-rate ceiling is the display's refresh (read from the compositor at session
+//    creation, 95 % of its period as the shortest on-screen time of an image), with the count adapted: an interval
+//    generates only as many images as the display can show (a 60 Hz panel: 30 -> 60 fps at 2x, nothing at a 60+ fps
+//    base). Without a readable refresh the scheduler's own window stays.
+//  - BACK-PRESSURE. When the display path shows fewer images than the game renders, queued game frames (never dropped)
+//    would fill every presenter slot and the session would be refused. Before each game frame goes to the session the
+//    host waits (at most 50 ms, 0.5 ms steps) until the presenter has a free slot for it and the reserve, as a game's
+//    own present waits on a full queue.
+//  - LIVE STATUS (LiveStatus): what the last game present did, the presenter in use and whether the host gave up, in
+//    atomics written on the present thread; a menu drawn on any thread (inside a present included) reads them without
+//    taking a lock.
 //  - No lambda captures a copy that can throw; no exception leaves a callback (the wrapper detaches a callback that
 //    throws, and the game's present still happens).
 // Written for this project.
@@ -88,6 +118,24 @@ struct FgAsiSessionStats {
              exec_net2_exact = 0;
 };
 
+// What the host's last game present did (FgAsiSessionHost::LiveStatus), for a menu. Plain values.
+enum FgAsiPhase : uint32_t {
+    kFgPhaseWaiting = 0,     // no game present reached the session host yet (or FG is not taken)
+    kFgPhaseGenerating = 1,  // the last game frame generated
+    kFgPhaseRealOnly = 2,    // the last game frame was shown without generated images (reason / real_only say why)
+    kFgPhaseStopped = 3,     // the host stopped trying for this run (session failures)
+};
+struct FgAsiLiveStatus {
+    uint32_t phase = kFgPhaseWaiting;
+    uint32_t reason = 0;      // WgFgReason of the last real-only / refused present
+    uint32_t real_only = 0;   // WgFgRealOnly of the last real-only present
+    uint32_t preset = 0;      // the last game frame's effective preset
+    uint32_t count = 0;       // generated images per game frame of the last generating frame
+    uint32_t presenter = 0;   // wgfg::FgPresenterChoice of the session's presenter (0: none yet)
+    uint64_t presents = 0;    // game presents the host saw
+    bool host_overlay = false;
+};
+
 class FgAsiSessionHost final : public IFgPresentCallback {
 public:
     // Takes the weights over (copied into the executor's arena at each session creation).
@@ -110,6 +158,11 @@ public:
     static bool RetainTag(void* ctx, uint32_t buffer_type, bool transient, void* cmd, WgFgTexture* tex, bool* copied);
 
     FgAsiSessionStats Stats() const;
+    // Lock-free (see LIVE STATUS above).
+    FgAsiLiveStatus LiveStatus() const;
+    // OptiScaler hosts this plugin (see HOST OVERLAY above): fg_presenter=auto takes a DXGI flip presenter from the next
+    // session. `why` is logged once.
+    void SetHostOverlay(const char* why);
 
     // ---- IFgPresentCallback ----
     void BeginInterval(const FgPresentCall&) override {}
@@ -124,6 +177,8 @@ public:
     void Detached() override;
     void Attached(IDXGISwapChain4* inner, IUnknown* queue) override;
     UINT ExtraSwapChainFlags(const DXGI_SWAP_CHAIN_DESC1& desc) override;
+    IUnknown* CreationQueue(IUnknown* game_queue, const DXGI_SWAP_CHAIN_DESC1& desc) override;
+    void AttachedPresentQueue(IUnknown* queue) override;
 
     struct Impl;
 

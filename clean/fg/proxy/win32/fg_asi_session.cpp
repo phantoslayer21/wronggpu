@@ -6,6 +6,8 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <new>
@@ -26,6 +28,27 @@ using Microsoft::WRL::ComPtr;
 namespace {
 
 constexpr uint32_t kMaxSessionFailures = 3;
+// Lateness control (see the host's LATENESS comment in fg_asi_session.h): the arrival -> first generated image budget
+// starts at 4 ms and grows while generated images miss their display time, up to 30 ms; it eases back 0.5 ms after
+// 16 quiet windows. One window: 60 generating game frames.
+constexpr wgfg::FgTicks kBudgetBase = 40000;
+constexpr wgfg::FgTicks kBudgetMax = 300000;
+constexpr wgfg::FgTicks kBudgetStepMin = 20000;
+constexpr wgfg::FgTicks kBudgetEase = 5000;
+constexpr uint32_t kBudgetWindow = 60;
+constexpr uint32_t kBudgetQuietWindows = 16;
+// Presenter slots: enough for the images of three intervals in flight at 6x and the one on screen
+constexpr uint32_t kPresenterSlots = 12;
+// Back-pressure: free presenter slots a game frame waits for (its real image and the reserve), at most 50 ms
+constexpr uint32_t kBackPressureSlots = 2;
+constexpr ULONGLONG kBackPressureMs = 50;
+
+// The presenter's free slots (the Windows back ends; any other: unknown, ~0u).
+uint32_t PresenterFreeSlots(const wgfg::IFgPresenter* p) {
+    if (const auto* d = dynamic_cast<const wgfg::FgDxgiPresenter*>(p)) return d->FreeSlots();
+    if (const auto* c = dynamic_cast<const wgfg::FgWinCompPresenter*>(p)) return c->FreeSlots();
+    return ~0u;
+}
 constexpr DWORD kDestroyWaitMs = 1000;
 constexpr DWORD kLatencyWaitMs = 100;
 constexpr uint32_t kCopyRing = 4;
@@ -102,7 +125,15 @@ struct FgAsiSessionHost::Impl {
 
     // the attached chain
     IDXGISwapChain4* inner = nullptr;  // no reference: the wrapper holds the chain while we are attached
-    ComPtr<ID3D12CommandQueue> queue;
+    ComPtr<ID3D12CommandQueue> queue;  // the game's queue (the executor's game-queue work)
+    // the present queue (CreationQueue): created once per device; chain_queue is the queue the attached chain presents
+    // on (the present queue, or the game's queue for a chain created without it)
+    ComPtr<ID3D12CommandQueue> present_queue;
+    ComPtr<ID3D12Device> present_device;
+    ComPtr<ID3D12CommandQueue> chain_queue;
+    ComPtr<ID3D12CommandQueue> attached_present_queue;  // AttachedPresentQueue, taken by the next Attached
+    ComPtr<ID3D12Fence> game_fence;  // the copy path: the game's work on the facade, before the present queue copies
+    uint64_t game_value = 0;
     ComPtr<ID3D12Device> device;
     HWND hwnd = nullptr;
     UINT chain_flags = 0;
@@ -131,6 +162,25 @@ struct FgAsiSessionHost::Impl {
     bool handled = false;  // the current interval was presented by the session
     uint64_t last_values[3] = {};  // the executor's fence after the last intervals (queue-depth bound)
     FgAsiSessionStats stats;
+    uint32_t probe_failures = 0;   // start-up adapter probes that found no DXGI factory (logged at most 3 times)
+
+    // live status for a menu (FgAsiLiveStatus): written on the present thread, read lock-free from any thread
+    std::atomic<bool> host_overlay{false};
+    std::atomic<uint32_t> st_phase{kFgPhaseWaiting}, st_reason{0}, st_real_only{0}, st_preset{0}, st_count{0},
+        st_presenter{0};
+    std::atomic<uint64_t> st_presents{0};
+    bool overlay_choice_logged = false;
+    HANDLE wait_timer = nullptr;      // back-pressure waits (high resolution)
+    uint64_t back_pressure_waits = 0; // game frames that waited for a presenter slot
+    bool back_pressure_logged = false;
+
+    // lateness control (kBudget*): kept across sessions of the run
+    wgfg::FgTicks budget = kBudgetBase;
+    uint32_t window_frames = 0;
+    bool window_have = false;
+    wgfg::FgPresentStats window_base;
+    uint32_t quiet_windows = 0;
+    uint32_t budget_lines = 0;
 
     // retained copies of transient tagged textures, one per buffer type (RetainTag); own lock: tagging runs on the
     // game's threads and must not wait behind a present
@@ -279,6 +329,7 @@ struct FgAsiSessionHost::Impl {
     // The facade buffer the game presented, copied into the real chain's current back buffer (the game's queue).
     bool CopyFacadeToChain() {
         if (facade.empty() || !inner || !queue || !EnsureCopyObjects()) return false;
+        ID3D12CommandQueue* const cq = chain_queue ? chain_queue.Get() : queue.Get();
         const UINT bbi = inner->GetCurrentBackBufferIndex();
         ComPtr<ID3D12Resource> bb;
         if (FAILED(inner->GetBuffer(bbi, IID_PPV_ARGS(&bb)))) return false;
@@ -297,9 +348,16 @@ struct FgAsiSessionHost::Impl {
         for (D3D12_RESOURCE_BARRIER& x : b) std::swap(x.Transition.StateBefore, x.Transition.StateAfter);
         list->ResourceBarrier(2, b);
         if (FAILED(list->Close())) return false;
+        if (cq != queue.Get()) {
+            // the game rendered into the facade buffer on its own queue: the present queue copies after that work
+            if (!game_fence && FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&game_fence))))
+                return false;
+            if (FAILED(queue->Signal(game_fence.Get(), ++game_value)) || FAILED(cq->Wait(game_fence.Get(), game_value)))
+                return false;
+        }
         ID3D12CommandList* lists[] = {list.Get()};
-        queue->ExecuteCommandLists(1, lists);
-        queue->Signal(copy_fence.Get(), ++copy_value);
+        cq->ExecuteCommandLists(1, lists);
+        cq->Signal(copy_fence.Get(), ++copy_value);
         alloc_value[a] = copy_value;
         ++ring;
         return true;
@@ -345,6 +403,37 @@ struct FgAsiSessionHost::Impl {
                           static_cast<unsigned long long>(sc.frame_refusals));
             Log(buf);
         }
+        if (const wgfg::IFgPresenter* pr = session->Presenter()) {
+            // what the display path did: images shown, dropped by pacing, skipped by the display
+            const wgfg::FgPresentStats ps = pr->Stats();
+            char buf[320];
+            std::snprintf(buf, sizeof buf,
+                          "fg host: presenter stats: displayed_real=%llu displayed_generated=%llu generated_queued=%llu "
+                          "dropped_late=%llu dropped_pressure=%llu cancelled=%llu display_skipped=%llu "
+                          "max_slip_us=%lld budget_ms=%.1f",
+                          static_cast<unsigned long long>(ps.displayed_real),
+                          static_cast<unsigned long long>(ps.displayed_generated),
+                          static_cast<unsigned long long>(ps.generated_queued),
+                          static_cast<unsigned long long>(ps.dropped_late),
+                          static_cast<unsigned long long>(ps.dropped_pressure),
+                          static_cast<unsigned long long>(ps.cancelled),
+                          static_cast<unsigned long long>(ps.display_skipped),
+                          static_cast<long long>(ps.max_slip / 10), budget / 10000.0);
+            Log(buf);
+            // why intervals were real-only (the scheduler's / presenter's reasons), and the DXGI back end's presents
+            std::string reasons = "fg host: real-only intervals:";
+            for (uint32_t k = 1; k < wgfg::kFgRealOnlyReasonCount; ++k)
+                if (ps.real_only_intervals[k])
+                    reasons += std::string(" ") + wgfg::FgRealOnlyReasonName(static_cast<wgfg::FgRealOnlyReason>(k)) + "=" +
+                           std::to_string(ps.real_only_intervals[k]);
+            if (const auto* dx = dynamic_cast<const wgfg::FgDxgiPresenter*>(pr)) {
+                const wgfg::FgDxgiPresenterInfo in = dx->Info();
+                reasons += "; dxgi presents=" + std::to_string(in.presents) +
+                       " latency_timeouts=" + std::to_string(in.latency_timeouts);
+            }
+            reasons += "; back-pressure waits=" + std::to_string(back_pressure_waits);
+            Log(reasons);
+        }
         wgfg::FgSessionResult r = session->Destroy();
         const ULONGLONG until = GetTickCount64() + kDestroyWaitMs;
         while (r.error == wgfg::FgSessionError::PresenterBusy && GetTickCount64() < until) {
@@ -357,7 +446,82 @@ struct FgAsiSessionHost::Impl {
         exec_source.reset();
         win_source.reset();
         for (uint64_t& v : last_values) v = 0;
+        window_frames = 0;
+        window_have = false;
+        quiet_windows = 0;
         ++stats.sessions_destroyed;
+    }
+
+    // After each generating game frame: every kBudgetWindow frames, the share of generated images that missed their
+    // display time (finished after their deadline, or found no free slot) sets the first-image budget.
+    void ControlLateness() {
+        if (!session) return;
+        const wgfg::IFgPresenter* pr = session->Presenter();
+        if (!pr || ++window_frames < kBudgetWindow) return;
+        window_frames = 0;
+        const wgfg::FgPresentStats st = pr->Stats();
+        if (!window_have) {
+            window_base = st;
+            window_have = true;
+            return;
+        }
+        const uint64_t queued = st.generated_queued - window_base.generated_queued;
+        const uint64_t late = st.dropped_late - window_base.dropped_late;
+        const uint64_t pressure = st.dropped_pressure - window_base.dropped_pressure;
+        window_base = st;
+        const uint64_t missed = late + pressure, tried = queued + missed;
+        if (tried < 10) return;
+        wgfg::FgTicks next = budget;
+        if (missed * 10 > tried) {  // more than 1 in 10 missed: give the GPU more time
+            quiet_windows = 0;
+            next = budget + std::max(kBudgetStepMin, budget / 2);
+            if (next > kBudgetMax) next = kBudgetMax;
+        } else if (missed * 50 <= tried) {  // 1 in 50 or fewer for a while: take some latency back
+            if (++quiet_windows >= kBudgetQuietWindows) {
+                quiet_windows = 0;
+                next = budget - kBudgetEase < kBudgetBase ? kBudgetBase : budget - kBudgetEase;
+            }
+        } else {
+            quiet_windows = 0;
+        }
+        if (next == budget || !session->SetFirstImageBudget(next)) return;
+        if (budget_lines < 32) {
+            ++budget_lines;
+            char line[256];
+            std::snprintf(line, sizeof line,
+                          "fg host: generated images on time %llu of %llu (late %llu, no slot %llu) in the last %u "
+                          "frames: first-image budget %.1f -> %.1f ms%s",
+                          static_cast<unsigned long long>(queued), static_cast<unsigned long long>(tried),
+                          static_cast<unsigned long long>(late), static_cast<unsigned long long>(pressure),
+                          kBudgetWindow, budget / 10000.0, next / 10000.0,
+                          budget_lines == 32 ? " (the last budget line of this run)" : "");
+            Log(line);
+        }
+        budget = next;
+    }
+
+    // Before a game frame goes to the session: wait (bounded) for a presenter slot for it (BACK-PRESSURE).
+    void WaitForPresenterRoom() {
+        if (!session) return;
+        const wgfg::IFgPresenter* pr = session->Presenter();
+        if (!pr || PresenterFreeSlots(pr) >= kBackPressureSlots) return;
+        if (!wait_timer)
+            wait_timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+        ++back_pressure_waits;
+        if (!back_pressure_logged) {
+            back_pressure_logged = true;
+            Log("fg host: the display shows fewer images than the game renders; game frames now wait for a presenter "
+                "slot (at most 50 ms each), as on a full swap-chain queue");
+        }
+        const ULONGLONG until = GetTickCount64() + kBackPressureMs;
+        while (PresenterFreeSlots(pr) < kBackPressureSlots && GetTickCount64() < until) {
+            LARGE_INTEGER due;
+            due.QuadPart = -5000;  // 0.5 ms
+            if (wait_timer && SetWaitableTimer(wait_timer, &due, 0, nullptr, nullptr, FALSE))
+                WaitForSingleObject(wait_timer, 2);
+            else
+                Sleep(1);
+        }
     }
 
     void TryCreateSession(FgProxy* c) {
@@ -381,6 +545,20 @@ struct FgAsiSessionHost::Impl {
             sd.render_min_width = sd.dynamic_resolution ? 100u : sd.render_max_width;
             sd.render_min_height = sd.dynamic_resolution ? 100u : sd.render_max_height;
         }
+        // room for every N the route allows: a multiplier raised in the menu applies without a new session
+        const uint32_t route_max = c->advertised_max_generated();
+        if (route_max > sd.max_generated) sd.max_generated = route_max;
+        // OptiScaler hosts the plugin: auto takes a DXGI flip presenter, so its overlay is drawn on every image
+        if (sd.presenter_mode == WG_FG_PRESENTER_AUTO && host_overlay.load()) {
+            const bool tear = tearing_supported && (chain_flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0;
+            sd.presenter_mode = tear ? WG_FG_PRESENTER_DXGI_TEARING : WG_FG_PRESENTER_DXGI_VSYNC;
+            if (!overlay_choice_logged) {
+                overlay_choice_logged = true;
+                Log(std::string("fg host: fg_presenter=auto with OptiScaler hosting: ") +
+                    (tear ? "dxgi_tearing" : "dxgi_vsync (the chain or the system has no tearing)") +
+                    ", so OptiScaler's menu and overlay are drawn on every presented image");
+            }
+        }
         if (!exec) {
             wgfg::FgD3d12ExecutorDesc ed;
             ed.dxil_dir = cfg.dxil_dir;
@@ -394,8 +572,9 @@ struct FgAsiSessionHost::Impl {
             if (!exec) return;
         }
         wgfg::FgPresenterFactoryDesc base;
+        base.slot_count = kPresenterSlots;
         base.device = device.Get();
-        base.queue = queue.Get();
+        base.queue = chain_queue ? chain_queue.Get() : queue.Get();  // the queue the real chain presents on
         base.swap_chain = inner;
         base.hwnd = hwnd;
         win_source.reset(new (std::nothrow) wgfg::FgWinPresenterSource(base));
@@ -408,7 +587,25 @@ struct FgAsiSessionHost::Impl {
         }
         wgfg::FgSessionDesc d;
         d.create = ToRuntime(sd);
-        d.scheduler.first_image_budget = 40000;  // 4 ms headroom for async GPU compute + submit
+        d.scheduler.first_image_budget = budget;  // 4 ms at first; the lateness control raises it as needed
+        {
+            // DISPLAY RATE: no generated image shorter on screen than (95 % of) one refresh; the count adapts
+            wgfg::FgClockMap map;
+            wgfg::FgRefreshGrid grid;
+            if (wgfg::FgReadCompositorGrid(map, 0, &grid) && grid.period > 0) {
+                d.scheduler.display.min_interval = grid.period - grid.period / 20;
+                d.scheduler.display.max_interval = 1000000;  // 10 Hz: a fixed-refresh display has no floor here
+                d.scheduler.adaptive_count = true;
+                char line[160];
+                std::snprintf(line, sizeof line,
+                              "fg host: display refresh %.1f Hz: an interval generates only the images the display can "
+                              "show (count adapted)",
+                              10000000.0 / static_cast<double>(grid.period));
+                Log(line);
+            } else {
+                Log("fg host: the display refresh is not readable; the scheduler's own output window stays");
+            }
+        }
         d.executor = exec.get();
         d.presenter_source = exec_source.get();
         d.clock = &HostClock;
@@ -425,6 +622,7 @@ struct FgAsiSessionHost::Impl {
             win_source.reset();
             if (stats.session_failures >= kMaxSessionFailures) {
                 stats.gave_up = true;
+                st_phase.store(kFgPhaseStopped);
                 Log("fg host: frame generation stays off for this run (session creation failed 3 times); the game's "
                     "frames are presented as it asks");
             }
@@ -433,9 +631,12 @@ struct FgAsiSessionHost::Impl {
         WgFgExecutorV1 h = session->ExecutorHandOff();
         c->set_executor(&h);
         ++stats.sessions_created;
+        const wgfg::FgPresenterChoice chosen = win_source->LastSelection().chosen;
+        st_presenter.store(static_cast<uint32_t>(chosen));
         Log(std::string("fg host: session created, ") + std::to_string(sd.output_width) + " x " +
-            std::to_string(sd.output_height) + ", preset " + std::to_string(sd.preset) + ", N " +
-            std::to_string(sd.max_generated) + ", net2 " + (cfg.net2_exact ? "exact" : "fast"));
+            std::to_string(sd.output_height) + ", preset " + std::to_string(sd.preset) + ", N up to " +
+            std::to_string(sd.max_generated) + ", net2 " + (cfg.net2_exact ? "exact" : "fast") + ", presenter " +
+            wgfg::FgPresenterChoiceName(chosen));
     }
 };
 
@@ -473,6 +674,7 @@ FgAsiSessionHost::~FgAsiSessionHost() {
     }
     if (impl_->latency) CloseHandle(impl_->latency);
     if (impl_->copy_event) CloseHandle(impl_->copy_event);
+    if (impl_->wait_timer) CloseHandle(impl_->wait_timer);
 }
 
 void FgAsiSessionHost::OnInstalled(FgProxy* core) {
@@ -481,6 +683,26 @@ void FgAsiSessionHost::OnInstalled(FgProxy* core) {
     // the precheck passed: the model validated; the presenter is decided at session creation (refused there, not
     // replaced)
     if (core) core->set_runtime_facts(true, true);
+}
+
+FgAsiLiveStatus FgAsiSessionHost::LiveStatus() const {
+    const Impl& m = *impl_;
+    FgAsiLiveStatus s;
+    s.phase = m.st_phase.load();
+    s.reason = m.st_reason.load();
+    s.real_only = m.st_real_only.load();
+    s.preset = m.st_preset.load();
+    s.count = m.st_count.load();
+    s.presenter = m.st_presenter.load();
+    s.presents = m.st_presents.load();
+    s.host_overlay = m.host_overlay.load();
+    return s;
+}
+
+void FgAsiSessionHost::SetHostOverlay(const char* why) {
+    if (impl_->host_overlay.exchange(true)) return;
+    impl_->Log(std::string("fg host: OptiScaler hosts this plugin (") + (why ? why : "?") +
+               "); fg_presenter=auto presents through its swap chain");
 }
 
 FgAsiSessionStats FgAsiSessionHost::Stats() const {
@@ -520,9 +742,25 @@ void FgAsiSessionHost::CoreReady(void* ctx, FgProxy* core) {
         }
         // read-only: a factory and its adapter list, no device
         ComPtr<IDXGIFactory1> f;
-        if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&f))) || !f) {
-            m.Log("fg host: start-up probe: no DXGI factory; the game's factory is checked when the game creates it");
+        const HRESULT hr = CreateDXGIFactory1(IID_PPV_ARGS(&f));
+        if (FAILED(hr) || !f) {
+            // InitializeASI can run inside the host's own start-up, where DXGI may refuse; the probe runs again at the
+            // game's first FG support / load call (the transport calls this while FG is not taken) and the game's own
+            // factory is checked when the game creates it
+            if (++m.probe_failures <= 3) {
+                char line[224];
+                std::snprintf(line, sizeof line,
+                              "fg host: start-up probe: no DXGI factory (0x%08lx, attempt %u); tried again at the "
+                              "game's first FG call, and the game's factory is checked when the game creates it",
+                              static_cast<unsigned long>(hr), m.probe_failures);
+                m.Log(line);
+            }
             return;
+        }
+        if (m.probe_failures) {
+            m.Log("fg host: start-up probe: a DXGI factory after " + std::to_string(m.probe_failures) +
+                  " failed attempt(s)");
+            m.probe_failures = 0;
         }
         m.NoteFactory(core, f.Get(), false);
     } catch (...) {
@@ -631,8 +869,24 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
     m.handled = false;
     try {
         m.TryCreateSession(core);
+        m.WaitForPresenterRoom();
         wgfg::FgSessionResult sr;
         const int32_t rc = wgfg::FgSessionPresent(core, m.session.get(), desc, out, &sr);
+        m.st_presents.fetch_add(1);
+        if (out) {
+            if (out->status == WG_FG_PRESENT_GENERATE) {
+                m.st_preset.store(out->effective_preset);
+                m.st_count.store(out->effective_count);
+                m.st_phase.store(kFgPhaseGenerating);
+                m.ControlLateness();
+            } else if (out->status == WG_FG_PRESENT_REAL_ONLY || out->status == WG_FG_PRESENT_REFUSED) {
+                m.st_reason.store(out->reason);
+                m.st_real_only.store(out->real_only);
+                m.st_phase.store(kFgPhaseRealOnly);
+            } else {
+                m.st_phase.store(kFgPhaseWaiting);
+            }
+        }
         if (m.session && out) {
             const bool took = out->status == WG_FG_PRESENT_GENERATE || out->status == WG_FG_PRESENT_REAL_ONLY;
             // the session presented the game frame unless it refused before its presenter was reached
@@ -646,7 +900,10 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
                       (m.exec ? m.exec->LastWhy() : std::string()) + ")");
                 if (m.session->State() != wgfg::FgSessionState::Active) {
                     m.DestroySession("refused");
-                    if (++m.stats.session_failures >= kMaxSessionFailures) m.stats.gave_up = true;
+                    if (++m.stats.session_failures >= kMaxSessionFailures) {
+                        m.stats.gave_up = true;
+                        m.st_phase.store(kFgPhaseStopped);
+                    }
                 }
             }
         }
@@ -675,6 +932,7 @@ HRESULT FgAsiSessionHost::PresentInterval(const FgPresentCall& call, IFgInnerPre
         m.DestroySession("an interval it did not take");
         if (++m.stats.session_failures >= kMaxSessionFailures && !m.stats.gave_up) {
             m.stats.gave_up = true;
+            m.st_phase.store(kFgPhaseStopped);
             m.Log("fg host: frame generation stays off for this run (3 session failures); the game's frames are "
                   "presented as it asks");
         }
@@ -752,6 +1010,7 @@ void FgAsiSessionHost::Detached() {
     impl_->WaitCopy(impl_->copy_value, kDestroyWaitMs);
     impl_->ReleaseFacade();
     impl_->inner = nullptr;
+    impl_->chain_queue.Reset();
 }
 
 void FgAsiSessionHost::Attached(IDXGISwapChain4* inner, IUnknown* queue) {
@@ -767,6 +1026,8 @@ void FgAsiSessionHost::Attached(IDXGISwapChain4* inner, IUnknown* queue) {
     m.inner = inner;
     m.queue = q;
     m.device = dev;
+    m.chain_queue = m.attached_present_queue ? m.attached_present_queue : q;
+    m.attached_present_queue.Reset();
     if (FAILED(inner->GetHwnd(&m.hwnd))) m.hwnd = nullptr;
     if (!m.latency) m.latency = CreateSemaphoreW(nullptr, 1, 16, nullptr);
     if (m.core) m.core->set_device(dev.Get(), q.Get());
@@ -775,9 +1036,55 @@ void FgAsiSessionHost::Attached(IDXGISwapChain4* inner, IUnknown* queue) {
         return;
     }
     char line[128];
-    wsprintfA(line, "fg host: chain attached, %u x %u, format %u, %u buffers (facade)", m.width, m.height,
-              static_cast<unsigned>(m.chain_format), static_cast<unsigned>(m.facade.size()));
+    wsprintfA(line, "fg host: chain attached, %u x %u, format %u, %u buffers (facade), presents on %s", m.width,
+              m.height, static_cast<unsigned>(m.chain_format), static_cast<unsigned>(m.facade.size()),
+              m.chain_queue.Get() != m.queue.Get() ? "the present queue" : "the game's queue");
     m.Log(line);
+}
+
+IUnknown* FgAsiSessionHost::CreationQueue(IUnknown* game_queue, const DXGI_SWAP_CHAIN_DESC1&) {
+    Impl& m = *impl_;
+    std::lock_guard<std::recursive_mutex> lock(m.mu);
+    try {
+        ComPtr<ID3D12CommandQueue> gq;
+        ComPtr<ID3D12Device> dev;
+        if (!game_queue || FAILED(game_queue->QueryInterface(IID_PPV_ARGS(&gq))) || !gq ||
+            FAILED(gq->GetDevice(IID_PPV_ARGS(&dev))) || !dev)
+            return nullptr;
+        const D3D12_COMMAND_QUEUE_DESC gd = gq->GetDesc();
+        if (gd.Type != D3D12_COMMAND_LIST_TYPE_DIRECT) return nullptr;
+        if (m.present_queue && m.present_device.Get() == dev.Get()) return m.present_queue.Get();
+        m.present_queue.Reset();
+        m.present_device.Reset();
+        D3D12_COMMAND_QUEUE_DESC qd = {};
+        qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+        qd.Priority = D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
+        qd.NodeMask = gd.NodeMask;
+        bool high = true;
+        if (FAILED(dev->CreateCommandQueue(&qd, IID_PPV_ARGS(&m.present_queue)))) {
+            high = false;
+            qd.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
+            if (FAILED(dev->CreateCommandQueue(&qd, IID_PPV_ARGS(&m.present_queue)))) {
+                m.present_queue.Reset();
+                m.Log("fg host: no present queue of its own; the real swap chain presents on the game's queue");
+                return nullptr;
+            }
+        }
+        m.present_queue->SetName(L"WrongGPU FG present queue");
+        m.present_device = dev;
+        m.Log(std::string("fg host: the real swap chain is created on a present queue of its own (") +
+              (high ? "high" : "normal") + " priority): presents never wait behind the game's rendering");
+        return m.present_queue.Get();
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+void FgAsiSessionHost::AttachedPresentQueue(IUnknown* q) {
+    Impl& m = *impl_;
+    std::lock_guard<std::recursive_mutex> lock(m.mu);
+    m.attached_present_queue.Reset();
+    if (q) q->QueryInterface(IID_PPV_ARGS(&m.attached_present_queue));
 }
 
 UINT FgAsiSessionHost::ExtraSwapChainFlags(const DXGI_SWAP_CHAIN_DESC1&) {

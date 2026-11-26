@@ -527,8 +527,7 @@ void TestDefaultOffForwardsEverything() {
 
 void TestReleaseGateForwardsEverything() {
     FgProxyConfig cfg = QualifiedConfig();
-    // the shipped gate is closed (a developer build with WRONGGPU_FG_DEV_QUALIFIED opens it; the closed gate's
-    // behaviour is still checked there)
+    // the shipped gate is open from 0.7.0 (fg_limits.h); the closed gate's behaviour is checked through the config
     static_assert(kFgModesQualified == (WG_FG_MODES_QUALIFIED != 0), "kFgModesQualified must match macro");
 #if !WG_FG_MODES_QUALIFIED
     static_assert(!kFgModesQualified, "shipped gate must be closed");
@@ -717,6 +716,91 @@ void TestSinglePresentOwner() {
 }
 
 // ---- N = 1..5 and presets --------------------------------------------------------------------------------------------
+
+// The host menu changes the player's preset and multiplier while the game runs (update_live_settings): taken at the
+// game's next frame without new options, the game's own preset request still wins, the game's count is capped by the
+// new multiplier, invalid values change nothing, and a generic binding's version range is honoured by the entry.
+void TestLiveSettings() {
+    FgProxyConfig cfg = QualifiedConfig();
+    cfg.settings.multiplier = 2;  // player cap 1
+    cfg.settings.preset = 0;
+    Rig rig(cfg);
+    CHECK(rig.proxy.claim_present(kChain, WG_FG_OWNER_NATIVE_ADAPTER) == WG_FG_REASON_NONE);
+    WgFgOptions o = Options(4);  // the game asks for 4 generated images, no preset
+    CHECK(rig.proxy.set_options(kFeatFg, 1, &o, nullptr) == WG_OK);
+    rig.feed(1);
+    WgFgPresentResult r = rig.present(1);
+    CHECK(r.status == WG_FG_PRESENT_GENERATE && r.effective_count == 1 && r.effective_preset == 0);
+    // 4x and preset C from the next frame (no new options from the game)
+    CHECK(rig.proxy.update_live_settings(2, 4));
+    rig.feed(2);
+    r = rig.present(2);
+    CHECK(r.status == WG_FG_PRESENT_GENERATE && r.effective_count == 3 && r.effective_preset == 2);
+    CHECK(rig.exec.last.generated_count == 3 && rig.exec.last.preset == 2);
+    CHECK(rig.proxy.state().effective_count == 3 && rig.proxy.advertised_max_generated() == 5);
+    CHECK(rig.log_lines("fg: live settings: preset C, multiplier 4x (player cap 3), from this frame") == 1);
+    // the same values again: nothing changes, nothing logged
+    CHECK(rig.proxy.update_live_settings(2, 4));
+    rig.feed(3);
+    CHECK(rig.present(3).effective_count == 3);
+    CHECK(rig.log_lines("fg: live settings:") == 1);
+    // 6x: the game's own request (4) is below the cap
+    CHECK(rig.proxy.update_live_settings(2, 6));
+    rig.feed(4);
+    r = rig.present(4);
+    CHECK(r.effective_count == 4 && rig.exec.last.generated_count == 4);
+    // the game asks for preset B: the player's preset does not replace it; the cap still applies
+    o = Options(4, 1);
+    CHECK(rig.proxy.set_options(kFeatFg, 1, &o, nullptr) == WG_OK);
+    CHECK(rig.proxy.update_live_settings(0, 3));
+    rig.feed(5);
+    r = rig.present(5);
+    CHECK(r.effective_preset == 1 && r.effective_count == 2);
+    CHECK(rig.log_lines("the game asks for preset B, which stays") == 1);
+    // later options from the game use the live cap
+    o = Options(5);
+    CHECK(rig.proxy.set_options(kFeatFg, 1, &o, nullptr) == WG_OK);
+    CHECK(rig.proxy.state().effective_count == 2 && rig.proxy.state().effective_preset == 0);
+    // invalid values: refused, nothing changes
+    CHECK(!rig.proxy.update_live_settings(3, 4));
+    CHECK(!rig.proxy.update_live_settings(0, 1));
+    CHECK(!rig.proxy.update_live_settings(0, 7));
+    rig.feed(6);
+    r = rig.present(6);
+    CHECK(r.effective_preset == 0 && r.effective_count == 2);
+    // a preset the binding does not offer is refused
+    {
+        FgProxyConfig c2 = QualifiedConfig();
+        c2.binding.presets_mask = 0x3;  // A and B
+        Rig r2(c2);
+        CHECK(!r2.proxy.update_live_settings(2, 2));
+        CHECK(r2.proxy.update_live_settings(1, 2));
+    }
+    // a generic binding's minor-version range at the interposer entry
+    CHECK(FgBindingVersionMatches(2, 14, 2, 14, 0) && !FgBindingVersionMatches(2, 15, 2, 14, 0));
+    CHECK(FgBindingVersionMatches(2, 4, 2, 4, 99) && FgBindingVersionMatches(2, 99, 2, 4, 99));
+    CHECK(!FgBindingVersionMatches(2, 3, 2, 4, 99) && !FgBindingVersionMatches(3, 4, 2, 4, 99) &&
+          !FgBindingVersionMatches(2, 100, 2, 4, 99));
+    {
+        FgProxyConfig c3 = QualifiedConfig();
+        c3.binding.version_minor = 4;
+        c3.binding.version_minor_max = 99;
+        for (uint32_t minor : {4u, 8u, 14u, 99u}) {
+            Rig r3(c3, false);
+            WgFgChainV1 t = r3.chain.table();
+            CHECK(r3.proxy.attach_interposer(&t, 2, minor) == WG_FG_REASON_NONE);
+        }
+        for (uint32_t minor : {0u, 3u, 100u}) {
+            Rig r3(c3, false);
+            WgFgChainV1 t = r3.chain.table();
+            CHECK(r3.proxy.attach_interposer(&t, 2, minor) == WG_FG_REASON_VERSION_MISMATCH);
+        }
+        Rig r4(c3, false);
+        WgFgChainV1 t = r4.chain.table();
+        CHECK(r4.proxy.attach_interposer(&t, 3, 4) == WG_FG_REASON_VERSION_MISMATCH);
+    }
+    CHECK(std::string(FgRealOnlyName(WG_FG_REAL_ONLY_DISABLED)) == "generation off");
+}
 
 void TestMultiFrameAndPresets() {
     {
@@ -1267,6 +1351,7 @@ int main() {
     TestPacketRectDefaults();
     TestAssemblyFailures();
     TestEntries();
+    TestLiveSettings();
 #if defined(WG_FG_HAVE_RUNTIME_CONTRACT)
     TestRuntimeContractBridge();
     std::printf("runtime contract bridge: checked\n");

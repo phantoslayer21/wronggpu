@@ -227,7 +227,9 @@ TEST(route_refuses_in_order_and_advertises_nothing_unqualified) {
     f.presenter_qualified = true;
     CHECK(FgCheckRoute(f) == (kFgModesQualified ? FgRefusal::None : FgRefusal::RouteNotQualified));
     CHECK(FgAdvertisedMaxGenerated(f) == (kFgModesQualified ? kFgMaxGenerated : 0u));
-    static_assert(!kFgModesQualified, "no FG mode is advertised before the oracle gate and presenter qualification");
+    static_assert(kFgModesQualified == (WG_FG_MODES_QUALIFIED != 0), "the contract's gate is fg_limits.h's");
+    f.modes_qualified = false;  // the closed gate: no FG mode is advertised or taken
+    CHECK(FgCheckRoute(f) == FgRefusal::RouteNotQualified && FgAdvertisedMaxGenerated(f) == 0u);
     f.modes_qualified = true;  // a qualified build: all facts true
     CHECK(FgCheckRoute(f) == FgRefusal::None && FgAdvertisedMaxGenerated(f) == 5);
     // every refusal has a name

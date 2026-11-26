@@ -15,6 +15,9 @@
 //                                             (real-only from the facade buffer), a resize (the session destroyed and
 //                                             created again), and the game's last release (session destroyed, queue
 //                                             drained) with the debug layer clean.
+//   Both: the OptiScaler menu card (win32/fg_panel.h) through a stand-in host table: registration (a Custom tab card,
+//   a tab of its own on a host without cards, refusal on an incomplete table), the status line per state, the preset
+//   and multiplier combos handed to the live hook and saved to the scratch game's wronggpu-setup\settings.ini.
 #include <windows.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -29,8 +32,12 @@
 
 #include "../../runtime/fg_d3d12_executor.h"
 #include "../fg_proxy_core.h"
+#include "../../presenter/fg_presenter_factory.h"
 #include "../win32/fg_asi_session.h"
+#include "../win32/fg_asi_transport.h"
+#include "../win32/fg_panel.h"
 #include "../win32/fg_swapchain_hook.h"
+#include "wg_state.h"
 
 using Microsoft::WRL::ComPtr;
 using namespace wgfgp;
@@ -538,6 +545,195 @@ void RunHost(Gpu& gpu, const std::string& dxil, uint32_t preset) {
 
 }  // namespace
 
+// ---- the OptiScaler menu card through a stand-in host table ---------------------------------------------------------
+
+namespace fakehost {
+WgHostDrawFn g_draw = nullptr;
+std::string g_title;
+int g_cards = 0, g_tabs = 0;
+std::vector<std::string> g_seen;
+int32_t g_force = -1;
+std::string g_force_label;
+bool RegisterCard(WgHostMenuPlugin*, const char* title, WgHostDrawFn draw, void*) {
+    ++g_cards;
+    g_title = title;
+    g_draw = draw;
+    return true;
+}
+bool RegisterTab(WgHostMenuPlugin*, const char* name, const char*, WgHostDrawFn draw, void*) {
+    ++g_tabs;
+    g_title = name;
+    g_draw = draw;
+    return true;
+}
+void Section(const char* t) { g_seen.push_back(std::string("section:") + t); }
+void Text(const char* t) { g_seen.push_back(t); }
+void TextColored(float, float, float, float, const char* t) { g_seen.push_back(t); }
+void Tooltip(const char*) {}
+bool Combo(const char* label, int32_t* cur, const char* const* items, int32_t count) {
+    g_seen.push_back(std::string("combo:") + label + "=" + (*cur >= 0 && *cur < count ? items[*cur] : "?"));
+    if (g_force >= 0 && g_force_label == label) {
+        *cur = g_force;
+        g_force = -1;
+        return true;
+    }
+    return false;
+}
+WgHostMenuApi Api(bool cards) {
+    WgHostMenuApi a = {};
+    a.size = sizeof(a);
+    a.version = cards ? 3u : 1u;
+    a.register_tab = &RegisterTab;
+    a.section = &Section;
+    a.item_tooltip = &Tooltip;
+    a.text = &Text;
+    a.text_disabled = &Text;
+    a.text_colored = &TextColored;
+    a.combo = &Combo;
+    if (cards) a.register_custom_card = &RegisterCard;
+    return a;
+}
+bool Seen(const std::string& what) {
+    for (const auto& x : g_seen)
+        if (x.find(what) != std::string::npos) return true;
+    return false;
+}
+}  // namespace fakehost
+
+panel::Status g_panel_status;
+bool g_apply_ok = true;
+uint32_t g_applied_preset = 99, g_applied_multiplier = 99, g_apply_calls = 0;
+std::wstring g_panel_dir;
+panel::Status PanelStatusHook() { return g_panel_status; }
+bool PanelApplyHook(uint32_t preset, uint32_t multiplier) {
+    ++g_apply_calls;
+    g_applied_preset = preset;
+    g_applied_multiplier = multiplier;
+    return g_apply_ok;
+}
+std::wstring PanelDirHook() { return g_panel_dir; }
+std::vector<std::string> g_panel_log;
+void PanelLogHook(const char* line) { g_panel_log.push_back(line); }
+
+void TestPanel(const std::string& scratch) {
+    g_case = "panel";
+    // the status line per state
+    panel::Status st;
+    FgSettings cur;
+    CHECK(panel::StatusLine(st, cur) == "Off (fg=off)");
+    st.enabled = true;
+    st.install_result = kFgInterfaceNotFound;
+    CHECK(panel::StatusLine(st, cur).rfind("Not active: game interface module not found", 0) == 0);
+    st.installed = true;
+    CHECK(panel::StatusLine(st, cur).rfind("Not active: no frame generation runtime", 0) == 0);
+    st.have_host = true;
+    CHECK(panel::StatusLine(st, cur) == "Waiting for the game");
+    st.live.phase = kFgPhaseGenerating;
+    st.live.count = 1;
+    st.live.preset = 0;
+    st.live.presenter = static_cast<uint32_t>(wgfg::FgPresenterChoice::DxgiFlipTearing);
+    CHECK(panel::StatusLine(st, cur) == "Generating: 2x, preset A, DXGI flip, tearing");
+    cur.multiplier = 4;
+    CHECK(panel::StatusLine(st, cur) == "Generating: 2x, preset A, DXGI flip, tearing (the game asks for fewer images)");
+    st.live.count = 3;
+    st.live.preset = 2;
+    st.live.presenter = static_cast<uint32_t>(wgfg::FgPresenterChoice::WindowsCompositionHwfq);
+    CHECK(panel::StatusLine(st, cur) == "Generating: 4x, preset C, Windows composition, hardware flip queue");
+    st.live.phase = kFgPhaseRealOnly;
+    st.live.reason = WG_FG_REASON_MISSING_MOTION;
+    CHECK(panel::StatusLine(st, cur) == "Real frames only: no motion vectors");
+    st.live.reason = 0;
+    st.live.real_only = WG_FG_REAL_ONLY_DISABLED;
+    CHECK(panel::StatusLine(st, cur) == "Real frames only: generation off");
+    st.live.phase = kFgPhaseStopped;
+    CHECK(panel::StatusLine(st, cur).rfind("Stopped for this run", 0) == 0);
+
+    // a game folder with its state folder, and the hooks
+    const std::string game = scratch + "\\panel-game";
+    CreateDirectoryA(game.c_str(), nullptr);
+    CreateDirectoryA((game + "\\wronggpu-setup").c_str(), nullptr);
+    DeleteFileA((game + "\\wronggpu-setup\\settings.ini").c_str());
+    g_panel_dir.assign(game.begin(), game.end());
+    panel::Hooks hooks;
+    hooks.status = &PanelStatusHook;
+    hooks.apply = &PanelApplyHook;
+    hooks.game_dir = &PanelDirHook;
+    hooks.log = &PanelLogHook;
+    FgSettings start;
+    start.enabled = true;
+    start.preset = 0;
+    start.multiplier = 2;
+
+    // an incomplete table: no card
+    WgHostMenuApi broken = fakehost::Api(true);
+    broken.combo = nullptr;
+    CHECK(!panel::Init(&broken, nullptr, hooks, start));
+    CHECK(fakehost::g_cards == 0 && fakehost::g_tabs == 0);
+    CHECK(!panel::Init(nullptr, nullptr, hooks, start));
+
+    // a host with cards: the card on the Custom tab
+    static WgHostMenuApi api = fakehost::Api(true);
+    CHECK(panel::Init(&api, nullptr, hooks, start));
+    CHECK(fakehost::g_cards == 1 && fakehost::g_title == "WrongGPU Frame Generation" && fakehost::g_draw);
+    if (!fakehost::g_draw) return;
+    // fg=off: the status and a hint, no combos
+    g_panel_status = panel::Status();
+    fakehost::g_seen.clear();
+    fakehost::g_draw(nullptr);
+    CHECK(fakehost::Seen("Off (fg=off)") && !fakehost::Seen("combo:"));
+    // generating: the status line and both combos with the start values
+    g_panel_status = st;
+    g_panel_status.live.phase = kFgPhaseGenerating;
+    g_panel_status.live.count = 1;
+    g_panel_status.live.preset = 0;
+    g_panel_status.live.presenter = static_cast<uint32_t>(wgfg::FgPresenterChoice::DxgiFlipTearing);
+    fakehost::g_seen.clear();
+    fakehost::g_draw(nullptr);
+    CHECK(fakehost::Seen("Generating: 2x, preset A, DXGI flip, tearing"));
+    CHECK(fakehost::Seen("combo:Preset##wg_fg_preset=A") && fakehost::Seen("combo:Multiplier##wg_fg_multiplier=2x"));
+    CHECK(!fakehost::Seen("section:"));  // a card is already titled
+    // the multiplier combo: live hook, then settings.ini
+    fakehost::g_force = 2;
+    fakehost::g_force_label = "Multiplier##wg_fg_multiplier";
+    fakehost::g_draw(nullptr);
+    CHECK(g_apply_calls == 1 && g_applied_preset == 0 && g_applied_multiplier == 4);
+    CHECK(panel::Current().multiplier == 4);
+    wgstate::Settings saved = wgstate::ReadSettings(g_panel_dir);
+    const std::string* m = wgstate::Get(saved, "fg_multiplier");
+    CHECK(m && *m == "4");
+    CHECK(!g_panel_log.empty() && g_panel_log.back().find("fg_multiplier=4 chosen in OptiScaler's menu (from the next "
+                                                          "frame, saved to wronggpu-setup\\settings.ini)") !=
+                                     std::string::npos);
+    // the preset combo
+    fakehost::g_force = 2;
+    fakehost::g_force_label = "Preset##wg_fg_preset";
+    fakehost::g_seen.clear();
+    fakehost::g_draw(nullptr);
+    CHECK(g_apply_calls == 2 && g_applied_preset == 2 && g_applied_multiplier == 4);
+    saved = wgstate::ReadSettings(g_panel_dir);
+    const std::string* pr = wgstate::Get(saved, "fg_preset");
+    m = wgstate::Get(saved, "fg_multiplier");
+    CHECK(pr && *pr == "C" && m && *m == "4");
+    fakehost::g_seen.clear();
+    fakehost::g_draw(nullptr);
+    CHECK(fakehost::Seen("combo:Preset##wg_fg_preset=C") && fakehost::Seen("combo:Multiplier##wg_fg_multiplier=4x"));
+    // no live core: saved for the next start
+    g_apply_ok = false;
+    CHECK(panel::ChoosePreset(1).find("(from the next game start, saved to") != std::string::npos);
+    g_apply_ok = true;
+    // values outside the lists change nothing
+    const uint32_t calls = g_apply_calls;
+    CHECK(panel::ChoosePreset(3).empty() && panel::ChooseMultiplier(1).empty() && panel::ChooseMultiplier(7).empty());
+    CHECK(g_apply_calls == calls);
+    // a host without cards: a tab of its own, titled inside
+    static WgHostMenuApi tab_api = fakehost::Api(false);
+    CHECK(panel::Init(&tab_api, nullptr, hooks, start));
+    CHECK(fakehost::g_tabs == 1 && fakehost::g_title == "WrongGPU Frame Generation");
+    fakehost::g_seen.clear();
+    fakehost::g_draw(nullptr);
+    CHECK(fakehost::Seen("section:WrongGPU Frame Generation"));
+}
+
 int main(int argc, char** argv) {
     bool gpu = false;
     std::string dxil, scratch = ".";
@@ -552,6 +748,7 @@ int main(int argc, char** argv) {
     TestIds();
     TestPrecheck(scratch);
     TestFlags();
+    TestPanel(scratch);
     std::printf("cpu: %d checks, %d failed\n", g_checks, g_failed);
     if (gpu) {
         g_case = "gpu-init";

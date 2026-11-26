@@ -227,6 +227,12 @@ void FgTargetScheduler::OnDeviceLost() {
     history_valid_ = false;
 }
 
+void FgTargetScheduler::SetFirstImageBudget(FgTicks budget) {
+    if (budget < 0) budget = 0;
+    if (budget > config_.max_lead) budget = config_.max_lead;
+    config_.first_image_budget = budget;
+}
+
 FgTicks FgTargetScheduler::RequiredLead(FgTicks period, std::uint32_t n) const {
     if (period <= 0 || n == 0) return config_.real_min_lead;
     FgTicks offset = 0;

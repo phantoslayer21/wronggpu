@@ -62,8 +62,15 @@ constexpr uint32_t kMaxDecodedTags = 4096;
 
 std::atomic<FgAsiTransport*> g_owner{nullptr};       // the active transport (one per process)
 std::atomic<FgAsiTransport::Impl*> g_route{nullptr};  // null: every handler forwards to the genuine export
-// the roles, then kFgSlotCreateFactory2; kept after restore: a handler entered late still forwards
-std::atomic<void*> g_genuine[kFgRoleCount + 1] = {};
+// the roles, then kFgSlotCreateFactory2 and the DXGI factory slots; kept after restore: a handler entered late still
+// forwards
+std::atomic<void*> g_genuine[kFgSlotCount] = {};
+// Host routes (install_routes): the host's next function per slot, written by the host (the route entry's `next` points
+// here). Set: every forward of that slot continues there, never through the export the host's route sits in front of.
+// Kept after restore (a host cannot take a route back: its handler keeps forwarding); cleared by an import-table install.
+std::atomic<void*> g_route_next[kFgSlotCount] = {};
+static_assert(sizeof(std::atomic<void*>) == sizeof(void*) && std::atomic<void*>::is_always_lock_free,
+              "the host writes a plain pointer into a route's next");
 std::atomic<void*> g_genuine_options{nullptr}, g_genuine_state{nullptr};  // resolved lazily through get-function
 std::atomic<uint32_t> g_fg_feature{WG_FEAT_FRAME_GENERATION};
 std::atomic<long> g_in_flight{0};
@@ -72,6 +79,7 @@ struct Counters {
     std::atomic<uint64_t> calls[kFgRoleCount] = {};
     std::atomic<uint64_t> forwarded[kFgRoleCount] = {};
     std::atomic<uint64_t> fg_answered{0}, option_calls{0}, state_calls{0}, codec_failures{0}, scan_entries{0};
+    std::atomic<uint64_t> routes_installed{0}, slots_put_back{0};
 };
 Counters g_ctr;
 
@@ -111,6 +119,8 @@ void ResetCounters() {
     g_ctr.state_calls = 0;
     g_ctr.codec_failures = 0;
     g_ctr.scan_entries = 0;
+    g_ctr.routes_installed = 0;
+    g_ctr.slots_put_back = 0;
 }
 
 // The native arguments of the call being routed, for the chain trampolines (the core's chain carries only part of them).
@@ -144,9 +154,16 @@ public:
     InFlight& operator=(const InFlight&) = delete;
 };
 
+// Where a forwarded call of `role` goes: the host's next function when a host route took the role, else the genuine
+// export (or the earlier import patch the slot held).
+void* GenuineAddress(uint32_t role) {
+    void* next = g_route_next[role].load(std::memory_order_acquire);
+    return next ? next : g_genuine[role].load();
+}
+
 template <typename F>
 F Genuine(uint32_t role) {
-    return reinterpret_cast<F>(g_genuine[role].load());
+    return reinterpret_cast<F>(GenuineAddress(role));
 }
 
 void NoteForward(uint32_t role, WgResultCode r) {
@@ -804,8 +821,18 @@ public:
         if (!r || !chain) return;
         if (chain->Attach(&g_present_bridge, r->core, r->owners, WG_FG_OWNER_SWAPCHAIN_WRAPPER) == WG_FG_REASON_NONE) {
             g_bridge_ctr.chains_attached.fetch_add(1);
-            if (r->presenter) r->presenter->Attached(chain->Inner(), chain->Queue());
+            if (r->presenter) {
+                if (chain->PresentQueue()) r->presenter->AttachedPresentQueue(chain->PresentQueue());
+                r->presenter->Attached(chain->Inner(), chain->Queue());
+            }
         }
+    }
+    IUnknown* CreationQueue(HWND, const DXGI_SWAP_CHAIN_DESC1& desc, IUnknown* game_queue) override {
+        InFlight in;
+        FgAsiTransport::Impl* r = g_route.load();
+        // only for a chain that will be claimed (FG taken), as the extra flags
+        if (!r || !r->presenter || !r->core || !r->core->fg_taken()) return nullptr;
+        return r->presenter->CreationQueue(game_queue, desc);
     }
     UINT ExtraCreateFlags(HWND, const DXGI_SWAP_CHAIN_DESC1& desc) override {
         InFlight in;
@@ -836,21 +863,64 @@ void HookFactory(FgAsiTransport::Impl& r, IUnknown* unknown) {
 #endif
 }
 
-// The game's factory creation through the interface module: the genuine export first, its result unchanged.
-HRESULT WINAPI H_CreateFactory2(UINT flags, REFIID riid, void** out) {
-    InFlight in;
-    g_bridge_ctr.factories.fetch_add(1);
-    auto fn = reinterpret_cast<FgCreateFactory2Fn>(g_genuine[kFgSlotCreateFactory2].load());
-    const HRESULT hr = fn ? fn(flags, riid, out) : E_NOINTERFACE;
+// After a factory creation the game made through a redirected slot: the swap-chain hook goes on the factory it got,
+// then the factory note (the route's adapter facts). The result stays the genuine creation's.
+void AfterFactory(HRESULT hr, void** out) {
     FgAsiTransport::Impl* r = g_route.load();
-    if (FAILED(hr) || !r || !out || !*out) return hr;
+    if (FAILED(hr) || !r || !out || !*out) return;
     try {
         HookFactory(*r, static_cast<IUnknown*>(*out));
         if (r->factory_note) r->factory_note(r->factory_note_ctx, r->core, static_cast<IUnknown*>(*out));
     } catch (...) {
         g_ctr.codec_failures.fetch_add(1);
     }
+}
+
+// The game's factory creation through the interface module: the genuine export first, its result unchanged.
+HRESULT WINAPI H_CreateFactory2(UINT flags, REFIID riid, void** out) {
+    InFlight in;
+    g_bridge_ctr.factories.fetch_add(1);
+    auto fn = Genuine<FgCreateFactory2Fn>(kFgSlotCreateFactory2);
+    const HRESULT hr = fn ? fn(flags, riid, out) : E_NOINTERFACE;
+    AfterFactory(hr, out);
     return hr;
+}
+
+// The DXGI module's own factory creations (dxgi_factory_fallback), the same way.
+HRESULT WINAPI H_DxgiFactory(REFIID riid, void** out) {
+    InFlight in;
+    g_bridge_ctr.factories.fetch_add(1);
+    auto fn = Genuine<FgCreateFactory1Fn>(kFgSlotDxgiFactory);
+    const HRESULT hr = fn ? fn(riid, out) : E_NOINTERFACE;
+    AfterFactory(hr, out);
+    return hr;
+}
+HRESULT WINAPI H_DxgiFactory1(REFIID riid, void** out) {
+    InFlight in;
+    g_bridge_ctr.factories.fetch_add(1);
+    auto fn = Genuine<FgCreateFactory1Fn>(kFgSlotDxgiFactory1);
+    const HRESULT hr = fn ? fn(riid, out) : E_NOINTERFACE;
+    AfterFactory(hr, out);
+    return hr;
+}
+HRESULT WINAPI H_DxgiFactory2(UINT flags, REFIID riid, void** out) {
+    InFlight in;
+    g_bridge_ctr.factories.fetch_add(1);
+    auto fn = Genuine<FgCreateFactory2Fn>(kFgSlotDxgiFactory2);
+    const HRESULT hr = fn ? fn(flags, riid, out) : E_NOINTERFACE;
+    AfterFactory(hr, out);
+    return hr;
+}
+
+// The DXGI module's file name and its factory creation exports (dxgi_factory_fallback), by slot.
+const char* const kDxgiLeaf = "dxgi.dll";
+const char* DxgiExportOf(uint32_t slot) {
+    switch (slot) {
+        case kFgSlotDxgiFactory: return "CreateDXGIFactory";
+        case kFgSlotDxgiFactory1: return "CreateDXGIFactory1";
+        case kFgSlotDxgiFactory2: return "CreateDXGIFactory2";
+        default: return nullptr;
+    }
 }
 
 // ---- patching -------------------------------------------------------------------------------------------------------
@@ -943,6 +1013,9 @@ const char* FgRoleWord(uint32_t role) {
                                                      "tag-for-frame", "constants", "evaluate", "free",
                                                      "is-loaded", "set-loaded"};
     if (role == kFgSlotCreateFactory2) return "create-factory";
+    if (role == kFgSlotDxgiFactory) return "dxgi-create-factory";
+    if (role == kFgSlotDxgiFactory1) return "dxgi-create-factory1";
+    if (role == kFgSlotDxgiFactory2) return "dxgi-create-factory2";
     return role < kFgRoleCount ? kWords[role] : "?";
 }
 
@@ -960,6 +1033,7 @@ const char* FgInstallResultWord(uint32_t r) {
         case kFgAlreadyActive: return "another transport is active (nothing changed)";
         case kFgNullArgument: return "null argument";
         case kFgRuntimeMissing: return "the FG model or kernels are missing or invalid (nothing patched)";
+        case kFgRoutesRefused: return "the host refused the routes (nothing routed)";
         default: return "?";
     }
 }
@@ -1035,6 +1109,9 @@ void* FgAsiTransport::handler_for(uint32_t role) {
         case kFgRoleIsLoaded: return reinterpret_cast<void*>(&H_IsLoaded);
         case kFgRoleSetLoaded: return reinterpret_cast<void*>(&H_SetLoaded);
         case kFgSlotCreateFactory2: return reinterpret_cast<void*>(&H_CreateFactory2);
+        case kFgSlotDxgiFactory: return reinterpret_cast<void*>(&H_DxgiFactory);
+        case kFgSlotDxgiFactory1: return reinterpret_cast<void*>(&H_DxgiFactory1);
+        case kFgSlotDxgiFactory2: return reinterpret_cast<void*>(&H_DxgiFactory2);
         default: return nullptr;
     }
 }
@@ -1062,7 +1139,7 @@ void* FgAsiTransport::options_handler() { return reinterpret_cast<void*>(&H_FgOp
 void* FgAsiTransport::state_handler() { return reinterpret_cast<void*>(&H_FgState); }
 
 void* FgAsiTransport::genuine(uint32_t role) const {
-    return role <= kFgSlotCreateFactory2 ? g_genuine[role].load() : nullptr;
+    return role < kFgSlotCount ? g_genuine[role].load() : nullptr;
 }
 
 FgTransportStats FgAsiTransport::stats() const {
@@ -1076,7 +1153,121 @@ FgTransportStats FgAsiTransport::stats() const {
     s.state_calls = g_ctr.state_calls.load();
     s.codec_failures = g_ctr.codec_failures.load();
     s.scan_entries = g_ctr.scan_entries.load();
+    s.routes_installed = g_ctr.routes_installed.load();
+    s.slots_put_back = g_ctr.slots_put_back.load();
     return s;
+}
+
+// The version gate, the genuine exports by name, and the core attached to them through the trampolines (install() and
+// install_routes()). kFgInstalled: *out holds the attached core.
+uint32_t FgAsiTransport::attach_core(const FgAsiConfig& cfg, HMODULE iface, uint32_t major, uint32_t minor,
+                                     std::unique_ptr<FgProxy>* out) {
+    if (!FgBindingVersionMatches(major, minor, cfg.imports.version_major, cfg.imports.version_minor,
+                                 cfg.imports.version_minor_max)) {
+        const uint32_t hi = cfg.imports.version_minor_max > cfg.imports.version_minor ? cfg.imports.version_minor_max
+                                                                                      : cfg.imports.version_minor;
+        return finish(kFgVersionMismatch, std::to_string(major) + "." + std::to_string(minor) + ", binding " +
+                                              std::to_string(cfg.imports.version_major) + "." +
+                                              std::to_string(cfg.imports.version_minor) +
+                                              (hi != cfg.imports.version_minor ? " .. " + std::to_string(cfg.imports.version_major) + "." + std::to_string(hi) : std::string()));
+    }
+
+    // the genuine exports, by name (the address the slots hold; a host's inline patch on them stays in the chain)
+    for (uint32_t i = 0; i < kFgRoleCount; ++i) {
+        const std::string& nm = cfg.imports.role_names[i];
+        g_genuine[i].store(nm.empty() ? nullptr : reinterpret_cast<void*>(GetProcAddress(iface, nm.c_str())));
+    }
+    const std::string& fac = cfg.imports.factory2_name;
+    g_genuine[kFgSlotCreateFactory2].store(fac.empty() ? nullptr
+                                                       : reinterpret_cast<void*>(GetProcAddress(iface, fac.c_str())));
+    for (uint32_t i = kFgSlotDxgiFactory; i <= kFgSlotDxgiFactory2; ++i) g_genuine[i].store(nullptr);
+    ResetBridgeCounters();
+    g_genuine_options.store(nullptr);
+    g_genuine_state.store(nullptr);
+    g_fg_feature.store(cfg.core.ids.fg);
+    g_last_fn_options = cfg.imports.fn_options;
+    g_last_fn_state = cfg.imports.fn_state;
+    ResetCounters();
+    ResetCallLog();
+
+    // the core, attached to the genuine interface through the trampolines
+    FgProxyConfig pc = cfg.core;
+    pc.settings = cfg.settings;
+    auto core = std::unique_ptr<FgProxy>(new FgProxy(pc, cfg.owners, cfg.log, cfg.log_ctx));
+    WgFgChainV1 chain = {};
+    chain.struct_size = sizeof(chain);
+    chain.abi_version = WG_FG_ADAPTER_ABI_VERSION;
+    chain.self = this;
+    chain.max_generated = cfg.imports.abi_max_generated;
+    chain.is_supported = &ChainIsSupported;
+    chain.get_function = &ChainGetFunction;
+    chain.set_options = &ChainSetOptions;
+    chain.get_state = &ChainGetState;
+    chain.tag = &ChainTag;
+    chain.constants = &ChainConstants;
+    chain.present = &ChainPresent;
+    const uint32_t ar = core->attach_interposer(&chain, major, minor);
+    if (ar != WG_FG_REASON_NONE) return finish(kFgAttachRefused, "reason " + std::to_string(ar));
+    if (!cfg.imports.fn_options.empty()) core->set_feature_function(cfg.imports.fn_options, options_handler());
+    if (!cfg.imports.fn_state.empty()) core->set_feature_function(cfg.imports.fn_state, state_handler());
+    imports_ = cfg.imports;
+    *out = std::move(core);
+    return kFgInstalled;
+}
+
+// Start-up route facts first (no slot or route is live yet), then the handlers route through this transport.
+void FgAsiTransport::start_routing(const FgAsiConfig& cfg, std::unique_ptr<FgProxy> core) {
+    if (cfg.core_ready) cfg.core_ready(cfg.core_ready_ctx, core.get());
+    impl_.reset(new Impl());
+    impl_->core = core.get();
+    impl_->codec = cfg.codec;
+    impl_->fg_feature = cfg.core.ids.fg;
+    impl_->fn_options = cfg.imports.fn_options;
+    impl_->fn_state = cfg.imports.fn_state;
+    impl_->presenter = cfg.presenter;
+    impl_->present_route = cfg.present_route;
+    impl_->present_route_ctx = cfg.present_route_ctx;
+    impl_->factory_note = cfg.factory_note;
+    impl_->factory_note_ctx = cfg.factory_note_ctx;
+    impl_->core_ready = cfg.core_ready;
+    impl_->core_ready_ctx = cfg.core_ready_ctx;
+    impl_->tag_retain = cfg.tag_retain;
+    impl_->tag_retain_ctx = cfg.tag_retain_ctx;
+    impl_->owners = cfg.owners;
+    impl_->log = cfg.log;
+    impl_->log_ctx = cfg.log_ctx;
+    core_ = std::move(core);
+    g_route.store(impl_.get());
+}
+
+// dxgi_factory_fallback: the exe's own imports of the DXGI module's factory creations (import and delay-load tables),
+// redirected to the factory handlers. Called with routing active; returns the slots patched.
+size_t FgAsiTransport::patch_dxgi_fallback() {
+    std::vector<std::string> names(kFgSlotCount);
+    for (uint32_t i = kFgSlotDxgiFactory; i <= kFgSlotDxgiFactory2; ++i) names[i] = DxgiExportOf(i);
+    HMODULE exe = GetModuleHandleW(nullptr);
+    HMODULE dxgi = GetModuleHandleW(Widen(kDxgiLeaf).c_str());
+    g::Budget budget(200000, 100);
+    size_t patched = 0;
+    for (const FgSlot& sl : FgCollectSlots(exe, kDxgiLeaf, names, budget)) {
+        void* h = handler_for(sl.name_index);
+        void* original = nullptr;
+        if (!h || !g::safe_get(sl.slot, &original) || original == h) continue;
+        // an import slot holds the bound function (or an earlier patch: kept in the chain); a delay-load slot may
+        // still hold the linker's helper thunk, so its genuine function is the module's export
+        void* genuine = (!sl.delay_load && original) ? original
+                        : dxgi ? reinterpret_cast<void*>(GetProcAddress(dxgi, DxgiExportOf(sl.name_index)))
+                               : nullptr;
+        if (!genuine) continue;
+        g_genuine[sl.name_index].store(genuine);
+        if (PatchSlot(sl.slot, h)) {
+            patches_.push_back({sl.slot, original, h, sl.name_index, sl.delay_load, exe});
+            ++patched;
+            log(std::string("fg transport: patched ") + (sl.delay_load ? "delay-load" : "import") + " slot " +
+                FgRoleWord(sl.name_index) + " in " + ModuleLeaf(exe) + " (the game creates its DXGI factory there)");
+        }
+    }
+    return patched;
 }
 
 uint32_t FgAsiTransport::install(const FgAsiConfig& cfg) {
@@ -1102,6 +1293,9 @@ uint32_t FgAsiTransport::install(const FgAsiConfig& cfg) {
                 }
             }
         } owner_release{this};
+        // an import-table install is the process's first: no host route exists yet
+        for (auto& n : g_route_next) n.store(nullptr);
+        routed_ = false;
 
         // find the interface module (already loaded, or the game's own file for an exe that delay-loads it)
         const std::string& leaf = cfg.imports.interposer_leaf;
@@ -1120,52 +1314,14 @@ uint32_t FgAsiTransport::install(const FgAsiConfig& cfg) {
         log(std::string("fg transport: game interface ") + (loaded ? "loaded for the exe's delay-load import: "
                                                                    : "found already loaded: ") + ModuleLeaf(iface));
 
-        // version gate
+        // version gate, genuine exports, core
         uint32_t major = 0, minor = 0;
         const FgVersionReader rv = cfg.read_version ? cfg.read_version : &FgModuleFileVersion;
         if (!rv(iface, &major, &minor)) return finish(kFgVersionUnreadable, "");
-        if (major != cfg.imports.version_major || minor != cfg.imports.version_minor)
-            return finish(kFgVersionMismatch, std::to_string(major) + "." + std::to_string(minor) + ", binding " +
-                                                  std::to_string(cfg.imports.version_major) + "." +
-                                                  std::to_string(cfg.imports.version_minor));
-
-        // the genuine exports, by name (the address the slots hold; a host's inline patch on them stays in the chain)
-        for (uint32_t i = 0; i < kFgRoleCount; ++i) {
-            const std::string& nm = cfg.imports.role_names[i];
-            g_genuine[i].store(nm.empty() ? nullptr : reinterpret_cast<void*>(GetProcAddress(iface, nm.c_str())));
-        }
+        std::unique_ptr<FgProxy> core;
+        const uint32_t ar = attach_core(cfg, iface, major, minor, &core);
+        if (ar != kFgInstalled) return ar;
         const std::string& fac = cfg.imports.factory2_name;
-        g_genuine[kFgSlotCreateFactory2].store(fac.empty() ? nullptr
-                                                           : reinterpret_cast<void*>(GetProcAddress(iface, fac.c_str())));
-        ResetBridgeCounters();
-        g_genuine_options.store(nullptr);
-        g_genuine_state.store(nullptr);
-        g_fg_feature.store(cfg.core.ids.fg);
-        g_last_fn_options = cfg.imports.fn_options;
-        g_last_fn_state = cfg.imports.fn_state;
-        ResetCounters();
-        ResetCallLog();
-
-        // the core, attached to the genuine interface through the trampolines
-        FgProxyConfig pc = cfg.core;
-        pc.settings = cfg.settings;
-        auto core = std::unique_ptr<FgProxy>(new FgProxy(pc, cfg.owners, cfg.log, cfg.log_ctx));
-        WgFgChainV1 chain = {};
-        chain.struct_size = sizeof(chain);
-        chain.abi_version = WG_FG_ADAPTER_ABI_VERSION;
-        chain.self = this;
-        chain.max_generated = cfg.imports.abi_max_generated;
-        chain.is_supported = &ChainIsSupported;
-        chain.get_function = &ChainGetFunction;
-        chain.set_options = &ChainSetOptions;
-        chain.get_state = &ChainGetState;
-        chain.tag = &ChainTag;
-        chain.constants = &ChainConstants;
-        chain.present = &ChainPresent;
-        const uint32_t ar = core->attach_interposer(&chain, major, minor);
-        if (ar != WG_FG_REASON_NONE) return finish(kFgAttachRefused, "reason " + std::to_string(ar));
-        if (!cfg.imports.fn_options.empty()) core->set_feature_function(cfg.imports.fn_options, options_handler());
-        if (!cfg.imports.fn_state.empty()) core->set_feature_function(cfg.imports.fn_state, state_handler());
 
         // bounded scan of every loaded importer (the interface module and this module skipped); nothing is patched
         // until the whole scan finished inside its budget
@@ -1209,30 +1365,12 @@ uint32_t FgAsiTransport::install(const FgAsiConfig& cfg) {
             return finish(kFgScanOverBudget, std::to_string(budget.entries()) + " entries, " +
                                                  std::to_string(static_cast<unsigned>(budget.elapsed_ms())) + " ms");
         if (found.empty()) return finish(kFgNothingToPatch, "");
+        bool factory_slot = false;
+        for (const Found& f : found) factory_slot = factory_slot || f.slot.name_index == kFgSlotCreateFactory2;
 
         // start-up route facts first (no slot is live yet), then route, then redirect: a slot is live the moment it is
         // written
-        if (cfg.core_ready) cfg.core_ready(cfg.core_ready_ctx, core.get());
-        impl_.reset(new Impl());
-        impl_->core = core.get();
-        impl_->codec = cfg.codec;
-        impl_->fg_feature = cfg.core.ids.fg;
-        impl_->fn_options = cfg.imports.fn_options;
-        impl_->fn_state = cfg.imports.fn_state;
-        impl_->presenter = cfg.presenter;
-        impl_->present_route = cfg.present_route;
-        impl_->present_route_ctx = cfg.present_route_ctx;
-        impl_->factory_note = cfg.factory_note;
-        impl_->factory_note_ctx = cfg.factory_note_ctx;
-        impl_->core_ready = cfg.core_ready;
-        impl_->core_ready_ctx = cfg.core_ready_ctx;
-        impl_->tag_retain = cfg.tag_retain;
-        impl_->tag_retain_ctx = cfg.tag_retain_ctx;
-        impl_->owners = cfg.owners;
-        impl_->log = cfg.log;
-        impl_->log_ctx = cfg.log_ctx;
-        core_ = std::move(core);
-        g_route.store(impl_.get());
+        start_routing(cfg, std::move(core));
         for (const Found& f : found) {
             void* h = handler_for(f.slot.name_index);
             void* original = nullptr;
@@ -1248,6 +1386,9 @@ uint32_t FgAsiTransport::install(const FgAsiConfig& cfg) {
                     ModuleLeaf(f.module));
             }
         }
+        // a generic binding whose game does not create its factory through the interface module: the exe's DXGI
+        // factory creations carry the swap-chain hook instead
+        if (cfg.imports.dxgi_factory_fallback && !factory_slot) patch_dxgi_fallback();
         active_ = true;
         owner_release.keep = true;
         return finish(kFgInstalled, std::to_string(patches_.size()) + " slot(s) redirected");
@@ -1255,6 +1396,110 @@ uint32_t FgAsiTransport::install(const FgAsiConfig& cfg) {
         // nothing half-done stays routed: back to the genuine interface for every call
         restore();
         return finish(kFgNullArgument, "exception during install; nothing stays patched");
+    }
+}
+
+uint32_t FgAsiTransport::install_routes(const FgAsiConfig& cfg, HMODULE iface, uint32_t major, uint32_t minor,
+                                        FgRouteRegisterFn reg, void* reg_ctx) {
+    try {
+        if (!reg || !iface) return kFgNullArgument;
+        // the routes this binding can serve on this module: every hooked role the module exports, and the factory
+        // creation; the names point into imports_ (kept while the transport lives)
+        auto build = [this](std::vector<FgRoute>* routes) {
+            routes->clear();
+            for (uint32_t i = 0; i < kFgRoleCount; ++i)
+                if (!imports_.role_names[i].empty() && g_genuine[i].load())
+                    routes->push_back({imports_.role_names[i].c_str(), handler_for(i),
+                                       reinterpret_cast<void**>(&g_route_next[i])});
+            if (!imports_.factory2_name.empty() && g_genuine[kFgSlotCreateFactory2].load())
+                routes->push_back({imports_.factory2_name.c_str(), handler_for(kFgSlotCreateFactory2),
+                                   reinterpret_cast<void**>(&g_route_next[kFgSlotCreateFactory2])});
+        };
+        auto installed = [](uint32_t slot) { return g_route_next[slot].load(std::memory_order_acquire) != nullptr; };
+        std::vector<FgRoute> routes;
+
+        if (active_) {
+            // an import-table install: the host's routes take each role it installs; those slots are put back
+            if (iface != iface_) {
+                log("fg transport: the host hooked another interface module (" + ModuleLeaf(iface) +
+                    "); the installed one keeps its slots");
+                return result_;
+            }
+            if (routed_) return kFgInstalled;
+            build(&routes);
+            if (routes.empty()) return result_;
+            if (!reg(reg_ctx, routes.data(), static_cast<uint32_t>(routes.size()))) {
+                log("fg transport: the host refused the routes; the import slots stay redirected");
+                return result_;
+            }
+            uint32_t n = 0;
+            for (uint32_t i = 0; i < kFgSlotCount; ++i) n += installed(i) ? 1u : 0u;
+            g_ctr.routes_installed.store(n);
+            routed_ = n > 0;
+            size_t back = 0;
+            for (auto it = patches_.begin(); it != patches_.end();) {
+                void* now = nullptr;
+                if (it->role < kFgSlotCount && installed(it->role) && g::safe_get(it->slot, &now) && now == it->handler &&
+                    PatchSlot(it->slot, it->original)) {
+                    ++back;
+                    it = patches_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            g_ctr.slots_put_back.store(back);
+            log("fg transport: " + std::to_string(n) + " host route(s) in front of the interface's exports (" +
+                ModuleLeaf(iface) + " " + std::to_string(major) + "." + std::to_string(minor) + "); " +
+                std::to_string(back) + " import slot(s) put back (the routes take every call, a later plugin's "
+                "forward to the export included)");
+            return kFgInstalled;
+        }
+
+        // no import-table install: the routes are the transport
+        log_fn_ = cfg.log;
+        log_ctx_ = cfg.log_ctx;
+        if (!cfg.settings.enabled && WG_FG_WIN32_MUTANT != 1) return finish(kFgInstallOff, "");
+        if (!cfg.imports.qualified || !cfg.core.binding.qualified || !cfg.codec || cfg.imports.interposer_leaf.empty())
+            return finish(kFgNoBinding, "");
+        FgAsiTransport* expected = nullptr;
+        if (!g_owner.compare_exchange_strong(expected, this)) return finish(kFgAlreadyActive, "");
+        struct OwnerRelease {
+            FgAsiTransport* self;
+            bool keep = false;
+            ~OwnerRelease() {
+                if (!keep) {
+                    FgAsiTransport* me = self;
+                    g_owner.compare_exchange_strong(me, nullptr);
+                }
+            }
+        } owner_release{this};
+        for (auto& n : g_route_next) n.store(nullptr);  // the host writes the next functions of these routes
+        iface_ = iface;
+        loaded_by_us_ = false;
+        log("fg transport: the host hooked the game interface: " + ModuleLeaf(iface) + " " + std::to_string(major) +
+            "." + std::to_string(minor));
+        std::unique_ptr<FgProxy> core;
+        const uint32_t ar = attach_core(cfg, iface, major, minor, &core);
+        if (ar != kFgInstalled) return ar;
+        build(&routes);
+        if (routes.empty()) return finish(kFgNothingToPatch, "the module exports no hooked role");
+        start_routing(cfg, std::move(core));  // routing first: the host may let a call in as soon as it installs
+        if (!reg(reg_ctx, routes.data(), static_cast<uint32_t>(routes.size()))) {
+            restore();
+            return finish(kFgRoutesRefused, "");
+        }
+        uint32_t n = 0;
+        for (uint32_t i = 0; i < kFgSlotCount; ++i) n += installed(i) ? 1u : 0u;
+        g_ctr.routes_installed.store(n);
+        routed_ = n > 0;
+        if (cfg.imports.dxgi_factory_fallback && !installed(kFgSlotCreateFactory2)) patch_dxgi_fallback();
+        active_ = true;
+        owner_release.keep = true;
+        return finish(kFgInstalled, std::to_string(n) + " host route(s), " + std::to_string(patches_.size()) +
+                                        " slot(s) redirected");
+    } catch (...) {
+        restore();
+        return finish(kFgNullArgument, "exception during the route install; nothing stays routed");
     }
 }
 
@@ -1279,6 +1524,7 @@ void FgAsiTransport::restore() {
     if (core_) core_->detach();
     core_.reset();
     impl_.reset();
+    routed_ = false;
     if (active_) {
         FgAsiTransport* me = this;
         g_owner.compare_exchange_strong(me, nullptr);

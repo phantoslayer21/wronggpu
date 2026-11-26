@@ -11,7 +11,10 @@
 //    walk. A structure whose version is lower than the binding's is not read.
 //  - OPTIONS (set-options). The checks the original makes, in its order: the options or the viewport missing from the
 //    chain -> 20; generated count 0 (even with the mode off) -> 25; generated count above the reported maximum (state
-//    +52) -> 38. Then the mode: 0 off, 1 on, 2 auto (WrongGPU's own pacing), 3 dynamic (refused with 25 while the
+//    +52) -> 38. The options structure is read only up to the version the game passed: version 1 carries everything
+//    through the error callback (+96); +104 (v2), +108 (v3) and the UI-recomposition byte (+112, read from version 5,
+//    the layout qualified on the titles) are never read from an older structure. A binding names the lowest version it
+//    takes (FgSl214Layout::options_version: 5 for Cyberpunk 2077, 1 for the generic interface 2.x binding). Then the mode: 0 off, 1 on, 2 auto (WrongGPU's own pacing), 3 dynamic (refused with 25 while the
 //    binding reports no dynamic support, which is what the state's +80 says). Decoded: the switch, the count, preset B
 //    when the UI-recomposition byte (+112) is exactly 1 (otherwise the player's preset), the dynamic-resolution flag and
 //    size, the colour and motion/depth sizes and formats the game may fill (both supported titles leave them 0), the
@@ -119,6 +122,9 @@ inline constexpr uint32_t kFgNatStatusConstantUnset = 0x8u;
 inline constexpr uint32_t kFgNatStatusNoBackBufferIndex = 0x10u;
 // the minimum state version that carries each member
 inline constexpr uint64_t kFgNatStateV2 = 2, kFgNatStateV3 = 3, kFgNatStateV4 = 4;
+// the minimum options version from which each member past the error callback is read (v1 ends at +104)
+inline constexpr uint64_t kFgNatOptionsLatencyV = 2, kFgNatOptionsQueueV = 3, kFgNatOptionsUiRecompositionV = 5,
+                          kFgNatOptionsDynamicFpsV = 5;
 
 // ---- the binding's data the codec needs (filled from the title binding; tests fill synthetic GUIDs) -----------------
 

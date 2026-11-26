@@ -152,7 +152,9 @@ bool FgSl214Codec::options(const WgViewport*, const void* native, WgFgOptions* o
     const WgNatFgOptions* o = find_options(native);
     if (!o || !out) return false;
     out->enable = o->mode != kFgNatModeOff ? 1u : 0u;
-    out->preset = o->ui_recomposition == 1 ? static_cast<uint32_t>(WG_FG_PRESET_B) : WG_FG_PRESET_NOT_SET;
+    // the UI-recomposition byte only from the version that carries it (an older structure ends before +112)
+    const bool ui = o->h.version >= kFgNatOptionsUiRecompositionV && o->ui_recomposition == 1;
+    out->preset = ui ? static_cast<uint32_t>(WG_FG_PRESET_B) : WG_FG_PRESET_NOT_SET;
     out->generated_count = o->frames;
     for (uint32_t i = 0; i < WG_FG_OPTIONAL_COUNT; ++i) out->optional_decl[i] = l_.optional_decl[i];
     out->color_space = WG_FG_CS_SDR;
@@ -172,9 +174,14 @@ std::string FgSl214Codec::describe_options(const void* native) {
     if (!o) return "options not in the chain";
     static const char* const kModes[] = {"off", "on", "auto", "dynamic"};
     char buf[160];
-    std::snprintf(buf, sizeof buf, "mode %u (%s), frames %u, flags 0x%x, ui recomposition %u", o->mode,
-                  o->mode < 4 ? kModes[o->mode] : "unknown", o->frames, o->flags,
-                  static_cast<unsigned>(o->ui_recomposition));
+    if (o->h.version >= kFgNatOptionsUiRecompositionV)
+        std::snprintf(buf, sizeof buf, "mode %u (%s), frames %u, flags 0x%x, ui recomposition %u", o->mode,
+                      o->mode < 4 ? kModes[o->mode] : "unknown", o->frames, o->flags,
+                      static_cast<unsigned>(o->ui_recomposition));
+    else  // an older structure: nothing past what its version carries is read
+        std::snprintf(buf, sizeof buf, "mode %u (%s), frames %u, flags 0x%x, options v%u", o->mode,
+                      o->mode < 4 ? kModes[o->mode] : "unknown", o->frames, o->flags,
+                      static_cast<unsigned>(o->h.version));
     return buf;
 }
 

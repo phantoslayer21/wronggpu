@@ -1009,6 +1009,223 @@ void TestIatChaining(const GameModule& game) {
     CHECK(SlotsAreGenuine(game));
 }
 
+// ---- host routes (OptiScaler's plugin interface 3) ------------------------------------------------------------------
+// A stand-in host: copies the routes and writes each route's next function (here the stand-in's genuine export, as a
+// host's hook would continue there). A test calls a route's handler the way the host's hook in front of the export
+// calls it for every caller of the export.
+struct FakeRouteHost {
+    std::vector<FgRoute> routes;
+    std::vector<std::string> names;
+    bool refuse = false;
+    bool install = true;  // false: registered, but the host installs nothing (next stays null)
+    uint32_t calls = 0;
+    static bool Register(void* ctx, const FgRoute* r, uint32_t n) {
+        FakeRouteHost* h = static_cast<FakeRouteHost*>(ctx);
+        ++h->calls;
+        if (h->refuse) return false;
+        h->routes.assign(r, r + n);
+        h->names.clear();
+        for (const FgRoute& x : h->routes) {
+            h->names.push_back(x.export_name);
+            if (h->install) *x.next = GenuineExport(x.export_name);
+        }
+        return true;
+    }
+    template <typename F>
+    F handler(uint32_t role) const {
+        for (const FgRoute& x : routes)
+            if (std::strcmp(x.export_name, kRoleNames[role]) == 0) return reinterpret_cast<F>(x.handler);
+        return nullptr;
+    }
+};
+
+bool VersionThree_Four(HMODULE, uint32_t* major, uint32_t* minor) {
+    *major = 3;
+    *minor = 4;
+    return true;
+}
+bool VersionThree_Zero(HMODULE, uint32_t* major, uint32_t* minor) {
+    *major = 3;
+    *minor = 0;
+    return true;
+}
+bool VersionFour_Four(HMODULE, uint32_t* major, uint32_t* minor) {
+    *major = 4;
+    *minor = 4;
+    return true;
+}
+
+void TestHostRoutes(const GameModule& game) {
+    using IsSupportedFn = WgResultCode (*)(uint32_t, const WgAdapterInfo*);
+    using FreeFn = WgResultCode (*)(uint32_t, const WgViewport*);
+    using GetFunctionFn = WgResultCode (*)(uint32_t, const char*, void**);
+    using TagFn = WgResultCode (*)(const WgViewport*, const WgTag*, uint32_t, void*);
+    const HMODULE iface = GetModuleHandleA(kLeaf);
+    FgMockRecord* r = fgmock_record();
+    // 1. after an import-table install: the host's routes take each role; the import slots are put back
+    {
+        fgmock_reset();
+        SetMockResults();
+        g_log.clear();
+        MockCodec codec;
+        FgPresentOwners owners;
+        FgAsiTransport t;
+        const FgAsiConfig cfg = MakeConfig(&codec, &owners, true);
+        CHECK(t.install(cfg) == kFgInstalled && SlotsAreOurs(game));
+        FakeRouteHost host;
+        CHECK(t.install_routes(cfg, iface, 3, 1, &FakeRouteHost::Register, &host) == kFgInstalled);
+        CHECK(host.calls == 1 && host.routes.size() == kFgRoleCount);  // the stand-in's config names no factory
+        for (uint32_t i = 0; i < kFgRoleCount && i < host.names.size(); ++i) {
+            CHECK(host.names[i] == kRoleNames[i]);
+            CHECK(host.routes[i].handler == FgAsiTransport::handler_for(i));
+        }
+        CHECK(t.routed() && t.stats().routes_installed == kFgRoleCount);
+        CHECK(t.stats().slots_put_back == t.stats().routes_installed + 0 || t.stats().slots_put_back >= kFgRoleCount);
+        CHECK(SlotsAreGenuine(game));  // every import slot holds the genuine export again
+        CHECK(LogCount("host route(s) in front of the interface's exports") == 1);
+        // once per install
+        CHECK(t.install_routes(cfg, iface, 3, 1, &FakeRouteHost::Register, &host) == kFgInstalled && host.calls == 1);
+        // calls through the routes: not taken -> each continues at the host's next with the game's own arguments
+        auto is_supported = host.handler<IsSupportedFn>(kFgRoleIsSupported);
+        auto free_ = host.handler<FreeFn>(kFgRoleFree);
+        auto get_function = host.handler<GetFunctionFn>(kFgRoleGetFunction);
+        auto tag = host.handler<TagFn>(kFgRoleTag);
+        CHECK(is_supported && free_ && get_function && tag);
+        if (is_supported && free_ && get_function && tag) {
+            WgAdapterInfo ai = {};
+            const uint32_t before = r->calls[kMockIsSupported];
+            CHECK(is_supported(kFeatFg, &ai) == r->result[kMockIsSupported] && r->calls[kMockIsSupported] == before + 1);
+            CHECK(r->last[kMockIsSupported].a == &ai);
+            // taken: FG is answered by the core (the genuine feature never sees it); other features continue
+            MakeTaken(t.core());
+            CHECK(is_supported(kFeatFg, nullptr) == WG_OK && r->calls[kMockIsSupported] == before + 1);
+            CHECK(is_supported(kFeatSr, &ai) == r->result[kMockIsSupported] && r->calls[kMockIsSupported] == before + 2);
+            WgViewport vp = {};
+            vp.id = 5;
+            CHECK(free_(kFeatSr, &vp) == r->result[kMockFree] && r->last[kMockFree].a == &vp);
+            CHECK(free_(kFeatFg, &vp) == WG_OK);
+            void* fn = nullptr;
+            CHECK(get_function(kFeatFg, FG_MOCK_FN_FG_OPTIONS, &fn) == WG_OK && fn == FgAsiTransport::options_handler());
+            WgTag tags[1] = {};
+            void* cmd = &vp;
+            const uint32_t tb = r->calls[kMockTag];
+            CHECK(tag(&vp, tags, 1, cmd) == r->result[kMockTag] && r->calls[kMockTag] == tb + 1 &&
+                  r->last[kMockTag].c == cmd && r->last[kMockTag].count == 1);
+        }
+        t.restore();
+        CHECK(SlotsAreGenuine(game));
+    }
+    // 2. the host hooked a module other than the installed one: nothing changes
+    {
+        fgmock_reset();
+        SetMockResults();
+        MockCodec codec;
+        FgPresentOwners owners;
+        FgAsiTransport t;
+        const FgAsiConfig cfg = MakeConfig(&codec, &owners, true);
+        CHECK(t.install(cfg) == kFgInstalled);
+        FakeRouteHost host;
+        CHECK(t.install_routes(cfg, GetModuleHandleW(nullptr), 3, 1, &FakeRouteHost::Register, &host) == kFgInstalled);
+        CHECK(host.calls == 0 && !t.routed() && SlotsAreOurs(game));
+        // the host refuses: the import slots stay the transport
+        FakeRouteHost refusing;
+        refusing.refuse = true;
+        CHECK(t.install_routes(cfg, iface, 3, 1, &FakeRouteHost::Register, &refusing) == kFgInstalled);
+        CHECK(refusing.calls == 1 && !t.routed() && SlotsAreOurs(game));
+        // registered but nothing installed: the slots stay too
+        FakeRouteHost idle;
+        idle.install = false;
+        CHECK(t.install_routes(cfg, iface, 3, 1, &FakeRouteHost::Register, &idle) == kFgInstalled);
+        CHECK(idle.calls == 1 && !t.routed() && SlotsAreOurs(game));
+        t.restore();
+        CHECK(SlotsAreGenuine(game));
+    }
+    // 3. no import-table install: the routes are the transport; the gates run against the module and version the host
+    //    reports, nothing is patched
+    {
+        fgmock_reset();
+        SetMockResults();
+        g_log.clear();
+        MockCodec codec;
+        FgPresentOwners owners;
+        FakeRouteHost host;
+        {
+            FgAsiTransport off;
+            CHECK(off.install_routes(MakeConfig(&codec, &owners, false), iface, 3, 1, &FakeRouteHost::Register, &host) ==
+                  kFgInstallOff);
+            CHECK(host.calls == 0 && !off.active());
+        }
+        {
+            FgAsiTransport unbound;
+            FgAsiConfig nb = MakeConfig(&codec, &owners, true);
+            nb.imports.qualified = false;
+            CHECK(unbound.install_routes(nb, iface, 3, 1, &FakeRouteHost::Register, &host) == kFgNoBinding);
+            CHECK(host.calls == 0);
+        }
+        FgAsiTransport t;
+        const FgAsiConfig cfg = MakeConfig(&codec, &owners, true);
+        CHECK(t.install_routes(cfg, iface, 3, 2, &FakeRouteHost::Register, &host) == kFgVersionMismatch);
+        CHECK(host.calls == 0 && !t.active());
+        g_log.clear();
+        CHECK(t.install_routes(cfg, iface, 3, 1, &FakeRouteHost::Register, &host) == kFgInstalled);
+        CHECK(host.calls == 1 && t.active() && t.routed() && t.patch_count() == 0 && SlotsAreGenuine(game));
+        CHECK(LogCount("fg transport: the host hooked the game interface") == 1);
+        auto is_supported = host.handler<IsSupportedFn>(kFgRoleIsSupported);
+        CHECK(is_supported != nullptr);
+        if (is_supported) {
+            const uint32_t before = r->calls[kMockIsSupported];
+            CHECK(is_supported(kFeatSr, nullptr) == r->result[kMockIsSupported] &&
+                  r->calls[kMockIsSupported] == before + 1);
+            MakeTaken(t.core());
+            CHECK(is_supported(kFeatFg, nullptr) == WG_OK && r->calls[kMockIsSupported] == before + 1);
+        }
+        // a second transport cannot take the process's routes
+        FgAsiTransport second;
+        FakeRouteHost host2;
+        CHECK(second.install_routes(cfg, iface, 3, 1, &FakeRouteHost::Register, &host2) == kFgAlreadyActive);
+        CHECK(host2.calls == 0);
+        t.restore();
+        CHECK(!t.active() && SlotsAreGenuine(game));
+        // the host refuses: nothing stays routed
+        FakeRouteHost refusing;
+        refusing.refuse = true;
+        FgAsiTransport t2;
+        CHECK(t2.install_routes(cfg, iface, 3, 1, &FakeRouteHost::Register, &refusing) == kFgRoutesRefused);
+        CHECK(refusing.calls == 1 && !t2.active() && SlotsAreGenuine(game));
+        CHECK(std::string(FgInstallResultWord(kFgRoutesRefused)).find("refused the routes") != std::string::npos);
+    }
+    // 4. a generic binding's minor-version range (import-table install)
+    {
+        fgmock_reset();
+        SetMockResults();
+        MockCodec codec;
+        FgPresentOwners owners;
+        FgAsiConfig cfg = MakeConfig(&codec, &owners, true);
+        cfg.imports.version_minor_max = 9;
+        cfg.core.binding.version_minor_max = 9;
+        {
+            FgAsiTransport t;
+            cfg.read_version = &VersionThree_Four;
+            CHECK(t.install(cfg) == kFgInstalled && SlotsAreOurs(game));
+            t.restore();
+        }
+        {
+            FgAsiTransport t;
+            cfg.read_version = &VersionThree_Zero;
+            CHECK(t.install(cfg) == kFgVersionMismatch && SlotsAreGenuine(game));
+        }
+        {
+            FgAsiTransport t;
+            cfg.read_version = &VersionFour_Four;
+            CHECK(t.install(cfg) == kFgVersionMismatch && SlotsAreGenuine(game));
+        }
+        CHECK(SlotsAreGenuine(game));
+    }
+    // the slot words of the DXGI factory fallback
+    CHECK(std::string(FgRoleWord(kFgSlotDxgiFactory2)) == "dxgi-create-factory2");
+    CHECK(FgAsiTransport::handler_for(kFgSlotDxgiFactory1) != nullptr && FgAsiTransport::handler_for(kFgSlotCount) == nullptr);
+}
+
 void TestThrowingCodecAndNulls(const GameModule& game) {
     fgmock_reset();
     SetMockResults();
@@ -1734,6 +1951,7 @@ int main(int argc, char** argv) {
         TestIsLoadedSetLoaded(game);
         TestLazyCoreReady(game);
         TestIatChaining(game);
+        TestHostRoutes(game);
         TestThrowingCodecAndNulls(game);
     }
     TestSwapChainIdentityAndRefcount();

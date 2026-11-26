@@ -1312,7 +1312,9 @@ void TestGpuDxgi(Gpu& gpu) {
     const FgDxgiPresenterInfo info = p->Info();
     std::printf("  chain %ux%u, %u buffers, slots %u, grid period %lld\n", info.width, info.height, info.buffer_count,
                 info.slot_count, static_cast<long long>(info.grid.period));
-    CHECK(info.slot_count == 4 && info.buffer_count == 3 && info.width == 256);
+    // the default slot count: FgMinSlotsFor(N), at least 8 (fg_dxgi_presenter.cpp)
+    const std::uint32_t default_slots = FgMinSlotsFor(1) < 8 ? 8u : FgMinSlotsFor(1);
+    CHECK(info.slot_count == default_slots && info.buffer_count == 3 && info.width == 256);
     FgWinResult why;
     const std::uint32_t fid = p->RegisterFence(gpu.fence.Get(), &why);
     CHECK(fid >= 1);
@@ -1345,7 +1347,7 @@ void TestGpuDxgi(Gpu& gpu) {
                                          DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT);
     CHECK(SUCCEEDED(rr));
     CHECK(p->CompleteResize(SUCCEEDED(rr), 2) == FgStatus::Ok);
-    CHECK(p->Info().width == 320 && p->HoldsSwapChainBuffers() && p->FreeSlots() == 4);
+    CHECK(p->Info().width == 320 && p->HoldsSwapChainBuffers() && p->FreeSlots() == default_slots);
     CHECK(p->Quiesce() == FgStatus::Ok && p->WaitIdle(3000));
     FgStatus ds = p->Detach();
     for (int i = 0; i < 100 && ds == FgStatus::Busy; ++i) {

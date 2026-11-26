@@ -13,7 +13,7 @@ if(NOT DEFINED PROJECT_NAME)
 endif()
 find_package(Threads REQUIRED)
 # F9: developer test builds only (see clean/fg/fg_limits.h); public and CI builds keep it OFF.
-option(WRONGGPU_FG_DEV_QUALIFIED "Developer test builds only: FG modes taken without the release gate" OFF)
+option(WRONGGPU_FG_DEV_QUALIFIED "Developer test builds only: the FG developer diagnostics (frame dumps)" OFF)
 if(WRONGGPU_FG_DEV_QUALIFIED)
   add_compile_definitions(WRONGGPU_FG_DEV_QUALIFIED=1)
   message(WARNING "fg runtime: WRONGGPU_FG_DEV_QUALIFIED is ON (developer test build; never publish this build)")

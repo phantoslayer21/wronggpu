@@ -11,11 +11,10 @@ inline constexpr std::uint32_t kFgMaxGenerated = 5;  // N = 1..5 generated image
 }  // namespace wgfg
 
 // The release gate of the FG modes (wgfg::kFgModesQualified in fg_contract.h, wgfgp::kFgModesQualified in
-// fg_proxy_core.h): closed until the end-to-end oracle gate (F5) and a qualified presenter pass. Developer test builds
-// may open it with the CMake option WRONGGPU_FG_DEV_QUALIFIED (compile definition WRONGGPU_FG_DEV_QUALIFIED=1, the
-// whole build tree); public and CI builds never set it.
-#if defined(WRONGGPU_FG_DEV_QUALIFIED) && WRONGGPU_FG_DEV_QUALIFIED
+// fg_proxy_core.h): open from 0.7.0, after the end-to-end checks and the live qualification of WrongGPU-FG.asi in
+// Cyberpunk 2077 with OptiScaler on an RX 9070 XT (generated images displayed through the DXGI flip presenter). The
+// per-game switch (fg=off by default) and every other route fact still decide whether a game gets frame generation;
+// a test sets FgProxyConfig::modes_qualified / FgRouteFacts::modes_qualified = false to check the closed gate. The
+// CMake option WRONGGPU_FG_DEV_QUALIFIED (compile definition WRONGGPU_FG_DEV_QUALIFIED=1) now only adds the developer
+// diagnostics (the frame dumps under WRONGGPU_FG_DUMP_DIR, fg_asi_session.h); public and CI builds never set it.
 #define WG_FG_MODES_QUALIFIED 1
-#else
-#define WG_FG_MODES_QUALIFIED 0
-#endif

@@ -13,9 +13,9 @@ if(NOT DEFINED PROJECT_NAME)
 endif()
 
 set(WG_FG_PROXY_DIR ${CMAKE_CURRENT_LIST_DIR})
-# F9: developer test builds only. ON takes the FG modes without the release gate (kFgModesQualified, fg_limits.h);
-# public and CI builds keep it OFF, so nothing advertises a mode that has not passed the gate.
-option(WRONGGPU_FG_DEV_QUALIFIED "Developer test builds only: FG modes taken without the release gate" OFF)
+# F9: developer test builds only. ON adds the FG developer diagnostics (the frame dumps, fg_asi_session.h); the release
+# gate itself is open from 0.7.0 (fg_limits.h). Public and CI builds keep it OFF.
+option(WRONGGPU_FG_DEV_QUALIFIED "Developer test builds only: the FG developer diagnostics (frame dumps)" OFF)
 if(WRONGGPU_FG_DEV_QUALIFIED)
   add_compile_definitions(WRONGGPU_FG_DEV_QUALIFIED=1)
   message(WARNING "fg proxy: WRONGGPU_FG_DEV_QUALIFIED is ON (developer test build; never publish this build)")
@@ -97,6 +97,9 @@ if(WIN32)
   include(${WG_FG_PROXY_DIR}/bindings/fg_binding_gen.cmake)
   set(WG_FG_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
   wg_fg_generate_binding("${WG_FG_PROXY_DIR}/bindings/cp2077-2.14.1.json" "${WG_FG_GEN_DIR}/fg_binding_cp2077.h" CP2077)
+  # the generic interface 2.x binding (any other game on interface 2.4 or later)
+  wg_fg_generate_binding("${WG_FG_PROXY_DIR}/bindings/sl2-generic.json" "${WG_FG_GEN_DIR}/fg_binding_sl2_generic.h"
+                         SL2_GENERIC)
   # the bounded PE view, safe reads and scan budget are the RR guard's own (rr_guard.cpp), reused unchanged
   set(WG_FG_WIN32_SOURCES ${WG_FG_PROXY_DIR}/win32/fg_asi_transport.cpp ${WG_FG_PROXY_DIR}/win32/fg_swapchain_hook.cpp
                           ${WG_FG_PROXY_DIR}/win32/fg_sl214_codec.cpp ${WG_FG_PROXY_DIR}/win32/fg_title_bindings.cpp
@@ -127,7 +130,8 @@ if(WIN32)
                         user32.lib mincore.lib)
   wg_fg_flags(wg_fg_asi_runtime)
 
-  add_library(wg_fg_asi SHARED ${WG_FG_PROXY_DIR}/win32/fg_asi_entry.cpp)
+  # the plugin: the ASI entry and OptiScaler's menu card (fg_panel.h)
+  add_library(wg_fg_asi SHARED ${WG_FG_PROXY_DIR}/win32/fg_asi_entry.cpp ${WG_FG_PROXY_DIR}/win32/fg_panel.cpp)
   target_link_libraries(wg_fg_asi PRIVATE wg_fg_asi_runtime wg_fg_win32)
   target_include_directories(wg_fg_asi PRIVATE ${WG_FG_PROXY_DIR}/../../wgshared/include)
   set_target_properties(wg_fg_asi PROPERTIES OUTPUT_NAME "WrongGPU-FG" PREFIX "" SUFFIX ".asi")
@@ -135,8 +139,10 @@ if(WIN32)
 
   # F9: the session host. ctest runs the CPU checks; `test_fg_asi_session --gpu --dxil <build>/dx12` adds the headless
   # GPU leg (a wrapped composition swap chain, the adapter core on a stand-in chain, synthetic weights).
-  add_executable(test_fg_asi_session ${WG_FG_PROXY_DIR}/tests/test_fg_asi_session.cpp)
+  add_executable(test_fg_asi_session ${WG_FG_PROXY_DIR}/tests/test_fg_asi_session.cpp
+                                     ${WG_FG_PROXY_DIR}/win32/fg_panel.cpp)
   target_link_libraries(test_fg_asi_session PRIVATE wg_fg_asi_runtime)
+  target_include_directories(test_fg_asi_session PRIVATE ${WG_FG_PROXY_DIR}/../../wgshared/include)
   wg_fg_flags(test_fg_asi_session)
   add_test(NAME fg_asi_session COMMAND test_fg_asi_session --scratch ${CMAKE_CURRENT_BINARY_DIR}/asi-session-scratch)
   file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/asi-session-scratch")

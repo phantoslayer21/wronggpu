@@ -320,6 +320,9 @@ public:
     const FgHistory* History() const { return history_.get(); }
     const FgTargetScheduler* Scheduler() const { return scheduler_.get(); }
     IFgPresenter* Presenter() const { return presenter_.get(); }
+    // The scheduler's first-image budget while the session runs (FgTargetScheduler::SetFirstImageBudget), kept for a
+    // scheduler made again after a resize. false: no session.
+    bool SetFirstImageBudget(FgTicks budget);
     uint64_t PresentEpoch() const { return present_epoch_; }
     bool MenuLatchPending() const { return menu_latch_; }
     const FgCreateDesc& CreateDesc() const { return desc_.create; }

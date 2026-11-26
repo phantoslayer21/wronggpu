@@ -143,6 +143,13 @@ FgSessionResult FgSession::Refuse(FgSessionResult r) {
     return Finish(r);
 }
 
+bool FgSession::SetFirstImageBudget(FgTicks budget) {
+    if (!scheduler_) return false;
+    scheduler_->SetFirstImageBudget(budget);
+    desc_.scheduler.first_image_budget = scheduler_->Config().first_image_budget;
+    return true;
+}
+
 FgSessionResult FgSession::Lose(FgSessionResult r) {
     if (presenter_ && presenter_->State() != FgPresenterState::Detached && presenter_->State() != FgPresenterState::Lost)
         presenter_->OnDeviceLost();
