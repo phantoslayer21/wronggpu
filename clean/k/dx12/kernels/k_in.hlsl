@@ -46,6 +46,9 @@
 // @wg-kernel kx/k_in_tiled_uniform__a1 co=k_io_exact.co entry=k_in_tiled_uniform block=256 wave=64 args=s248:p4.b128.p5.b48 defines=K_UNIFORM=1,KI_HWMATH=1
 // @wg-kernel kx/k_in_tiled__a1 co=k_io_exact.co entry=k_in_tiled block=256 wave=64 args=s200:p4.b128.p5 defines=KI_HWMATH=1
 // @wg-kernel kx/k_in_tiled_direct__a1 co=k_io_exact.co entry=k_in_tiled block=256 wave=64 args=s200:p4.b128.p5 rs=direct defines=WG_DIRECT_TEXTURES=1,KI_HWMATH=1
+// @wg-kernel kx/k_in_tiled_color_uniform__a1 co=k_io_exact.co entry=k_in_tiled_uniform block=256 wave=64 args=s264:p4.b128.p7.b48 defines=K_UNIFORM=1,K_COLOR=1,KI_HWMATH=1
+// @wg-kernel kx/k_in_tiled_color__a1 co=k_io_exact.co entry=k_in_tiled block=256 wave=64 args=s216:p4.b128.p7 defines=K_COLOR=1,KI_HWMATH=1
+// @wg-kernel kx/k_in_tiled_color_direct__a1 co=k_io_exact.co entry=k_in_tiled block=256 wave=64 args=s216:p4.b128.p7 rs=direct defines=WG_DIRECT_TEXTURES=1,K_COLOR=1,KI_HWMATH=1
 #include "wg_platform.hlsli"
 #ifndef K_UNIFORM
 #define K_UNIFORM 0

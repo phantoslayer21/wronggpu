@@ -817,11 +817,23 @@
    "k_io_exact.co"
   ],
   [
+   "kx/k_in_tiled_color__a1",
+   "k_io_exact.co"
+  ],
+  [
    "kx/k_in_tiled_color_direct",
    "k_io_exact.co"
   ],
   [
+   "kx/k_in_tiled_color_direct__a1",
+   "k_io_exact.co"
+  ],
+  [
    "kx/k_in_tiled_color_uniform",
+   "k_io_exact.co"
+  ],
+  [
+   "kx/k_in_tiled_color_uniform__a1",
    "k_io_exact.co"
   ],
   [

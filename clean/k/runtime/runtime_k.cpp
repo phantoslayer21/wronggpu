@@ -1504,12 +1504,11 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
     frame_note_ = "model K: k_approx=a1 applies to the tiled input stage only; this context's frames on the legacy input path (a render size above 0.68 x the output, a jitter outside [-0.5, 0.5], or input_tiled=0) run the standard input stage (this line once per context)";
   }
   // The output colour taps by the tiled input kernel (HIP k_in_tiled_color[_uniform]) instead of a separate k_out_color:
-  // the fast input stage on every backend; the exact input stage only on the native D3D12 device (backend 3), whose
-  // kx/k_in_tiled_color[_uniform|_direct] compute the taps of k_out_color from the colour texels the tile stage loads
-  // anyway (same operations, same bits: clean/k/dx12/kernels/k_in.hlsl ki_color_tap). The exact input stage on HIP keeps
-  // k_out_color (KFrame's exact plan); the pre-breakpoint S fallback (kxs/), k_approx=a1 and k_approx=a2 (its k_out_color__a2
-  // taps are the approximate ones) have no fused forms; k_color_fuse=0 turns it off.
-  const bool exact_color_fuse = color_fuse_ && in_exact_ && cfg_.backend == 3 && !approx_a1_ && !approx_a2_ && !s_breakpoints_fallback_;
+  // the fast input stage on every backend; the exact input stage and k_approx=a1 (including k_mode=fast = a1,a2) on the
+  // native D3D12 device (backend 3), whose kx/k_in_tiled_color[_uniform|_direct][__a1] compute the taps of k_out_color
+  // from the colour texels the tile stage loads anyway. Standalone k_approx=a2 without a1 keeps k_out_color__a2; the
+  // pre-breakpoint S fallback (kxs/) has no fused form; k_color_fuse=0 turns it off.
+  const bool exact_color_fuse = color_fuse_ && in_exact_ && cfg_.backend == 3 && (!approx_a2_ || approx_a1_) && !s_breakpoints_fallback_;
   const bool use_tiled_color = use_tiled && (!in_exact_ || exact_color_fuse) && !reset && 4LL * Bw_ >= W_ && 4LL * Bh_ >= H_;
   KiHost input_host = {};
   const bool use_uniforms = use_tiled && !native_direct_ && input_uniforms_ && input_uniforms_safe(fin, &input_host);
@@ -1683,9 +1682,9 @@ std::vector<std::string> KRuntime::d3d12_kernels() const {
     const std::string suffix = approx_a1_ ? "__a1" : "";
     if (!native_direct_ && input_uniforms_) v.push_back(tag + "k_in_tiled_uniform" + suffix);
     v.push_back(tag + "k_in_tiled" + d + suffix);  // input_uniforms_safe refusing the host uniforms
-    if (cfg_.backend == 3 && color_fuse_ && !approx_a1_ && !approx_a2_ && !s_breakpoints_fallback_) {  // the fused forms with the output colour taps (use_tiled_color)
-      if (!native_direct_ && input_uniforms_) v.push_back(tag + "k_in_tiled_color_uniform");
-      v.push_back(tag + "k_in_tiled_color" + d);
+    if (cfg_.backend == 3 && color_fuse_ && (!approx_a2_ || approx_a1_) && !s_breakpoints_fallback_) {  // the fused forms with the output colour taps (use_tiled_color)
+      if (!native_direct_ && input_uniforms_) v.push_back(tag + "k_in_tiled_color_uniform" + suffix);
+      v.push_back(tag + "k_in_tiled_color" + d + suffix);
     }
   }
   if (approx_a2_) {  // k_approx=a2 (opt-in)
