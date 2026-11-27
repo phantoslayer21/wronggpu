@@ -741,10 +741,10 @@ public:
         return call.present1 ? inner.Present1(call.sync_interval, call.flags, call.params)
                              : inner.Present(call.sync_interval, call.flags);
     }
-    void BeforeResize() override {
+    HRESULT BeforeResize() override {
         InFlight in;
         FgAsiTransport::Impl* r = g_route.load();
-        if (r && r->presenter) r->presenter->BeforeResize();
+        return r && r->presenter ? r->presenter->BeforeResize() : S_OK;
     }
     void AfterResize(HRESULT hr) override {
         InFlight in;

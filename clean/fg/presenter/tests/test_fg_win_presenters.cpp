@@ -8,7 +8,9 @@
 //                                   presenter on an unbound surface (zero-copy shared displayable slots, shared-fence
 //                                   handoff, presents with target times) and the DXGI presenter on a composition swap
 //                                   chain bound to nothing. No window is created and nothing reaches the screen.
+#include <algorithm>
 #include <atomic>
+#include <d3d12sdklayers.h>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -30,6 +32,7 @@ namespace {
 
 int g_checks = 0;
 int g_failures = 0;
+bool g_debug_layer = false;
 const char* g_case = "";
 
 void Check(bool ok, const char* what, int line) {
@@ -982,6 +985,7 @@ void TestReadOnlyProbe() {
 
 struct Gpu {
     ComPtr<ID3D12Device> device;
+    ComPtr<ID3D12InfoQueue> debug;
     ComPtr<ID3D12CommandQueue> queue;
     ComPtr<ID3D12CommandAllocator> alloc;
     ComPtr<ID3D12GraphicsCommandList> list;
@@ -1004,7 +1008,13 @@ struct Gpu {
             if (!(d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) break;
             a.Reset();
         }
+        if (g_debug_layer) {
+            ComPtr<ID3D12Debug> layer;
+            if (FAILED(D3D12GetDebugInterface(IID_PPV_ARGS(&layer)))) return false;
+            layer->EnableDebugLayer();
+        }
         if (!a || FAILED(D3D12CreateDevice(a.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&device)))) return false;
+        if (g_debug_layer && FAILED(device.As(&debug))) return false;
         D3D12_COMMAND_QUEUE_DESC q = {};
         q.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
         D3D12_DESCRIPTOR_HEAP_DESC hd = {D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0};
@@ -1016,6 +1026,22 @@ struct Gpu {
             return false;
         event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         return event != nullptr;
+    }
+    bool DebugLayerClean() const {
+        if (!debug) return !g_debug_layer;
+        bool clean = true;
+        for (UINT64 index = 0; index < debug->GetNumStoredMessages(); ++index) {
+            SIZE_T bytes = 0;
+            if (FAILED(debug->GetMessage(index, nullptr, &bytes))) return false;
+            std::vector<char> buffer(bytes);
+            auto* message = reinterpret_cast<D3D12_MESSAGE*>(buffer.data());
+            if (FAILED(debug->GetMessage(index, message, &bytes))) return false;
+            if (message->Severity <= D3D12_MESSAGE_SEVERITY_ERROR) {
+                std::printf("debug layer: %s\n", message->pDescription);
+                clean = false;
+            }
+        }
+        return clean;
     }
     // The executor's work for one slot: clear it to a constant grey, leave it in COMMON, signal the fence.
     std::uint64_t Render(ID3D12Resource* target, float grey) {
@@ -1343,11 +1369,31 @@ void TestGpuDxgi(Gpu& gpu) {
     CHECK(p->Quiesce() == FgStatus::Ok);
     CHECK(p->WaitIdle(3000));
     CHECK(!p->HoldsSwapChainBuffers());
+    std::printf("  dxgi resize after quiesce and queue drain\n");
     const HRESULT rr = sc->ResizeBuffers(0, 320, 180, DXGI_FORMAT_UNKNOWN,
                                          DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT);
     CHECK(SUCCEEDED(rr));
     CHECK(p->CompleteResize(SUCCEEDED(rr), 2) == FgStatus::Ok);
     CHECK(p->Info().width == 320 && p->HoldsSwapChainBuffers() && p->FreeSlots() == default_slots);
+    const HANDLE latency = sc->GetFrameLatencyWaitableObject();
+    CHECK(latency != nullptr);
+    if (latency) {
+        while (WaitForSingleObject(latency, 0) == WAIT_OBJECT_0) {}
+        const FgTicks now = FgInterruptNow();
+        const FgIntervalPlan real_plan = MakePlan(2, 1, 17, now, 10 * kMs, 0);
+        std::uint32_t slot = 0;
+        CHECK(p->ReserveRealSlot(&slot) == FgStatus::Ok);
+        if (ID3D12Resource* target = p->SlotResource(slot)) {
+            const std::uint64_t value = gpu.Render(target, 0.5f);
+            CHECK(p->PresentRealOnly(real_plan, FgRealImage{2, 17, {fid, value}}) == FgStatus::Ok);
+            CHECK(p->WaitIdle(1000));
+            CHECK(p->Info().occlusion_retired_real == 1);
+            CHECK(p->Stats().display_skipped_real == 1);
+        } else {
+            CHECK(false);
+        }
+        CloseHandle(latency);
+    }
     CHECK(p->Quiesce() == FgStatus::Ok && p->WaitIdle(3000));
     FgStatus ds = p->Detach();
     for (int i = 0; i < 100 && ds == FgStatus::Busy; ++i) {
@@ -1361,6 +1407,77 @@ void TestGpuDxgi(Gpu& gpu) {
 // RC2 (A2 / A4 / N-B3): real-retire callback fires strictly once per real frame (displayed, skipped, cancelled by
 // quiesce, NOT on CancelSuffix re-present); truthful funnel counters never double-count; 20 slots + 3 pending
 // intervals sustain steady 2-interval 6x pipeline with 0 pressure drops.
+void TestDxgiWorkerLeaseAndJitter() {
+    g_case = "dxgi worker lease and +2 ms ready jitter";
+    ScriptFences fences;
+    const std::uint32_t fence = fences.Create();
+    FgEngineConfig config = EngineConfig(6);
+    config.pending_late_tolerance = 40000;
+    FgPresentEngine engine(config, &fences);
+    CHECK(engine.Attach(1) == FgStatus::Ok);
+    std::uint32_t retired_real = 0;
+    engine.SetRealRetireCallback([](void* context, std::uint64_t, std::uint64_t, bool) {
+        ++*static_cast<std::uint32_t*>(context);
+    }, &retired_real);
+    std::vector<std::uint8_t> trace;
+    engine.SetTraceCallback([](void* context, std::uint64_t, std::uint64_t, std::uint32_t, bool,
+                               std::uint8_t kind, FgTicks, FgTicks) {
+        static_cast<std::vector<std::uint8_t>*>(context)->push_back(kind);
+    }, &trace);
+
+    const FgTicks now = 100 * kMs;
+    const FgIntervalPlan plan = MakePlan(1, 1, 1, now, 20 * kMs, 1);
+    FgIntervalReservation reservation;
+    CHECK(engine.BeginInterval(plan, now, &reservation) == FgStatus::Ok);
+    FgIntervalSubmission submission;
+    submission.epoch = 1;
+    submission.interval_id = 1;
+    submission.count = 2;
+    submission.produced[0] = submission.produced[1] = true;
+    submission.ready[0] = {fence, 1};
+    submission.ready[1] = {fence, 2};
+    CHECK(engine.SubmitInterval(submission, now) == FgStatus::Ok);
+    fences.Set(fence, 1);
+    const FgTicks ready = plan.targets[0].target + 2 * kMs;
+    engine.Pump(ready);
+    std::vector<FgEnginePresent> out;
+    engine.TakeOutbox(&out);
+    CHECK(out.size() == 1 && !out[0].real);
+    if (out.size() != 1) return;
+    const FgEnginePresent generated = out[0];
+    CHECK(engine.LeasePresent(generated.slot, generated.present_id));
+
+    // Game-thread operations while the worker is outside the presenter lock doing its native copy/present.
+    std::uint64_t cancel_from = 0;
+    CHECK(engine.CancelPresentsFrom(generated.present_id, ready, &cancel_from) == 0);
+    engine.RevokeGenerated(plan.interval_id, FgDropReason::Revoked, ready, &cancel_from);
+    CHECK(!engine.OnSlotReleased(generated.slot, false));
+    std::uint32_t another_slot = 0;
+    CHECK(engine.ReserveRealOnlySlot(&another_slot) == FgStatus::Ok && another_slot != generated.slot);
+    engine.ReleaseRealOnlySlot();
+    engine.FinishLeasedPresent(generated.slot, ready, ready, true);
+    CHECK(engine.OnSlotReleased(generated.slot, true));
+
+    fences.Set(fence, 2);
+    engine.Pump(ready);
+    out.clear();
+    engine.TakeOutbox(&out);
+    CHECK(out.size() == 1 && out[0].real);
+    if (out.size() != 1) return;
+    const FgEnginePresent real = out[0];
+    CHECK(engine.LeasePresent(real.slot, real.present_id));
+    CHECK(engine.Quiesce(ready, &cancel_from) == FgStatus::Ok);
+    CHECK(!engine.Drained() && retired_real == 0 && !engine.OnSlotReleased(real.slot, false));
+    CHECK(engine.Detach(ready, &cancel_from) == FgStatus::Busy);
+    engine.FinishLeasedPresent(real.slot, real.target, real.target, true);
+    CHECK(retired_real == 0 && !engine.Drained());
+    CHECK(engine.OnSlotReleased(real.slot, true));
+    CHECK(retired_real == 1 && engine.Drained());
+    CHECK(engine.Stats().generated_submitted == 1 && engine.Stats().dropped_late == 0);
+    CHECK(!engine.Stats().display_time_measured);
+    CHECK(std::count(trace.begin(), trace.end(), 6u) == 2);
+}
+
 void TestRc2EngineContracts() {
     g_case = "rc2-engine-contracts";
     {
@@ -1449,7 +1566,7 @@ void TestRc2EngineContracts() {
         FgPresentEngine e(EngineConfig(12), &fences);
         CHECK(e.Attach(1) == FgStatus::Ok);
         const FgTicks t0 = 500 * kMs;
-        // interval 1: index 1 past deadline at reservation (pre-queue late), index 2 expires post-queue
+        // interval 1: index 1 past deadline at reservation (pre-queue late), index 2 expires while still pending
         FgIntervalPlan p = MakePlan(1, 1, 1, t0, 166667, 2);
         FgIntervalReservation res;
         CHECK(e.BeginInterval(p, p.targets[0].deadline + 1, &res) == FgStatus::Ok);
@@ -1463,14 +1580,14 @@ void TestRc2EngineContracts() {
         sub.ready[2] = FgReadyFence{f, 3};
         CHECK(e.SubmitInterval(sub, p.targets[0].deadline + 1) == FgStatus::Ok);
         fences.Set(f, 3);
-        e.Pump(p.targets[1].deadline + 1);  // index 2 expires post-queue; real goes out
+        e.Pump(p.targets[1].deadline + 1);  // index 2 expires while still pending; real goes out
         std::vector<FgEnginePresent> out;
         e.TakeOutbox(&out);
         CHECK(out.size() == 1 && out[0].real);
         CHECK(e.OnPresentSubmitted(out[0].present_id, p.targets[2].target));
         const FgPresentStats st = e.Stats();
         CHECK(st.generated_requested == 2 && st.generated_scheduled == 2 && st.generated_reserved == 1);
-        CHECK(st.generated_dropped_pre_queue == 1 && st.generated_dropped_post_queue == 1);
+        CHECK(st.generated_dropped_pre_queue == 2 && st.generated_dropped_post_queue == 0);
         CHECK(st.dropped_late == 2 && st.dropped_pressure == 0);
         CHECK(st.dropped_late + st.dropped_pressure == st.generated_dropped_pre_queue + st.generated_dropped_post_queue);
         CHECK(st.real_submitted == 1 && st.generated_submitted == 0);
@@ -1535,8 +1652,10 @@ void TestRc2EngineContracts() {
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // a crash must not swallow the log
     bool gpu = false;
-    for (int i = 1; i < argc; ++i)
+    for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--gpu") == 0) gpu = true;
+        if (std::strcmp(argv[i], "--debug-layer") == 0) g_debug_layer = true;
+    }
     TestPacingMath();
     TestEngineBasicFlow();
     TestEngineOwnership();
@@ -1546,6 +1665,7 @@ int main(int argc, char** argv) {
     TestEngineFeedback();
     TestEngineLifecycle();
     TestRc2EngineContracts();
+    TestDxgiWorkerLeaseAndJitter();
     TestCadenceMatrix();
     TestSelection();
     TestCreationRefusals();
@@ -1561,6 +1681,7 @@ int main(int argc, char** argv) {
             TestGpuProbe(g);
             TestGpuComposition(g);
             TestGpuDxgi(g);
+            CHECK(g.DebugLayerClean());
         }
     }
     std::printf("test_fg_win_presenters%s: %d checks, %d failure(s)\n", gpu ? " --gpu" : "", g_checks, g_failures);

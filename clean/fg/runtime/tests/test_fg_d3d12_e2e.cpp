@@ -2270,6 +2270,8 @@ bool RunBench(Gpu& gpu, const std::string& dxil, const FgExecWeights& weights, F
     static_assert(sizeof(stages) / sizeof(*stages) == static_cast<size_t>(FgExecStage::Count));
     std::printf("bench preset %c %ux (gen %u) %ux%u (%u warmup, %u timed, mean GPU ms per game frame)\n", label,
                 gen_count + 1, gen_count, width, height, warmup, timed);
+    std::printf("  generated fences: %s\n",
+                exec.PerIndexFences() ? "per-index" : "single-batch-when-eligible");
     std::printf("  levers: batch %s, hoist %s, dualq %s, scratch banks %u, fuse2 mask 0x%x\n", exec.BatchActive() ? "on" : "off",
                 exec.HoistActive() ? "on" : "off", exec.DualQueueActive() ? "on" : "off", exec.ScratchBanks(),
                 exec.Fuse2Active());

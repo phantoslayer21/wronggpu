@@ -37,8 +37,9 @@ public:
 using FgRealRetireFn = void (*)(void* ctx, std::uint64_t frame_id, std::uint64_t interval_id, bool displayed);
 
 // Lightweight per-image trace event (A3). event_kind: 0=queued(fence_done), 1=submitted, 2=displayed, 3=dropped_pre,
-// 4=dropped_post, 5=skipped. Must not re-enter the engine.
-using FgPresentTraceFn = void (*)(void* ctx, std::uint64_t interval_id, std::uint32_t index, bool real,
+// 4=dropped_post, 5=skipped, 6=display submission estimate, 7=present lease taken. Must not re-enter the engine.
+using FgPresentTraceFn = void (*)(void* ctx, std::uint64_t interval_id, std::uint64_t frame_id,
+                                  std::uint32_t index, bool real,
                                   std::uint8_t event_kind, FgTicks ts, FgTicks target);
 
 struct FgEngineConfig {
@@ -46,6 +47,7 @@ struct FgEngineConfig {
     std::uint32_t slot_count = kFgMaxGenerated + 4;  // >= N + 3: displayed, one per target, one being released
     std::uint32_t real_reserve = 1;                  // slots generated reservations leave free for real images
     std::uint32_t max_pending_intervals = 2;         // intervals with generated images not yet on the display path
+    FgTicks pending_late_tolerance = 0; // >0: allow the backend to pace a ready image past its target
     FgTicks refresh_period = 0;                      // > 0: count displayed images closer than half of it
 };
 
@@ -73,6 +75,7 @@ enum class FgEngineSlotState : std::uint8_t {
     Reserved,   // handed to the executor, not yet submitted
     Pending,    // submitted, waiting for its producer fence / its turn
     Queued,     // on the display path
+    Presenting, // leased to the DXGI worker, outside cancellation and slot reuse
     Displayed,  // on screen
     Retired,    // left the display path (superseded, skipped, cancelled): buffer not yet released by the display
     Draining,   // dropped before the display path: lease held until its producer fence completes
@@ -94,7 +97,6 @@ public:
         trace_fn_ = fn;
         trace_ctx_ = ctx;
     }
-    void SetDisplayTimeMeasured(bool measured) { stats_.display_time_measured = measured; }
 
     // IFgPresenter semantics (fg_presenter.h), with the caller's time.
     FgStatus Attach(std::uint64_t epoch);
@@ -131,7 +133,10 @@ public:
 
     // Display-path feedback, by engine present id. Unknown or stale ids are ignored (returns false).
     bool OnPresentSubmitted(std::uint64_t present_id, FgTicks when);  // handed to the OS present call
-    bool OnPresentDisplayed(std::uint64_t present_id, FgTicks actual);
+    bool OnPresentDisplayed(std::uint64_t present_id, FgTicks actual, bool measured = false);
+    // DXGI hands an in-flight present to the worker. Cancellation only touches the remaining queued suffix.
+    bool LeasePresent(std::uint32_t slot, std::uint64_t present_id);
+    void FinishLeasedPresent(std::uint32_t slot, FgTicks submitted, FgTicks estimate, bool presented);
     bool OnPresentSkipped(std::uint64_t present_id);    // the display path skipped it (a newer present was ready)
     bool OnPresentDropped(std::uint64_t present_id, FgDropReason reason);  // the back end did not present it
     // The display path no longer uses the slot's buffer (available event / copy finished). Only a Retired slot, or a
@@ -178,12 +183,15 @@ private:
     };
 
     void RetireReal(Slot& s, bool displayed);
+    void CountSubmission(const Slot& s, FgTicks when);
+    void CountDisplay(const Slot& s, FgTicks when, bool measured);
     void EmitTrace(const Slot& s, std::uint8_t event_kind, FgTicks ts) const;
     FgStatus CheckAccepting() const;
     FgStatus CheckPlan(const FgIntervalPlan& plan) const;
     void CommitTimeline(const FgIntervalPlan& plan);
     int FindFree() const;
     bool FenceDone(const Slot& s) const;
+    FgTicks PendingDeadline(const Slot& s) const;
     void Drop(std::uint32_t slot, FgDropReason reason, bool hold_lease);
     void Queue(std::uint32_t slot, bool represent);
     int FindQueued(std::uint64_t present_id) const;
@@ -212,6 +220,7 @@ private:
     FgIntervalReservation open_reservation_;
     int real_only_slot_ = -1;
     bool have_display_ = false;
+    bool have_estimated_display_ = false;
     FgTicks last_display_ = 0;
     FgPresentStats stats_;
     FgRealRetireFn real_retire_fn_ = nullptr;

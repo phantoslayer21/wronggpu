@@ -372,6 +372,7 @@ FgSessionResult FgSession::Destroy() {
 
 FgSessionResult FgSession::PresentRealOnlyPlan(const FgIntervalPlan& plan, FgSessionResult r,
                                                const FgTextureRef* game_colour) {
+    if (desc_.on_plan) desc_.on_plan(desc_.plan_ctx, plan);
     FgRealDispatchDesc rd;
     rd.frame_token = plan.real_frame_id;
     rd.interval_id = plan.interval_id;
@@ -416,6 +417,7 @@ FgSessionResult FgSession::RunInterval(const FgFramePacket& packet, const FgInge
     const uint32_t n = plan.generated_count;
     r.interval_id = plan.interval_id;
     r.scheduled = n;
+    if (desc_.on_plan) desc_.on_plan(desc_.plan_ctx, plan);
     FgIntervalReservation res;
     r.presenter = presenter_->BeginInterval(plan, &res);
     if (r.presenter == FgStatus::NoSlot) {
@@ -643,12 +645,10 @@ FgSessionResult FgSession::RunInterval(const FgFramePacket& packet, const FgInge
     return Finish(r);
 }
 
-FgTicks FgSession::TakeArrival() {
-    if (has_next_arrival_) {
-        has_next_arrival_ = false;
-        return next_arrival_;
-    }
-    return Now();
+void FgSession::SetFrameTiming(FgGameFrame* frame) {
+    frame->arrival = has_next_arrival_ ? next_arrival_ : Now();
+    frame->budget_origin = has_next_arrival_ ? next_budget_origin_ : frame->arrival;
+    has_next_arrival_ = false;
 }
 
 FgSessionResult FgSession::OnPresent(const FgFramePacket& packet) {
@@ -680,15 +680,14 @@ FgSessionResult FgSession::OnPresent(const FgFramePacket& packet) {
         last_preset_ = packet.preset;
         last_count_ = packet.generated_count;
 
-        const FgTicks arrival = TakeArrival();
+        FgGameFrame gf;
+        SetFrameTiming(&gf);
         const FgIngestResult ingest = history_->Accept(packet, desc_.executor->CompletedComputeValue());
         r.history_real_only = ingest.real_only;
         r.frame = ingest.status;
 
-        FgGameFrame gf;
         gf.epoch = present_epoch_;
         gf.frame_id = packet.frame_token;
-        gf.arrival = arrival;
         gf.requested_count = packet.generated_count;
         gf.generation_enabled = ingest.status != FgFrameStatus::Refused && ingest.current_bank >= 0;
         gf.reset = (packet.flags & kFgFlagReset) != 0;
@@ -783,7 +782,7 @@ FgSessionResult FgSession::OnGameFrameOnly(uint64_t frame_token, uint32_t adapte
     FgGameFrame gf;
     gf.epoch = present_epoch_;
     gf.frame_id = frame_token;
-    gf.arrival = TakeArrival();
+    SetFrameTiming(&gf);
     gf.requested_count = adapter_real_only == WG_FG_REAL_ONLY_DISABLED ? 0u : last_count_;
     gf.generation_enabled = false;
     gf.reset = adapter_real_only == WG_FG_REAL_ONLY_RESET;

@@ -87,7 +87,7 @@ public:
     virtual ~IFgPresentCallback() = default;
     virtual void BeginInterval(const FgPresentCall& call) = 0;
     virtual HRESULT PresentInterval(const FgPresentCall& call, IFgInnerPresenter& inner) = 0;
-    virtual void BeforeResize() {}
+    virtual HRESULT BeforeResize() { return S_OK; }
     virtual void AfterResize(HRESULT) {}
     virtual void BeforeFullscreen(BOOL) {}
     virtual void AfterFullscreen(BOOL, HRESULT) {}
@@ -228,7 +228,8 @@ private:
     FgSwapChain(const FgSwapChain&) = delete;
     FgSwapChain& operator=(const FgSwapChain&) = delete;
 
-    HRESULT PresentCommon(bool present1, UINT sync_interval, UINT flags, const DXGI_PRESENT_PARAMETERS* params);
+    HRESULT PresentCommon(bool present1, UINT sync_interval, UINT flags, const DXGI_PRESENT_PARAMETERS* params,
+                          void* caller);
     HRESULT RawPresent(bool present1, UINT sync_interval, UINT flags, const DXGI_PRESENT_PARAMETERS* params);
     void Fault(const char* where);  // lock held
     void DetachLocked(bool notify);

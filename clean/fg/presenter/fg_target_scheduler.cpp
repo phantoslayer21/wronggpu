@@ -212,7 +212,7 @@ FgStatus FgTargetScheduler::BeginEpoch(std::uint64_t epoch) {
     have_target_ = false;
     last_real_target_ = 0;
     history_valid_ = false;
-    generated_in_epoch_ = false;
+    last_interval_generated_ = false;
     last_requested_ = 0;
     effective_ = 0;
     bad_run_ = 0;
@@ -393,37 +393,37 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
         last_reduction_reason_ = FgRealOnlyReason::LatencyCap;
     }
 
-    // Playout lead: what this count needs (a real-only interval keeps the lead of the count it would resume with).
-    // N-B2: when lead_need exceeds max_lead, step N down (N-1, ..., 1) instead of dropping straight to 0.
-    FgTicks lead_need = RequiredLead(period_estimate, n > 0 ? n : effective);
+    const FgTicks origin = frame.budget_origin > frame.arrival ? frame.budget_origin : frame.arrival;
+    const auto needed_lead = [&](std::uint32_t count) {
+        return RequiredLead(period_estimate, count == 0 && last_interval_generated_ ? effective : count);
+    };
+
+    FgTicks lead_need = needed_lead(n);
     if (lead_need > config_.max_lead) {
-        if (n > 0) {
-            while (n > 0 && RequiredLead(period_estimate, n) > config_.max_lead) --n;
-            last_reduction_reason_ = FgRealOnlyReason::LatencyCap;
-            if (n == 0) reason = FgRealOnlyReason::LatencyCap;
-            lead_need = RequiredLead(period_estimate, n);
-        } else {
-            std::uint32_t eff_cap = effective;
-            while (eff_cap > 0 && RequiredLead(period_estimate, eff_cap) > config_.max_lead) --eff_cap;
-            lead_need = RequiredLead(period_estimate, eff_cap);
-        }
+        while (n > 0 && needed_lead(n) > config_.max_lead) --n;
+        lead_need = needed_lead(n);
+        if (lead_need > config_.max_lead) lead_need = config_.real_min_lead;
+        last_reduction_reason_ = FgRealOnlyReason::LatencyCap;
+        if (n == 0 && reason == FgRealOnlyReason::None) reason = FgRealOnlyReason::LatencyCap;
     }
 
-    bool reanchor = !anchored_ || period_estimate == 0;
+    const bool consecutive_real_only = n == 0 && !last_interval_generated_;
+    bool reanchor = !anchored_ || period_estimate == 0 || consecutive_real_only;
     FgTicks lead = 0;
     if (!reanchor) {
         FgTicks end = 0;
         if (FgCheckedAdd(last_real_target_, period_estimate, &end) != FgStatus::Ok ||
-            FgCheckedAdd(end, -frame.arrival, &lead) != FgStatus::Ok)
+            FgCheckedAdd(end, -origin, &lead) != FgStatus::Ok)
             return FgStatus::Overflow;
         if (lead < config_.real_min_lead) {
             reanchor = true;  // behind: the real endpoint cannot be met on this timeline
             shortfall_run_ = 0;
         } else if (lead > config_.max_lead) {
             shortfall_run_ = 0;
-            if (n > 0) {  // too much queued latency: drain it real-only (the target never moves backwards)
-                n = 0;
-                reason = FgRealOnlyReason::LatencyCap;
+            if (n > 0) {
+                --n;
+                lead_need = needed_lead(n);
+                if (n == 0) reason = FgRealOnlyReason::LatencyCap;
                 last_reduction_reason_ = FgRealOnlyReason::LatencyCap;
             }
         } else if (n > 0) {
@@ -456,24 +456,38 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
     FgTicks t_base = 0;
     FgTicks period = 0;
     if (reanchor) {
-        FgTicks target = 0;
-        if (FgCheckedAdd(frame.arrival, lead_need, &target) != FgStatus::Ok) return FgStatus::Overflow;
-        if (have_target_) {
+        for (;;) {
+            FgTicks target = 0;
+            FgTicks spacing = 0;
             FgTicks floor = 0;
-            if (FgCheckedAdd(last_real_target_, w.min_interval, &floor) != FgStatus::Ok) return FgStatus::Overflow;
+            if (FgCheckedAdd(origin, lead_need, &target) != FgStatus::Ok ||
+                !CheckedMul(static_cast<FgTicks>(n) + 1, w.min_interval, &spacing))
+                return FgStatus::Overflow;
+            const FgTicks previous_target = have_target_ ? last_real_target_ : frame.arrival;
+            t_base = previous_target;
+            if (n > 0) {
+                // The previous real-only interval may have skipped all generation lead. Start a new cadence
+                // after that endpoint, leaving enough time for the first generated image.
+                const FgTicks base = target - period_estimate;
+                if (base > t_base) t_base = base;
+            }
+            if (FgCheckedAdd(t_base, spacing, &floor) != FgStatus::Ok) return FgStatus::Overflow;
             if (target < floor) target = floor;
-            t_base = last_real_target_;
-        } else {
-            t_base = frame.arrival;
+            period = target - t_base;
+            if (n == 0) break;
+            const FgTicks slot = period / (static_cast<FgTicks>(n) + 1);
+            if (slot >= w.min_interval && slot <= w.max_interval &&
+                slot >= origin - t_base + config_.bridge_and_submit_margin &&
+                target - origin <= config_.max_lead)
+                break;
+            --n;
+            lead_need = needed_lead(n);
+            if (lead_need > config_.max_lead) lead_need = config_.real_min_lead;
+            last_reduction_reason_ = FgRealOnlyReason::Reanchor;
         }
-        period = target - t_base;
-        if (n > 0) {
-            n = 0;
-            if (reason == FgRealOnlyReason::None)
-                reason = generated_in_epoch_ ? FgRealOnlyReason::Reanchor : FgRealOnlyReason::NotPrimed;
-        }
+        if (n == 0 && reason == FgRealOnlyReason::None) reason = FgRealOnlyReason::Reanchor;
+        out->reanchored = !anchored_ || !consecutive_real_only;
         anchored_ = period_estimate > 0;
-        out->reanchored = true;
     } else {
         // Bounded lead correction: keeps the lead near what the count needs without a visible step.
         t_base = last_real_target_;
@@ -488,7 +502,7 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
         FgTicks floor = 0;
         if (!CheckedMul(static_cast<FgTicks>(n) + 1, w.min_interval, &floor)) return FgStatus::Overflow;
         if (period < floor) period = floor;
-        const FgTicks feasible = frame.arrival + config_.real_min_lead - t_base;
+        const FgTicks feasible = origin + config_.real_min_lead - t_base;
         if (period < feasible) period = feasible;
     }
     if (period < static_cast<FgTicks>(n) + 1) period = static_cast<FgTicks>(n) + 1;
@@ -506,12 +520,12 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
     out->target_count = n + 1;
     FgStatus s = FgBuildTargets(t_base, period, n, out->margin, out->targets);
     if (s != FgStatus::Ok) return s;
-    for (std::uint32_t k = 0; k < n; ++k) out->targets[k].admitted = Admissible(out->targets[k], frame.arrival);
+    for (std::uint32_t k = 0; k < n; ++k) out->targets[k].admitted = Admissible(out->targets[k], origin);
     if ((s = FgValidatePlan(*out)) != FgStatus::Ok) return s;
 
     last_real_target_ = out->targets[n].target;
     have_target_ = true;
-    if (n > 0) generated_in_epoch_ = true;
+    last_interval_generated_ = n > 0;
     return FgStatus::Ok;
 }
 

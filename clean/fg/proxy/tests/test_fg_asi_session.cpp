@@ -23,7 +23,9 @@
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 
+#include <atomic>
 #include <cstdio>
+#include <thread>
 #include <cstring>
 #include <fstream>
 #include <memory>
@@ -56,7 +58,7 @@ const char* g_case = "";
         }                                                                              \
     } while (0)
 
-int g_log_lines = 0;
+std::atomic<int> g_log_lines{0};
 void PrintLog(void*, const char* line) {
     if (g_log_lines++ < 60) std::printf("      log: %s\n", line);
 }
@@ -991,10 +993,81 @@ void TestFacadeFormats(Gpu& gpu, const std::string& dxil) {
     }
 }
 
+void TestFacadeCopyRetryAndReuse(Gpu& gpu) {
+    g_case = "copy retry and slow facade reuse";
+    ComPtr<IDXGIFactory2> factory;
+    D3D12_COMMAND_QUEUE_DESC queue_desc = {};
+    ComPtr<ID3D12CommandQueue> chain_queue;
+    ComPtr<ID3D12Fence> gate, done;
+    CHECK(SUCCEEDED(gpu.factory.As(&factory)));
+    CHECK(SUCCEEDED(gpu.device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&chain_queue))));
+    CHECK(SUCCEEDED(gpu.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate))));
+    CHECK(SUCCEEDED(gpu.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&done))));
+    if (!factory || !chain_queue || !gate || !done) return;
+    DXGI_SWAP_CHAIN_DESC1 desc = {};
+    desc.Width = kW;
+    desc.Height = kH;
+    desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    desc.SampleDesc.Count = 1;
+    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    desc.BufferCount = 2;
+    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+    ComPtr<IDXGISwapChain1> base;
+    ComPtr<IDXGISwapChain4> native;
+    CHECK(SUCCEEDED(factory->CreateSwapChainForComposition(chain_queue.Get(), &desc, nullptr, &base)));
+    if (!base || FAILED(base.As(&native))) return;
+
+    FgAsiSessionConfig config;
+    config.log = &PrintLog;
+    FgAsiSessionHost host(config, nullptr);
+    host.AttachedPresentQueue(chain_queue.Get());
+    host.Attached(native.Get(), gpu.queue.Get());
+    CHECK(host.Stats().facade);
+    if (!host.Stats().facade) return;
+    struct RetryInner final : IFgInnerPresenter {
+        IDXGISwapChain4* chain = nullptr;
+        bool retry = true;
+        HRESULT Present(UINT, UINT) override {
+            if (!retry) return S_OK;
+            retry = false;
+            return DXGI_ERROR_WAS_STILL_DRAWING;
+        }
+        HRESULT Present1(UINT sync, UINT flags, const DXGI_PRESENT_PARAMETERS*) override {
+            return Present(sync, flags);
+        }
+        IDXGISwapChain4* Inner() override { return chain; }
+    } inner;
+    inner.chain = native.Get();
+    CHECK(SUCCEEDED(chain_queue->Wait(gate.Get(), 1)));
+    FgPresentCall call;
+    UINT index = ~0u;
+    CHECK(host.PresentInterval(call, inner) == DXGI_ERROR_WAS_STILL_DRAWING);
+    CHECK(host.CurrentBackBufferIndex(&index) && index == 0);
+    call.retry = true;
+    CHECK(host.PresentInterval(call, inner) == S_OK);
+    CHECK(host.CurrentBackBufferIndex(&index) && index == 1);
+    CHECK(host.Stats().copy_presents == 1);
+    call.retry = false;
+    CHECK(host.PresentInterval(call, inner) == S_OK);
+    CHECK(host.CurrentBackBufferIndex(&index) && index == 0);
+    CHECK(SUCCEEDED(gpu.queue->Signal(done.Get(), 1)));
+    Sleep(120);
+    CHECK(done->GetCompletedValue() == 0);  // advancing enqueued the wait without timing out on the CPU
+    CHECK(SUCCEEDED(gate->Signal(1)));
+    CHECK(gpu.Wait());
+    CHECK(done->GetCompletedValue() == 1);
+    CHECK(host.BeforeResize() == S_OK);
+    host.AfterResize(DXGI_ERROR_INVALID_CALL);
+    CHECK(host.CurrentBackBufferIndex(&index) && index == 0);
+    host.Detached();
+    if (g_debug_layer) CHECK(gpu.DebugErrors() == 0);
+}
+
 // RC2 (A1 / A2 / O-A1 / O-A3 / N-B3 / N-S3 / M1): tests SetMaximumFrameLatency(1/2/3) deadlock-free with a cached
 // waitable handle surviving ResizeBuffers, inner chain latency kept at 2, no-op SetFullscreenState(FALSE) ignored,
 // 0 back-pressure waits when in-game FG is toggled OFF, and synthetic 2x (120 fps) & 4x (80 fps) GPU pacing legs.
-void TestRc2LatencyAndPacing(Gpu& gpu, const std::string& dxil) {
+void TestRc2LatencyAndPacing(Gpu& gpu, const std::string& dxil, bool run_latency, bool run_cadence) {
     std::printf("  rc2 latency (1/2/3), no-op fullscreen, fg-off back-pressure, and synthetic 2x/4x pacing\n");
     GameTextures game;
     CHECK(game.Init(gpu));
@@ -1002,183 +1075,228 @@ void TestRc2LatencyAndPacing(Gpu& gpu, const std::string& dxil) {
     CHECK(SUCCEEDED(gpu.factory.As(&f2)));
     if (!f2) return;
 
-    // Part 1: latency limits 1, 2, 3 with cached waitable handle across ResizeBuffers + no-op fullscreen + FG off
-    for (UINT lat : {1u, 2u, 3u}) {
-        FgPresentOwners owners;
-        FakeInterface iface;
-        FgProxyConfig pcfg = CoreConfig(2);  // Preset C
-        pcfg.binding.has_mfg_selector = true;
-        pcfg.settings.multiplier = 2;  // M1: Cyberpunk-like binding ignores user cap
-        FgProxy core(pcfg, &owners, &PrintLog, nullptr);
-        const WgFgChainV1 ct = iface.table();
-        CHECK(core.attach_interposer(&ct, 2, 14) == WG_FG_REASON_NONE);
-        core.set_feature_function("fgTestSetOptions", &g_fn_a);
-        core.set_feature_function("fgTestGetState", &g_fn_b);
+    // Admission is also enforced when the title chooses not to wait on its handle.
+    if (run_latency) {
+        for (const bool wait_on_game : {true, false}) {
+            for (UINT lat : {1u, 2u, 3u}) {
+                FgPresentOwners owners;
+                FakeInterface iface;
+                FgProxyConfig pcfg = CoreConfig(2);  // Preset C
+                pcfg.binding.has_mfg_selector = true;
+                pcfg.settings.multiplier = 2;  // M1: Cyberpunk-like binding ignores user cap
+                FgProxy core(pcfg, &owners, &PrintLog, nullptr);
+                const WgFgChainV1 ct = iface.table();
+                CHECK(core.attach_interposer(&ct, 2, 14) == WG_FG_REASON_NONE);
+                core.set_feature_function("fgTestSetOptions", &g_fn_a);
+                core.set_feature_function("fgTestGetState", &g_fn_b);
 
-        FgAsiSessionConfig hc;
-        hc.settings = pcfg.settings;
-        hc.dxil_dir = dxil;
-        hc.log = &PrintLog;
-        std::unique_ptr<wgfg::FgExecWeights> w(new wgfg::FgExecWeights());
-        wgfg::FgExecSyntheticWeights(11, w.get());
-        std::unique_ptr<FgAsiSessionHost> host(new FgAsiSessionHost(hc, std::move(w)));
-        host->OnInstalled(&core);
-        FgAsiSessionHost::FactoryNote(host.get(), &core, gpu.factory.Get());
-        CHECK(core.fg_taken());
+                FgAsiSessionConfig hc;
+                hc.settings = pcfg.settings;
+                hc.dxil_dir = dxil;
+                hc.log = &PrintLog;
+                std::unique_ptr<wgfg::FgExecWeights> w(new wgfg::FgExecWeights());
+                wgfg::FgExecSyntheticWeights(11, w.get());
+                std::unique_ptr<FgAsiSessionHost> host(new FgAsiSessionHost(hc, std::move(w)));
+                host->OnInstalled(&core);
+                FgAsiSessionHost::FactoryNote(host.get(), &core, gpu.factory.Get());
+                CHECK(core.fg_taken());
 
-        DXGI_SWAP_CHAIN_DESC1 sd = {};
-        sd.Width = kW;
-        sd.Height = kH;
-        sd.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        sd.SampleDesc.Count = 1;
-        sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-        sd.BufferCount = 3;
-        sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-        sd.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
-        sd.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
-        const UINT extra = host->ExtraSwapChainFlags(sd);
-        sd.Flags |= extra;
-        IDXGISwapChain1* sc1 = nullptr;
-        CHECK(SUCCEEDED(f2->CreateSwapChainForComposition(gpu.queue.Get(), &sd, nullptr, &sc1)) && sc1);
-        if (!sc1) return;
-        FgSwapChain* chain = nullptr;
-        CHECK(SUCCEEDED(FgSwapChain::Create(sc1, gpu.queue.Get(), &PrintLog, nullptr, &chain)) && chain);
-        if (!chain) return;
-        chain->SetExtraFlags(extra & ~DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT);
-        host->SetGameWaitable(true);
-        CHECK(chain->Attach(host.get(), &core, &owners, WG_FG_OWNER_SWAPCHAIN_WRAPPER) == WG_FG_REASON_NONE);
-        host->Attached(chain->Inner(), chain->Queue());
+                DXGI_SWAP_CHAIN_DESC1 sd = {};
+                sd.Width = kW;
+                sd.Height = kH;
+                sd.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                sd.SampleDesc.Count = 1;
+                sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+                sd.BufferCount = 3;
+                sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+                sd.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+                sd.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+                const UINT extra = host->ExtraSwapChainFlags(sd);
+                sd.Flags |= extra;
+                IDXGISwapChain1* sc1 = nullptr;
+                CHECK(SUCCEEDED(f2->CreateSwapChainForComposition(gpu.queue.Get(), &sd, nullptr, &sc1)) && sc1);
+                if (!sc1) return;
+                FgSwapChain* chain = nullptr;
+                CHECK(SUCCEEDED(FgSwapChain::Create(sc1, gpu.queue.Get(), &PrintLog, nullptr, &chain)) && chain);
+                if (!chain) return;
+                chain->SetExtraFlags(extra & ~DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT);
+                host->SetGameWaitable(true);
+                CHECK(chain->Attach(host.get(), &core, &owners, WG_FG_OWNER_SWAPCHAIN_WRAPPER) == WG_FG_REASON_NONE);
+                host->Attached(chain->Inner(), chain->Queue());
 
-        // A2: invalid latency values rejected; valid latency sets facade limit while inner stays at 2 (O-A3)
-        CHECK(chain->SetMaximumFrameLatency(0) == DXGI_ERROR_INVALID_CALL);
-        CHECK(chain->SetMaximumFrameLatency(17) == DXGI_ERROR_INVALID_CALL);
-        CHECK(chain->SetMaximumFrameLatency(lat) == S_OK);
-        UINT got_lat = 0, inner_lat = 0;
-        CHECK(chain->GetMaximumFrameLatency(&got_lat) == S_OK && got_lat == lat);
-        CHECK(chain->Inner()->GetMaximumFrameLatency(&inner_lat) == S_OK && inner_lat == 2u);
+                // A2: invalid latency values rejected; valid latency sets facade limit while inner stays at 2 (O-A3)
+                CHECK(chain->SetMaximumFrameLatency(0) == DXGI_ERROR_INVALID_CALL);
+                CHECK(chain->SetMaximumFrameLatency(17) == DXGI_ERROR_INVALID_CALL);
+                CHECK(chain->SetMaximumFrameLatency(lat) == S_OK);
+                UINT got_lat = 0, inner_lat = 0;
+                CHECK(chain->GetMaximumFrameLatency(&got_lat) == S_OK && got_lat == lat);
+                CHECK(chain->Inner()->GetMaximumFrameLatency(&inner_lat) == S_OK && inner_lat == 2u);
 
-        // Cached waitable handle stays valid across ResizeBuffers
-        HANDLE cached_waitable = chain->GetFrameLatencyWaitableObject();
-        CHECK(cached_waitable != nullptr);
+                // Cached waitable handle stays valid across ResizeBuffers
+                HANDLE cached_waitable = chain->GetFrameLatencyWaitableObject();
+                CHECK(cached_waitable != nullptr);
 
-        WgFgOptions on = Options(true, 2);
-        on.generated_count = 3;  // 4x request (honoured despite settings.multiplier=2 because has_mfg_selector=true)
-        WgFgOptions off = Options(false, 2);
-        core.set_options(WG_FEAT_FRAME_GENERATION, 1, &on, &on);
-
-        int waits_ok = 0, present_errors = 0;
-        uint64_t bp_before_off = 0, bp_after_off = 0;
-        const int total_frames = 22;
-        for (int f = 0; f < total_frames; ++f) {
-            const uint64_t tok = static_cast<uint64_t>(f) + 1;
-            if (f == 6) {
-                // N-S3: no-op SetFullscreenState(FALSE) on already-windowed chain must not tear down the session
-                BOOL cur_fs = FALSE;
-                IDXGIOutput* cur_out = nullptr;
-                const bool can_query_fs = SUCCEEDED(chain->Inner()->GetFullscreenState(&cur_fs, &cur_out));
-                if (cur_out) cur_out->Release();
-                if (can_query_fs && !cur_fs) {
-                    const uint64_t dest_before = host->Stats().sessions_destroyed;
-                    chain->SetFullscreenState(FALSE, nullptr);
-                    chain->SetFullscreenState(FALSE, nullptr);
-                    CHECK(host->Stats().sessions_destroyed == dest_before);
-                    CHECK(host->Stats().noop_fullscreen_ignored >= 2);
-                }
-            }
-            if (f == 10) {
-                CHECK(SUCCEEDED(chain->ResizeBuffers(0, kW, kH, DXGI_FORMAT_UNKNOWN,
-                                                     DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT)));
-            }
-            if (f == 14) {
-                bp_before_off = host->Stats().back_pressure_waits;
-                core.set_options(WG_FEAT_FRAME_GENERATION, 1, &off, &off);
-            }
-            if (f == 20) {
-                bp_after_off = host->Stats().back_pressure_waits;
+                WgFgOptions on = Options(true, 2);
+                on.generated_count = 3;  // 4x request (honoured despite settings.multiplier=2 because has_mfg_selector=true)
+                WgFgOptions off = Options(false, 2);
                 core.set_options(WG_FEAT_FRAME_GENERATION, 1, &on, &on);
+
+                int waits_ok = 0, present_errors = 0;
+                uint64_t bp_before_off = 0, bp_after_off = 0;
+                const int total_frames = 22;
+                const int stall_frame = 3;
+                const int stall_end = stall_frame + static_cast<int>(lat);
+                ComPtr<ID3D12Fence> stalled_game;
+                std::thread unblock;
+                bool have_next_credit = false;
+                CHECK(SUCCEEDED(gpu.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&stalled_game))));
+                for (int f = 0; f < total_frames; ++f) {
+                    const uint64_t tok = static_cast<uint64_t>(f) + 1;
+                    if (f == 6) {
+                        // N-S3: no-op SetFullscreenState(FALSE) on already-windowed chain must not tear down the session
+                        BOOL cur_fs = FALSE;
+                        IDXGIOutput* cur_out = nullptr;
+                        const bool can_query_fs = SUCCEEDED(chain->Inner()->GetFullscreenState(&cur_fs, &cur_out));
+                        if (cur_out) cur_out->Release();
+                        if (can_query_fs && !cur_fs) {
+                            const uint64_t dest_before = host->Stats().sessions_destroyed;
+                            chain->SetFullscreenState(FALSE, nullptr);
+                            chain->SetFullscreenState(FALSE, nullptr);
+                            CHECK(host->Stats().sessions_destroyed == dest_before);
+                            CHECK(host->Stats().noop_fullscreen_ignored >= 2);
+                        }
+                    }
+                    if (f == 10) {
+                        const std::uint64_t epoch = chain->Epoch();
+                        CHECK(FAILED(chain->ResizeBuffers(1, kW, kH, DXGI_FORMAT_UNKNOWN,
+                                                          DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT)));
+                        CHECK(chain->Epoch() == epoch && host->Stats().facade);
+                        CHECK(SUCCEEDED(chain->ResizeBuffers(0, kW, kH, DXGI_FORMAT_UNKNOWN,
+                                                             DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT)));
+                    }
+                    if (f == 14) {
+                        bp_before_off = host->Stats().back_pressure_waits;
+                        core.set_options(WG_FEAT_FRAME_GENERATION, 1, &off, &off);
+                    }
+                    if (f == 20) {
+                        bp_after_off = host->Stats().back_pressure_waits;
+                        core.set_options(WG_FEAT_FRAME_GENERATION, 1, &on, &on);
+                    }
+                    if (wait_on_game && cached_waitable &&
+                        (have_next_credit || WaitForSingleObject(cached_waitable, 300) == WAIT_OBJECT_0))
+                        ++waits_ok;
+                    have_next_credit = false;
+                    const UINT bi = chain->GetCurrentBackBufferIndex();
+                    ComPtr<ID3D12Resource> bb;
+                    CHECK(SUCCEEDED(chain->GetBuffer(bi, IID_PPV_ARGS(&bb))) && bb);
+                    if (!bb) break;
+                    if (wait_on_game || !stalled_game || f <= stall_frame || f > stall_end)
+                        CHECK(game.Render(gpu, f, bb.Get()));
+                    if (stalled_game && f == stall_frame) {
+                        CHECK(SUCCEEDED(gpu.queue->Wait(stalled_game.Get(), 1)));
+                        if (!wait_on_game) {
+                            unblock = std::thread([fence = stalled_game]() {
+                                Sleep(420);
+                                fence->Signal(1);
+                            });
+                        }
+                    }
+                    WgFgTag tags[2] = {};
+                    ID3D12Resource* res[2] = {game.motion.Get(), game.depth.Get()};
+                    const uint32_t nts[2] = {kNtMotion, kNtDepth};
+                    const uint32_t fm[2] = {DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R32_FLOAT};
+                    for (int t = 0; t < 2; ++t) {
+                        tags[t].struct_size = sizeof(WgFgTag);
+                        tags[t].native_type = nts[t];
+                        tags[t].texture.resource = res[t];
+                        tags[t].texture.format = fm[t];
+                        tags[t].texture.width = kW;
+                        tags[t].texture.height = kH;
+                        tags[t].texture.state = D3D12_RESOURCE_STATE_COMMON;
+                        tags[t].texture.frame_token = tok;
+                        tags[t].texture.viewport_id = 1;
+                        tags[t].texture.producer_epoch = 3;
+                        tags[t].texture.rect = {0, 0, kW, kH};
+                    }
+                    core.tag(tags, 2, tags);
+                    WgFgConstants k = {};
+                    k.struct_size = sizeof(k);
+                    k.abi_version = WG_FG_ADAPTER_ABI_VERSION;
+                    k.frame_token = tok;
+                    k.viewport_id = 1;
+                    for (int i = 0; i < 4; ++i) k.camera_current[5 * i] = k.camera_previous[5 * i] = 1.0f;
+                    k.motion_scale_x = k.motion_scale_y = 1.0f;
+                    k.render_rect = {0, 0, kW, kH};
+                    k.output_rect = {0, 0, kW, kH};
+                    core.constants(&k, &k);
+                    WgFgPresentDesc d = {};
+                    d.struct_size = sizeof(d);
+                    d.abi_version = WG_FG_ADAPTER_ABI_VERSION;
+                    d.owner = WG_FG_OWNER_SWAPCHAIN_WRAPPER;
+                    d.viewport_id = 1;
+                    d.frame_token = tok;
+                    d.swapchain_id = chain->Id();
+                    d.swapchain_epoch = chain->Epoch();
+                    d.window_id = 0x77;
+                    d.luid.low = gpu.desc.AdapterLuid.LowPart;
+                    d.luid.high = gpu.desc.AdapterLuid.HighPart;
+                    d.backbuffer.resource = bb.Get();
+                    d.backbuffer.format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                    d.backbuffer.width = kW;
+                    d.backbuffer.height = kH;
+                    d.backbuffer.frame_token = tok;
+                    d.backbuffer.viewport_id = 1;
+                    d.backbuffer.rect = {0, 0, kW, kH};
+                    bb.Reset();
+                    WgFgPresentResult r = {};
+                    r.struct_size = sizeof(r);
+                    r.abi_version = WG_FG_ADAPTER_ABI_VERSION;
+                    FgAsiSessionHost::Route(host.get(), &core, &d, f == stall_frame ? nullptr : &r);
+                    CHECK(host->LiveStatus().in_flight_real <= lat);
+                    if (FAILED(chain->Present(0, 0))) ++present_errors;
+                    if (wait_on_game && stalled_game && f == stall_frame) {
+                        CHECK(host->LiveStatus().in_flight_real > 0);
+                        have_next_credit = cached_waitable && WaitForSingleObject(cached_waitable, 0) == WAIT_OBJECT_0;
+                        CHECK(have_next_credit);
+                        CHECK(SUCCEEDED(stalled_game->Signal(1)));
+                    }
+                    if (wait_on_game || f < stall_frame || f > stall_end) Sleep(16);
+                }
+                if (unblock.joinable()) unblock.join();
+                gpu.Wait();
+                Sleep(120);
+                const FgAsiSessionStats st = host->Stats();
+                const FgAsiLiveStatus live = host->LiveStatus();
+                std::printf("    lat=%u: waits=%d/%d retires=%llu credit_waits=%llu bp_off_delta=%llu noop_fs=%llu "
+                            "mult_src=%u req=%u worker_reentries=%llu\n",
+                            lat, waits_ok, total_frames, static_cast<unsigned long long>(st.real_retires),
+                            static_cast<unsigned long long>(st.credit_waits),
+                            static_cast<unsigned long long>(bp_after_off - bp_before_off),
+                            static_cast<unsigned long long>(st.noop_fullscreen_ignored), live.multiplier_source,
+                            live.requested_count, static_cast<unsigned long long>(chain->Stats().worker_reentries));
+                CHECK(present_errors == 0);
+                if (wait_on_game) {
+                    CHECK(waits_ok == total_frames);
+                    CHECK(st.real_retires >= static_cast<uint64_t>(total_frames - 4));
+                } else {
+                    std::printf("    lat=%u without game waits: admission_timeouts=%llu\n", lat,
+                                static_cast<unsigned long long>(st.admission_timeouts));
+                    CHECK(st.admission_timeouts > 0);
+                    UINT available = 0;
+                    while (cached_waitable && WaitForSingleObject(cached_waitable, 0) == WAIT_OBJECT_0) ++available;
+                    CHECK(available == lat);
+                }
+                CHECK(bp_after_off == bp_before_off);  // N-B3: 0 back-pressure waits while in-game FG toggle is OFF
+                CHECK(live.multiplier_source == kFgMultSourceGame && live.game_has_mfg_selector && live.requested_count == 3);
+                CHECK(chain->Stats().worker_reentries == 0);
+                if (cached_waitable) CloseHandle(cached_waitable);
+                chain->Release();
+                CHECK(gpu.Wait());
+                host.reset();
+                const int64_t dbg = gpu.DebugErrors();
+                if (dbg >= 0) CHECK(dbg == 0);
             }
-            if (cached_waitable && WaitForSingleObject(cached_waitable, 300) == WAIT_OBJECT_0) ++waits_ok;
-            const UINT bi = chain->GetCurrentBackBufferIndex();
-            ComPtr<ID3D12Resource> bb;
-            CHECK(SUCCEEDED(chain->GetBuffer(bi, IID_PPV_ARGS(&bb))) && bb);
-            if (!bb) break;
-            CHECK(game.Render(gpu, f, bb.Get()));
-            WgFgTag tags[2] = {};
-            ID3D12Resource* res[2] = {game.motion.Get(), game.depth.Get()};
-            const uint32_t nts[2] = {kNtMotion, kNtDepth};
-            const uint32_t fm[2] = {DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R32_FLOAT};
-            for (int t = 0; t < 2; ++t) {
-                tags[t].struct_size = sizeof(WgFgTag);
-                tags[t].native_type = nts[t];
-                tags[t].texture.resource = res[t];
-                tags[t].texture.format = fm[t];
-                tags[t].texture.width = kW;
-                tags[t].texture.height = kH;
-                tags[t].texture.state = D3D12_RESOURCE_STATE_COMMON;
-                tags[t].texture.frame_token = tok;
-                tags[t].texture.viewport_id = 1;
-                tags[t].texture.producer_epoch = 3;
-                tags[t].texture.rect = {0, 0, kW, kH};
-            }
-            core.tag(tags, 2, tags);
-            WgFgConstants k = {};
-            k.struct_size = sizeof(k);
-            k.abi_version = WG_FG_ADAPTER_ABI_VERSION;
-            k.frame_token = tok;
-            k.viewport_id = 1;
-            for (int i = 0; i < 4; ++i) k.camera_current[5 * i] = k.camera_previous[5 * i] = 1.0f;
-            k.motion_scale_x = k.motion_scale_y = 1.0f;
-            k.render_rect = {0, 0, kW, kH};
-            k.output_rect = {0, 0, kW, kH};
-            core.constants(&k, &k);
-            WgFgPresentDesc d = {};
-            d.struct_size = sizeof(d);
-            d.abi_version = WG_FG_ADAPTER_ABI_VERSION;
-            d.owner = WG_FG_OWNER_SWAPCHAIN_WRAPPER;
-            d.viewport_id = 1;
-            d.frame_token = tok;
-            d.swapchain_id = chain->Id();
-            d.swapchain_epoch = chain->Epoch();
-            d.window_id = 0x77;
-            d.luid.low = gpu.desc.AdapterLuid.LowPart;
-            d.luid.high = gpu.desc.AdapterLuid.HighPart;
-            d.backbuffer.resource = bb.Get();
-            d.backbuffer.format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-            d.backbuffer.width = kW;
-            d.backbuffer.height = kH;
-            d.backbuffer.frame_token = tok;
-            d.backbuffer.viewport_id = 1;
-            d.backbuffer.rect = {0, 0, kW, kH};
-            bb.Reset();
-            WgFgPresentResult r = {};
-            r.struct_size = sizeof(r);
-            r.abi_version = WG_FG_ADAPTER_ABI_VERSION;
-            FgAsiSessionHost::Route(host.get(), &core, &d, &r);
-            if (FAILED(chain->Present(0, 0))) ++present_errors;
-            Sleep(16);
         }
-        gpu.Wait();
-        Sleep(120);
-        const FgAsiSessionStats st = host->Stats();
-        const FgAsiLiveStatus live = host->LiveStatus();
-        std::printf("    lat=%u: waits=%d/%d retires=%llu credit_waits=%llu bp_off_delta=%llu noop_fs=%llu "
-                    "mult_src=%u req=%u worker_reentries=%llu\n",
-                    lat, waits_ok, total_frames, static_cast<unsigned long long>(st.real_retires),
-                    static_cast<unsigned long long>(st.credit_waits),
-                    static_cast<unsigned long long>(bp_after_off - bp_before_off),
-                    static_cast<unsigned long long>(st.noop_fullscreen_ignored), live.multiplier_source,
-                    live.requested_count, static_cast<unsigned long long>(chain->Stats().worker_reentries));
-        CHECK(present_errors == 0 && waits_ok == total_frames);
-        CHECK(st.real_retires >= static_cast<uint64_t>(total_frames - 4));
-        CHECK(bp_after_off == bp_before_off);  // N-B3: 0 back-pressure waits while in-game FG toggle is OFF
-        CHECK(live.multiplier_source == kFgMultSourceGame && live.game_has_mfg_selector && live.requested_count == 3);
-        CHECK(chain->Stats().worker_reentries == 0);
-        if (cached_waitable) CloseHandle(cached_waitable);
-        chain->Release();
-        CHECK(gpu.Wait());
-        host.reset();
-        const int64_t dbg = gpu.DebugErrors();
-        if (dbg >= 0) CHECK(dbg == 0);
     }
 
     // Part 2: synthetic 2x (120 fps -> 240 Hz) and 4x (80 fps -> 320 Hz) GPU pacing runs (Preset C, DXGI tearing)
@@ -1188,7 +1306,7 @@ void TestRc2LatencyAndPacing(Gpu& gpu, const std::string& dxil) {
         DWORD sleep_ms;
     };
     const Cadence cadences[2] = {{"2x-120fps", 1u, 8u}, {"4x-80fps", 3u, 12u}};
-    for (const Cadence& cad : cadences) {
+    if (run_cadence) for (const Cadence& cad : cadences) {
         g_log_lines = 0;
         FgPresentOwners owners;
         FakeInterface iface;
@@ -1328,10 +1446,11 @@ void TestRc2LatencyAndPacing(Gpu& gpu, const std::string& dxil) {
 
 int main(int argc, char** argv) {
     bool gpu = false;
-    std::string dxil, scratch = ".";
+    std::string dxil, scratch = ".", only;
     int preset = -1;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--gpu") == 0) gpu = true;
+        if (std::strcmp(argv[i], "--only") == 0 && i + 1 < argc) only = argv[++i];
         if (std::strcmp(argv[i], "--dxil") == 0 && i + 1 < argc) dxil = argv[++i];
         if (std::strcmp(argv[i], "--scratch") == 0 && i + 1 < argc) scratch = argv[++i];
         if (std::strcmp(argv[i], "--debug-layer") == 0) g_debug_layer = true;
@@ -1353,19 +1472,23 @@ int main(int argc, char** argv) {
             if (!FgIsRdna4(g.desc.VendorId, g.desc.DeviceId)) {
                 std::printf("  not an RDNA 4 adapter: the host's route is never taken here (GPU leg skipped)\n");
             } else {
-                g_case = "gpu-facade-formats";
-                TestFacadeFormats(g, dxil);
-                if (preset < 0 || preset == 2) {
+                if (only.empty() || only == "facade") {
+                    g_case = "gpu-facade-formats";
+                    TestFacadeFormats(g, dxil);
+                    TestFacadeCopyRetryAndReuse(g);
+                }
+                if ((only.empty() || only == "host") && (preset < 0 || preset == 2)) {
                     g_case = "gpu-host-lite-2x";
                     RunHost(g, dxil, 2);
                 }
-                if (preset < 0 || preset == 0) {
+                if ((only.empty() || only == "host") && (preset < 0 || preset == 0)) {
                     g_case = "gpu-host-full-a-2x";
                     RunHost(g, dxil, 0);
                 }
-                if (preset < 0) {
+                if (preset < 0 && (only.empty() || only == "latency" || only == "cadence")) {
                     g_case = "gpu-rc2-latency-and-pacing";
-                    TestRc2LatencyAndPacing(g, dxil);
+                    TestRc2LatencyAndPacing(g, dxil, only.empty() || only == "latency",
+                                           only.empty() || only == "cadence");
                 }
             }
         }

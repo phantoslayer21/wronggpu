@@ -1491,9 +1491,10 @@ public:
         if (throw_after_present) throw std::runtime_error("synthetic presenter failure");
         return hr;
     }
-    void BeforeResize() override {
+    HRESULT BeforeResize() override {
         ++before_resize;
         order.push_back("before-resize");
+        return S_OK;
     }
     void AfterResize(HRESULT hr) override {
         ++after_resize;
@@ -1875,6 +1876,12 @@ void TestRc2SwapChainGuards() {
     TestCallback cb;
     cb.serve_facade = true;
     CHECK(w->Attach(&cb, nullptr, &owners) == WG_FG_REASON_NONE);
+
+    const std::uint64_t windowed_epoch = w->Epoch();
+    CHECK(game->SetFullscreenState(FALSE, nullptr) == S_OK);
+    CHECK(w->Epoch() == windowed_epoch);
+    CHECK(game->SetFullscreenState(TRUE, nullptr) == S_OK);
+    CHECK(w->Epoch() == windowed_epoch + 1);
 
     // O-A11: extra flags hidden from game GetDesc / GetDesc1, kept on Inner()
     DXGI_SWAP_CHAIN_DESC d0 = {};

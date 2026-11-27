@@ -187,6 +187,8 @@ struct FgPresentStats {
     std::uint64_t epochs = 0;                // epochs attached
     std::uint64_t real_only_intervals[kFgRealOnlyReasonCount] = {};  // per FgRealOnlyReason
     FgTicks max_slip = 0;                    // largest (actual - target) of a displayed image
+    std::uint64_t display_skipped_real = 0;
+    std::uint64_t display_skipped_generated = 0;
     std::uint64_t display_skipped = 0;       // queued presents the display path itself skipped (a newer one was ready)
     std::uint64_t display_collisions = 0;    // displayed less than half a refresh after the previous displayed image
     // Non-overlapping per-stage funnel counters (A4): requested -> scheduled -> reserved -> queued -> submitted ->

@@ -288,6 +288,8 @@ public:
     uint64_t ArenaBytes() const;
     // Bounded wait for a value on the producer fence.
     bool WaitForComputeValue(uint64_t value, uint32_t timeout_ms);
+    bool GateGameQueueOnCompute(uint64_t value);
+    bool PerIndexFences() const;
     // Bounded wait until every submission completed.
     bool WaitIdle(uint32_t timeout_ms);
     // Collect and clear the timings through the latest submission. Returns false when profiling is unavailable.
