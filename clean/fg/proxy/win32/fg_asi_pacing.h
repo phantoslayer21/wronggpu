@@ -43,6 +43,7 @@ private:
 };
 
 constexpr int64_t kFirstImageBudgetMax = 320000;  // 32 ms
+constexpr int64_t kFirstImageMissMargin = 5000;
 
 constexpr int64_t FirstImageBudgetCap(int64_t ready_lag, uint32_t latency_limit) {
     constexpr int64_t min_cap = 80000;   // 8 ms
@@ -52,19 +53,31 @@ constexpr int64_t FirstImageBudgetCap(int64_t ready_lag, uint32_t latency_limit)
 }
 
 constexpr int64_t FirstImageBudgetFloor(int64_t minimum, int64_t readiness_p95, int64_t miss_floor) {
-    const int64_t last_miss_with_margin = miss_floor > 0 ? miss_floor + 5000 : 0;
+    const int64_t last_miss_with_margin = miss_floor > 0 ? miss_floor + kFirstImageMissMargin : 0;
     return std::max({minimum, readiness_p95 + 3000, last_miss_with_margin});
 }
 
 struct FirstImageBudgetLimits {
     int64_t sampled_cap = kFirstImageBudgetMax;
     int64_t miss_floor = 0;
+    uint32_t clean_windows = 0;
 
     void Observe(std::size_t count, int64_t readiness_p75, uint32_t latency_limit) {
         if (count >= 6) sampled_cap = FirstImageBudgetCap(readiness_p75, latency_limit);
     }
 
     void RecordMiss(int64_t budget) { miss_floor = std::max(miss_floor, budget); }
+    void TrackCleanWindow(bool full, bool clean, int64_t minimum, int64_t readiness_p95) {
+        if (!clean || (full && readiness_p95 <= 0)) {
+            clean_windows = 0;
+            return;
+        }
+        if (!full || ++clean_windows < 3) return;
+        clean_windows = 0;
+        const int64_t readiness_floor = FirstImageBudgetFloor(minimum, readiness_p95, 0);
+        const int64_t target = std::max<int64_t>(0, readiness_floor - kFirstImageMissMargin);
+        if (miss_floor > target) miss_floor = std::max(target, miss_floor - 5000);  // at most 0.5 ms
+    }
     int64_t EasingFloor(int64_t minimum, int64_t readiness_p95) const {
         return std::min(kFirstImageBudgetMax, FirstImageBudgetFloor(minimum, readiness_p95, miss_floor));
     }

@@ -1337,6 +1337,7 @@ struct FgAsiSessionHost::Impl {
         const wgfg::FgTicks d_recent_p95 = d_origins.Percentile(0.95, 8);
         const wgfg::FgTicks d_p90 = d_orig_p90_pre;
         const wgfg::FgTicks d_p95 = d_origins.Percentile(0.95);
+        budget_limits.TrackCleanWindow(evaluated_frames >= kBudgetWindow, missed == 0, kBudgetBase, d_p95);
         // A rate observed after admission blocked is paced by the budget itself. Use producer readiness from
         // intervals with at most 0.5 ms admission/slot wait, and leave the dynamic cap unknown without such data.
         budget_limits.Observe(unthrottled_readiness.Size(), unthrottled_readiness.Percentile(0.75, 8),

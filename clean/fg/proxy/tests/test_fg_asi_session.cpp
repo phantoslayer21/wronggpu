@@ -2541,6 +2541,22 @@ void TestHighCountPresentBudgetEasesInSmallSteps() {
     CHECK(FirstImageFastEaseStepCap(219000, false, 5) == 25000);
 }
 
+void TestMissFloorDecaysAfterCleanWindows() {
+    g_case = "pacing-miss-floor-decay";
+    FirstImageBudgetLimits limits;
+    limits.RecordMiss(98000);
+    for (int i = 0; i < 2; ++i) limits.TrackCleanWindow(true, true, 40000, 77000);
+    limits.TrackCleanWindow(false, true, 40000, 77000);
+    CHECK(limits.miss_floor == 98000);
+    limits.TrackCleanWindow(false, false, 40000, 77000);
+    for (int i = 0; i < 2; ++i) limits.TrackCleanWindow(true, true, 40000, 77000);
+    CHECK(limits.miss_floor == 98000);
+    limits.TrackCleanWindow(true, true, 40000, 77000);
+    CHECK(limits.miss_floor == 93000);
+    for (int i = 0; i < 30; ++i) limits.TrackCleanWindow(true, true, 40000, 77000);
+    CHECK(limits.EasingFloor(40000, 77000) == 80000);
+}
+
 void TestBudgetControllerUsesProducerMissesAndResetsItsBaseline() {
     g_case = "pacing-producer-budget-window";
     wgfg::FgPresentStats base;
@@ -2590,6 +2606,7 @@ int main(int argc, char** argv) {
     TestBudgetCapNeedsReliableSamplesAndPreservesFloors();
     TestHighCountPresentBudgetEasesInSmallSteps();
     TestBudgetControllerUsesProducerMissesAndResetsItsBaseline();
+    TestMissFloorDecaysAfterCleanWindows();
     std::printf("cpu: %d checks, %d failed\n", g_checks, g_failed);
     if (gpu) {
         g_case = "gpu-init";
