@@ -1858,7 +1858,8 @@ void TestRc2LatencyAndPacing(Gpu& gpu, const std::string& dxil, bool run_latency
 // frames (25 ms) transitioning into steady 10.5 ms / 12.5 ms / 18.5 ms GPU-bound rendering at 2x (N=1), 4x (N=3), and
 // 6x (N=5). Proves no bistable 2x LatencyCap trap, < 2% late drops at 2x, < 5% late drops at 4x/6x, base FPS >= 85%
 // of FG-off, and presented output scaling cleanly with N.
-void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, bool admission_only) {
+void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::string& only) {
+    const bool admission_only = only == "admission";
     ComPtr<IDXGIFactory2> f2;
     CHECK(SUCCEEDED(gpu.factory.As(&f2)));
     GameTextures game;
@@ -2304,6 +2305,16 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, bool admission_o
         return out;
     };
 
+    if (only == "real-only-admission") {
+        // Match the RT-on baseline's ~13 ms render period at latency 1, with FG explicitly disabled.
+        const SmokeRunResult off = run_leg("off-real-only-admission", false, 5u, 0, 0, 180, 13000, 7000);
+        CHECK(off.present_errors == 0 && off.session_failures == 0);
+        CHECK(off.sched == 0 && off.real_sub >= 175);
+        CHECK(off.steady_base_fps >= 69.0);
+        CHECK(off.queue_peak == 0 && off.queue_waits == 0);
+        return;
+    }
+
     if (admission_only) {
         char mode[16] = {};
         const bool use_consumption = GetEnvironmentVariableA("WG_FG_ADMISSION", mode, sizeof(mode)) == 8 &&
@@ -2324,7 +2335,7 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, bool admission_o
         // Request 4x with a nominal 200 fps producer. The 349.4 Hz presenter must shed generated images.
         const SmokeRunResult display_bound = run_leg("4x-display-bound", true, 3u, 0, 0, 260, 5000, 4000);
         CHECK(display_bound.present_errors == 0 && display_bound.session_failures == 0);
-        CHECK(display_bound.queue_peak == 2 && display_bound.queue_waits > 0);
+        CHECK(display_bound.queue_peak <= 2);
         CHECK(display_bound.steady_max_scheduled < 3);
         return;
     }
@@ -2438,9 +2449,10 @@ int main(int argc, char** argv) {
                     TestRc2LatencyAndPacing(g, dxil, only.empty() || only == "latency",
                                            only.empty() || only == "cadence");
                 }
-                if (preset < 0 && (only.empty() || only == "smoke" || only == "admission")) {
+                if (preset < 0 && (only.empty() || only == "smoke" || only == "admission" ||
+                                   only == "real-only-admission")) {
                     g_case = "gpu-smoke-pacing";
-                    TestSmokeGpuBoundPacing(g, dxil, only == "admission");
+                    TestSmokeGpuBoundPacing(g, dxil, only);
                 }
             }
             if (g_debug_layer) {

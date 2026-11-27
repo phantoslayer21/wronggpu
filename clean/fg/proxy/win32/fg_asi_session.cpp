@@ -427,6 +427,11 @@ struct FgAsiSessionHost::Impl {
         if (plan.generated_count > 0) {
             m.last_generating_count = plan.generated_count;
             if (plan.reanchored) ++m.generating_reanchors;
+        } else if (!m.admission_until_present) {
+            // A real-only interval uses the original first-present boundary. A copy accepted into the GPU
+            // FIFO can still be waiting for all of the game's rendering, so it must not open the next admission.
+            std::lock_guard<std::mutex> lock(m.credit_mu);
+            m.ReleasePresenterReservationLocked(plan.real_frame_id);
         }
         IntervalTrace tr = m.next_trace;
         tr.frame_token = plan.real_frame_id;
@@ -451,11 +456,10 @@ struct FgAsiSessionHost::Impl {
         Impl* m = static_cast<Impl*>(ctx);
         if (!m || interval_id == 0) return;
         if (kind == wgfg::kFgTraceRealConsumed) {
-            if (!m->admission_until_present) m->EndAdmission(frame_id);
+            if (!m->admission_until_present) m->EndAdmissionAt(frame_id, true);
             return;
         }
-        if (m->admission_until_present && (kind == 1 || kind == 3 || kind == 4 || kind == 7))
-            m->EndAdmission(frame_id);  // legacy first-image rule
+        if (kind == 1 || kind == 3 || kind == 4 || kind == 7) m->EndAdmissionAt(frame_id, false);
         const wgfg::FgTicks now = ts != 0 ? ts : wgfg::FgInterruptNow();
         std::lock_guard<std::mutex> lock(m->trace_mu);
         // Linear scan of recent entries (at most 32 back — intervals complete in FIFO order).
@@ -583,17 +587,23 @@ struct FgAsiSessionHost::Impl {
         m.CancelAdmissionLocked(frame_id);
     }
 
-    void EndAdmission(uint64_t frame_id) {
+    void EndAdmissionAt(uint64_t frame_id, bool consumed) {
         std::lock_guard<std::mutex> lock(credit_mu);
-        EndAdmissionLocked(frame_id);
+        const bool wants_consumption =
+            std::find(presenter_intervals.begin(), presenter_intervals.end(), frame_id) != presenter_intervals.end();
+        if (wants_consumption == consumed) EndAdmissionLocked(frame_id);
     }
 
-    void CancelAdmissionLocked(uint64_t frame_id) {
-        EndAdmissionLocked(frame_id);
+    void ReleasePresenterReservationLocked(uint64_t frame_id) {
         const auto it = std::find(presenter_intervals.begin(), presenter_intervals.end(), frame_id);
         if (it == presenter_intervals.end()) return;
         presenter_intervals.erase(it);
         credit_cv.notify_all();
+    }
+
+    void CancelAdmissionLocked(uint64_t frame_id) {
+        EndAdmissionLocked(frame_id);
+        ReleasePresenterReservationLocked(frame_id);
     }
 
     void CancelAdmission(uint64_t frame_id) {
@@ -614,12 +624,12 @@ struct FgAsiSessionHost::Impl {
         return false;
     }
 
-    bool BeginAdmission(uint64_t frame_id) {
+    bool BeginAdmission(uint64_t frame_id, bool fg_enabled) {
         std::lock_guard<std::mutex> lock(credit_mu);
         if (pending_admissions.size() >= latency_limit || presenter_intervals.size() >= kPresenterAdmissionDepth)
             return false;
         pending_admissions.push_back(frame_id);
-        if (!admission_until_present) {
+        if (!admission_until_present && fg_enabled) {
             presenter_intervals.push_back(frame_id);
             presenter_queue_peak = std::max(presenter_queue_peak, presenter_intervals.size());
         }
@@ -1928,7 +1938,7 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
             m.next_trace.t_arrival = t_arrival;
             m.next_trace.t_after_wait = t_after_wait;
             m.next_trace.free_slots = PresenterFreeSlots(m.session->Presenter());
-            admitted = m.BeginAdmission(desc->frame_token);
+            admitted = m.BeginAdmission(desc->frame_token, fg_enabled);
             if (!admitted) {
                 m.RecordSessionFailure();
                 m.DestroySession("admission closed");
