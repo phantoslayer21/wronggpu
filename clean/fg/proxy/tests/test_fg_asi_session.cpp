@@ -837,12 +837,15 @@ void TestPanel(const std::string& scratch) {
     fakehost::g_seen.clear();
     fakehost::g_draw(nullptr);
     CHECK(fakehost::Seen("Real frames only:"));
-    // N6: an isolated real-only frame within the 500 ms activity window keeps generating steady (no 10 Hz flapping)
-    // and retains the last generating multiplier instead of reporting "1x".
+    // An isolated real-only frame within the 1500 ms activity window keeps generating steady (no flapping)
+    // and retains the smoothed multiplier + /base pair instead of dropping to "Real only" or 0/0.
+    g_panel_status.live.displayed_fps = 0.0f;
+    g_panel_status.live.base_fps = 0.0f;
     CHECK(panel::PublishAt(g_panel_status, panel::NextReportSequence(), false, 1100));
     CHECK(fakehost::g_report_state == "3x" && fakehost::g_report_generating);
-    // Once 500 ms elapse without new presented generated images, report drops cleanly to Real only.
-    CHECK(panel::PublishAt(g_panel_status, panel::NextReportSequence(), false, 1500));
+    CHECK(fakehost::g_report_rate == 120.0f && fakehost::g_report_base == 41.0f);
+    // Once 1500 ms elapse without new presented generated images, report drops cleanly to Real only.
+    CHECK(panel::PublishAt(g_panel_status, panel::NextReportSequence(), false, 2500));
     CHECK(fakehost::g_report_state == "Real only" && fakehost::g_report_rate == 0.0f);
     CHECK(fakehost::g_report_base == 0.0f && !fakehost::g_report_generating);
 
@@ -859,9 +862,9 @@ void TestPanel(const std::string& scratch) {
     const auto stale_sequence = panel::NextReportSequence();
     const auto stale_generating = g_panel_status;
     g_panel_status.enabled = false;
-    CHECK(panel::PublishAt(g_panel_status, panel::NextReportSequence(), true, 1600));
+    CHECK(panel::PublishAt(g_panel_status, panel::NextReportSequence(), true, 2600));
     CHECK(fakehost::g_report_state == "Off" && fakehost::g_report_rate == 0.0f && !fakehost::g_report_generating);
-    CHECK(panel::PublishAt(stale_generating, stale_sequence, true, 1610));
+    CHECK(panel::PublishAt(stale_generating, stale_sequence, true, 2610));
     CHECK(fakehost::g_report_state == "Off" && !fakehost::g_report_generating);
 
     // R3A-1: scheduled_count > 0 with zero new presented generated images (all dropped late) must report Real only,
@@ -877,29 +880,29 @@ void TestPanel(const std::string& scratch) {
         dropped.live.displayed_fps = 60.0f;
         dropped.live.base_fps = 60.0f;
         dropped.live.displayed_generated = 10;  // unchanged since before Off!
-        CHECK(panel::PublishAt(dropped, panel::NextReportSequence(), true, 2000));
+        CHECK(panel::PublishAt(dropped, panel::NextReportSequence(), true, 3000));
         CHECK(fakehost::g_report_state == "Real only" && !fakehost::g_report_generating);
         CHECK(fakehost::g_report_rate == 0.0f && fakehost::g_report_base == 0.0f);
         // Repeated publishes with unchanged displayed_generated still stay Real only.
-        CHECK(panel::PublishAt(dropped, panel::NextReportSequence(), false, 2250));
+        CHECK(panel::PublishAt(dropped, panel::NextReportSequence(), false, 3250));
         CHECK(fakehost::g_report_state == "Real only" && !fakehost::g_report_generating);
 
-        // Once generated images are actually presented (delta > 0), R3A-10 bypasses the 100 ms throttle immediately.
+        // Once generated images are actually presented (delta >= 2), R3A-10 bypasses the 100 ms throttle immediately.
         dropped.live.displayed_generated = 15;
         dropped.live.displayed_fps = 120.0f;
         dropped.live.base_fps = 40.0f;
-        CHECK(panel::PublishAt(dropped, panel::NextReportSequence(), false, 2260));
+        CHECK(panel::PublishAt(dropped, panel::NextReportSequence(), false, 3260));
         CHECK(fakehost::g_report_state == "3x" && fakehost::g_report_generating);
         CHECK(fakehost::g_report_rate == 120.0f && fakehost::g_report_base == 40.0f);
 
         // Steady-state update within 100 ms with unchanged active/state is throttled (does not overwrite rate yet).
         dropped.live.displayed_fps = 123.0f;
-        CHECK(panel::PublishAt(dropped, panel::NextReportSequence(), false, 2300));
+        CHECK(panel::PublishAt(dropped, panel::NextReportSequence(), false, 3300));
         CHECK(fakehost::g_report_rate == 120.0f);
 
-        // If all generated images now drop late for >= 500 ms (displayed_generated stuck at 15), report falls back
+        // If all generated images now drop late for >= 1500 ms (displayed_generated stuck at 15), report falls back
         // to Real only even while scheduled_count stays 2!
-        CHECK(panel::PublishAt(dropped, panel::NextReportSequence(), false, 2760));
+        CHECK(panel::PublishAt(dropped, panel::NextReportSequence(), false, 4760));
         CHECK(fakehost::g_report_state == "Real only" && !fakehost::g_report_generating);
         CHECK(fakehost::g_report_rate == 0.0f && fakehost::g_report_base == 0.0f);
     }
@@ -916,17 +919,17 @@ void TestPanel(const std::string& scratch) {
         gen_st.live.displayed_generated = 20;
         gen_st.live.displayed_fps = 120.0f;
         gen_st.live.base_fps = 60.0f;
-        CHECK(panel::PublishAt(gen_st, panel::NextReportSequence(), true, 3000));
+        CHECK(panel::PublishAt(gen_st, panel::NextReportSequence(), true, 5000));
         CHECK(fakehost::g_report_state == "2x" && fakehost::g_report_generating);
         panel::Status wait_st = gen_st;
         wait_st.live.phase = kFgPhaseRealOnly;
         wait_st.live.reason = 0;
         wait_st.live.real_only = WG_FG_REAL_ONLY_DISABLED;
-        CHECK(panel::PublishAt(wait_st, panel::NextReportSequence(), false, 3010));
+        CHECK(panel::PublishAt(wait_st, panel::NextReportSequence(), false, 5010));
         CHECK(fakehost::g_report_state == "Waiting" && !fakehost::g_report_generating);
         panel::Status off_st = wait_st;
         off_st.enabled = false;
-        CHECK(panel::PublishAt(off_st, panel::NextReportSequence(), false, 3020));
+        CHECK(panel::PublishAt(off_st, panel::NextReportSequence(), false, 5020));
         CHECK(fakehost::g_report_state == "Off" && !fakehost::g_report_generating);
     }
 
@@ -947,11 +950,11 @@ void TestPanel(const std::string& scratch) {
 
     // R3A-2: PublishAt returns false when the host rejects/revokes the claim (e.g. swap-chain creation began mid-install).
     fakehost::g_report_accept = false;
-    CHECK(!panel::PublishAt(g_panel_status, panel::NextReportSequence(), true, 3100));
+    CHECK(!panel::PublishAt(g_panel_status, panel::NextReportSequence(), true, 5100));
     fakehost::g_report_accept = true;
 
     // R3B-1: an isolated scheduler-driven real-only interval (e.g. OutOfVrrWindow display cap) between generating
-    // intervals keeps the 500 ms activity hold without publishing inactive, shows the CURRENT scheduler reduction
+    // intervals keeps the 1500 ms activity hold without publishing inactive, shows the CURRENT scheduler reduction
     // reason (display cap / latency / presenter pressure) instead of a stale adapter reason, and a sustained
     // display-capped run transitions cleanly to Real only after the hold. A lost session ends the hold immediately.
     {
@@ -966,7 +969,7 @@ void TestPanel(const std::string& scratch) {
         r3b.live.displayed_generated = 25;
         r3b.live.displayed_fps = 180.0f;
         r3b.live.base_fps = 60.0f;
-        CHECK(panel::PublishAt(r3b, panel::NextReportSequence(), true, 4000));
+        CHECK(panel::PublishAt(r3b, panel::NextReportSequence(), true, 6000));
         CHECK(fakehost::g_report_generating && fakehost::g_report_state == "3x");
 
         // Isolated single-interval display cap (OutOfVrrWindow): hold kept, no inactive publish, UI names display cap.
@@ -978,7 +981,7 @@ void TestPanel(const std::string& scratch) {
         fakehost::g_draw(nullptr);
         CHECK(fakehost::Seen("Real frames only: display cap"));
         CHECK(panel::StatusLine(capped, cur) == "Real frames only: display cap");
-        CHECK(panel::PublishAt(capped, panel::NextReportSequence(), false, 4120));
+        CHECK(panel::PublishAt(capped, panel::NextReportSequence(), false, 6120));
         CHECK(fakehost::g_report_generating && fakehost::g_report_state == "3x");
 
         // Even if a snapshot arrives with kFgPhaseRealOnly + stale adapter WG_FG_REAL_ONLY_DISABLED alongside an
@@ -992,7 +995,7 @@ void TestPanel(const std::string& scratch) {
         fakehost::g_draw(nullptr);
         CHECK(fakehost::Seen("Real frames only: display cap") && !fakehost::Seen("Waiting"));
         CHECK(panel::StatusLine(stale_adapter, cur) == "Real frames only: display cap");
-        CHECK(panel::PublishAt(stale_adapter, panel::NextReportSequence(), false, 4200));
+        CHECK(panel::PublishAt(stale_adapter, panel::NextReportSequence(), false, 6200));
         CHECK(fakehost::g_report_generating && fakehost::g_report_state == "3x");
 
         // LatencyCap and Pressure spellings.
@@ -1003,29 +1006,81 @@ void TestPanel(const std::string& scratch) {
 
         // Next generating interval refreshes the hold seamlessly with zero inactive publish in between.
         r3b.live.displayed_generated = 27;
-        CHECK(panel::PublishAt(r3b, panel::NextReportSequence(), false, 4250));
+        CHECK(panel::PublishAt(r3b, panel::NextReportSequence(), false, 6250));
         CHECK(fakehost::g_report_generating && fakehost::g_report_state == "3x");
 
-        // Sustained display-capped run: held inside 500 ms, then transitions cleanly to Real only at 500 ms.
+        // Sustained display-capped run: held inside 1500 ms, then transitions cleanly to Real only at 1500 ms.
         capped.live.schedule_reason = static_cast<uint32_t>(wgfg::FgRealOnlyReason::OutOfVrrWindow);
         capped.live.displayed_generated = 27;
-        CHECK(panel::PublishAt(capped, panel::NextReportSequence(), false, 4600));
+        CHECK(panel::PublishAt(capped, panel::NextReportSequence(), false, 7250));
         CHECK(fakehost::g_report_generating && fakehost::g_report_state == "3x");
-        CHECK(panel::PublishAt(capped, panel::NextReportSequence(), false, 4750));
+        CHECK(panel::PublishAt(capped, panel::NextReportSequence(), false, 7750));
         CHECK(!fakehost::g_report_generating && fakehost::g_report_state == "Real only");
         CHECK(fakehost::g_report_text == "Real frames only: display cap");
         CHECK(fakehost::g_report_rate == 0.0f && fakehost::g_report_base == 0.0f);
 
         // Lost session (phase Waiting, schedule_reason 0) ends the hold immediately even within 10 ms.
         r3b.live.displayed_generated = 30;
-        CHECK(panel::PublishAt(r3b, panel::NextReportSequence(), true, 5000));
+        CHECK(panel::PublishAt(r3b, panel::NextReportSequence(), true, 8000));
         CHECK(fakehost::g_report_generating && fakehost::g_report_state == "3x");
         panel::Status lost = r3b;
         lost.live.phase = kFgPhaseWaiting;
         lost.live.scheduled_count = 0;
         lost.live.schedule_reason = 0;
-        CHECK(panel::PublishAt(lost, panel::NextReportSequence(), false, 5010));
+        CHECK(panel::PublishAt(lost, panel::NextReportSequence(), false, 8010));
         CHECK(!fakehost::g_report_generating && fakehost::g_report_state == "Waiting");
+    }
+
+    // Truthful measured multiplier, hysteresis, /base consistency, and 100 ms throttle on label-only changes.
+    {
+        panel::Status meas = st;
+        meas.enabled = true;
+        meas.installed = true;
+        meas.have_host = true;
+        meas.live.phase = kFgPhaseGenerating;
+        meas.live.count = 1;
+        meas.live.scheduled_count = 1;  // 2x scheduled, but output/base is display-capped near 1.2x
+        meas.live.schedule_reason = 0;
+        // Single stray generated frame from inactive must NOT flap into generating.
+        meas.live.displayed_generated = 31;
+        meas.live.displayed_fps = 144.0f;
+        meas.live.base_fps = 140.0f;
+        CHECK(panel::PublishAt(meas, panel::NextReportSequence(), false, 9000));
+        CHECK(!fakehost::g_report_generating && fakehost::g_report_state == "Real only");
+
+        // Second generated frame enters generating with measured 1.0x (never 2x at 144/140).
+        meas.live.displayed_generated = 32;
+        CHECK(panel::PublishAt(meas, panel::NextReportSequence(), false, 9050));
+        CHECK(fakehost::g_report_generating && fakehost::g_report_state == "1.0x");
+        CHECK(fakehost::g_report_rate > 143.0f && fakehost::g_report_base > 139.0f);
+
+        // Label-only change inside 100 ms must respect the 100 ms throttle (no immediate bypass).
+        meas.live.displayed_generated = 40;
+        meas.live.displayed_fps = 240.0f;
+        meas.live.base_fps = 120.0f;
+        CHECK(panel::PublishAt(meas, panel::NextReportSequence(), false, 9090));
+        CHECK(fakehost::g_report_generating && fakehost::g_report_state == "1.0x");
+
+        // After >= 100 ms, smoothed ratio updates cleanly to fractional multiplier (between 1.0x and 2.0x).
+        meas.live.displayed_generated = 45;
+        meas.live.displayed_fps = 180.0f;
+        meas.live.base_fps = 136.0f;
+        CHECK(panel::PublishAt(meas, panel::NextReportSequence(), false, 9200));
+        CHECK(fakehost::g_report_generating && fakehost::g_report_state != "2x" &&
+              fakehost::g_report_state != "Real only");
+        const std::string held_state = fakehost::g_report_state;
+        const float held_rate = fakehost::g_report_rate;
+        const float held_base = fakehost::g_report_base;
+        CHECK(held_rate > 0.0f && held_base > 0.0f);
+
+        // Brief zero-rate sample during active hold preserves both the label and the /base pair.
+        meas.live.scheduled_count = 0;
+        meas.live.schedule_reason = static_cast<uint32_t>(wgfg::FgRealOnlyReason::OutOfVrrWindow);
+        meas.live.displayed_fps = 0.0f;
+        meas.live.base_fps = 0.0f;
+        CHECK(panel::PublishAt(meas, panel::NextReportSequence(), false, 9500));
+        CHECK(fakehost::g_report_generating && fakehost::g_report_state == held_state);
+        CHECK(fakehost::g_report_rate == held_rate && fakehost::g_report_base == held_base);
     }
 
     panel::ReleaseOutput();
@@ -1886,8 +1941,8 @@ void TestRc2LatencyAndPacing(Gpu& gpu, const std::string& dxil, bool run_latency
                 }
                 CHECK(panel::PublishAt(reduced, panel::NextReportSequence(), false, 10100));
                 CHECK(fakehost::g_report_generating);  // activity hold preserved across live scheduler reduction
-                CHECK(panel::PublishAt(reduced, panel::NextReportSequence(), false, 10600));
-                CHECK(!fakehost::g_report_generating);  // expires cleanly after 500 ms
+                CHECK(panel::PublishAt(reduced, panel::NextReportSequence(), false, 11500));
+                CHECK(!fakehost::g_report_generating);  // expires cleanly after 1500 ms
             }
             panel::ReleaseOutput();
         }

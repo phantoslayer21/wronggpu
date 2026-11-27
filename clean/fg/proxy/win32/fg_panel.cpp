@@ -3,7 +3,10 @@
 // Written for this project.
 #include "fg_panel.h"
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
+#include <cstdio>
 #include <mutex>
 
 #include "../../presenter/fg_presenter_factory.h"
@@ -30,22 +33,76 @@ uint64_t g_report_at = 0;
 uint64_t g_seen_displayed_generated = 0;
 uint64_t g_last_generated_at = 0;
 bool g_have_generated_sample = false;
+uint64_t g_enter_gen_count = 0;
+uint64_t g_enter_gen_since = 0;
 uint32_t g_last_generating_count = 0;
 std::string g_last_generating_text;
+bool g_have_smoothed_rates = false;
+float g_smoothed_displayed_fps = 0.0f;
+float g_smoothed_base_fps = 0.0f;
+float g_smoothed_ratio = 0.0f;
+float g_last_raw_displayed_fps = 0.0f;
+float g_last_raw_base_fps = 0.0f;
+uint64_t g_last_rate_sample_at = 0;
+bool g_have_displayed_tenth = false;
+int g_displayed_tenth = 0;
 bool g_have_reported = false;
 bool g_last_reported_active = false;
 std::string g_last_reported_state;
 
+void ResetActiveTelemetryLocked() {
+    g_have_generated_sample = false;
+    g_last_generated_at = 0;
+    g_enter_gen_count = 0;
+    g_enter_gen_since = 0;
+    g_last_generating_count = 0;
+    g_last_generating_text.clear();
+    g_have_smoothed_rates = false;
+    g_smoothed_displayed_fps = 0.0f;
+    g_smoothed_base_fps = 0.0f;
+    g_smoothed_ratio = 0.0f;
+    g_last_raw_displayed_fps = 0.0f;
+    g_last_raw_base_fps = 0.0f;
+    g_last_rate_sample_at = 0;
+    g_have_displayed_tenth = false;
+    g_displayed_tenth = 0;
+}
+
 void ResetReportTrackingLocked() {
     g_report_at = 0;
     g_seen_displayed_generated = 0;
-    g_last_generated_at = 0;
-    g_have_generated_sample = false;
-    g_last_generating_count = 0;
-    g_last_generating_text.clear();
+    ResetActiveTelemetryLocked();
     g_have_reported = false;
     g_last_reported_active = false;
     g_last_reported_state.clear();
+}
+
+std::string FormatMeasuredMultiplierLocked(float ratio) {
+    const float clamped = std::clamp(ratio, 1.0f, 6.0f);
+    int target_tenth = static_cast<int>(std::lround(clamped * 10.0f));
+    target_tenth = std::clamp(target_tenth, 10, 60);
+    // Snap values within 0.1x of an integer >= 2x (e.g. 1.9x..2.1x -> 2x, 2.9x..3.1x -> 3x) so steady
+    // generation stays crisp without hiding genuinely fractional output (1.0x..1.8x, 2.2x..2.8x).
+    if (target_tenth >= 19) {
+        const int rem = target_tenth % 10;
+        if (rem == 9) target_tenth += 1;
+        else if (rem == 1) target_tenth -= 1;
+    }
+
+    if (!g_have_displayed_tenth) {
+        g_displayed_tenth = target_tenth;
+        g_have_displayed_tenth = true;
+    } else if (target_tenth != g_displayed_tenth) {
+        const float displayed = static_cast<float>(g_displayed_tenth) * 0.1f;
+        const float deadband = (g_displayed_tenth >= 20 && (g_displayed_tenth % 10) == 0) ? 0.15f : 0.08f;
+        if (std::fabs(clamped - displayed) >= deadband) g_displayed_tenth = target_tenth;
+    }
+
+    if (g_displayed_tenth >= 20 && (g_displayed_tenth % 10) == 0)
+        return std::to_string(g_displayed_tenth / 10) + "x";
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%d.%dx", g_displayed_tenth / 10, g_displayed_tenth % 10);
+    return buf;
 }
 
 void Log(const std::string& line) {
@@ -428,11 +485,12 @@ bool PublishAt(const Status& status, uint64_t sequence, bool immediate, uint64_t
         std::lock_guard<std::mutex> lock(g_report_mu);
         if (!g_report_api || sequence <= g_published_sequence) return true;
 
-        // R3A-1 / N6: report generating only when generated images were actually presented in the activity window,
-        // holding briefly across 250 ms sample spacing and isolated 1-frame scheduler real-only blips.
-        bool generated_presented = false;
+        // Report generating only when generated images were actually presented in the activity window,
+        // holding across brief display-cap / sample pauses and requiring >= 2 presented frames to re-enter
+        // generating so a single isolated generated frame cannot flap the overlay label.
+        uint64_t generated_delta = 0;
         if (status.live.displayed_generated > g_seen_displayed_generated) {
-            generated_presented = true;
+            generated_delta = status.live.displayed_generated - g_seen_displayed_generated;
             g_seen_displayed_generated = status.live.displayed_generated;
         } else if (status.live.displayed_generated < g_seen_displayed_generated) {
             g_seen_displayed_generated = status.live.displayed_generated;
@@ -444,22 +502,61 @@ bool PublishAt(const Status& status, uint64_t sequence, bool immediate, uint64_t
             (status.live.phase == kFgPhaseRealOnly && IsActiveSessionReduction(status.live));
         const bool can_generate = status.enabled && !status.host_conflict && !status.deferred && status.installed &&
                                   status.have_host && session_generating;
-        constexpr uint64_t kGeneratedHoldMs = 500;
+        constexpr uint64_t kGeneratedHoldMs = 1500;
+        constexpr uint64_t kEnterMinGeneratedFrames = 2;
         bool active = false;
         if (!can_generate) {
-            g_have_generated_sample = false;
-            g_last_generated_at = 0;
-            g_last_generating_count = 0;
-            g_last_generating_text.clear();
+            ResetActiveTelemetryLocked();
         } else {
-            if (generated_presented) {
-                g_have_generated_sample = true;
-                g_last_generated_at = now;
-            }
-            if (g_have_generated_sample && now >= g_last_generated_at && now - g_last_generated_at < kGeneratedHoldMs) {
+            const bool currently_active =
+                g_have_generated_sample && now >= g_last_generated_at && now - g_last_generated_at < kGeneratedHoldMs;
+            if (currently_active) {
+                if (generated_delta > 0) g_last_generated_at = now;
                 active = true;
             } else {
-                g_have_generated_sample = false;
+                if (g_have_generated_sample) ResetActiveTelemetryLocked();
+                if (generated_delta > 0) {
+                    if (g_enter_gen_count == 0 || now < g_enter_gen_since ||
+                        now - g_enter_gen_since >= kGeneratedHoldMs) {
+                        g_enter_gen_count = generated_delta;
+                        g_enter_gen_since = now;
+                    } else {
+                        g_enter_gen_count += generated_delta;
+                    }
+                    if (g_enter_gen_count >= kEnterMinGeneratedFrames) {
+                        g_have_generated_sample = true;
+                        g_last_generated_at = now;
+                        g_enter_gen_count = 0;
+                        g_enter_gen_since = 0;
+                        active = true;
+                    }
+                }
+            }
+        }
+
+        // Smooth measured display and base FPS across fresh 250 ms samples, and keep the smoothed pair
+        // across brief active hold intervals where a sample bucket saw zero generated frames.
+        const bool sample_valid = status.live.displayed_fps > 0.0f && status.live.base_fps > 0.0f;
+        if (active && sample_valid) {
+            const bool fresh_sample = !g_have_smoothed_rates ||
+                                      status.live.displayed_fps != g_last_raw_displayed_fps ||
+                                      status.live.base_fps != g_last_raw_base_fps ||
+                                      now < g_last_rate_sample_at || now - g_last_rate_sample_at >= 250;
+            if (fresh_sample) {
+                constexpr float kRateAlpha = 0.35f;
+                if (!g_have_smoothed_rates) {
+                    g_smoothed_displayed_fps = status.live.displayed_fps;
+                    g_smoothed_base_fps = status.live.base_fps;
+                    g_have_smoothed_rates = true;
+                } else {
+                    g_smoothed_displayed_fps += kRateAlpha * (status.live.displayed_fps - g_smoothed_displayed_fps);
+                    g_smoothed_base_fps += kRateAlpha * (status.live.base_fps - g_smoothed_base_fps);
+                }
+                g_smoothed_ratio =
+                    g_smoothed_base_fps > 0.0f ? (g_smoothed_displayed_fps / g_smoothed_base_fps) : 1.0f;
+                g_last_raw_displayed_fps = status.live.displayed_fps;
+                g_last_raw_base_fps = status.live.base_fps;
+                g_last_rate_sample_at = now;
             }
         }
 
@@ -471,10 +568,14 @@ bool PublishAt(const Status& status, uint64_t sequence, bool immediate, uint64_t
 
         std::string state;
         if (active) {
-            const uint32_t count = status.live.scheduled_count ? status.live.scheduled_count
-                                   : g_last_generating_count   ? g_last_generating_count
-                                                               : (status.live.count ? status.live.count : 1u);
-            state = std::to_string(count + 1) + "x";
+            if (g_have_smoothed_rates) {
+                state = FormatMeasuredMultiplierLocked(g_smoothed_ratio);
+            } else {
+                const uint32_t count = status.live.scheduled_count ? status.live.scheduled_count
+                                       : g_last_generating_count   ? g_last_generating_count
+                                                                   : (status.live.count ? status.live.count : 1u);
+                state = std::to_string(count + 1) + "x";
+            }
             if (text.rfind("Generating ", 0) != 0)
                 text = !g_last_generating_text.empty() ? g_last_generating_text : ("Generating " + state);
         } else if (can_generate) {
@@ -490,10 +591,11 @@ bool PublishAt(const Status& status, uint64_t sequence, bool immediate, uint64_t
             state = text.rfind("Real frames only:", 0) == 0 ? "Real only" : text;
         }
 
-        // R3A-10: compute active/state before throttling and bypass the 100 ms throttle on any state transition.
-        const bool transitioned =
-            !g_have_reported || active != g_last_reported_active || state != g_last_reported_state;
-        if (!immediate && !transitioned && now >= g_report_at && now - g_report_at < 100) return true;
+        // Bypass the 100 ms throttle on mode/activity transitions (Off / Waiting / Real only / Generating),
+        // but keep the 100 ms throttle for label-only multiplier changes while generating stays active.
+        const bool mode_changed = !g_have_reported || active != g_last_reported_active ||
+                                  (!active && state != g_last_reported_state);
+        if (!immediate && !mode_changed && now >= g_report_at && now - g_report_at < 100) return true;
 
         g_published_sequence = sequence;
         g_report_at = now;
@@ -501,11 +603,12 @@ bool PublishAt(const Status& status, uint64_t sequence, bool immediate, uint64_t
         g_last_reported_active = active;
         g_last_reported_state = state;
 
-        const bool valid_rates = active && status.live.displayed_fps > 0.0f && status.live.base_fps > 0.0f;
+        const bool valid_rates = active && g_have_smoothed_rates && g_smoothed_displayed_fps > 0.0f &&
+                                 g_smoothed_base_fps > 0.0f;
         return g_report_api->report_frame_generation(g_report_plugin, "WrongGPU", state.c_str(), text.c_str(),
                                                      "DLSS Frame Generation",
-                                                     valid_rates ? status.live.displayed_fps : 0.0f,
-                                                     valid_rates ? status.live.base_fps : 0.0f, active);
+                                                     valid_rates ? g_smoothed_displayed_fps : 0.0f,
+                                                     valid_rates ? g_smoothed_base_fps : 0.0f, active);
     } catch (...) {
         // Menu telemetry must not affect the game's Present.
         return true;
