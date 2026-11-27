@@ -2624,6 +2624,9 @@ void TestMissFloorDecaysAfterCleanWindows() {
 
 void TestBudgetControllerUsesProducerMissesAndResetsItsBaseline() {
     g_case = "pacing-producer-budget-window";
+    CHECK((FirstImageProducerWindow{10, 1}.ReducedCount(3) == 0));
+    CHECK((FirstImageProducerWindow{19, 1}.ReducedCount(3) == 0));
+    CHECK((FirstImageProducerWindow{19, 2}.ReducedCount(3) == 2));
     wgfg::FgPresentStats base;
     base.generated_scheduled = 10;
     base.generated_late_pre_queue = 1;

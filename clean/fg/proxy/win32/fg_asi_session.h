@@ -39,8 +39,8 @@
 //  - LATENESS. A generated image is shown only if the GPU finished it before its display time, which the scheduler
 //    puts at the game present plus a first-image budget. A game whose GPU still renders the frame it just presented
 //    (GPU bound, frames queued) finishes most images after a fixed short budget, so they are dropped and only the game
-//    frames reach the display. The host therefore measures, every 60 generating frames, the share of generated images
-//    that missed the producer deadline. The budget starts at 4 ms and adapts to producer readiness, up to a ceiling
+//    frames reach the display. The host measures producer misses in 30-frame windows, with shorter startup and
+//    probe windows. The budget starts at 4 ms and adapts to producer readiness, up to a ceiling
 //    computed from GPU readiness and the game's latency limit. Clean windows ease it toward the recent slow tail
 //    and the last producer miss. Each change is logged. The presenter has 20 image slots.
 //  - PRESENT QUEUE. A chain created while FG is taken is created on a direct queue of the host's own (high priority,
@@ -48,10 +48,10 @@
 //    behind the game's rendering of its next frame, which in a GPU-bound game would hold every generated image until
 //    after the next game frame. The copy path's present queue waits for the game's work on the facade buffer (a fence
 //    the host signals on the game's queue); the executor keeps recording its game-queue work on the game's queue.
-//  - DISPLAY RATE. The scheduler's output-rate ceiling is the display's refresh (read from the compositor at session
-//    creation, 95 % of its period as the shortest on-screen time of an image), with the count adapted: an interval
-//    generates only as many images as the display can show (a 60 Hz panel: 30 -> 60 fps at 2x, nothing at a 60+ fps
-//    base). Without a readable refresh the scheduler's own window stays.
+//  - DISPLAY RATE. The variable-refresh window starts at about 97% of the physical refresh rate. The DXGI tearing
+//    scheduler also accounts for measured Present call time with a bounded allowance. The count adapts to fit
+//    available display slots (a 60 Hz panel can show about 29 -> 58 fps at 2x). Without a readable refresh
+//    the scheduler uses its configured window.
 //  - BACK-PRESSURE. When the display path shows fewer images than the game renders, queued game frames (never dropped)
 //    would fill every presenter slot and the session would be refused. Before each game frame goes to the session the
 //    host waits (at most 50 ms, 0.5 ms steps) until the presenter has a free slot for it and the reserve, as a game's
