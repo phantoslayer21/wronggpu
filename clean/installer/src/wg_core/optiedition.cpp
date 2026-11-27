@@ -19,9 +19,9 @@ EditionInfo PinnedEdition() {
             L"OptiScaler_v10.0.0-pre1_20261127_WrongGPU-edition-v6.zip";
     e.page = kEditionPage;
     e.file = L"OptiScaler_v10.0.0-pre1_20261127_WrongGPU-edition-v6.zip";
-    e.size = 185513174ull;
-    e.sha256 = L"0a187a66fa8889b817da6dc440ea5ec5a80dabeb3192eeb416534d350e5e05b3";
-    e.dllSha256 = L"359eb5fb0a11b15d0bed7b227f9b0869fa85e77df43d6af791ba813e12e9b935";
+    e.size = 185382527ull;
+    e.sha256 = L"848f073c28e571f93e0ab1b33c88fda0a67f48947db94c76725397fcd4c2f1b9";
+    e.dllSha256 = L"45d199738b88500a303f3ebb859c17289f48ec6b09c799319b5e982c8647f4eb";
     e.version = L"10.0.0-pre1 (WrongGPU edition v6)";
 #ifdef WRONGGPU_TESTING
     // tests: their own server and stand-in archive, or no download at all
