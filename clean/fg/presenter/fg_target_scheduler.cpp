@@ -214,6 +214,7 @@ FgStatus FgTargetScheduler::BeginEpoch(std::uint64_t epoch) {
     uncapped_arrival_ = 0;
     cadence_arrival_ = previous_credit_wait_ = 0;
     playout_period_ = 0;
+    protect_consumed_lead_ = false;
     fill_requested_ = fill_count_ = fill_overrun_ = 0;
     overflow_ready_ = false;
     anchored_ = false;
@@ -505,6 +506,7 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
 
     const bool track_playout = config_.consumed_admission && adaptive_vrr && n > 0 &&
                                period_estimate / 4 < w.min_interval;
+    const bool protect_lead = track_playout && protect_consumed_lead_;
     if (track_playout) {
         const auto nominal = period_estimate;
         if (playout_period_ == 0 || ev == FgIntervalEstimator::Event::Discontinuity) {
@@ -525,7 +527,7 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
         const auto budgeted = RequiredLead(period_estimate, count == 0 && last_interval_count_ > 0 ? effective : count);
         // A little headroom at high base rates absorbs the wake and bridge jitter left
         // after producer readiness. Admission still releases on consumption.
-        if (!track_playout || count == 0) return budgeted;
+        if (!protect_lead || count == 0) return budgeted;
         const auto reserve = std::min<FgTicks>(10000, period_estimate / 8);
         return budgeted > kTicksMax - reserve ? kTicksMax : budgeted + reserve;
     };
@@ -656,12 +658,14 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
         if (diff > deadband) {
             const bool recover_single = adaptive_vrr && n == 1 && period_estimate / 3 < w.min_interval &&
                                         shortfall_run_ > 0;
-            const FgTicks limit = track_playout ? period_estimate / 4 :
-                                  n == 0 ? period_estimate / 8 : period_estimate / (recover_single ? 16 : 128);
-            correction = Clamp(diff / (track_playout ? 2 : 8), 0, limit);
+            const bool recover_playout = track_playout && shortfall_run_ > 0;
+            const FgTicks limit = protect_lead ? period_estimate / 4 :
+                                  n == 0 || recover_playout ? period_estimate / 8 :
+                                  period_estimate / (recover_single ? 16 : 128);
+            correction = Clamp(diff / (protect_lead ? 2 : 8), 0, limit);
         } else if (diff < -deadband) {
             const FgTicks limit = diff < -period_estimate / 4 ? period_estimate / 4 : period_estimate / 8;
-            correction = Clamp(diff / (track_playout ? 8 : 2), -limit, 0);
+            correction = Clamp(diff / (protect_lead ? 8 : 2), -limit, 0);
         }
         period = period_estimate + correction;
         FgTicks floor = 0;

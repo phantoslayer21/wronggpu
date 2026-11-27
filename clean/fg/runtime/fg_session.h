@@ -341,6 +341,7 @@ public:
     bool SetFirstImageBudget(FgTicks budget);
     bool SetMaxGeneratedCap(uint32_t cap);
     void SetOverflowReady(bool ready) { if (scheduler_) scheduler_->SetOverflowReady(ready); }
+    void SetConsumedLeadProtection(bool active) { if (scheduler_) scheduler_->SetConsumedLeadProtection(active); }
     uint64_t PresentEpoch() const { return present_epoch_; }
     bool MenuLatchPending() const { return menu_latch_; }
     const FgCreateDesc& CreateDesc() const { return desc_.create; }

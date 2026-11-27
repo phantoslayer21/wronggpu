@@ -1493,6 +1493,7 @@ struct FgAsiSessionHost::Impl {
             if (delivery_requested || delivery.cap || delivery.ready) {
                 delivery = {};
                 session->SetOverflowReady(false);
+                session->SetConsumedLeadProtection(false);
                 ApplyCountCaps();
             }
             delivery_base = presenter->Stats();
@@ -1617,6 +1618,9 @@ struct FgAsiSessionHost::Impl {
         // before WaitForCreditRoom returned (d_p90 is below the slack threshold) and the newest cadence caught up to the
         // current budget (p_med <= budget + 3.5 ms) so we never stack downward steps across phase lag.
         const wgfg::FgTicks d_orig_p90_pre = d_origins.Percentile(0.90);
+        const wgfg::FgTicks d_orig_p95 = d_origins.Percentile(0.95);
+        session->SetConsumedLeadProtection(HasActiveProducerTail(consumed_admission, d_origins.Size(),
+                                                                 d_orig_p95, budget));
         const wgfg::FgTicks slack_threshold = FirstImageReadinessSlack(budget, consumed_admission, last_generating_count);
         const wgfg::FgTicks p_med_pre = base_dts.Percentile(0.50, 4);
         if (clean_excess_check &&
@@ -1648,7 +1652,7 @@ struct FgAsiSessionHost::Impl {
         const wgfg::FgTicks d_p50 = d_origins.Percentile(0.50, 8);
         const wgfg::FgTicks d_recent_p95 = d_origins.Percentile(0.95, 8);
         const wgfg::FgTicks d_p90 = d_orig_p90_pre;
-        const wgfg::FgTicks d_p95 = d_origins.Percentile(0.95);
+        const wgfg::FgTicks d_p95 = d_orig_p95;
         budget_limits.TrackCleanWindow(evaluated_frames >= kBudgetWindow, missed == 0, kBudgetBase, d_p95);
         // A rate observed after admission blocked is paced by the budget itself. Use producer readiness from
         // intervals with at most 0.5 ms admission/slot wait, and leave the dynamic cap unknown without such data.

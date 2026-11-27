@@ -167,6 +167,10 @@ struct OverflowDelivery {
     }
 };
 
+inline bool HasActiveProducerTail(bool consumed, std::size_t samples, int64_t readiness_p95, int64_t budget) {
+    return consumed && samples >= 6 && readiness_p95 + 12500 >= budget;
+}
+
 inline void ResetFirstImageBudgetWindow(FirstImageBudgetLimits& limits, wgfg::FgPresentStats& baseline,
                                       const wgfg::FgPresentStats& current) {
     limits = {};

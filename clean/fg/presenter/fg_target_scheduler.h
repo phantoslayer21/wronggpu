@@ -152,6 +152,7 @@ public:
     // 0 clears the override.
     void SetMaxGeneratedCap(std::uint32_t cap);
     void SetOverflowReady(bool ready) { overflow_ready_ = ready; }
+    void SetConsumedLeadProtection(bool active) { protect_consumed_lead_ = active; }
     std::uint32_t MaxGeneratedCap() const { return max_generated_cap_; }
 
 private:
@@ -173,6 +174,7 @@ private:
     FgTicks uncapped_arrival_ = 0;
     FgTicks cadence_arrival_ = 0, previous_credit_wait_ = 0;
     FgTicks playout_period_ = 0;
+    bool protect_consumed_lead_ = false;
     std::uint32_t fill_requested_ = 0;
     std::uint32_t fill_count_ = 0;
     std::uint32_t fill_overrun_ = 0;

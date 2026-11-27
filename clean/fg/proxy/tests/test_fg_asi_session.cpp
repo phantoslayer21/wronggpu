@@ -2656,6 +2656,10 @@ void TestOverflowDeliveryRequiresHeadroomAndStepsBackOnMisses() {
     CHECK(moderate.cap == 0);
     moderate.Observe(90, 2, 3, 5, true, false, true);
     CHECK(moderate.cap == 2);
+    CHECK(HasActiveProducerTail(true, 12, 80000, 92000));
+    CHECK(!HasActiveProducerTail(true, 12, 36000, 92000));
+    CHECK(!HasActiveProducerTail(false, 12, 80000, 92000));
+    CHECK(!HasActiveProducerTail(true, 5, 80000, 92000));
 }
 
 void TestMissFloorDecaysAfterCleanWindows() {
