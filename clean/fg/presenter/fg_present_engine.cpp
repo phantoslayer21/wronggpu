@@ -164,6 +164,10 @@ bool FgPresentEngine::PendingConsumptionFence(FgReadyFence* out) const {
     return false;
 }
 
+FgTicks FgPresentEngine::HeadPendingTarget() const {
+    return pending_.empty() ? 0 : slots_[pending_.front()].target;
+}
+
 std::uint64_t FgPresentEngine::SlotPresentId(std::uint32_t slot) const {
     return slot < slots_.size() && slots_[slot].state == FgEngineSlotState::Queued ? slots_[slot].present_id : 0;
 }

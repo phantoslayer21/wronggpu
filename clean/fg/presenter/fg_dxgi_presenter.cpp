@@ -518,11 +518,11 @@ bool FgDxgiPresenter::PlanHeadLocked(FgTicks now, Planned* out) {
             pl.issue_at = submit;
             pl.shown_at = vblank;
         } else {
-            const bool has_next =
+            const bool next_ready =
                 local_.size() > 1 && engine_.SlotPresentId(local_[1].slot) == local_[1].present_id;
-            const FgTicks next_target = has_next ? local_[1].target : 0;
+            const FgTicks next_target = next_ready ? local_[1].target : engine_.HeadPendingTarget();
             const FgTearingPlanDecision td = FgPlanTearingImage(p.target, p.real, now, last_issue_, desc_.min_interval,
-                                                                desc_.late_tolerance, has_next, next_target);
+                                                                desc_.late_tolerance, next_target > p.target, next_target);
             if (td.drop_late) {  // past tolerance or would push next past its slip allowance: drop and free lease
                 engine_.OnPresentDropped(p.present_id, FgDropReason::Late);
                 local_.pop_front();

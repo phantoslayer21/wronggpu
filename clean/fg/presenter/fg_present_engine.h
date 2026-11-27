@@ -151,6 +151,7 @@ public:
     bool HeadPendingFence(FgReadyFence* out) const;
     // Also watch the real copy independently of a generated image at the head of the pending queue.
     bool PendingConsumptionFence(FgReadyFence* out) const;
+    FgTicks HeadPendingTarget() const;
     // Engine present id of a Queued slot (0 otherwise).
     std::uint64_t SlotPresentId(std::uint32_t slot) const;
     bool Drained() const;  // nothing but the image on screen (and free slots) left
@@ -296,7 +297,7 @@ inline FgTearingPlanDecision FgPlanTearingImage(FgTicks target, bool real, FgTic
     if (real) return d;
     const FgTicks slot = has_next && next_target > target ? next_target - target : 0;
     FgTicks tol = base_late_tolerance;
-    const FgTicks slot_allow = slot - slot / 4;
+    const FgTicks slot_allow = slot - slot / 8;
     if (slot > 0) {
         const FgTicks scaled = slot_allow < 15000 ? 15000 : (slot_allow > 40000 ? 40000 : slot_allow);
         if (scaled > tol) tol = scaled;

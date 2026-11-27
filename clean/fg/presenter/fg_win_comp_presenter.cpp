@@ -667,10 +667,10 @@ void FgWinCompPresenter::SubmitOutboxLocked() {
         } else {
             // R3B-7: mirror DXGI tearing collision math so near-ceiling VRR output tolerates minor issue slip
             // without dropping ready generated images while preserving >= min_interval target spacing.
-            const bool has_next = i + 1 < deferred_.size();
-            const FgTicks next_target = has_next ? deferred_[i + 1].target : 0;
+            const FgTicks next_target = i + 1 < deferred_.size() ? deferred_[i + 1].target : engine_.HeadPendingTarget();
             const FgTearingPlanDecision td = FgPlanTearingImage(
-                p.target, p.real, now, have_vblank_ ? last_vblank_ : 0, desc_.min_interval, 20000, has_next, next_target);
+                p.target, p.real, now, have_vblank_ ? last_vblank_ : 0, desc_.min_interval, 20000,
+                next_target > p.target, next_target);
             if (td.drop_late) {
                 engine_.OnPresentDropped(p.present_id, FgDropReason::Late);
                 continue;

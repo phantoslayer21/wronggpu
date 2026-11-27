@@ -1305,16 +1305,16 @@ void TestTearingPlanHeadNearCeiling() {
         // Ready generated images with 0.3-1.0 ms jitter near the VRR ceiling must NOT be dropped.
         CHECK(dropped == 0);
     }
-    // Tolerate 1.8 ms of submission slip near the ceiling while retaining the 2 ms late-image cutoff.
+    // Tolerate a short slip near the ceiling and drop a generated image close to a full slot late.
     {
         const FgTicks target = kSecond;
         const FgTicks next_target = target + 28986;
         const FgTearingPlanDecision gen_ready =
-            FgPlanTearingImage(target, false, target + 18000, target - kMinInterval, kMinInterval, kBaseLateTol, true,
+            FgPlanTearingImage(target, false, target + 24000, target - kMinInterval, kMinInterval, kBaseLateTol, true,
                                next_target);
         CHECK(!gen_ready.drop_late);
         const FgTearingPlanDecision gen_late =
-            FgPlanTearingImage(target, false, target + 22000, target - kMinInterval, kMinInterval, kBaseLateTol, true,
+            FgPlanTearingImage(target, false, target + 27000, target - kMinInterval, kMinInterval, kBaseLateTol, true,
                                next_target);
         CHECK(gen_late.drop_late);
         const FgTearingPlanDecision real_late =

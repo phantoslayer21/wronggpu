@@ -260,8 +260,10 @@ struct Gpu {
             }
         }
         info->ClearStoredMessages();
+        debug_errors_seen += errors;
         return errors;
     }
+    int64_t debug_errors_seen = 0;
 };
 
 // The stand-in game's own textures: motion (zero) and depth (constant), and a colour source copied into the facade
@@ -2442,9 +2444,8 @@ int main(int argc, char** argv) {
                 }
             }
             if (g_debug_layer) {
-                const auto errors = g.DebugErrors();
-                std::printf("debug layer errors after GPU tests: %lld\n", static_cast<long long>(errors));
-                CHECK(errors == 0);
+                std::printf("debug layer errors in GPU tests: %lld\n", static_cast<long long>(g.debug_errors_seen));
+                CHECK(g.info && g.debug_errors_seen == 0);
             }
         }
     }
