@@ -83,7 +83,7 @@ struct FgSharedDispatchDesc {
     int previous_bank = -1, current_bank = -1;
     FgPreset preset = FgPreset::A;
     FgPresetGraph graph = {};
-    uint32_t generated_count = 0;  // N frozen for this frame
+    uint32_t generated_count = 0;  // N scheduled for this frame after display and latency caps
     bool generates = false;        // this frame's interval schedules generated images
     const FgFramePacket* packet = nullptr;  // valid for the duration of the call
 };

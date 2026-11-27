@@ -749,6 +749,24 @@ void TestEndToEndCountsAndPresets() {
     }
 }
 
+void TestSharedWorkFollowsDisplayLimitedCount() {
+    for (const uint32_t requested : {1u, 5u}) {
+        Rig rig(requested, WG_FG_PRESET_C);
+        rig.period = 71429;  // 140 fps base, one generated image fits a 360 Hz display
+        rig.desc.scheduler.adaptive_count = true;
+        CHECK(rig.Create().error == FgSessionError::None);
+        rig.Frames(24);
+        for (size_t i = 0; i < rig.frames.size(); ++i) {
+            const auto& f = rig.frames[i];
+            const auto shared = IndexEvents(rig.exec, f.token, 'S');
+            CHECK(shared.size() == 1);
+            if (!shared.empty()) CHECK(shared[0].n == f.session.scheduled);
+            if (i >= kWarmup) CHECK(f.session.scheduled == 1 && f.session.generated_recorded == 1);
+        }
+        CHECK(rig.Shutdown());
+    }
+}
+
 // 2x -> 6x -> 3x in one session: the count follows the game at game-frame boundaries and history is never reset.
 void TestDynamicCountNoHistoryReset() {
     Rig rig(1, WG_FG_PRESET_B);
@@ -1452,6 +1470,7 @@ void Run(const char* name, void (*test)()) {
 
 int main() {
     Run("TestEndToEndCountsAndPresets", &TestEndToEndCountsAndPresets);
+    Run("TestSharedWorkFollowsScheduledCount", &TestSharedWorkFollowsDisplayLimitedCount);
     Run("TestDynamicCountNoHistoryReset", &TestDynamicCountNoHistoryReset);
     Run("TestPresetSwitchAtFrameBoundary", &TestPresetSwitchAtFrameBoundary);
     Run("TestMenuLatch", &TestMenuLatch);

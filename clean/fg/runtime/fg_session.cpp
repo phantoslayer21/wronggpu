@@ -729,7 +729,8 @@ FgSessionResult FgSession::OnPresent(const FgFramePacket& packet) {
             sd.current_bank = ingest.current_bank;
             sd.preset = packet.preset;
             FgPresetGraphOf(packet.preset, &sd.graph);
-            sd.generated_count = packet.generated_count;
+            // Hoisted per-index work must use the same count and interpolation times as the presenter plan.
+            sd.generated_count = plan.generated_count;
             sd.generates = plan.generated_count > 0;
             sd.packet = &packet;
             FgSharedResult shared;
