@@ -38,6 +38,7 @@
 #include <mutex>
 #include <vector>
 
+#include "fg_display_cadence.h"
 #include "fg_present_engine.h"
 #include "fg_win_common.h"
 
@@ -104,6 +105,7 @@ public:
     // Waits (bounded) until no old work is left: before a resize or Detach. true when drained.
     bool WaitIdle(DWORD timeout_ms);
     FgCompPresenterInfo Info() const;
+    FgDisplaySummary ReadDisplayCadence(bool window);
     std::uint32_t FreeSlots() const;
     DWORD WorkerThreadId() const { return worker_.ThreadId(); }
     void SetRealRetireCallback(FgRealRetireFn fn, void* ctx);
@@ -132,9 +134,8 @@ private:
     struct Submitted {
         std::uint64_t engine_id;
         std::uint64_t platform_id;
-        std::uint32_t slot;
-        FgTicks target;
-        bool real;
+        FgTicks vblank;
+        FgDisplayPresent display;
     };
 
     explicit FgWinCompPresenter(const FgCompPresenterDesc& desc, const FgEngineConfig& engine);
@@ -149,7 +150,8 @@ private:
     void CancelOnDisplayLocked(std::uint64_t engine_from);
     void LoseLocked();
     void UpdateGridLocked();
-    bool EngineIdForPlatform(std::uint64_t platform_id, std::uint64_t* engine_id, bool erase);
+    bool TakePlatformPresent(std::uint64_t platform_id, Submitted* out);
+    void ForgetSubmittedLocked();
 
     FgCompPresenterDesc desc_;
     FgCompPresenterInfo info_;
@@ -175,6 +177,7 @@ private:
 
     mutable std::mutex mutex_;
     FgPresentEngine engine_;
+    FgDisplayCadence display_;
     std::vector<FgEnginePresent> deferred_;
     std::vector<Submitted> submitted_;
     std::vector<std::uint32_t> scratch_slots_;

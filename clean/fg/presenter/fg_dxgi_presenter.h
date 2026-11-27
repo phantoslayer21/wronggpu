@@ -30,6 +30,7 @@
 #include <mutex>
 #include <vector>
 
+#include "fg_display_cadence.h"
 #include "fg_present_engine.h"
 #include "fg_win_common.h"
 
@@ -93,6 +94,7 @@ public:
     bool WaitIdle(DWORD timeout_ms);
     bool HoldsSwapChainBuffers() const;
     FgDxgiPresenterInfo Info() const;
+    FgDisplaySummary ReadDisplayCadence(bool window);
     std::uint32_t FreeSlots() const;
     DWORD WorkerThreadId() const { return worker_.ThreadId(); }
     void SetRealRetireCallback(FgRealRetireFn fn, void* ctx);
@@ -159,6 +161,7 @@ private:
 
     mutable std::mutex mutex_;
     FgPresentEngine engine_;
+    FgDxgiDisplayCadence display_;
     std::deque<FgEnginePresent> local_;  // queued on the engine, not yet presented (present-id order)
     bool latency_credit_ = false;        // a frame-latency count taken but not yet used by a Present
     bool presenting_ = false;            // true while the worker holds the engine's present lease

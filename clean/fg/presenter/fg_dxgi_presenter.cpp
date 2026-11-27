@@ -16,10 +16,16 @@ constexpr std::uint32_t kMaxSlots = 32;
 constexpr FgTicks kGridRefresh = 10000000;  // re-read the vblank phase once a second
 constexpr DWORD kLatencyWaitMs = 10;
 
+bool StatisticsUnsupported(HRESULT hr) {
+    return hr == DXGI_ERROR_UNSUPPORTED || hr == DXGI_ERROR_INVALID_CALL || hr == E_NOTIMPL ||
+           hr == E_NOINTERFACE;
+}
+
 }  // namespace
 
 FgDxgiPresenter::FgDxgiPresenter(const FgDxgiPresenterDesc& desc, const FgEngineConfig& engine)
-    : desc_(desc), device_(desc.device), queue_(desc.queue), swap_(desc.swap_chain), engine_(engine, &fences_) {
+    : desc_(desc), device_(desc.device), queue_(desc.queue), swap_(desc.swap_chain), engine_(engine, &fences_),
+      display_(desc.refresh_period) {
     info_.slot_count = engine.slot_count;
 }
 
@@ -223,6 +229,11 @@ FgDxgiPresenterInfo FgDxgiPresenter::Info() const {
     return info_;
 }
 
+FgDisplaySummary FgDxgiPresenter::ReadDisplayCadence(bool window) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return window ? display_.TakeWindow() : display_.Session();
+}
+
 std::uint32_t FgDxgiPresenter::FreeSlots() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return engine_.FreeSlots();
@@ -334,6 +345,7 @@ FgStatus FgDxgiPresenter::CompleteResize(bool resize_ok, std::uint64_t new_epoch
     std::lock_guard<std::mutex> lock(mutex_);
     if (presenting_ || !CopiesIdleLocked()) return engine_.Refuse(FgStatus::Busy);
     const FgStatus s = engine_.CompleteResize(resize_ok, new_epoch);
+    if (s == FgStatus::Ok) display_.EndEpoch();
     if (s != FgStatus::Ok) return s;
     const FgWinResult r = AcquireChain();  // the resized chain's buffers (and new slots when size / format changed)
     if (!r.Ok()) {
@@ -359,6 +371,7 @@ FgStatus FgDxgiPresenter::OnDeviceLost() {
         return FgStatus::Ok;
     }
     const FgStatus s = engine_.OnDeviceLost();
+    display_.EndEpoch();
     local_.clear();
     return s;
 }
@@ -378,6 +391,7 @@ FgStatus FgDxgiPresenter::Detach() {
     const FgStatus s = engine_.Detach(FgInterruptNow(), &from);
     CancelLocalLocked(from);
     if (s == FgStatus::Ok) {
+        display_.EndEpoch();
         // the presents already on the game's queue finish before the chain is let go (the game may release the swap
         // chain right after Detach)
         DrainQueueLocked(1000);
@@ -425,6 +439,7 @@ bool FgDxgiPresenter::DrainQueueLocked(DWORD timeout_ms) {
 
 void FgDxgiPresenter::LoseLocked() {
     engine_.OnDeviceLost();
+    display_.EndEpoch();
     local_.clear();
 }
 
@@ -466,7 +481,10 @@ void FgDxgiPresenter::StepLocked(FgTicks now) {
         grid_updated_at_ = now;
         FgRefreshGrid grid;
         DXGI_FRAME_STATISTICS fs = {};
-        if (SUCCEEDED(swap_->GetFrameStatistics(&fs)) && fs.SyncQPCTime.QuadPart != 0) {
+        const HRESULT result = swap_->GetFrameStatistics(&fs);
+        if (result == DXGI_ERROR_FRAME_STATISTICS_DISJOINT)
+            display_.Discontinuity(FgDisplayFeedbackError::Disjoint);
+        if (SUCCEEDED(result) && fs.SyncQPCTime.QuadPart != 0) {
             grid.origin = clock_map_.FromQpc(fs.SyncQPCTime.QuadPart);  // this chain's own last vblank
             grid.period = info_.grid.period;
             info_.grid = grid;
@@ -682,6 +700,15 @@ bool FgDxgiPresenter::PresentHead(HANDLE stop) {
         }
     }
     const FgTicks present_done = FgInterruptNow();
+    const bool shown = SUCCEEDED(hr) && hr != DXGI_STATUS_OCCLUDED;
+    UINT present_id = 0;
+    DXGI_FRAME_STATISTICS frame_stats = {};
+    HRESULT id_result = S_FALSE, stats_result = S_FALSE;
+    if (shown) {
+        // Sample the chain outside the presenter lock and after measuring the Present call.
+        id_result = swap->GetLastPresentCount(&present_id);
+        stats_result = swap->GetFrameStatistics(&frame_stats);
+    }
 
     std::lock_guard<std::mutex> lock(mutex_);
     presenting_ = false;
@@ -696,7 +723,6 @@ bool FgDxgiPresenter::PresentHead(HANDLE stop) {
         LoseLocked();
         return true;
     }
-    const bool shown = SUCCEEDED(hr) && hr != DXGI_STATUS_OCCLUDED;
     const FgTicks duration = present_started > 0 ? present_done - present_started : 0;
     // Keep the submission and display estimates anchored to the return from the Present call.
     engine_.FinishLeasedPresent(head.present.slot, SUCCEEDED(hr) ? present_done : 0,
@@ -712,6 +738,32 @@ bool FgDxgiPresenter::PresentHead(HANDLE stop) {
     if (tearing && shown) {
         call_pacing_.Observe(duration);
         info_.present_call_p85_smoothed = call_pacing_.Estimate();
+    }
+    if (shown) {
+        if (id_result == S_OK) {
+            display_.Submitted(present_id, {head.present.target, present_started, head.present.real,
+                                           head.present.gameplay});
+        } else {
+            display_.MissingId();
+        }
+        if (stats_result == DXGI_ERROR_FRAME_STATISTICS_DISJOINT ||
+            id_result == DXGI_ERROR_FRAME_STATISTICS_DISJOINT) {
+            display_.Discontinuity(FgDisplayFeedbackError::Disjoint);
+        } else if (StatisticsUnsupported(id_result) || StatisticsUnsupported(stats_result)) {
+            display_.Discontinuity(FgDisplayFeedbackError::Unsupported);
+        } else {
+            if (id_result != S_OK || stats_result != S_OK)
+                display_.Discontinuity(FgDisplayFeedbackError::ReadError);
+            if (stats_result == S_OK && (frame_stats.PresentCount != 0 || frame_stats.PresentRefreshCount != 0 ||
+                                         frame_stats.SyncQPCTime.QuadPart != 0)) {
+                // With VRR there is no fixed time offset between distinct refresh counts.
+                const FgTicks displayed = frame_stats.PresentRefreshCount == frame_stats.SyncRefreshCount &&
+                                                  frame_stats.SyncQPCTime.QuadPart > 0
+                                              ? clock_map_.FromQpc(frame_stats.SyncQPCTime.QuadPart)
+                                              : 0;
+                display_.ObserveLatest(frame_stats.PresentCount, displayed);
+            }
+        }
     }
     last_present_start_ = present_started;
     last_present_done_ = present_done;

@@ -74,6 +74,7 @@ struct FgEnginePresent {
     FgTicks target = 0;
     FgTicks deadline = 0;
     FgReadyFence fence;
+    bool gameplay = true;
 };
 
 enum class FgEngineSlotState : std::uint8_t {
@@ -191,6 +192,7 @@ private:
         bool represent = false;
         bool real_credit_active = false;
         bool consumption_pending = false;
+        bool gameplay = true;
     };
 
     void RetireReal(Slot& s, bool displayed);

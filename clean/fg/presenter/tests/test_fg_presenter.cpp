@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "../fg_fake_presenter.h"
+#include "../fg_display_cadence.h"
 #include "../fg_present_engine.h"
 #include "../fg_target_scheduler.h"
 
@@ -1512,6 +1513,62 @@ void TestRtOffTearingFloorReplay() {
           bounded.reanchors == x2.reanchors);
 }
 
+void TestDxgiDisplayCadence() {
+    g_case = "DXGI display cadence";
+    FgDxgiDisplayCadence cadence(100000);  // 10 ms refresh period
+    const FgTicks start = kSecond;
+    cadence.Submitted(100, {start - 20000, start - 30000, true, true});
+    cadence.ObserveLatest(100, start);
+    cadence.ObserveLatest(100, start + 10000);  // the same ID can appear in multiple polls
+    cadence.Submitted(101, {start, start, true, false});
+    cadence.Submitted(102, {start + 130000, start + 120000, false, true});
+    cadence.ObserveLatest(102, start + 160000);
+    cadence.Submitted(103, {start + 230000, start + 220000, true, true});
+    cadence.ObserveLatest(103, start + 240000);
+    cadence.Submitted(104, {start + 240000, start + 240000, true, false});
+    cadence.ObserveLatest(104, start + 240000);
+    const auto first = cadence.TakeWindow();
+    CHECK(first.submitted == 5 && first.real == 3 && first.generated == 1 && first.unseen == 1);
+    CHECK(first.gameplay_real == 2 && first.gameplay_generated == 1 && first.GameplayMultiplier() == 1.5);
+    CHECK(first.interval_samples == 3 && first.short_intervals == 2);
+    CHECK(first.interval_p50 == 80000 && first.interval_p95 == 160000 && first.interval_p99 == 160000);
+    CHECK(first.interval_max == 160000 && first.latency_p50 == 10000 && first.latency_p95 == 30000);
+    CHECK(first.GameplayFps() == 10000000.0 / 80000);  // no gameplay span across an unseen image
+    CHECK(cadence.TakeWindow().real == 0);
+
+    cadence.Submitted(105, {start, start, true, true});
+    cadence.Discontinuity(FgDisplayFeedbackError::Disjoint);
+    cadence.ObserveLatest(105, start + 900000);  // an ID from the prior statistics epoch
+    cadence.Submitted(106, {start + 900000, start + 880000, true, true});
+    cadence.ObserveLatest(106, 0);  // ID resolved, timestamp unavailable
+    cadence.Submitted(107, {start + 910000, start + 900000, true, true});
+    cadence.ObserveLatest(107, start + 900000);
+    cadence.Submitted(108, {start, start, true, true});
+    cadence.Discontinuity(FgDisplayFeedbackError::Unsupported);
+    const auto all = cadence.Session();
+    CHECK(all.submitted == 9 && all.real == 5 && all.generated == 1 && all.unseen == 1);
+    CHECK(all.disjoint == 1 && all.unsupported == 1 && all.unresolved == 2);
+    CHECK(all.untimed == 1 && all.interval_samples == 3);
+
+    FgDxgiDisplayCadence wrap(100000);
+    wrap.Submitted(0xffffffffu, {start, start, true, true});
+    wrap.Submitted(0, {start, start, false, true});
+    wrap.ObserveLatest(0xfffffffeu, start);
+    CHECK(wrap.Session().pending == 2);
+    wrap.ObserveLatest(0, start);
+    CHECK(wrap.Session().unseen == 1 && wrap.Session().generated == 1 && wrap.Session().pending == 0);
+
+    FgDxgiDisplayCadence boundary(100000);
+    boundary.Submitted(1, {start, start, true, true});
+    boundary.ObserveLatest(1, start);
+    boundary.TakeWindow();
+    boundary.Submitted(2, {start + 90000, start + 90000, true, true});
+    boundary.ObserveLatest(2, start + 90000);
+    const auto next = boundary.TakeWindow();
+    CHECK(next.interval_samples == 1 && next.short_intervals == 0);
+    CHECK(next.interval_p50 == 90000 && next.gameplay_intervals == 1);
+}
+
 void TestRtOffWrappedPresentReplay() {
     g_case = "RT-off wrapped Present spikes";
     constexpr FgTicks physical = 27778;
@@ -1925,6 +1982,7 @@ int main() {
     TestFixedGridCountCandidateRestartsItsStreak();
     TestSchedulerReportsReanchorCauses();
     TestRtOffTearingFloorReplay();
+    TestDxgiDisplayCadence();
     TestRtOffWrappedPresentReplay();
     TestRtOffAdmissionWaitKeepsProducerLead();
     std::printf("test_fg_presenter: %d checks, %d failure(s)\n", g_checks, g_failures);

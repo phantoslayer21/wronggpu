@@ -253,6 +253,7 @@ void FgPresentEngine::Queue(std::uint32_t slot, bool represent) {
     p.target = s.target;
     p.deadline = s.deadline;
     p.fence = s.fence;
+    p.gameplay = s.gameplay;
     outbox_.push_back(p);
 }
 
@@ -463,6 +464,7 @@ FgStatus FgPresentEngine::PresentRealOnly(const FgIntervalPlan& plan, const FgRe
     r.frame_id = plan.real_frame_id;
     r.index = 1;
     r.real = true;
+    r.gameplay = plan.real_only_reason != FgRealOnlyReason::MenuDisabled;
     r.real_credit_active = true;
     r.target = plan.targets[0].target;
     r.deadline = plan.targets[0].deadline;

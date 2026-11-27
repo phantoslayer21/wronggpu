@@ -340,10 +340,17 @@ struct FgAsiSessionHost::Impl {
     uint32_t trace_since_summary = 0;
     bool trace_csv_enabled = false;
     std::string trace_csv_path;
+    struct DisplayTrace {
+        const char* source = "unavailable";
+        wgfg::FgDisplaySummary samples;
+    };
+    bool logged_display_disjoint = false;
+    bool logged_display_unsupported = false;
     struct TraceJob {
         std::vector<IntervalTrace> rows;
         std::string summary_tag;
         wgfg::FgTicks budget = 0;
+        DisplayTrace display{};
     };
     std::condition_variable trace_cv;
     std::deque<TraceJob> trace_jobs;
@@ -426,7 +433,7 @@ struct FgAsiSessionHost::Impl {
                 trace_jobs.pop_front();
             }
             if (!job.summary_tag.empty()) {
-                LogTraceSummary(job.summary_tag.c_str(), job.budget, job.rows);
+                LogTraceSummary(job.summary_tag.c_str(), job.budget, job.rows, job.display);
                 continue;
             }
             if (!csv) csv = OpenTraceCsv();
@@ -559,7 +566,47 @@ struct FgAsiSessionHost::Impl {
         }
     }
 
-    void QueueTraceSummary(const char* tag, bool closing) {
+    DisplayTrace ReadDisplayCadence(bool window) {
+        auto* pr = session ? session->Presenter() : nullptr;
+        if (auto* dx = dynamic_cast<wgfg::FgDxgiPresenter*>(pr)) {
+            return {"dxgi-vblank", dx->ReadDisplayCadence(window)};
+        }
+        if (auto* cp = dynamic_cast<wgfg::FgWinCompPresenter*>(pr)) {
+            return {"composition", cp->ReadDisplayCadence(window)};
+        }
+        return {};
+    }
+
+    static std::string FormatDisplay(const DisplayTrace& display) {
+        const auto& t = display.samples;
+        const auto us = [](wgfg::FgTicks ticks) { return std::to_string(ticks / 10); };
+        const auto count = [](uint64_t n) { return std::to_string(n); };
+        char fps[32] = "n/a";
+        if (t.gameplay_time > 0) std::snprintf(fps, sizeof(fps), "%.1f", t.GameplayFps());
+        return std::string("display_source=") + display.source +
+               " display_observed=" + count(t.real + t.generated) +
+               " display_unseen=" + count(t.unseen) + " display_unresolved=" + count(t.unresolved) +
+               " display_pending=" + count(t.pending) + " display_polled_submitted=" + count(t.submitted) +
+               " display_untimed=" + count(t.untimed) + " display_disjoint=" + count(t.disjoint) +
+               " display_unsupported=" + count(t.unsupported) + " display_read_errors=" + count(t.read_errors) +
+               " | display_dt_us p50=" + us(t.interval_p50) + " p95=" + us(t.interval_p95) +
+               " p99=" + us(t.interval_p99) + " max=" + us(t.interval_max) + " n=" + count(t.interval_samples) +
+               " short=" + count(t.short_intervals) + " | display_latency_us p50=" + us(t.latency_p50) +
+               " p95=" + us(t.latency_p95) + " n=" + count(t.real + t.generated - t.untimed) +
+               " | gameplay_display_fps=" + fps +
+               " gameplay_display_real=" + count(t.gameplay_real) +
+               " gameplay_display_generated=" + count(t.gameplay_generated);
+    }
+
+    void QueueTraceSummary(const char* tag, bool closing, const DisplayTrace& display) {
+        if (display.samples.disjoint && !logged_display_disjoint) {
+            Log("fg host: DXGI display statistics disjoint; cadence restarted");
+            logged_display_disjoint = true;
+        }
+        if (display.samples.unsupported && !logged_display_unsupported) {
+            Log("fg host: DXGI display statistics unsupported on the swap chain");
+            logged_display_unsupported = true;
+        }
         std::lock_guard<std::mutex> lock(trace_mu);
         if (trace_count != 0 && trace_worker.joinable()) {
             std::vector<IntervalTrace> snap;
@@ -572,13 +619,15 @@ struct FgAsiSessionHost::Impl {
                 trace_jobs.push_back({std::move(trace_evicted), {}, 0});
                 trace_evicted.clear();
             }
-            trace_jobs.push_back({std::move(snap), tag, budget});
+            trace_jobs.push_back({std::move(snap), tag, budget, display});
             trace_cv.notify_one();
         }
         if (closing) {
             trace_count = 0;
             trace_head = 0;
             trace_since_summary = 0;
+            logged_display_disjoint = false;
+            logged_display_unsupported = false;
         }
     }
 
@@ -593,7 +642,8 @@ struct FgAsiSessionHost::Impl {
         return out.empty() ? "none" : out;
     }
 
-    void LogTraceSummary(const char* tag, wgfg::FgTicks summary_budget, const std::vector<IntervalTrace>& snap) {
+    void LogTraceSummary(const char* tag, wgfg::FgTicks summary_budget, const std::vector<IntervalTrace>& snap,
+                         const DisplayTrace& display) {
         std::vector<int64_t> base_dt, wait_us, rec_us, gen_rdy_us, real_rdy_us, slip_us;
         std::vector<int64_t> present_interval_us, queue_depth_wait_us, inner_present_us;
         uint32_t max_in_flight = 0;
@@ -646,7 +696,8 @@ struct FgAsiSessionHost::Impl {
                       static_cast<long long>(Percentile(queue_depth_wait_us, 1.00)),
                       static_cast<long long>(Percentile(inner_present_us, 0.95)),
                       static_cast<long long>(Percentile(inner_present_us, 1.00)), inner_present_us.size());
-        Log(std::string(buf) + " | gen_reanchor_causes=" + FormatReanchorCauses(causes));
+        Log(std::string(buf) + " | gen_reanchor_causes=" + FormatReanchorCauses(causes) + " | " +
+            FormatDisplay(display));
     }
 
     void EnsureLatencySemLocked() {
@@ -1248,7 +1299,11 @@ struct FgAsiSessionHost::Impl {
                           static_cast<unsigned long long>(ps.real_submitted), sust,
                           ps.display_time_measured ? "measured" : "submit-estimate",
                           static_cast<unsigned long long>(FgSwapChain::TotalWorkerReentries()));
-            Log(buf);
+            const DisplayTrace display = ReadDisplayCadence(false);
+            char gameplay[32] = "n/a";
+            if (display.samples.gameplay_real)
+                std::snprintf(gameplay, sizeof(gameplay), "%.2fx", display.samples.GameplayMultiplier());
+            Log(std::string(buf) + " | gameplay_mult=" + gameplay + " | " + FormatDisplay(display));
             // why intervals were real-only (the scheduler's / presenter's reasons), and the DXGI back end's presents
             std::string reasons = "fg host: real-only intervals:";
             for (uint32_t k = 1; k < wgfg::kFgRealOnlyReasonCount; ++k)
@@ -1292,10 +1347,11 @@ struct FgAsiSessionHost::Impl {
                        " gen_reanchor_causes=" + FormatReanchorCauses(generating_reanchor_causes);
             Log(reasons);
         }
+        const DisplayTrace closing_display = ReadDisplayCadence(true);
         const wgfg::FgSessionResult r = session->Destroy();
         Log(std::string("fg host: session destroyed (") + why + "): " + wgfg::FgSessionErrorName(r.error));
         session.reset();
-        QueueTraceSummary(why, true);
+        QueueTraceSummary(why, true, closing_display);
         exec_source.reset();
         win_source.reset();
         DrainAdmissions();
@@ -2274,7 +2330,7 @@ HRESULT FgAsiSessionHost::PresentInterval(const FgPresentCall& call, IFgInnerPre
         m.RecordPresentIntervalTiming(m.handled_interval_id, wgfg::FgInterruptNow() - started, queue_wait);
         if (++m.trace_since_summary >= kTraceSummaryInterval) {
             m.trace_since_summary = 0;
-            m.QueueTraceSummary("periodic", false);
+            m.QueueTraceSummary("periodic", false, m.ReadDisplayCadence(true));
         }
         return advance;
     }
