@@ -1288,8 +1288,14 @@ class Context {
     ID3D12CommandList* l = wd_list_;
     wd_queue_->ExecuteCommandLists(1, &l);
     wd_queue_->Signal(wd_fence_, ++wd_fv_);
-    for (int i = 0; i < 100 && wd_fence_->GetCompletedValue() < wd_fv_; ++i) Sleep(10);
-    if (wd_fence_->GetCompletedValue() < wd_fv_) return false;
+    for (int i = 0; i < 100; ++i) {
+      const uint64_t cv = wd_fence_->GetCompletedValue();
+      if (cv == UINT64_MAX) return false;
+      if (cv >= wd_fv_) break;
+      Sleep(10);
+    }
+    const uint64_t cv = wd_fence_->GetCompletedValue();
+    if (cv == UINT64_MAX || cv < wd_fv_) return false;
     void* p = nullptr;
     D3D12_RANGE r = {0, 32};
     if (FAILED(wd_read_->Map(0, &r, &p)) || !p) return false;
@@ -1788,7 +1794,11 @@ class Context {
     typedef HRESULT(WINAPI * PfnCreateDevice)(IUnknown*, D3D_FEATURE_LEVEL, REFIID, void**);
     HMODULE dxgi = LoadLibraryW(L"dxgi.dll");
     HMODULE d3d12 = GetModuleHandleW(L"d3d12.dll");
-    if (!d3d12) d3d12 = LoadLibraryW(L"d3d12.dll");
+    bool free_d3d12 = false;
+    if (!d3d12) {
+      d3d12 = LoadLibraryW(L"d3d12.dll");
+      free_d3d12 = d3d12 != nullptr;
+    }
     auto factory = dxgi ? reinterpret_cast<PfnCreateFactory>(
                               reinterpret_cast<void*>(GetProcAddress(dxgi, "CreateDXGIFactory1")))
                         : nullptr;
@@ -1796,6 +1806,8 @@ class Context {
                               reinterpret_cast<void*>(GetProcAddress(d3d12, "D3D12CreateDevice")))
                         : nullptr;
     if (!factory || !create) {
+      if (free_d3d12) FreeLibrary(d3d12);
+      if (dxgi) FreeLibrary(dxgi);
       say(WG_LOG_WARN, "sharing: dxgi.dll / d3d12.dll entry points not found");
       return nullptr;
     }
@@ -1811,6 +1823,8 @@ class Context {
     }
     if (a) a->Release();
     if (f) f->Release();
+    if (free_d3d12) FreeLibrary(d3d12);
+    if (dxgi) FreeLibrary(dxgi);
     return d;
   }
 

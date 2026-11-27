@@ -439,13 +439,14 @@ def test_hook(built, binding, out, logs, probe, n=None, gen=None, fault_built=No
                     + (f"\n{r.stderr.strip()}" if r.stderr.strip() else ""))
         if r.returncode:
             raise SystemExit("\n".join(logs))
-        if not probe and not bad_run:  # rr_enabled = 0 with the delay-load game too
-            r = subprocess.run([os.path.join(dstage, "test_hook_dll.exe"), dstage, "--rr-off"],
-                               capture_output=True, text=True, timeout=600)
-            logs.append(f"[2.{minor} hook {kind}, delay-load --rr-off] {r.stdout.strip()}"
-                        + (f"\n{r.stderr.strip()}" if r.stderr.strip() else ""))
-            if r.returncode:
-                raise SystemExit("\n".join(logs))
+        if not probe and not bad_run:  # rr_enabled = 0 and preloaded interface (another plugin loaded it first)
+            for flag in ("--rr-off", "--preloaded"):
+                r = subprocess.run([os.path.join(dstage, "test_hook_dll.exe"), dstage, flag],
+                                   capture_output=True, text=True, timeout=600)
+                logs.append(f"[2.{minor} hook {kind}, delay-load {flag}] {r.stdout.strip()}"
+                            + (f"\n{r.stderr.strip()}" if r.stderr.strip() else ""))
+                if r.returncode:
+                    raise SystemExit("\n".join(logs))
     test_guard(built, out, logs, probe, n, gen, iface_dll, implib, iface_name)
     return n, built
 

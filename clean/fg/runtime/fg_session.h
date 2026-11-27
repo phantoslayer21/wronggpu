@@ -173,6 +173,7 @@ public:
     virtual ~IFgPresenterSource() = default;
     virtual FgStatus CreatePresenter(const FgCreateDesc& desc, std::unique_ptr<IFgPresenter>* out,
                                      std::string* why) = 0;
+    virtual void ReleasePresenter() {}
 };
 
 // ---- session ---------------------------------------------------------------------------------------------------------

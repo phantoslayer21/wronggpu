@@ -60,7 +60,8 @@ class KRuntime {
   // On backend 3 create first checks that <build>/dx12/manifest.json has a port of every kernel the context can
   // launch (d3d12_missing): a context with a missing port is refused before the model is loaded, so the D3D12
   // executor refuses it and the HIP executor runs it (executor_select.h).
-  bool create(const WgRtConfig& cfg, Device* dev, AllocFn alloc, bool external_io, bool native_direct = false);
+  bool create(const WgRtConfig& cfg, Device* dev, AllocFn alloc, bool external_io, bool native_direct = false,
+              bool measure_only = false);
   // Enqueues one frame (does not wait).
   bool frame(const WgRtFrame& fr, const FrameIo* io);
   // native_direct: whether frame() would take this frame (nothing enqueued); false with err() saying why. The D3D12
@@ -120,6 +121,7 @@ class KRuntime {
   // smx_case_name names a self-check case
   bool smx_select(int backend, const std::string& hook);
   bool smx_check(bool rodd, bool all, std::vector<std::pair<std::string, uint64_t>>* out);
+  bool smx_measure_alloc();
   bool smx_probe(bool rodd, int* bad);
   std::string smx_case_name(int i, int ox, int oy, bool rodd) const;
   // the stage kernel network() launches: the __rodd form of a softmax stage after a failed probe
@@ -137,6 +139,7 @@ class KRuntime {
   AllocFn alloc_;
   bool external_io_ = false;
   bool native_direct_ = false;  // create's native_direct: the "_direct" kernels on the caller's bound textures
+  bool measure_only_ = false;   // Pass 1 arena sizing: allocate buffers, skip GPU uploads/memsets/sync
   std::string err_, build_dir_, model_path_, map_path_, kernels_text_;
   int W_ = 0, H_ = 0, W16_ = 0, H16_ = 0, Bw_ = 0, Bh_ = 0, max_rw_ = 0, max_rh_ = 0;
   bool hdr_ = false, depth_inverted_ = false, f16_ = false;  // f16_: runtime option network=fused16 (or fused8)

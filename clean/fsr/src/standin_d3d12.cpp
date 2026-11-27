@@ -462,6 +462,11 @@ public:
             return WG_ERROR_UNSUPPORTED;
         }
 
+        if (output == color || (needsDepth && output == depth) || (needsMotion && output == motion)) {
+            Log(WG_LOG_ERROR, "output aliases an active input resource");
+            return WG_ERROR_PARAMETER;
+        }
+
         // Descriptors for this frame.
         const UINT slot = (ring++ % kRingFrames) * kDescriptorsPerFrame;
         D3D12_CPU_DESCRIPTOR_HANDLE cpu = heap->GetCPUDescriptorHandleForHeapStart();

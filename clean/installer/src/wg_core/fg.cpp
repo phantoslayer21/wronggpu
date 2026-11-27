@@ -3,6 +3,7 @@
 #include "fg.h"
 
 #include "context.h"
+#include "detect.h"
 #include "pe.h"
 #include "profile.h"
 #include "record.h"
@@ -171,7 +172,11 @@ std::vector<FgLibrary> GameFgLibraries(const wstring& gameDir) {
 
 FgEnable CheckFgEnable(const wstring& gameDir, bool dataReady, wstring* library, wstring* why) {
     if (library) library->clear();
-    const std::vector<FgLibrary> libs = GameFgLibraries(gameDir);
+    std::vector<FgLibrary> libs = GameFgLibraries(gameDir);
+    if (libs.empty()) {
+        const wstring root = GameRoot(gameDir);
+        if (!root.empty() && !IEq(root, gameDir)) libs = GameFgLibraries(root);
+    }
     if (libs.empty()) {
         if (why)
             *why = L"This game has no frame generation library (nvngx_dlssg.dll): it does not offer DLSS Frame Generation, so WrongGPU's "

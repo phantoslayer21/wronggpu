@@ -72,6 +72,7 @@ struct FgPresenterFactoryDesc {
     UINT width = 0;
     UINT height = 0;
     DXGI_FORMAT format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    bool hdr = false;
     // DXGI
     ID3D12CommandQueue* queue = nullptr;
     IDXGISwapChain4* swap_chain = nullptr;

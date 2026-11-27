@@ -95,6 +95,7 @@ struct FgSchedulerConfig {
     FgTicks real_min_lead = 10000;             // a real target closer than this to its arrival re-anchors
     FgTicks max_lead = 500000;                 // playout lead cap (real target - arrival)
     std::uint32_t max_generated = kFgMaxGenerated;
+    FgTicks fixed_refresh_period = 0;   // > 0: require period / (N + 1) to fit a whole multiple of this refresh period
     bool adaptive_count = false;        // false: a fixed count outside the window suspends; true: lower the count
     bool menu_reprimes_history = true;  // a menu frame is not history for the next interval
 };

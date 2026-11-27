@@ -8,31 +8,50 @@ namespace wg {
 // key=value in [section] of an INI text: the existing line replaced, else added at the end of the section (or a new
 // section at the end of the file).
 string IniSet(const string& text, const string& section, const string& key, const string& value) {
+    const bool hasBom = text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xEF &&
+                        static_cast<unsigned char>(text[1]) == 0xBB && static_cast<unsigned char>(text[2]) == 0xBF;
+    const string bom = hasBom ? text.substr(0, 3) : string();
+    const string body = hasBom ? text.substr(3) : text;
+    const string eol = (body.empty() || body.find("\r\n") != string::npos) ? "\r\n" : "\n";
+    const bool trailingNewline = !body.empty() && body.back() == '\n';
     std::vector<string> lines;
-    for (size_t a = 0; a <= text.size();) {
-        size_t e = text.find('\n', a);
-        if (e == string::npos) { if (a < text.size()) lines.push_back(text.substr(a)); break; }
-        lines.push_back(text.substr(a, e - a)); a = e + 1;
+    for (size_t a = 0; a < body.size();) {
+        size_t e = body.find('\n', a);
+        if (e == string::npos) e = body.size();
+        string ln = body.substr(a, e - a);
+        if (!ln.empty() && ln.back() == '\r') ln.pop_back();
+        lines.push_back(ln);
+        a = e + 1;
     }
     auto trim = [](string t) { while (!t.empty() && (t.back() == '\r' || t.back() == ' ' || t.back() == '\t')) t.pop_back();
                                size_t i = 0; while (i < t.size() && (t[i] == ' ' || t[i] == '\t')) ++i; return t.substr(i); };
-    const string head = "[" + section + "]", line = key + "=" + value;
+    auto lowerAscii = [](string s) {
+        for (char& c : s) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        return s;
+    };
+    const string head = "[" + section + "]", lhead = lowerAscii(head), lkey = lowerAscii(key), line = key + "=" + value;
     int sec = -1, end = (int)lines.size();
     for (int i = 0; i < (int)lines.size(); ++i) {
         const string t = trim(lines[i]);
-        if (!t.empty() && t[0] == '[') { if (sec >= 0) { end = i; break; } if (t == head) sec = i; continue; }
+        if (!t.empty() && t[0] == '[') { if (sec >= 0) { end = i; break; } if (lowerAscii(t) == lhead) sec = i; continue; }
         if (sec < 0) continue;
         const size_t eq = t.find('=');
-        if (eq != string::npos && trim(t.substr(0, eq)) == key) { lines[i] = line + "\r"; sec = -2; break; }
+        if (eq != string::npos && lowerAscii(trim(t.substr(0, eq))) == lkey) { lines[i] = line; sec = -2; break; }
     }
-    if (sec == -1) { lines.push_back("\r"); lines.push_back(head + "\r"); lines.push_back(line + "\r"); }
-    else if (sec >= 0) {
+    if (sec == -1) {
+        if (!lines.empty() && !trim(lines.back()).empty()) lines.push_back("");
+        lines.push_back(head);
+        lines.push_back(line);
+    } else if (sec >= 0) {
         int at = end;
         while (at - 1 > sec && trim(lines[at - 1]).empty()) --at;  // before the blank lines that end the section
-        lines.insert(lines.begin() + at, line + "\r");
+        lines.insert(lines.begin() + at, line);
     }
-    string out;
-    for (size_t i = 0; i < lines.size(); ++i) { out += lines[i]; if (i + 1 < lines.size() || (!text.empty() && text.back() == '\n')) out += "\n"; }
+    string out = bom;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        out += lines[i];
+        if (i + 1 < lines.size() || trailingNewline || sec == -1) out += eol;
+    }
     return out;
 }
 // The value of `key` as WrongGPU's front end reads wronggpu.ini (keys before any section, in [wronggpu] and [fsr]; the

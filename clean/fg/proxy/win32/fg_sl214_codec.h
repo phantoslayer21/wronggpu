@@ -31,17 +31,16 @@
 //  - FRAME CLOCK. The game tags with the plain tag call (no frame token). All tags and constants between two game
 //    presents belong to one interval: they carry frame token (presents so far + 1); the present bridge presents that
 //    token and then advances the clock (frame_for_present / note_present).
-//  - CONSTANTS. view-to-clip of this frame and of the previous decoded frame, jitter, motion-vector scale, flags from
-//    the reset and depth-inverted tri-states. Unset tri-states are remembered for the state's status bit 8.
-// Only structures; no Windows calls. Thread safety: atomics for the clock and the remembered values, one mutex for the
-// previous matrix.
+//  - CONSTANTS. clip-to-prev-clip and prev-clip-to-clip of this frame, jitter, normalized UV motion-vector scale
+//    (WG_FG_FLAG_MOTION_SCALE_UV), flags from the reset and depth-inverted tri-states. Unset tri-states are remembered
+//    for the state's status bit 8.
+// Only structures; no Windows calls. Thread safety: atomics for the clock and the remembered values.
 // Written for this project.
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
 
 #include <atomic>
-#include <mutex>
 
 #include "fg_asi_transport.h"
 
@@ -180,6 +179,7 @@ public:
     // "mode 1 (on), frames 1, flags 0x8, ui recomposition 0" / "frames max 1, status 0x0, state v4"
     std::string describe_options(const void* native) override;
     std::string describe_state(const void* native) override;
+    uint32_t resolve_viewport_id(const WgViewport* vp, const void* native) const override;
 
     const FgSl214Layout& layout() const { return l_; }
     uint64_t presents() const { return interval_.load(); }
@@ -196,11 +196,6 @@ private:
     std::atomic<uint64_t> interval_{0};
     std::atomic<uint32_t> unset_{0};
     std::atomic<bool> have_constants_{false};
-    mutable std::mutex mu_;
-    float cur_view_to_clip_[16] = {};
-    float prev_view_to_clip_[16] = {};
-    uint64_t cur_frame_ = 0;
-    bool have_cur_ = false;
     std::atomic<uint64_t> c_tags_seen_{0}, c_tags_bound_{0}, c_tags_wrong_guid_{0}, c_tags_lifetime_{0},
         c_tags_not_texture_{0}, c_constants_{0}, c_constants_refused_{0}, c_options_checked_{0},
         c_options_refused_{0}, c_states_{0};

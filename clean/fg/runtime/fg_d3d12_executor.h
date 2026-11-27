@@ -71,6 +71,7 @@ public:
     virtual FgStatus ReserveRealSlotStatus(uint32_t* slot) {
         return ReserveRealSlot(slot) ? FgStatus::Ok : FgStatus::WrongState;
     }
+    virtual void ReleaseRealSlot() {}
 };
 
 enum class FgExecRefusal : uint32_t {
@@ -276,6 +277,7 @@ public:
 
     // The presenter the session created (FgExecutorPresenterSource binds it); registers the producer fence with it.
     bool BindSlotTarget(IFgSlotTarget* target);
+    void UnbindSlotTarget();
     FgExecRefusal LastRefusal() const;
     const std::string& LastWhy() const;
     const FgExecCounters& Counters() const;
@@ -324,6 +326,7 @@ public:
         : inner_(inner), executor_(executor) {}
     ~FgExecutorPresenterSource() override;
     FgStatus CreatePresenter(const FgCreateDesc& desc, std::unique_ptr<IFgPresenter>* out, std::string* why) override;
+    void ReleasePresenter() override;
 
 private:
     IFgPresenterSource* inner_;

@@ -143,15 +143,15 @@ const GameTarget& Inspect(const wstring& exe, const wstring& name = L"") {
 
 // The model search runs on a worker thread; its result comes back as WM_APP_MODEL.
 void StartModelSearch() {
-    if (g.scanning || g.target.exe.empty()) return;
+    if (g.closing.load() || g.scanning || g.target.exe.empty()) return;
     g.model = ModelState(); g.model.status = ModelState::SEARCHING;
     g.modelFor = g.target.exe;
     const int gen = ++g.modelGeneration;
     GameTarget t = g.target; wstring dll = g.userDll; std::vector<StoreGame> libs = g.noScan ? std::vector<StoreGame>{} : g.libraries; HWND hwnd = g.hwnd;
-    std::thread([t, dll, libs, gen, hwnd] {
+    g.modelThreads.emplace_back([t, dll, libs, gen, hwnd] {
         auto* m = new ModelMsg{gen, FindModel(g.ctx, &t, dll, libs)};
-        if (!PostMessageW(hwnd, WM_APP_MODEL, 0, (LPARAM)m)) delete m;
-    }).detach();
+        if (g.closing.load() || !PostMessageW(hwnd, WM_APP_MODEL, 0, (LPARAM)m)) delete m;
+    });
 }
 
 void UpdateButtons();
@@ -342,8 +342,8 @@ void StartWork() {
 }
 
 bool RelaunchElevated() {
-    wstring args = L"\"/EXE=" + g.target.exe + L"\" /GO /ELEVATED";
-    if (g.uninstall) args = L"\"/DIR=" + g.target.dir + L"\" /GO /ELEVATED /UNINSTALL";
+    wstring args = wg_wizard::QuoteCmdArg(L"/EXE=" + g.target.exe) + L" /GO /ELEVATED";
+    if (g.uninstall) args = wg_wizard::QuoteCmdArg(L"/DIR=" + g.target.dir) + L" /GO /ELEVATED /UNINSTALL";
     if (!g.uninstall) {
         const wstring routeArgs = wg_wizard::RouteArguments(g.route, g.ctx.opti.source);
         if (routeArgs.empty()) return false;
@@ -357,7 +357,7 @@ bool RelaunchElevated() {
     if (g.force) args += L" /FORCE";
     if (!g.uninstall && NeedsConsent()) args += L" /EXPERIMENTAL";        // the player ticked the confirmation already
     if (!g.uninstall && NeedsConflictOk()) args += L" /MOVEMODS /REMOVEOLD";
-    if (!g.uninstall && g.model.ok() && !g.model.reused) args += L" \"/MODEL=" + g.model.dll + L"\"";
+    if (!g.uninstall && g.model.ok() && !g.model.reused) args += L" " + wg_wizard::QuoteCmdArg(L"/MODEL=" + g.model.dll);
     wstring self = SelfPath();
     SHELLEXECUTEINFOW sei{}; sei.cbSize = sizeof(sei); sei.lpVerb = L"runas"; sei.lpFile = self.c_str();
     sei.lpParameters = args.c_str(); sei.nShow = SW_SHOWNORMAL; sei.hwnd = g.hwnd;
@@ -743,7 +743,14 @@ void PaintPage(Gdiplus::Graphics* grp, HDC dc) {
 void PaintFrame(HDC dc) {
     RECT rc; GetClientRect(g.hwnd, &rc);
     const int w = rc.right, h = rc.bottom;
-    HDC mem = CreateCompatibleDC(dc); HBITMAP bmp = CreateCompatibleBitmap(dc, w, h); HGDIOBJ oldBmp = SelectObject(mem, bmp);
+    if (w <= 0 || h <= 0) return;
+    HDC mem = CreateCompatibleDC(dc); HBITMAP bmp = CreateCompatibleBitmap(dc, w, h);
+    if (!mem || !bmp) {
+        if (bmp) DeleteObject(bmp);
+        if (mem) DeleteDC(mem);
+        return;
+    }
+    HGDIOBJ oldBmp = SelectObject(mem, bmp);
     RECT content{0, 0, w, h}; FillRect(mem, &content, Brush(kBg));
     RECT side{0, 0, S(kSideW), h}; FillRect(mem, &side, Brush(kSide));
     RECT sideEdge{S(kSideW) - 1, 0, S(kSideW), h}; FillRect(mem, &sideEdge, Brush(RGB(28, 31, 38)));
@@ -1023,12 +1030,14 @@ int RunWizard() {
         ShowPage(PG_WELCOME);
         HWND hwnd = g.hwnd;
         const bool noScan = g.noScan;
-        std::thread([hwnd, noScan] {
-            CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        g.closing.store(false);
+        g.scanThread = std::thread([hwnd, noScan] {
+            const HRESULT hrCom = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
             auto* s = new ScanMsg;
             if (!noScan) { s->libraries = ScanLibraries(); s->found = DetectGames(s->libraries); }
-            if (!PostMessageW(hwnd, WM_APP_SCAN, 0, (LPARAM)s)) delete s;
-        }).detach();
+            if (g.closing.load() || !PostMessageW(hwnd, WM_APP_SCAN, 0, (LPARAM)s)) delete s;
+            if (SUCCEEDED(hrCom)) CoUninitialize();
+        });
         if (g.go) ShowPage(wg_wizard::RouteReady(g.route, g.ctx.opti.ok()) ? PG_GAME : PG_ROUTE);
         else if (!g.shotDir.empty()) ShowPage(g.target.exe.empty() ? PG_ROUTE : PG_GAME);
     }
@@ -1036,6 +1045,10 @@ int RunWizard() {
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
         if (!IsDialogMessageW(g.hwnd, &msg)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
     }
+    g.closing.store(true);
+    if (g.scanThread.joinable()) g.scanThread.join();
+    for (auto& th : g.modelThreads) if (th.joinable()) th.join();
+    g.modelThreads.clear();
     return 0;
 }
 

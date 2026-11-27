@@ -54,9 +54,11 @@ float SettingRow(Gfx& gx, float x, float y, float w, bool border, wchar_t icon, 
     float actW = ownW, ctrlH = ownW > 0 ? 28.f : 0.f;  // ownW: room for a control the caller draws (the accent swatches)
     // a conversion running: an activity indicator beside its button (it has no amount to show), 22 DIPs of the row
     auto working = [](const Act& a) {  // the one "Converting..."
-        return (v.task == T_MODEL && (a.id == ID_S_RECONVERT || a.id == ID_S_MODELMORE)) || (v.task == T_RRDATA && (a.id == ID_S_RRCONVERT || a.id == ID_S_RRMORE)) ||
-               (v.task == T_MODELK && (a.id == ID_S_KCONVERT || a.id == ID_S_KMORE)) || (v.task == T_MODELL && (a.id == ID_S_LCONVERT || a.id == ID_S_LMORE)) ||
-               (v.task == T_MODELFG && (a.id == ID_S_FGCONVERT || a.id == ID_S_FGMORE));
+        return (v.task == T_MODEL && (a.id == ID_S_RECONVERT || a.id == ID_S_MODELMORE || a.id == ID_S_MODELFILE)) ||
+               (v.task == T_RRDATA && (a.id == ID_S_RRCONVERT || a.id == ID_S_RRMORE || a.id == ID_S_RRFILE)) ||
+               (v.task == T_MODELK && (a.id == ID_S_KCONVERT || a.id == ID_S_KMORE || a.id == ID_S_KFILE)) ||
+               (v.task == T_MODELL && (a.id == ID_S_LCONVERT || a.id == ID_S_LMORE || a.id == ID_S_LFILE)) ||
+               (v.task == T_MODELFG && (a.id == ID_S_FGCONVERT || a.id == ID_S_FGMORE || a.id == ID_S_FGFILE));
     };
     for (auto& a : acts) { actW += ButtonW(gx, a.text, 0, kBtnH, B_PLAIN) + 8 + (working(a) ? 22.f : 0.f); ctrlH = kBtnH; }
     if (actW > 0) actW -= 8;
@@ -881,7 +883,9 @@ void PaintFirstRun(Gfx& gx) {
             wstring lab, val;
             SplitCheck(l.second, lab, val);
             TS mt = vs; mt.weight = l.first == 2 ? 600 : 400;
-            listH += std::max(17.5f, gx.TextH(val, iw - 50 - (lab.empty() ? 0 : labW + 10), mt)) + 4;
+            const float lh = lab.empty() ? 0.f : gx.TextH(lab, labW, vs);
+            const float th = gx.TextH(val, iw - 50 - (lab.empty() ? 0 : labW + 10), mt);
+            listH += std::max({17.5f, th, lh}) + 4;
         }
         const Rc well{ix, y, iw, std::round(listH)};
         gx.FillRound(well, 10, pal.bg);
@@ -901,12 +905,14 @@ void PaintFirstRun(Gfx& gx) {
             // working: text2
             mt.color = l.first == 1 || l.first == 3 ? pal.text2 : pal.text;
             TS ls = vs; ls.color = pal.text2;  // the value's line height, so label and value share a baseline
-            if (!lab.empty()) gx.Text(lab, Rc{well.x + 36, ly, labW, 19}, ls);
+            const float lh = lab.empty() ? 0.f : gx.TextH(lab, labW, ls);
+            const float rh = std::max({17.5f, th, lh});
+            if (!lab.empty()) gx.Text(lab, Rc{well.x + 36, ly, labW, lh + 2}, ls);
             gx.Text(val, Rc{vx, ly, vw, th + 2}, mt);
             // the check in words, with what it means ("Problem: Graphics card: ..."): the glyph says it to the eye
-            AddText(Rc{well.x + 36, ly, well.r() - 14 - well.x - 36, th + 2},
+            AddText(Rc{well.x + 36, ly, well.r() - 14 - well.x - 36, rh + 2},
                     (l.first == 2 ? L"Problem: " : l.first == 1 ? L"Note: " : L"") + (lab.empty() ? val : lab + L": " + val));
-            ly += std::max(17.5f, th) + 4;
+            ly += rh + 4;
         }
         // the fold: a link on the list's last line, its chevron in the glyphs' column, its words in the labels'; 2 DIPs under
         // the lines, so its keyboard focus ring (4 DIPs out) clears the line above it, and kLinkFoot over the list's foot, so

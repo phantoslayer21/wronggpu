@@ -367,6 +367,13 @@ FgStatus FgPresentEngine::ReserveRealOnlySlot(std::uint32_t* slot) {
     return FgStatus::Ok;
 }
 
+void FgPresentEngine::ReleaseRealOnlySlot() {
+    if (real_only_slot_ < 0) return;
+    Slot& r = slots_[static_cast<std::size_t>(real_only_slot_)];
+    if (r.state == FgEngineSlotState::Reserved) r = Slot();
+    real_only_slot_ = -1;
+}
+
 FgStatus FgPresentEngine::PresentRealOnly(const FgIntervalPlan& plan, const FgRealImage& real) {
     FgStatus s = CheckAccepting();
     if (s != FgStatus::Ok) return Refuse(s);

@@ -114,7 +114,17 @@ FgRefusal FgHistory::CheckInputs(const FgFramePacket& p) const {
             return FgRefusal::TagTokenMismatch;
     }
     if (p.optional_present >> kFgOptCount) return FgRefusal::UndeclaredOptional;
-    if (p.color.format == 0 || p.color.format != session_.output_format) return FgRefusal::BadFormat;
+    auto canonical_color_format = [](uint32_t f) -> uint32_t {
+        switch (f) {
+            case 27: case 28: case 29: return 28;  // R8G8B8A8 TYPELESS / UNORM / UNORM_SRGB
+            case 87: case 90: case 91: return 87;  // B8G8R8A8 UNORM / TYPELESS / UNORM_SRGB
+            case 23: case 24: return 24;           // R10G10B10A2 TYPELESS / UNORM
+            case 9: case 10: return 10;            // R16G16B16A16 TYPELESS / FLOAT
+            default: return f;
+        }
+    };
+    if (p.color.format == 0 || canonical_color_format(p.color.format) != canonical_color_format(session_.output_format))
+        return FgRefusal::BadFormat;
     const FgRect& o = p.output_rect;
     if (o.x != 0 || o.y != 0 || o.width != session_.output_width || o.height != session_.output_height ||
         !covers(p.color, o))

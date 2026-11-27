@@ -65,8 +65,8 @@
 
 #ifndef WG_RR_RUNTIME_VERSION0
 #define WG_RR_RUNTIME_VERSION0 0
-#define WG_RR_RUNTIME_VERSION1 6
-#define WG_RR_RUNTIME_VERSION2 5
+#define WG_RR_RUNTIME_VERSION1 7
+#define WG_RR_RUNTIME_VERSION2 0
 #endif
 
 namespace wgrr_rt {
@@ -230,13 +230,23 @@ DXGI_FORMAT uav_format(DXGI_FORMAT f) {
   if (f == DXGI_FORMAT_B8G8R8X8_UNORM_SRGB) return DXGI_FORMAT_B8G8R8X8_UNORM;
   return f;
 }
+bool uav_store_supported(ID3D12Device* dev, DXGI_FORMAT f) {
+  if (!dev || f == DXGI_FORMAT_UNKNOWN) return false;
+  D3D12_FEATURE_DATA_FORMAT_SUPPORT fs = {};
+  fs.Format = f;
+  if (FAILED(dev->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &fs, sizeof fs))) return false;
+  return (fs.Support1 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW) != 0 &&
+         (fs.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE) != 0;
+}
 bool is_f16(DXGI_FORMAT f) {
   return f == DXGI_FORMAT_R16G16B16A16_FLOAT || f == DXGI_FORMAT_R16G16_FLOAT || f == DXGI_FORMAT_R16_FLOAT;
 }
 bool is_unorm8x4(DXGI_FORMAT f) {
   return f == DXGI_FORMAT_R8G8B8A8_UNORM || f == DXGI_FORMAT_B8G8R8A8_UNORM || f == DXGI_FORMAT_B8G8R8X8_UNORM;
 }
-bool is_unorm8(DXGI_FORMAT f) { return is_unorm8x4(f) || f == DXGI_FORMAT_R8_UNORM || f == DXGI_FORMAT_R8G8_UNORM; }
+bool is_unorm8(DXGI_FORMAT f) {
+  return is_unorm8x4(f) || f == DXGI_FORMAT_R8_UNORM || f == DXGI_FORMAT_R8G8_UNORM || f == DXGI_FORMAT_A8_UNORM;
+}
 bool is_rgb10a2(DXGI_FORMAT f) { return f == DXGI_FORMAT_R10G10B10A2_UNORM; }
 uint32_t channels_of(DXGI_FORMAT f) {
   switch (f) {
@@ -377,7 +387,7 @@ Kid input_features_kernel(int mode) { return mode == 1 ? K_IN_FEAT_LITE : (mode 
 bool kernel_opt_in(int k) {
   if (k >= K_IN0 && k <= K_D0F) return true;                  // body step X
   if (k >= K_ZSTAGE0 && k < K_ZFIX0 + 15) return true;        // body step Z and its fixup
-  if (k >= K_HEAD_FAST_RX0 && k < K_HEAD_FAST_RXW) return true;   // clean/rr-f-wave4: the A/B kernels of WG_RR_W4
+  if (k == K_HEAD_FAST_RX0 || (k >= K_ESTAGEB0 && k < K_HEAD_FAST_RXW)) return true;   // clean/rr-f-wave4: A/B opt-in kernels (K_OUT_FAST_F0 is used by Fast mode when W4 bit 2 is off)
   switch (k) {
     case K_HEAD: case K_HEAD_DEBUG: case K_HEAD_WPL: case K_HEAD_FIXUP: case K_HEAD_STRICT:
     case K_OUT_MAIN: case K_OUT_POOL: case K_RES_MAIN: case K_RES_POOL:
@@ -399,6 +409,7 @@ int variant_group(int k, bool* alt) {
   if (k == K_HEAD_FAST_RXW) { *alt = true; return VG_HEAD; }   // clean/rr-f-wave4b: the wave64 relaxed head
   if (k >= K_ESTAGEW0 && k < K_ESTAGEW0 + 3) return VG_BODY;   // clean/rr-f-wave4b: the relaxed body's level-1 stages in wave64
   if (k >= K_ESTAGEC0 && k <= K_D0F_W4C) return VG_BODY;       // clean/rr-f-wave4c: the wide stages in wave64, IN0 / D0-F .w4c
+  if (k == K_OUT_FAST_F0) { *alt = true; return VG_OUT; }      // clean/rr-f-wave4: Fast mode output fallback (W4 bit 2 off)
   if (k == K_OUT_FAST_F_PH1W) { *alt = true; return VG_OUT; }   // clean/rr-f-wave4c: Fast mode's output.fast.f with OFX_PH1W alone
   // clean/rr-f-wave5b/5c: all 24 Fast-only kernels sit in VG_OUT's alternatives (the bit only Fast mode has, rr_modes.cpp
   // modes_self_check): kernel_in_default_frame() is true for them in a runtime that starts in Fast and false otherwise, so Accurate
@@ -502,6 +513,9 @@ struct Runtime {
   bool disabled = false;                     // an exception was caught inside an evaluate: evaluates fail from now on
   ID3D12DescriptorHeap* pass_heap = nullptr; // pass-through descriptors (fixed part + one pair per slot)
   ID3D12Resource* pass_dummy = nullptr;      // bound as the root UAVs of the pass-through (never accessed)
+  ID3D12Resource* pass_proxy = nullptr;      // cached UAV proxy for pass-through to non-UAV / sRGB outputs
+  DXGI_FORMAT pass_proxy_fmt = DXGI_FORMAT_UNKNOWN;
+  uint32_t pass_proxy_w = 0, pass_proxy_h = 0;
   uint64_t pass_serial[kSlots] = {};
   uint64_t passes = 0;
   bool logged_pass_refused = false;
@@ -516,13 +530,16 @@ struct Runtime {
   std::mutex va_mu;
   std::string va_note;                       // "instance N arena [a, b) upload [c, d)" of the live instances
   // the input stage's SRV array as written per slot (copied back from the heap right after writing) and the frame's
-  // resources, compared with the heap at removal
+  // resources, compared with the heap at removal; leaf diag_mu synchronizes writes/teardown with removal_watch
+  std::mutex diag_mu;
+  std::atomic<uint64_t> diag_serial{0};
   uint8_t dsh[kSlots][kSrvArray * 64] = {};
   uint64_t dsh_serial[kSlots] = {};
   void* dsh_res[kSlots][kSrvArray] = {};
   uintptr_t dsh_cpu[kSlots] = {};
   uint32_t ksh[kSlots][256] = {};      // each slot's input constant block as written (removal log: vs the ring now)
   uintptr_t kring_cpu[kSlots] = {};
+  void* dsh_inst[kSlots] = {};         // owning Instance* for dsh_cpu / kring_cpu invalidation at destroy
   uint32_t dsh_inc = 0;
 };
 Runtime* g_rt = nullptr;
@@ -577,6 +594,7 @@ uint64_t begin_list(D3D12_GPU_VIRTUAL_ADDRESS* va) {
     return 0;
   }
   rt.serial = s;
+  rt.diag_serial.store(s, std::memory_order_relaxed);
   *va = rt.marker->GetGPUVirtualAddress() + 4ull * (kMarkBase + slot);
   return s;
 }
@@ -809,56 +827,61 @@ void removal_watch() {
   }
   log_line(fmt("DEVICE REMOVED (0x%08x): last frame finished %u (low 12 bits %u), frames recorded %llu; RR dispatch "
                "reached: %s; finished: %s; %s",
-               (unsigned)why, w0, w0 & 0xfff, (unsigned long long)rt.serial, crumb_text(w2).c_str(),
-               crumb_text(w3).c_str(), va.empty() ? "no live instance" : va.c_str()));
-  const uint32_t inc = std::min<uint32_t>(rt.dsh_inc, 64);
-  for (uint32_t s = 0; inc && s < kSlots; ++s) {
-    if (!rt.dsh_serial[s] || (rt.dsh_serial[s] & 0xfff) != (w2 ? (w2 >> 20) : ((w0 + 1) & 0xfff))) continue;   // without breadcrumbs: the frame after the last finished one
-    uint8_t now[kSrvArray * 64] = {};
-    const bool rd = seh_copy(now, (const void*)rt.dsh_cpu[s], (size_t)kSrvArray * inc);
-    std::string m = fmt("removal: frame %llu slot %u input SRVs (role: resource, base as written / in the heap now%s):",
-                        (unsigned long long)rt.dsh_serial[s], s, rd ? "" : ", heap not readable");
-    for (uint32_t r = 0; r < kSrvArray; ++r) {
-      const uint8_t* a = rt.dsh[s] + (size_t)r * inc;
-      const uint8_t* b = now + (size_t)r * inc;
-      const bool same = !rd || memcmp(a, b, inc) == 0;
-      if (!rt.dsh_res[s][r] && desc_va(a) == 0 && same) continue;
-      m += fmt(" %u: %p 0x%llx%s", r, rt.dsh_res[s][r], (unsigned long long)desc_va(a),
-               same ? "" : fmt(" / CHANGED 0x%llx", (unsigned long long)desc_va(b)).c_str());
-    }
-    log_line(m);
-    std::string d = fmt("removal: frame %llu slot %u input descriptors in the heap now (32-bit words):", (unsigned long long)rt.dsh_serial[s], s);
-    for (uint32_t r = 0; r < kSrvArray; ++r) {
-      d += fmt(" [%u]", r);
-      for (uint32_t k = 0; k < inc / 4; ++k) {
-        uint32_t v;
-        memcpy(&v, (rd ? now : rt.dsh[s]) + (size_t)r * inc + 4 * k, 4);
-        d += fmt(" %08x", v);
+               (unsigned)why, w0, w0 & 0xfff, (unsigned long long)rt.diag_serial.load(std::memory_order_relaxed),
+               crumb_text(w2).c_str(), crumb_text(w3).c_str(), va.empty() ? "no live instance" : va.c_str()));
+  std::vector<std::string> diag_lines;
+  {
+    std::lock_guard<std::mutex> dlock(rt.diag_mu);
+    const uint32_t inc = std::min<uint32_t>(rt.dsh_inc, 64);
+    for (uint32_t s = 0; inc && s < kSlots; ++s) {
+      if (!rt.dsh_serial[s] || (rt.dsh_serial[s] & 0xfff) != (w2 ? (w2 >> 20) : ((w0 + 1) & 0xfff))) continue;   // without breadcrumbs: the frame after the last finished one
+      uint8_t now[kSrvArray * 64] = {};
+      const bool rd = rt.dsh_cpu[s] && seh_copy(now, (const void*)rt.dsh_cpu[s], (size_t)kSrvArray * inc);
+      std::string m = fmt("removal: frame %llu slot %u input SRVs (role: resource, base as written / in the heap now%s):",
+                          (unsigned long long)rt.dsh_serial[s], s, rd ? "" : ", heap not readable");
+      for (uint32_t r = 0; r < kSrvArray; ++r) {
+        const uint8_t* a = rt.dsh[s] + (size_t)r * inc;
+        const uint8_t* b = now + (size_t)r * inc;
+        const bool same = !rd || memcmp(a, b, inc) == 0;
+        if (!rt.dsh_res[s][r] && desc_va(a) == 0 && same) continue;
+        m += fmt(" %u: %p 0x%llx%s", r, rt.dsh_res[s][r], (unsigned long long)desc_va(a),
+                 same ? "" : fmt(" / CHANGED 0x%llx", (unsigned long long)desc_va(b)).c_str());
       }
+      diag_lines.push_back(std::move(m));
+      std::string d = fmt("removal: frame %llu slot %u input descriptors in the heap now (32-bit words):", (unsigned long long)rt.dsh_serial[s], s);
+      for (uint32_t r = 0; r < kSrvArray; ++r) {
+        d += fmt(" [%u]", r);
+        for (uint32_t k = 0; k < inc / 4; ++k) {
+          uint32_t v;
+          memcpy(&v, (rd ? now : rt.dsh[s]) + (size_t)r * inc + 4 * k, 4);
+          d += fmt(" %08x", v);
+        }
+      }
+      diag_lines.push_back(std::move(d));
+      uint32_t kn[256] = {};
+      const bool krd = rt.kring_cpu[s] && seh_copy(kn, (const void*)rt.kring_cpu[s], sizeof kn);
+      std::string kd = fmt("removal: frame %llu slot %u input constant block (ring now%s):", (unsigned long long)rt.dsh_serial[s], s,
+                           krd ? "" : ", not readable");
+      uint32_t ndiff = 0;
+      for (uint32_t i = 0; i < 256; ++i) {
+        kd += fmt(" %08x", krd ? kn[i] : rt.ksh[s][i]);
+        if (krd && kn[i] != rt.ksh[s][i]) ndiff++;
+      }
+      diag_lines.push_back(std::move(kd));
+      std::string kx = fmt("removal: frame %llu slot %u constant words differing from as written: %u", (unsigned long long)rt.dsh_serial[s], s, ndiff);
+      for (uint32_t i = 0; krd && i < 256; ++i)
+        if (kn[i] != rt.ksh[s][i]) kx += fmt(" w%u %08x->%08x", i, rt.ksh[s][i], kn[i]);
+      diag_lines.push_back(std::move(kx));
     }
-    log_line(d);
-    uint32_t kn[256] = {};
-    const bool krd = rt.kring_cpu[s] && seh_copy(kn, (const void*)rt.kring_cpu[s], sizeof kn);
-    std::string kd = fmt("removal: frame %llu slot %u input constant block (ring now%s):", (unsigned long long)rt.dsh_serial[s], s,
-                         krd ? "" : ", not readable");
-    uint32_t ndiff = 0;
-    for (uint32_t i = 0; i < 256; ++i) {
-      kd += fmt(" %08x", krd ? kn[i] : rt.ksh[s][i]);
-      if (krd && kn[i] != rt.ksh[s][i]) ndiff++;
+    for (uint32_t s = 0; inc && s < kSlots; ++s) {   // every slot's frame: each role's base address as written
+      if (!rt.dsh_serial[s]) continue;
+      std::string m = fmt("removal: slot %u frame %llu:", s, (unsigned long long)rt.dsh_serial[s]);
+      for (uint32_t r = 0; r < kSrvArray; ++r)
+        if (rt.dsh_res[s][r]) m += fmt(" %u=%p@0x%llx", r, rt.dsh_res[s][r], (unsigned long long)desc_va(rt.dsh[s] + (size_t)r * inc));
+      diag_lines.push_back(std::move(m));
     }
-    log_line(kd);
-    std::string kx = fmt("removal: frame %llu slot %u constant words differing from as written: %u", (unsigned long long)rt.dsh_serial[s], s, ndiff);
-    for (uint32_t i = 0; krd && i < 256; ++i)
-      if (kn[i] != rt.ksh[s][i]) kx += fmt(" w%u %08x->%08x", i, rt.ksh[s][i], kn[i]);
-    log_line(kx);
   }
-  for (uint32_t s = 0; inc && s < kSlots; ++s) {   // every slot's frame: each role's base address as written
-    if (!rt.dsh_serial[s]) continue;
-    std::string m = fmt("removal: slot %u frame %llu:", s, (unsigned long long)rt.dsh_serial[s]);
-    for (uint32_t r = 0; r < kSrvArray; ++r)
-      if (rt.dsh_res[s][r]) m += fmt(" %u=%p@0x%llx", r, rt.dsh_res[s][r], (unsigned long long)desc_va(rt.dsh[s] + (size_t)r * inc));
-    log_line(m);
-  }
+  for (const std::string& line : diag_lines) log_line(line);
 }
 // clean/rr-f-a14-frame E2 (WG_RR_BARK): the barrier flavour of the frame being recorded (set by evaluate, under rt.mu)
 int g_bark = 0;
@@ -1249,11 +1272,13 @@ void drop_device() {
     auto keep = [&](IUnknown* o, bool counted) { if (o) rt.live_resources -= p.deferred.retire(o, users, p.marks, counted); };
     keep(rt.pass_heap, false);
     keep(rt.pass_dummy, true);
+    keep(rt.pass_proxy, true);
     for (int k = 0; k < K_COUNT; ++k) keep(rt.pso[k], false);
     keep(rt.rs, false);
     keep(rt.model_buf, true);
     keep(rt.ags_buf, true);
-    rt.pass_heap = nullptr, rt.pass_dummy = rt.model_buf = rt.ags_buf = nullptr, rt.rs = nullptr;
+    rt.pass_heap = nullptr, rt.pass_dummy = rt.pass_proxy = rt.model_buf = rt.ags_buf = nullptr, rt.rs = nullptr;
+    rt.pass_proxy_fmt = DXGI_FORMAT_UNKNOWN, rt.pass_proxy_w = rt.pass_proxy_h = 0;
     for (int k = 0; k < K_COUNT; ++k) rt.pso[k] = nullptr;
     p.words = rt.marker_map + kMarkBase;
     p.last = {rt.marker, rt.dev};   // the marker buffer the lists write (still mapped), then the device reference
@@ -1274,8 +1299,20 @@ void drop_device() {
     rt.marks = ListMarks(kMarkSlots);
   }
   rt.gen++;   // the next device's lists, serials and transient copies are a new generation
+  {
+    std::lock_guard<std::mutex> dlock(rt.diag_mu);
+    for (uint32_t s = 0; s < kSlots; ++s) {
+      rt.dsh_serial[s] = 0;
+      rt.dsh_cpu[s] = 0;
+      rt.kring_cpu[s] = 0;
+      rt.dsh_inst[s] = nullptr;
+    }
+    rt.dsh_inc = 0;
+  }
   release(rt.pass_heap);
   drop(rt.pass_dummy);
+  drop(rt.pass_proxy);
+  rt.pass_proxy_fmt = DXGI_FORMAT_UNKNOWN, rt.pass_proxy_w = rt.pass_proxy_h = 0;
   for (uint64_t& s : rt.pass_serial) s = 0;
   for (int k = 0; k < K_COUNT; ++k) release(rt.pso[k]);
   release(rt.rs);
@@ -1389,6 +1426,7 @@ uint32_t set_device_locked(ID3D12Device* given) {
   D3D12_COMMAND_QUEUE_DESC qd = {};
   qd.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
   if (FAILED(given->CreateCommandQueue(&qd, IID_PPV_ARGS(&rt.q))) || FAILED(rt.q->GetDevice(IID_PPV_ARGS(&rt.dev)))) {
+    release(rt.q);
     log_line("set-device: no compute queue on the game's device");
     return WG_E_D3D_API;
   }
@@ -1922,6 +1960,17 @@ const std::vector<uint64_t>& instance_lists(Instance* in) {
 // game thread, however many later lists complete.
 void destroy_instance_resources(Instance* in) {
   Runtime& rt = R();
+  {
+    std::lock_guard<std::mutex> dlock(rt.diag_mu);
+    for (uint32_t s = 0; s < kSlots; ++s) {
+      if (rt.dsh_inst[s] == in) {
+        rt.dsh_serial[s] = 0;
+        rt.dsh_cpu[s] = 0;
+        rt.kring_cpu[s] = 0;
+        rt.dsh_inst[s] = nullptr;
+      }
+    }
+  }
   if (in->upload) in->upload->Unmap(0, nullptr), in->upload_map = nullptr;
   if (in->qrb) in->qrb->Unmap(0, nullptr), in->qmap = nullptr;
   const std::vector<uint64_t> users = instance_lists(in);
@@ -2751,6 +2800,13 @@ uint32_t evaluate_locked(Instance* in, const WgRrFrame* f, WgRrFrameResult* res)
   ID3D12Resource* out_res[2] = {(ID3D12Resource*)img[WG_ROLE_OUTPUT].resource, nullptr};
   const bool aout_on = alpha_up && attached(WG_ROLE_OUTPUT_ALPHA);
   if (aout_on) out_res[1] = (ID3D12Resource*)img[WG_ROLE_OUTPUT_ALPHA].resource;
+  if (out_res[0] && out_res[1] && out_res[0] == out_res[1])
+    return fail(in, "output and output-alpha alias the same resource", res, WG_E_INVALID_PARAMETER);
+  for (int r = 0; r < WG_ROLE_COUNT; ++r) {
+    if (r == WG_ROLE_OUTPUT || r == WG_ROLE_OUTPUT_ALPHA || !attached(r)) continue;
+    if (img[r].resource == out_res[0] || (out_res[1] && img[r].resource == out_res[1]))
+      return fail(in, "an input aliases an output resource", res, WG_E_INVALID_PARAMETER);
+  }
   struct OutInfo { bool on = false, direct = false, srgb = false; DXGI_FORMAT f = DXGI_FORMAT_UNKNOWN, uf = DXGI_FORMAT_UNKNOWN;
                    uint32_t fmt = 0, ch = 4; D3D12_RESOURCE_DESC d{}; } oi[2];
   for (int k = 0; k < 2; ++k) {
@@ -2762,6 +2818,8 @@ uint32_t evaluate_locked(Instance* in, const WgRrFrame* f, WgRrFrameResult* res)
     o.f = srv_format((DXGI_FORMAT)(t.format ? t.format : o.d.Format), false);
     o.srgb = is_srgb(o.f);
     o.uf = uav_format(o.f);
+    if (!uav_store_supported(rt.dev, o.uf))
+      return fail(in, fmt("output format %u does not support typed UAV store", (unsigned)o.uf), res, WG_E_INVALID_PARAMETER);
     o.direct = (o.d.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0 && !o.srgb;
     o.ch = k == 0 ? 4 : 1;
     if (o.srgb) o.fmt = 0;
@@ -2942,8 +3000,12 @@ uint32_t evaluate_locked(Instance* in, const WgRrFrame* f, WgRrFrameResult* res)
     w[227] = B("in.LOGT"); w[228] = B("in.EXPT");
     w[229] = (uint32_t)P.off(Bf.mark);
     memcpy(up + kBlkInput, w, sizeof w);
-    memcpy(rt.ksh[slot], w, sizeof w);
-    rt.kring_cpu[slot] = (uintptr_t)(up + kBlkInput);
+    {
+      std::lock_guard<std::mutex> dlock(rt.diag_mu);
+      memcpy(rt.ksh[slot], w, sizeof w);
+      rt.kring_cpu[slot] = (uintptr_t)(up + kBlkInput);
+      rt.dsh_inst[slot] = in;
+    }
     if (Bf.dx >= 0) {   // WG_RR_DIAG_INX: the same block with the outputs (codes, hold, marks, PM, Pe, Pn) in dx
       const uint64_t ntd = (uint64_t)32 * ((rw + 31) / 32) * (32 * ((rh + 31) / 32)), d0 = P.off(Bf.dx);
       const uint64_t dm = d0 + ntd * 72, dp = dm + ((ntd + 1) * 4 + 15) / 16 * 16, rpd = (uint64_t)rw * rh;
@@ -3062,22 +3124,28 @@ uint32_t evaluate_locked(Instance* in, const WgRrFrame* f, WgRrFrameResult* res)
   for (int r = 0; r < (int)kRoles; ++r)
     if (ing[r].on) srv((ID3D12Resource*)img[ing[r].role].resource, ing[r].fmt, cpu(sbase + r));
   {   // clean/release-060 crash-cp2077: what this slot's SRV array holds, for the removal log
-    rt.dsh_inc = rt.inc;
-    rt.dsh_serial[slot] = serial;
-    rt.dsh_cpu[slot] = (uintptr_t)cpu(sbase).ptr;
-    for (uint32_t r = 0; r < kSrvArray; ++r)
-      rt.dsh_res[slot][r] = (r < kRoles && ing[r].on) ? img[ing[r].role].resource : nullptr;
-    if (!publish_descriptors((const void*)cpu(sbase).ptr, (size_t)kSrvArray * std::min<uint32_t>(rt.inc, 64), rt.dsh[slot]))
-      rt.dsh_serial[slot] = 0;
-    static int shown = 0;   // the decode checked against real descriptors (first evaluates)
-    if (shown < 2) {
-      shown++;
-      std::string m = fmt("input SRV base addresses (frame %llu, descriptor size %u%s):", (unsigned long long)serial, rt.inc,
-                          rt.dsh_serial[slot] ? "" : ", heap not readable");
-      for (uint32_t r = 0; r < kRoles; ++r)
-        if (rt.dsh_res[slot][r]) m += fmt(" %u=0x%llx", r, (unsigned long long)desc_va(rt.dsh[slot] + (size_t)r * std::min<uint32_t>(rt.inc, 64)));
-      log_line(m);
+    std::string shown_msg;
+    {
+      std::lock_guard<std::mutex> dlock(rt.diag_mu);
+      rt.dsh_inc = rt.inc;
+      rt.dsh_serial[slot] = serial;
+      rt.dsh_cpu[slot] = (uintptr_t)cpu(sbase).ptr;
+      rt.dsh_inst[slot] = in;
+      for (uint32_t r = 0; r < kSrvArray; ++r)
+        rt.dsh_res[slot][r] = (r < kRoles && ing[r].on) ? img[ing[r].role].resource : nullptr;
+      if (!publish_descriptors((const void*)cpu(sbase).ptr, (size_t)kSrvArray * std::min<uint32_t>(rt.inc, 64), rt.dsh[slot]))
+        rt.dsh_serial[slot] = 0;
+      static int shown = 0;   // the decode checked against real descriptors (first evaluates)
+      if (shown < 2) {
+        shown++;
+        shown_msg = fmt("input SRV base addresses (frame %llu, descriptor size %u%s):", (unsigned long long)serial, rt.inc,
+                        rt.dsh_serial[slot] ? "" : ", heap not readable");
+        for (uint32_t r = 0; r < kRoles; ++r)
+          if (rt.dsh_res[slot][r])
+            shown_msg += fmt(" %u=0x%llx", r, (unsigned long long)desc_va(rt.dsh[slot] + (size_t)r * std::min<uint32_t>(rt.inc, 64)));
+      }
     }
+    if (!shown_msg.empty()) log_line(shown_msg);
   }
   uint32_t npair = 0;
   auto pair = [&]() { return sbase + kSrvArray + 2 * (npair++); };
@@ -3834,13 +3902,25 @@ uint32_t retain_locked(void* cmd, void* resource, uint32_t format, uint32_t stat
   }
   ID3D12Resource* src = (ID3D12Resource*)resource;
   D3D12_RESOURCE_DESC d = src->GetDesc();
+  if (!wgi::texture_shape_ok(d)) {
+    release(l2);
+    release(l);
+    return WG_E_INVALID_PARAMETER;
+  }
   // bug hunt C: a texture with mips is copied as its mip 0 (texture_shape.h: a copy uses subresource 0; the runtime reads
   // mip 0), so a barrier on subresource 0 alone covers the copy; a single-mip one whole, as before (planes included)
-  const bool mip0 = d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && d.MipLevels > 1;
+  const bool mip0 = d.MipLevels > 1;
   if (mip0) d.MipLevels = 1;
   d.Flags &= ~(D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL |
-               D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS);
-  if (format && d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && d.Format == DXGI_FORMAT_UNKNOWN) d.Format = (DXGI_FORMAT)format;
+               D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS | D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE);
+  if (format && d.Format == DXGI_FORMAT_UNKNOWN) d.Format = (DXGI_FORMAT)format;
+  switch (d.Format) {
+    case DXGI_FORMAT_D32_FLOAT: d.Format = DXGI_FORMAT_R32_TYPELESS; break;
+    case DXGI_FORMAT_D24_UNORM_S8_UINT: d.Format = DXGI_FORMAT_R24G8_TYPELESS; break;
+    case DXGI_FORMAT_D32_FLOAT_S8X24_UINT: d.Format = DXGI_FORMAT_R32G8X24_TYPELESS; break;
+    case DXGI_FORMAT_D16_UNORM: d.Format = DXGI_FORMAT_R16_TYPELESS; break;
+    default: break;
+  }
   D3D12_HEAP_PROPERTIES hp = {};
   hp.Type = D3D12_HEAP_TYPE_DEFAULT;
   ID3D12Resource* c = nullptr;
@@ -4017,7 +4097,9 @@ bool instance_needs_modes(const Instance* in) { return in->vbits != R().start_vb
 bool instance_needs_opt_in(const Instance* in) {
   // the three input-features kernels (exact, lite, split) are all part of the default frame (small, compiled first)
   // clean/rr-f-s10-modes: also an instance whose variants (mode, per-knob overrides) differ from the first pass's
-  return !in->head_fast || !in->body_e || !in->fast_paths || in->w4 != 7u;
+  return !in->head_fast || !in->body_e || !in->fast_paths || ((in->w4 & 2u) == 0u) ||
+         (((in->vbits >> VG_HEAD) & 1u) != 0u && (w5_effective(in) & 1u) == 0u && (in->w4b & 1u) == 0u &&
+          (in->w4 & 1u) == 0u);
 }
 uint32_t a_evaluate(void*, void* inst, const WgRrFrame* f, WgRrFrameResult* res) {
   Runtime& rt = R();
@@ -4143,19 +4225,28 @@ uint32_t a_passthrough(void*, const WgRrFrame* f0) {
   };
   ID3D12Resource* cr = (ID3D12Resource*)c.resource;
   ID3D12Resource* orr = (ID3D12Resource*)o.resource;
+  if (cr == orr) return refuse("colour and output alias the same resource");
   const D3D12_RESOURCE_DESC od = orr->GetDesc();
   if (!wgi::texture_shape_ok(cr->GetDesc()) || !wgi::texture_shape_ok(od))  // bug hunt E (as evaluate)
     return refuse(std::string("colour or output: ") + wgi::texture_shape_rule());
   const DXGI_FORMAT of = srv_format((DXGI_FORMAT)(o.format ? o.format : od.Format), false);
-  if (!(od.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) || is_srgb(of))
-    return refuse("the output has no typed UAV");
-  const uint32_t rw = f.render_width ? f.render_width : c.width - c.origin_x;
-  const uint32_t rh = f.render_height ? f.render_height : c.height - c.origin_y;
-  const uint32_t ow = f.output_width ? f.output_width : (uint32_t)od.Width - o.origin_x;
-  const uint32_t oh = f.output_height ? f.output_height : od.Height - o.origin_y;
-  if (!rw || !rh || !ow || !oh || c.origin_x + rw > c.width || c.origin_y + rh > c.height ||
-      o.origin_x + ow > od.Width || o.origin_y + oh > od.Height)
-    return refuse(fmt("rectangles outside the resources (render %ux%u, output %ux%u)", rw, rh, ow, oh));
+  const DXGI_FORMAT of_uav = uav_format(of);
+  if (!uav_store_supported(rt.dev, of_uav))
+    return refuse(fmt("output format %u does not support typed UAV store", (unsigned)of_uav));
+  const bool direct = (od.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0 && !is_srgb(of);
+  if (c.origin_x > c.width || c.origin_y > c.height || o.origin_x > od.Width || o.origin_y > od.Height)
+    return refuse("origin outside the resources");
+  const uint64_t rw64 = f.render_width ? (uint64_t)f.render_width : (uint64_t)c.width - c.origin_x;
+  const uint64_t rh64 = f.render_height ? (uint64_t)f.render_height : (uint64_t)c.height - c.origin_y;
+  const uint64_t ow64 = f.output_width ? (uint64_t)f.output_width : od.Width - o.origin_x;
+  const uint64_t oh64 = f.output_height ? (uint64_t)f.output_height : (uint64_t)od.Height - o.origin_y;
+  if (!rw64 || !rh64 || !ow64 || !oh64 ||
+      (uint64_t)c.origin_x + rw64 > c.width || (uint64_t)c.origin_y + rh64 > c.height ||
+      (uint64_t)o.origin_x + ow64 > od.Width || (uint64_t)o.origin_y + oh64 > od.Height)
+    return refuse(fmt("rectangles outside the resources (render %llux%llu, output %llux%llu)",
+                      (unsigned long long)rw64, (unsigned long long)rh64,
+                      (unsigned long long)ow64, (unsigned long long)oh64));
+  const uint32_t rw = (uint32_t)rw64, rh = (uint32_t)rh64, ow = (uint32_t)ow64, oh = (uint32_t)oh64;
   ID3D12GraphicsCommandList* l = nullptr;
   ID3D12GraphicsCommandList2* l2 = nullptr;
   if (FAILED(((IUnknown*)f.command_list)->QueryInterface(IID_PPV_ARGS(&l)))) return WG_E_INVALID_PARAMETER;
@@ -4178,6 +4269,35 @@ uint32_t a_passthrough(void*, const WgRrFrame* f0) {
     }
     init_heap(rt.pass_heap);
   }
+  if (!direct && (!rt.pass_proxy || rt.pass_proxy_fmt != of_uav || rt.pass_proxy_w != od.Width || rt.pass_proxy_h != od.Height)) {
+    std::vector<uint64_t> pusers;
+    for (uint64_t ps : rt.pass_serial)
+      if (ps) pusers.push_back(ps);
+    defer_release(rt.pass_proxy, pusers);
+    rt.pass_proxy_fmt = DXGI_FORMAT_UNKNOWN, rt.pass_proxy_w = rt.pass_proxy_h = 0;
+    D3D12_HEAP_PROPERTIES hp = {};
+    hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC rd = {};
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    rd.Width = od.Width;
+    rd.Height = od.Height;
+    rd.DepthOrArraySize = 1;
+    rd.MipLevels = 1;
+    rd.Format = of_uav;
+    rd.SampleDesc.Count = 1;
+    rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    if (FAILED(rt.dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                               nullptr, IID_PPV_ARGS(&rt.pass_proxy)))) {
+      release(l2);
+      release(l);
+      return WG_E_D3D_API;
+    }
+    rt.live_resources++, rt.created_resources++;
+    rt.pass_proxy_fmt = of_uav;
+    rt.pass_proxy_w = (uint32_t)od.Width;
+    rt.pass_proxy_h = od.Height;
+  }
+  ID3D12Resource* uav_target = direct ? orr : rt.pass_proxy;
   // a descriptor slot whose last pass-through list proved complete (issue #82: its own completion slot); at most 5 s
   auto free_pass_slot = [&]() -> int {
     poll_marks();
@@ -4213,11 +4333,11 @@ uint32_t a_passthrough(void*, const WgRrFrame* f0) {
   D3D12_CPU_DESCRIPTOR_HANDLE hu = hc;
   hu.ptr += rt.inc;
   D3D12_UNORDERED_ACCESS_VIEW_DESC ud = {};
-  ud.Format = uav_format(of);
+  ud.Format = of_uav;
   ud.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-  rt.dev->CreateUnorderedAccessView(orr, nullptr, &ud, hu);
+  rt.dev->CreateUnorderedAccessView(uav_target, nullptr, &ud, hu);
   publish_descriptors((const void*)hc.ptr, (size_t)2 * rt.inc, nullptr);
-  // declared states -> NON_PIXEL_SHADER_RESOURCE (colour) / UNORDERED_ACCESS (output), restored afterwards
+  // declared states -> NON_PIXEL_SHADER_RESOURCE (colour) / UNORDERED_ACCESS or COPY_DEST (output), restored afterwards
   std::vector<Bar> bars;
   auto want = [&](ID3D12Resource* r, uint32_t declared, D3D12_RESOURCE_STATES to) {
     if (declared == 0xffffffffu || (declared & (uint32_t)to) == (uint32_t)to) return;
@@ -4226,7 +4346,7 @@ uint32_t a_passthrough(void*, const WgRrFrame* f0) {
     bars.push_back({r, (D3D12_RESOURCE_STATES)declared, to});
   };
   want(cr, c.state, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-  want(orr, o.state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  want(orr, o.state, direct ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : D3D12_RESOURCE_STATE_COPY_DEST);
   for (const Bar& b : bars) transition_game(l, b.r, b.from, b.to);
   ID3D12DescriptorHeap* heap = rt.pass_heap;
   l->SetDescriptorHeaps(1, &heap);
@@ -4242,7 +4362,18 @@ uint32_t a_passthrough(void*, const WgRrFrame* f0) {
   const float sx = (float)rw / (float)ow, sy = (float)rh / (float)oh;
   dispatch(l, K_PASS, (uint32_t)(((uint64_t)ow * oh + 63) / 64),
            {c.origin_x, c.origin_y, rw, rh, o.origin_x, o.origin_y, ow, oh, fb(sx), fb(sy)});
-  uav_barrier(l, orr);
+  uav_barrier(l, uav_target);
+  if (!direct) {
+    transition(l, rt.pass_proxy, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    D3D12_TEXTURE_COPY_LOCATION dst = {}, src = {};
+    dst.pResource = orr;
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    src.pResource = rt.pass_proxy;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    D3D12_BOX box = {o.origin_x, o.origin_y, 0, o.origin_x + ow, o.origin_y + oh, 1};
+    l->CopyTextureRegion(&dst, o.origin_x, o.origin_y, 0, &src, &box);
+    transition(l, rt.pass_proxy, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  }
   for (auto it = bars.rbegin(); it != bars.rend(); ++it) transition_game(l, it->r, it->to, it->from);
   end_list(l2, serial, mark_va);   // this list's own completion slot
   if (++rt.passes == 1) log_line(fmt("pass-through: first frame passed through (colour %ux%u -> output %ux%u)", rw, rh, ow, oh));

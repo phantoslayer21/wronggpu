@@ -135,6 +135,11 @@ const WgViewport* FgSl214Codec::find_viewport(const void* native, const WgViewpo
     return nullptr;
 }
 
+uint32_t FgSl214Codec::resolve_viewport_id(const WgViewport* vp, const void* native) const {
+    const WgViewport* found = find_viewport(native, vp);
+    return found ? found->id : (vp ? vp->id : 0u);
+}
+
 WgResultCode FgSl214Codec::check_options(const WgViewport* vp, const void* native, uint32_t max_generated) {
     c_options_checked_.fetch_add(1);
     const WgNatFgOptions* o = find_options(native);
@@ -251,11 +256,12 @@ bool FgSl214Codec::tags(const WgFrameToken*, const WgViewport* vp, const WgTag* 
         d.struct_size = sizeof(WgFgTag);
         d.native_type = WG_FG_NATIVE_TYPE_UNBOUND;
         c_tags_seen_.fetch_add(1);
-        const WgTag& t = native[i];
-        if (!FgGuidEq(t.h.type, l_.tag_guid)) {
+        const WgHeader* th = FgFindInChain(&native[i], l_.tag_guid);
+        if (!th) {
             c_tags_wrong_guid_.fetch_add(1);
             continue;
         }
+        const WgTag& t = *reinterpret_cast<const WgTag*>(th);
         bool fg_input = false;
         for (uint32_t r = 0; r < WG_FG_ROLE_COUNT; ++r)
             if (l_.native_type[r] != WG_FG_NATIVE_TYPE_UNBOUND && l_.native_type[r] == t.buffer_type) fg_input = true;
@@ -266,10 +272,12 @@ bool FgSl214Codec::tags(const WgFrameToken*, const WgViewport* vp, const WgTag* 
             c_tags_lifetime_.fetch_add(1);
             continue;
         }
-        if (!FgGuidEq(res->h.type, l_.resource_guid)) {
+        const WgHeader* rh = FgFindInChain(res, l_.resource_guid);
+        if (!rh) {
             c_tags_wrong_guid_.fetch_add(1);
             continue;
         }
+        res = reinterpret_cast<const WgResource*>(rh);
         if (res->kind != WG_RES_TEX2D) {
             c_tags_not_texture_.fetch_add(1);
             continue;
@@ -303,22 +311,12 @@ bool FgSl214Codec::constants(const WgConstants* c, const WgFrameToken*, const Wg
     const uint64_t frame = interval_.load() + 1;
     out->frame_token = frame;
     out->viewport_id = vp ? vp->id : 0u;
-    uint32_t flags = 0;
+    uint32_t flags = WG_FG_FLAG_MOTION_SCALE_UV;
     if (c->reset == WG_TRI_TRUE) flags |= WG_FG_FLAG_RESET;
     if (c->depth_inverted == WG_TRI_TRUE) flags |= WG_FG_FLAG_DEPTH_REVERSED;
     out->flags = flags;
-    memcpy(out->camera_current, c->view_to_clip, sizeof(out->camera_current));
-    {
-        std::lock_guard<std::mutex> lock(mu_);
-        // the previous interval's matrix; this frame's own on the first frame and after a reset; a second constants
-        // call in the same interval keeps the previous interval's
-        if (!have_cur_ || c->reset == WG_TRI_TRUE) memcpy(prev_view_to_clip_, c->view_to_clip, sizeof(prev_view_to_clip_));
-        else if (frame != cur_frame_) memcpy(prev_view_to_clip_, cur_view_to_clip_, sizeof(prev_view_to_clip_));
-        memcpy(cur_view_to_clip_, c->view_to_clip, sizeof(cur_view_to_clip_));
-        cur_frame_ = frame;
-        have_cur_ = true;
-        memcpy(out->camera_previous, prev_view_to_clip_, sizeof(out->camera_previous));
-    }
+    memcpy(out->camera_current, c->clip_to_prev_clip, sizeof(out->camera_current));
+    memcpy(out->camera_previous, c->prev_clip_to_clip, sizeof(out->camera_previous));
     out->jitter_x = c->jitter[0];
     out->jitter_y = c->jitter[1];
     out->motion_scale_x = c->mv_scale[0];

@@ -251,7 +251,16 @@ bool FgTargetScheduler::Fits(std::uint32_t n, FgTicks period, FgTicks band) cons
     FgTicks lo_total = 0;
     FgTicks hi_total = 0;
     if (lo < 1 || hi < lo || !CheckedMul(d, lo, &lo_total) || !CheckedMul(d, hi, &hi_total)) return false;
-    return period >= lo_total && period <= hi_total;
+    if (period < lo_total || period > hi_total) return false;
+    if (config_.fixed_refresh_period > 0) {
+        const FgTicks rp = config_.fixed_refresh_period;
+        const FgTicks interval = period / d;
+        const FgTicks k = (interval + rp / 2) / rp;
+        if (k < 1 || k > 0xFFFF) return false;
+        const FgTicks diff = interval - k * rp;
+        if ((diff < 0 ? -diff : diff) > rp / 8) return false;
+    }
+    return true;
 }
 
 bool FgTargetScheduler::FitsRaw(std::uint32_t n, FgTicks period) const {

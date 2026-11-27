@@ -1,12 +1,33 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "async_create.h"
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 #include <thread>
 
 namespace wgfsr {
 
 namespace {
 PendingCreate::Launcher g_launcher = nullptr;
+
+#ifdef _WIN32
+struct PinnedWork {
+    std::function<void()> work;
+    HMODULE self = nullptr;
+};
+
+DWORD WINAPI PinnedCreateThread(void* param) {
+    auto* w = static_cast<PinnedWork*>(param);
+    const HMODULE self = w->self;
+    std::function<void()> fn = std::move(w->work);
+    delete w;
+    if (fn) fn();
+    fn = nullptr;
+    FreeLibraryAndExitThread(self, 0);
+}
+#endif
 }
 
 void PendingCreate::SetLauncherForTest(Launcher launcher) { g_launcher = launcher; }
@@ -20,8 +41,26 @@ std::shared_ptr<PendingCreate> PendingCreate::Start(const WgUpscalerBackend* bac
     p->start_ = std::chrono::steady_clock::now();
     try {
         std::function<void()> work = [p] { p->Run(p); };
-        if (g_launcher) g_launcher(work);
-        else std::thread(work).detach();
+        if (g_launcher) {
+            g_launcher(work);
+        } else {
+#ifdef _WIN32
+            HMODULE self = nullptr;
+            if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                                   reinterpret_cast<LPCWSTR>(&PinnedCreateThread), &self) && self) {
+                auto* w = new PinnedWork{std::move(work), self};
+                const HANDLE t = CreateThread(nullptr, 0, &PinnedCreateThread, w, 0, nullptr);
+                if (t) {
+                    CloseHandle(t);
+                    return p;
+                }
+                work = std::move(w->work);
+                delete w;
+                FreeLibrary(self);
+            }
+#endif
+            std::thread(work).detach();
+        }
     } catch (...) {  // the worker could not be started: the create did not run and failed; the hold is given back now
         {
             std::lock_guard<std::mutex> lock(p->mutex_);

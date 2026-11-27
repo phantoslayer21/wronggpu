@@ -1133,7 +1133,8 @@ static unsigned healthTaken = 0;
 void TakeModelState(const HealthMsg& m) {
     if (m.seq && m.seq < healthTaken) return;
     if (m.seq) healthTaken = m.seq;
-    v.modelReady = m.model; v.modelWhy = m.why; v.modelSource = m.source; v.hipLine = m.hip;
+    v.modelReady = m.model; v.modelWhy = m.why; v.modelSource = m.source;
+    if (!m.hip.empty() || v.hipLine.empty()) v.hipLine = m.hip;
     v.rrReady = m.rr; v.rrWhy = m.rrWhy; v.rrSource = m.rrSource;
     v.modelKReady = m.k; v.modelKWhy = m.kWhy; v.modelLReady = m.l; v.modelLWhy = m.lWhy;
     v.fgReady = m.fg; v.fgWhy = m.fgWhy;
@@ -1617,7 +1618,8 @@ void MenuCommand(int owner, int cmd) {
         case M_RESET: {
             const Profile d = DefaultProfile();
             // the Upscaler section's settings only: the FPS overlay is OptiScaler's (its section, and "Reset OptiScaler settings...")
-            for (auto* k : {"wronggpu", "executor", "output_filter", "pre_exposure", "sparkle_guard"}) SetSetting(v.edit, k, d.get(k), nullptr);
+            for (auto* k : {"wronggpu", "model", "m_mode", "k_mode", "l_mode", "executor", "output_filter", "pre_exposure", "sparkle_guard"})
+                if (FindSetting(k)) SetSetting(v.edit, k, d.get(k), nullptr);
             ShowToast(v.edit.v == v.saved.v ? L"These settings are the defaults already." : L"Default settings are shown. Apply to use them.", 0);
             Invalidate();
             return;

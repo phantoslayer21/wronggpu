@@ -165,7 +165,7 @@ private:
     // Runs the stand-in (or network) for one frame; false (logged) when it could not.
     // c.pending: takes the upscaler over when its create has finished; false while it runs or when it failed.
     bool TakePending(Context& c, const std::string& tag);
-    bool RunStandIn(Context& c, const ffxDispatchDescUpscale& dispatch, const std::string& tag);
+    bool RunStandIn(Context& c, const ffxDispatchDescUpscale& dispatch, const std::string& tag, bool* transientNotReady = nullptr);
     // Platform::status for one dispatch of `c` (frame: the mapped frame of a WrongGPU-upscaled dispatch, else null).
     void Report(const Context& c, UpscaleState state, const WgFrame* frame, void* device);
     // The player compares (compare_key): `dispatch` on AMD's FidelityFX API upscaler (compareApi). False when there is

@@ -131,7 +131,10 @@ inline bool system_dxgi_adapter(const AdapterLuid& luid, AdapterRecord* out) {
   if (!dxgi) return false;
   using MakeFactory = HRESULT(WINAPI*)(REFIID, void**);
   auto create = reinterpret_cast<MakeFactory>(reinterpret_cast<void*>(GetProcAddress(dxgi, "CreateDXGIFactory1")));
-  if (!create) return false;
+  if (!create) {
+    FreeLibrary(dxgi);
+    return false;
+  }
   bool ok = false;
   IDXGIFactory4* f = nullptr;
   if (SUCCEEDED(create(__uuidof(IDXGIFactory4), reinterpret_cast<void**>(&f))) && f) {
@@ -150,6 +153,7 @@ inline bool system_dxgi_adapter(const AdapterLuid& luid, AdapterRecord* out) {
     }
     f->Release();
   }
+  FreeLibrary(dxgi);
   return ok;
 }
 

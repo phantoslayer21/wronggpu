@@ -177,6 +177,9 @@ inline IniValues parse_ini(const std::string& text) {
     ini.present = true;
     std::string section;
     size_t a = 0;
+    if (text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xEF &&
+        static_cast<unsigned char>(text[1]) == 0xBB && static_cast<unsigned char>(text[2]) == 0xBF)
+        a = 3;
     while (a < text.size()) {
         size_t b = text.find('\n', a);
         if (b == std::string::npos) b = text.size();
@@ -199,9 +202,12 @@ inline IniValues parse_ini(const std::string& text) {
 // a trailing comment on the key's own line. A missing key goes after the last non-empty line of its section; a
 // missing section is appended. Line ends follow the text (CRLF when it has any, else LF; CRLF for empty text).
 inline std::string ini_set(const std::string& text, const std::string& section, const std::string& key, const std::string& value) {
-    const std::string eol = text.empty() || text.find("\r\n") != std::string::npos ? "\r\n" : "\n";
+    const bool hasBom = text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xEF &&
+                        static_cast<unsigned char>(text[1]) == 0xBB && static_cast<unsigned char>(text[2]) == 0xBF;
+    const std::string bom = hasBom ? text.substr(0, 3) : std::string();
+    size_t a = hasBom ? 3 : 0;
+    const std::string eol = text.size() <= a || text.find("\r\n", a) != std::string::npos ? "\r\n" : "\n";
     std::vector<std::string> lines;
-    size_t a = 0;
     while (a < text.size()) {
         size_t b = text.find('\n', a);
         if (b == std::string::npos) b = text.size();
@@ -210,7 +216,7 @@ inline std::string ini_set(const std::string& text, const std::string& section, 
         lines.push_back(line);
         a = b + 1;
     }
-    const bool trailingNewline = !text.empty() && text.back() == '\n';
+    const bool trailingNewline = text.size() > (hasBom ? 3u : 0u) && text.back() == '\n';
     const std::string wantSection = lower(section), wantKey = lower(key);
     std::string current;
     int sectionStart = -1, lastInSection = -1, found = -1;
@@ -243,7 +249,7 @@ inline std::string ini_set(const std::string& text, const std::string& section, 
         lines.push_back("[" + section + "]");
         lines.push_back(newLine);
     }
-    std::string out;
+    std::string out = bom;
     for (size_t i = 0; i < lines.size(); ++i) {
         out += lines[i];
         if (i + 1 < lines.size() || trailingNewline || found < 0) out += eol;
@@ -561,25 +567,65 @@ bool read_file(const std::wstring& path, std::string* out) {
 }
 
 bool write_file_atomic(const std::wstring& path, const std::string& text) {
-    const std::wstring tmp = path + L".tmp" + std::to_wstring(GetCurrentProcessId());
-    HANDLE f = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    static volatile LONG s_tmpSeq = 0;
+    const DWORD pid = GetCurrentProcessId();
+    const DWORD tid = GetCurrentThreadId();
+    std::wstring tmp;
+    HANDLE f = INVALID_HANDLE_VALUE;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        const LONG seq = InterlockedIncrement(&s_tmpSeq);
+        tmp = path + L".tmp" + std::to_wstring(pid) + L"." + std::to_wstring(tid) + L"." + std::to_wstring(seq);
+        f = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (f != INVALID_HANDLE_VALUE) break;
+        if (GetLastError() != ERROR_FILE_EXISTS) return false;
+    }
     if (f == INVALID_HANDLE_VALUE) return false;
     DWORD put = 0;
     const bool ok = text.empty() || (WriteFile(f, text.data(), static_cast<DWORD>(text.size()), &put, nullptr) && put == text.size());
+    if (ok) FlushFileBuffers(f);
     CloseHandle(f);
-    if (!ok || !MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+    if (!ok) {
         DeleteFileW(tmp.c_str());
         return false;
     }
-    return true;
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        if (MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return true;
+        const DWORD err = GetLastError();
+        if (err != ERROR_ACCESS_DENIED && err != ERROR_SHARING_VIOLATION && err != ERROR_LOCK_VIOLATION) break;
+        Sleep(attempt < 4 ? 1 : 5);
+    }
+    DeleteFileW(tmp.c_str());
+    return false;
 }
 
 uint64_t now_ms() { return GetTickCount64(); }
 
 bool persist_ini_value(const std::wstring& path, const std::string& section, const std::string& key, const std::string& value) {
+    // Serialize read-modify-write across threads and multiple DLL instances in the same process.
+    uint64_t h = 14695981039346656037ull;
+    for (wchar_t c : path) {
+        wchar_t lc = (c >= L'A' && c <= L'Z') ? static_cast<wchar_t>(c - L'A' + L'a') : c;
+        h = (h ^ static_cast<uint64_t>(lc)) * 1099511628211ull;
+    }
+    const std::wstring mname = L"Local\\WrongGPU_IniWrite_" + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(h);
+    HANDLE mu = CreateMutexW(nullptr, FALSE, mname.c_str());
+    bool locked = false;
+    if (mu) {
+        const DWORD wr = WaitForSingleObject(mu, 2000);
+        locked = (wr == WAIT_OBJECT_0 || wr == WAIT_ABANDONED);
+        if (!locked) {
+            CloseHandle(mu);
+            return false;
+        }
+    }
     std::string text;
     if (!read_file(path, &text)) text = kWgDefaultIniText;
-    return write_file_atomic(path, ini_set(text, section, key, value));
+    const bool ok = write_file_atomic(path, ini_set(text, section, key, value));
+    if (mu) {
+        if (locked) ReleaseMutex(mu);
+        CloseHandle(mu);
+    }
+    return ok;
 }
 
 // ---- the block -----------------------------------------------------------------------------------------------------
@@ -764,8 +810,10 @@ bool SharedSettings::write_slots(const uint32_t* slots, const int32_t* vals, uin
         if (!value_in_range(slots[i], vals[i])) return false;
     locked_write(slots, vals, n);
     if (persist && !ini_.empty()) {
+        bool allOk = true;
         for (uint32_t i = 0; i < n; ++i)
-            persist_ini_value(ini_, kWgOptions[slots[i]].ini_section, kWgOptions[slots[i]].key, value_name(slots[i], vals[i]));
+            allOk = persist_ini_value(ini_, kWgOptions[slots[i]].ini_section, kWgOptions[slots[i]].key, value_name(slots[i], vals[i])) && allOk;
+        return allOk;
     }
     return true;
 }
@@ -833,10 +881,11 @@ bool HostIniPoll::poll(int* index, uint64_t nowMs) {
     const uint64_t write = (uint64_t(a.ftLastWriteTime.dwHighDateTime) << 32) | a.ftLastWriteTime.dwLowDateTime;
     const uint64_t stamp = write ^ (uint64_t(a.nFileSizeLow) << 1);
     if (stamp == lastWrite_) return false;
-    lastWrite_ = stamp;
     std::string text;
+    if (!read_file(path_, &text)) return false;
+    lastWrite_ = stamp;
     int n = -1;
-    if (!read_file(path_, &text) || !parse_host_index(text, section_, &n) || n == last_) return false;
+    if (!parse_host_index(text, section_, &n) || n == last_) return false;
     last_ = n;
     if (index) *index = n;
     return true;

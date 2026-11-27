@@ -119,6 +119,14 @@ struct FrontEnd::UpscaleContext {
         restartNext = true;
         badRun = 0;
         amdLast = false;
+        broken = false;
+        brokenFrames = 0;
+        unsupportedSaid = false;
+        resizes = 0;
+        resizeFailed = false;
+        modeSwitches = 0;
+        modeSwitchFailed = false;
+        retiredOptions.clear();
     }
 };
 
@@ -659,6 +667,7 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
                     std::lock_guard lock(mutex_);
                     forwarded_[*context] = Forwarded{name, 0, api, status, true};
                     runningModel_.store(0);  // AMD's upscaler runs
+                    if (config_.customSlot && !asiHooked && platform_.asiShowModel) platform_.asiShowModel(0);
                 }
                 Log(tag + " -> " + RcName(rc) + " (the host chose AMD's upscaler version " + Hex(chosen) + "; forwarded) context=" +
                     Name(context));
@@ -891,23 +900,37 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
     }
 
     if (!u->backend) {
+        auto clearRunningOnFail = [&] {
+            bool anyOwn = false;
+            {
+                std::lock_guard lock(mutex_);
+                anyOwn = !own_.empty();
+            }
+            if (!anyOwn) {
+                runningModel_.store(0);
+                if (config_.customSlot && !asiHooked && platform_.asiShowModel) platform_.asiShowModel(1);
+            }
+        };
         if (config_.customSlot && !u->pending && !UpscaleFallbackApi()) {
             // Custom slot, no AMD DLL of WrongGPU's own: a clean failure, and the host's own upscaler takes over. Never
             // the host's FidelityFX DLLs (config.h Config::customSlot): they would call this DLL again.
             if (!repeatedFailure)
                 Log(tag + " -> ERROR_RUNTIME_ERROR: " + why + "; hosted in OptiScaler's custom slot without an AMD DLL of WrongGPU's own "
                     "(amd_fidelityfx_dx12.wronggpu-original.dll next to this DLL): no context, the host's own upscaler takes over");
+            clearRunningOnFail();
             delete u;
             return FFX_API_RETURN_ERROR_RUNTIME_ERROR;
         }
         if (config_.upscaler != UpscalerChoice::Amd && !config_.fallbackToAmd && !hardIncompat) {
             Log(tag + " -> ERROR_RUNTIME_ERROR: " + why + " (fallback_to_amd = 0)");
+            clearRunningOnFail();
             delete u;
             return FFX_API_RETURN_ERROR_RUNTIME_ERROR;
         }
         const OriginalApi* original = UpscaleFallbackApi();
         if (!original) {
             Log(tag + " -> NO_PROVIDER: " + why + "; AMD's original DLL is not available either");
+            clearRunningOnFail();
             if (u->pending) {
                 // A bounded create can still use u's options and log callback.
                 // Keep them alive and destroy any late result before retiring u.
@@ -928,6 +951,7 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
                                                : original->createContext(&u->amd, desc, memCb);
         if (rc != FFX_API_RETURN_OK) {
             Log(tag + " -> " + RcName(rc) + " (AMD's create failed)");
+            clearRunningOnFail();
             if (u->pending) {
                 const WgUpscalerBackend* backend = u->pendingBackend;
                 PendingCreate::Abandon(u->pending, [u, backend](WgUpscaler* upscaler) {
@@ -947,7 +971,9 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
         own_[u] = true;
     }
     // the model the active context runs (HostSelected compares a selection with it): none while it runs AMD's upscaler
-    runningModel_.store(u->mode == UpscaleContext::Mode::Amd && !u->pending ? char(0) : u->selectedModel);
+    const char activeModel = u->mode == UpscaleContext::Mode::Amd && !u->pending ? char(0) : u->selectedModel;
+    runningModel_.store(activeModel);
+    if (config_.customSlot && !asiHooked && platform_.asiShowModel) platform_.asiShowModel(activeModel);
     *context = u;
     Log(tag + " -> OK context=" + Name(context) + (u->mode == UpscaleContext::Mode::Amd ? " amd=" + Pointer(u->amd) : ""));
     return FFX_API_RETURN_OK;
@@ -1007,6 +1033,8 @@ void FrontEnd::CheckPending(UpscaleContext& u, uint64_t call) {
             u.failReason = "WrongGPU's D3D12 hooks could not be installed for the command-list split";
             Log(tag + " ERROR: upscaler \"" + u.pendingBackend->name + "\" started after " + seconds + ", but " + u.failReason +
                 "; AMD FSR keeps upscaling");
+            runningModel_.store(0);
+            if (config_.customSlot && platform_.asiShowModel) platform_.asiShowModel(0);
             u.pending.reset();
             return;
         }
@@ -1024,7 +1052,9 @@ void FrontEnd::CheckPending(UpscaleContext& u, uint64_t call) {
                                              : u.createError;
         Log(tag + " ERROR: upscaler \"" + u.pendingBackend->name + "\" create failed after " + seconds + ": " + WgResultText(r) +
             "; AMD FSR keeps upscaling");
+        runningModel_.store(0);
         if (config_.customSlot) {
+            if (platform_.asiShowModel) platform_.asiShowModel(0);
             std::lock_guard lock(mutex_);
             failedCreates_[FailureKey(u.pendingBackend, u)] = RememberedFailure{u.failReason, 0, r == WG_ERROR_UNSUPPORTED};
         }
@@ -1338,6 +1368,8 @@ void FrontEnd::Fail(UpscaleContext& u, const std::string& why, uint64_t call, bo
         // Dispatch can leave resources referenced by commands the host has not
         // submitted yet. A handoff is not a GPU completion boundary. Retain the
         // network and stand-in until the host tears down this context normally.
+        runningModel_.store(0);
+        if (config_.customSlot && platform_.asiShowModel) platform_.asiShowModel(0);
         Log("#" + std::to_string(call) + " U" + std::to_string(u.id) + " now runs on AMD FSR for the rest of its life");
     }
 }
@@ -1397,10 +1429,16 @@ ffxReturnCode_t FrontEnd::DestroyContext(ffxContext* context, const ffxAllocatio
             return FFX_API_RETURN_ERROR_RUNTIME_ERROR;
         }
         bool others = false;  // another upscaler context is in use: the host switched upscalers (frontend.h, parked)
+        bool anyOwn = false;
         {
             std::lock_guard lock(mutex_);
             own_.erase(u);
+            anyOwn = !own_.empty();
             others = OtherUpscalerLocked();
+        }
+        if (!anyOwn) {
+            if (others) runningModel_.store(0);
+            if (config_.customSlot && platform_.asiShowModel) platform_.asiShowModel(others ? char(0) : char(1));
         }
         ffxReturnCode_t rc = FFX_API_RETURN_OK;
         std::shared_ptr<PendingCreate> pending;
@@ -1500,20 +1538,25 @@ ffxReturnCode_t FrontEnd::Configure(ffxContext* context, const ffxConfigureDescH
         Log(tag + " -> ERROR_RUNTIME_ERROR: U" + std::to_string(u->id) + " re-entered on this thread from inside a call of itself; refused");
         return FFX_API_RETURN_ERROR_RUNTIME_ERROR;
     }
-    if (u && u->mode == UpscaleContext::Mode::Own) {
+    if (u) {
         std::lock_guard lock(u->mutex);
-        ffxReturnCode_t rc = FFX_API_RETURN_ERROR_UNKNOWN_DESCTYPE;
-        if (desc->type == FFX_API_CONFIGURE_DESC_TYPE_UPSCALE_KEYVALUE) {
-            rc = FFX_API_RETURN_OK;  // FSR tuning keys; WrongGPU's upscaler has no equivalent
-        } else if (desc->type == FFX_API_CONFIGURE_DESC_TYPE_GLOBALDEBUG1) {
-            u->fpMessage = reinterpret_cast<const ffxConfigureDescGlobalDebug1*>(desc)->fpMessage;
-            rc = FFX_API_RETURN_OK;
+        if (u->mode == UpscaleContext::Mode::Own) {
+            ffxReturnCode_t rc = FFX_API_RETURN_ERROR_UNKNOWN_DESCTYPE;
+            if (desc->type == FFX_API_CONFIGURE_DESC_TYPE_UPSCALE_KEYVALUE) {
+                rc = FFX_API_RETURN_OK;  // FSR tuning keys; WrongGPU's upscaler has no equivalent
+            } else if (desc->type == FFX_API_CONFIGURE_DESC_TYPE_GLOBALDEBUG1) {
+                u->fpMessage = reinterpret_cast<const ffxConfigureDescGlobalDebug1*>(desc)->fpMessage;
+                rc = FFX_API_RETURN_OK;
+            }
+            return result(rc, " (WrongGPU)");
         }
-        return result(rc, " (WrongGPU)");
+        const OriginalApi* original = u->amdApi;
+        if (!original) return result(FFX_API_RETURN_NO_PROVIDER, "");
+        return result(original->configure(&u->amd, desc), " (forwarded to AMD)");
     }
-    const OriginalApi* original = u ? u->amdApi : !context ? Original() : ApiOf(*context);
+    const OriginalApi* original = !context ? Original() : ApiOf(*context);
     if (!original) return result(FFX_API_RETURN_NO_PROVIDER, "");
-    const ffxReturnCode_t rc = u ? original->configure(&u->amd, desc) : original->configure(context, desc);
+    const ffxReturnCode_t rc = original->configure(context, desc);
     return result(rc, " (forwarded to AMD)");
 }
 
@@ -1919,12 +1962,20 @@ ffxReturnCode_t FrontEnd::Query(ffxContext* context, ffxQueryDescHeader* desc) {
         reinterpret_cast<ffxQueryDescGetVersions*>(desc)->createDescType == FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE) {
         rc = ListVersions(*reinterpret_cast<ffxQueryDescGetVersions*>(desc));
         who = "WrongGPU, then AMD's upscaler versions";
-    } else if (u && u->mode == UpscaleContext::Mode::Own) {
+    } else if (u) {
         std::lock_guard lock(u->mutex);
-        rc = QueryOwn(*u, desc);
-        who = "WrongGPU";
-    } else if (const OriginalApi* original = u ? u->amdApi : !context || !*context ? Original() : ApiOf(*context)) {
-        rc = u ? original->query(&u->amd, desc) : original->query(context, desc);
+        if (u->mode == UpscaleContext::Mode::Own) {
+            rc = QueryOwn(*u, desc);
+            who = "WrongGPU";
+        } else if (u->amdApi) {
+            rc = u->amdApi->query(&u->amd, desc);
+            who = "forwarded to AMD";
+        } else {
+            rc = FFX_API_RETURN_NO_PROVIDER;
+            who = "AMD's original DLL is not available";
+        }
+    } else if (const OriginalApi* original = !context || !*context ? Original() : ApiOf(*context)) {
+        rc = original->query(context, desc);
         who = "forwarded to AMD";
     } else {
         rc = FFX_API_RETURN_NO_PROVIDER;
@@ -2158,7 +2209,27 @@ ffxReturnCode_t FrontEnd::BadFrame(UpscaleContext& u, const ffxDispatchDescUpsca
                what + "; AMD FSR dispatch failed: " + RcName(rc), what);
         return rc;
     }
-    // 3. Nobody: the frame fails, the context stays.
+    // 3. Nobody: the frame fails, the context stays (or in custom slot with amdOnly and no AMD fallback, remember the
+    // refusal so OptiScaler stops recreating the context every frame).
+    if (config_.customSlot && amdOnly && u.backend && !u.broken) {
+        u.broken = true;
+        if (u.failReason.empty()) u.failReason = what;
+        bool first = false;
+        uint32_t consecutive = 0;
+        {
+            std::lock_guard lock(mutex_);
+            const std::string key = FailureKey(u.backend, u) + "|" + problem;
+            consecutive = key == inputRefusedKey_ ? inputRefusedRun_ + 1 : 1;
+            inputRefusedKey_ = key;
+            inputRefusedRun_ = consecutive;
+            inputRefusedAny_.store(true, std::memory_order_relaxed);
+            if (consecutive >= kInputRefusedRun)
+                first = failedCreates_.emplace(FailureKey(u.backend, u), RememberedFailure{u.failReason, 0, result == WG_ERROR_UNSUPPORTED}).second;
+        }
+        if (first)
+            Log(tag + " custom slot: " + problem + " (" + std::to_string(consecutive) +
+                " contexts in a row); this refusal is remembered for the session so OptiScaler's own upscaler takes over");
+    }
     if (run == 1 || ShouldLogDispatch(frameIndex))
         Log(tag + (amdOnly ? " note U" : " ERROR U") + std::to_string(u.id) + ": " + what + ": no upscaler for this frame (" +
             (config_.fallbackToAmd ? "AMD FSR is not available" : "fallback_to_amd = 0") + ") -> " +
@@ -2248,7 +2319,7 @@ ffxReturnCode_t FrontEnd::Dispatch(ffxContext* context, const ffxDispatchDescHea
     const GpuTimed timed(platform_.gpuTimer, desc->type == FFX_API_DISPATCH_DESC_TYPE_UPSCALE
                                                  ? reinterpret_cast<const ffxDispatchDescUpscale*>(desc)->commandList
                                                  : nullptr);
-    if (u && u->mode == UpscaleContext::Mode::Own) {
+    if (u) {
         std::lock_guard lock(u->mutex);
         if (u->mode == UpscaleContext::Mode::Own) {
             if (desc->type == FFX_API_DISPATCH_DESC_TYPE_UPSCALE) {
@@ -2282,16 +2353,13 @@ ffxReturnCode_t FrontEnd::Dispatch(ffxContext* context, const ffxDispatchDescHea
             Log(tag + " -> ERROR_UNKNOWN_DESCTYPE (WrongGPU)");
             return FFX_API_RETURN_ERROR_UNKNOWN_DESCTYPE;
         }
-    }
-    const OriginalApi* original = u ? u->amdApi : !context || !*context ? Original() : ApiOf(*context);
-    if (!original) {
-        Log(tag + " -> NO_PROVIDER");
-        return FFX_API_RETURN_NO_PROVIDER;
-    }
-    if (desc->type == FFX_API_DISPATCH_DESC_TYPE_UPSCALE && platform_.noteDispatch)
-        platform_.noteDispatch(reinterpret_cast<const ffxDispatchDescUpscale*>(desc)->commandList, nullptr);
-    if (u) {
-        std::lock_guard lock(u->mutex);
+        const OriginalApi* original = u->amdApi;
+        if (!original) {
+            Log(tag + " -> NO_PROVIDER");
+            return FFX_API_RETURN_NO_PROVIDER;
+        }
+        if (desc->type == FFX_API_DISPATCH_DESC_TYPE_UPSCALE && platform_.noteDispatch)
+            platform_.noteDispatch(reinterpret_cast<const ffxDispatchDescUpscale*>(desc)->commandList, nullptr);
         ++u->dispatches;
         const ffxReturnCode_t rc = original->dispatch(&u->amd, desc);
         if (log || rc != FFX_API_RETURN_OK) Log(tag + " -> " + RcName(rc) + " (forwarded to AMD)");
@@ -2300,6 +2368,13 @@ ffxReturnCode_t FrontEnd::Dispatch(ffxContext* context, const ffxDispatchDescHea
                    "AMD FSR dispatch failed: " + std::string(RcName(rc)));
         return rc;
     }
+    const OriginalApi* original = !context || !*context ? Original() : ApiOf(*context);
+    if (!original) {
+        Log(tag + " -> NO_PROVIDER");
+        return FFX_API_RETURN_NO_PROVIDER;
+    }
+    if (desc->type == FFX_API_DISPATCH_DESC_TYPE_UPSCALE && platform_.noteDispatch)
+        platform_.noteDispatch(reinterpret_cast<const ffxDispatchDescUpscale*>(desc)->commandList, nullptr);
     const ffxReturnCode_t rc = original->dispatch(context, desc);
     if (log || rc != FFX_API_RETURN_OK) Log(tag + " -> " + RcName(rc) + " (forwarded to AMD)");
     if (rc == FFX_API_RETURN_OK && platform_.status && context && *context &&

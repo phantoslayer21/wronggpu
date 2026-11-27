@@ -168,10 +168,10 @@ int main() {
 
   // ---------------------------------------------------------------- classify (synthetic modules)
   {
-    // one executable allocation split into "modules": iface, foreign, host, own copy, WrongGPU.asi, exe, self;
-    // the last pages are anonymous (no module); one page is made PAGE_NOACCESS
+    // one executable allocation split into "modules": iface, foreign, host, own copy, WrongGPU.asi, WrongGPU-FG.asi,
+    // exe, self; the last pages are anonymous (no module); one page is made PAGE_NOACCESS
     const size_t kMod = 4 * kPage;
-    const int kMods = 7;
+    const int kMods = 8;
     uint8_t* blk = static_cast<uint8_t*>(VirtualAlloc(nullptr, kMods * kMod + 4 * kPage, MEM_RESERVE | MEM_COMMIT,
                                                       PAGE_EXECUTE_READWRITE));
     CHECK(blk != nullptr);
@@ -181,11 +181,12 @@ int main() {
     uint8_t* host = blk + 2 * kMod;
     uint8_t* copy = blk + 3 * kMod;
     uint8_t* wgasi = blk + 4 * kMod;
-    uint8_t* exe = blk + 5 * kMod;
-    uint8_t* self = blk + 6 * kMod;
+    uint8_t* wgfg = blk + 5 * kMod;
+    uint8_t* exe = blk + 6 * kMod;
+    uint8_t* self = blk + 7 * kMod;
     uint8_t* anon = blk + kMods * kMod;  // 4 anonymous pages; the last one unreadable
-    const char* names[kMods] = {"iface.dll", "other.asi", "host.dll", "WrongGPU-RR-copy.asi", "WrongGPU.asi", "game.exe",
-                                "WrongGPU-RR.asi"};
+    const char* names[kMods] = {"iface.dll", "other.asi", "host.dll", "WrongGPU-RR-copy.asi", "WrongGPU.asi",
+                                "WrongGPU-FG.asi", "game.exe", "WrongGPU-RR.asi"};
     Env env;
     env.iface = iface;
     env.host = host;
@@ -199,7 +200,9 @@ int main() {
       return blk + ((p - blk) / kMod) * kMod;
     };
     env.exports = [=](const void* m, const char* name) {
-      return (m == copy && strcmp(name, kOwnRrExport) == 0) || (m == wgasi && strcmp(name, kWrongGpuAsiExport) == 0);
+      return (m == copy && strcmp(name, kOwnRrExport) == 0) ||
+             (m == wgasi && strcmp(name, kWrongGpuAsiExport) == 0) ||
+             (m == wgfg && strcmp(name, kWrongGpuFgExport) == 0);
     };
     env.name_of = [=](const void* m) { return std::string(names[(static_cast<const uint8_t*>(m) - blk) / kMod]); };
     DWORD old = 0;
@@ -278,9 +281,14 @@ int main() {
     // the other module kinds
     CHECK(classify(copy + 8, env, false).owner == Owner::kOwnCopy);
     CHECK(classify(wgasi + 8, env, false).owner == Owner::kWrongGpu);
+    CHECK(classify(wgfg + 8, env, false).owner == Owner::kWrongGpu);
     CHECK(classify(exe + 8, env, false).owner == Owner::kExeThunk);
     CHECK(classify(self + 8, env, false).owner == Owner::kSelf);
     CHECK(classify(host + 8, env, false).owner == Owner::kHost);
+    // an export hooked straight into WrongGPU-FG.asi stays clean (our own plugin)
+    put_abs(iface + 704, wgfg + 16);
+    w = classify(iface + 704, env, true);
+    CHECK(w.owner == Owner::kWrongGpu && w.module == "WrongGPU-FG.asi");
     // an export hooked straight into a copy of WrongGPU RR
     put_abs(iface + 576, copy + 16);
     w = classify(iface + 576, env, true);
@@ -289,10 +297,11 @@ int main() {
     // ---- Verdict
     Verdict v;
     v.add(classify(iface + 16, env, true), "the export A of iface.dll", false, false);
+    v.add(classify(iface + 704, env, true), "the export FG of iface.dll", false, false);
     v.add(classify(host + 8, env, false), "the import slot B of game.exe", false, false);
     v.add(classify(exe + 8, env, false), "the delay-load slot C of game.exe", false, true);
     v.add(classify(anon + 1024, env, false), "the host's next function of D", true, false);
-    CHECK(v.kind == Verdict::kClean && v.reads == 4 && v.unclear == 0);
+    CHECK(v.kind == Verdict::kClean && v.reads == 5 && v.unclear == 0);
     // not positive findings: unreadable memory, a null slot, too many hops, anonymous code that does not jump on (not
     // accepted here), the exe's own code (not accepted here), a hook chain that ends in the exe: counted, kind stays clean
     v.add(classify(dead + 32, env, false), "the import slot F of game.exe", false, false);
@@ -301,7 +310,7 @@ int main() {
     v.add(classify(anon + 256, env, false), "the import slot L of game.exe", false, false);
     v.add(classify(anon + 1024, env, false), "the import slot I of game.exe", false, false);
     v.add(classify(exe + 8, env, false), "the import slot J of game.exe", false, false);
-    CHECK(v.kind == Verdict::kClean && v.unclear == 5 && v.reads == 9);
+    CHECK(v.kind == Verdict::kClean && v.unclear == 5 && v.reads == 10);
     CHECK(v.unclear_detail == "the import slot F of game.exe could not be read");  // the first one stays
     Verdict u;
     u.add(classify(anon + 256, env, false), "the import slot L of game.exe", false, false);
@@ -333,7 +342,7 @@ int main() {
     v.add(classify(copy + 8, env, false), "the import slot G of game.exe", false, false);
     CHECK(v.kind == Verdict::kOwnCopy && v.detail == "WrongGPU-RR-copy.asi");  // a copy of WrongGPU RR before all
     v.add(classify(foreign + 8, env, false), "the import slot H of game.exe", false, false);
-    CHECK(v.kind == Verdict::kOwnCopy && v.reads == 13);
+    CHECK(v.kind == Verdict::kOwnCopy && v.reads == 14);
     Verdict f4;  // a decoded chain of exactly kMaxHops jumps that ends in a foreign module is positive
     f4.add(classify(anon + 2048, env, false), "the import slot P of game.exe", false, false);
     CHECK(f4.kind == Verdict::kForeign && f4.detail == "the import slot P of game.exe leads to other.asi (through 4 hook jumps)");

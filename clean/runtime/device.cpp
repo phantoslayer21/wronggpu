@@ -545,17 +545,22 @@ class HipDevice : public Device {
   bool launch_timed(const std::string& kernel, unsigned grid, unsigned block, void** args, int start_event,
                     int stop_event) override {
     if (!api_.ExtModuleLaunchKernel) return Device::launch_timed(kernel, grid, block, args, start_event, stop_event);
+    if (start_event >= static_cast<int>(events_.size()) || stop_event >= static_cast<int>(events_.size()))
+      return fail("HIP event index out of range");
     hipFunction_t f = function(kernel);
     if (!f) return false;
     trace_launch(kernel, grid, block);
     return check(api_.ExtModuleLaunchKernel(f, grid * block, 1, 1, block, 1, 1, 0, stream_, args, nullptr,
-                                            start_event >= 0 ? events_.at(start_event) : nullptr,
-                                            stop_event >= 0 ? events_.at(stop_event) : nullptr, 0),
+                                            start_event >= 0 ? events_[static_cast<size_t>(start_event)] : nullptr,
+                                            stop_event >= 0 ? events_[static_cast<size_t>(stop_event)] : nullptr, 0),
                  ("hipExtModuleLaunchKernel(" + kernel + ")").c_str());
   }
   bool exact_kernel_events() const override { return api_.ExtModuleLaunchKernel != nullptr; }
   bool sync() override { return check(api_.StreamSynchronize(stream_), "hipStreamSynchronize"); }
-  bool record(int ev) override { return check(api_.EventRecord(events_.at(ev), stream_), "hipEventRecord"); }
+  bool record(int ev) override {
+    if (ev < 0 || static_cast<size_t>(ev) >= events_.size()) return fail("HIP event index out of range");
+    return check(api_.EventRecord(events_[static_cast<size_t>(ev)], stream_), "hipEventRecord");
+  }
   void* alloc_host(size_t bytes) override {
     void* p = nullptr;
     return api_.HostMalloc && api_.HostMalloc(&p, bytes, 0) == 0 ? p : nullptr;
@@ -585,16 +590,22 @@ class HipDevice : public Device {
     return true;
   }
   int event_done(int ev) override {
-    if (!api_.EventQuery) return -1;
-    const hipError_t r = api_.EventQuery(events_.at(ev));
+    if (!api_.EventQuery || ev < 0 || static_cast<size_t>(ev) >= events_.size()) return -1;
+    const hipError_t r = api_.EventQuery(events_[static_cast<size_t>(ev)]);
     return r == 0 ? 1 : (r == 600 ? 0 : -1);  // hipSuccess, hipErrorNotReady
   }
   bool elapsed_done_ms(int a, int b, float* ms) override {
-    return check(api_.EventElapsedTime(ms, events_.at(a), events_.at(b)), "hipEventElapsedTime");
+    if (!ms || a < 0 || b < 0 || static_cast<size_t>(a) >= events_.size() || static_cast<size_t>(b) >= events_.size())
+      return fail("HIP event index out of range");
+    return check(api_.EventElapsedTime(ms, events_[static_cast<size_t>(a)], events_[static_cast<size_t>(b)]),
+                 "hipEventElapsedTime");
   }
   bool elapsed_ms(int a, int b, float* ms) override {
-    return check(api_.EventSynchronize(events_.at(b)), "hipEventSynchronize") &&
-           check(api_.EventElapsedTime(ms, events_.at(a), events_.at(b)), "hipEventElapsedTime");
+    if (!ms || a < 0 || b < 0 || static_cast<size_t>(a) >= events_.size() || static_cast<size_t>(b) >= events_.size())
+      return fail("HIP event index out of range");
+    return check(api_.EventSynchronize(events_[static_cast<size_t>(b)]), "hipEventSynchronize") &&
+           check(api_.EventElapsedTime(ms, events_[static_cast<size_t>(a)], events_[static_cast<size_t>(b)]),
+                 "hipEventElapsedTime");
   }
 
  private:
@@ -711,13 +722,20 @@ class EmuDevice : public Device {
  public:
   ~EmuDevice() override {
     for (auto& kv : blocks_) std::free(kv.second);
+    for (auto& kv : tagged_)
+      if (kv.second.handle) close_library(kv.second.handle);
+    if (lib_) close_library(lib_);
   }
   bool init(const std::string& lib_path) {
     lib_ = open_library(lib_path);
     if (!lib_) return fail("cannot load the emulator library " + lib_path + ": " + library_error());
     launch_ = (int (*)(const char*, unsigned, unsigned, void**))symbol(lib_, "emu_launch");
     has_ = (int (*)(const char*))symbol(lib_, "emu_has_kernel");
-    if (!launch_ || !has_) return fail("emulator library lacks emu_launch / emu_has_kernel");
+    if (!launch_ || !has_) {
+      close_library(lib_);
+      lib_ = nullptr;
+      return fail("emulator library lacks emu_launch / emu_has_kernel");
+    }
     times_.resize(4);
     return true;
   }
@@ -740,18 +758,26 @@ class EmuDevice : public Device {
     }
   }
   bool upload(DevPtr dst, const void* src, size_t bytes) override {
+    if (!bytes) return true;
+    if (!dst || !src) return fail("emulator upload: null pointer");
     std::memcpy((void*)dst, src, bytes);
     return true;
   }
   bool download(void* dst, DevPtr src, size_t bytes) override {
+    if (!bytes) return true;
+    if (!dst || !src) return fail("emulator download: null pointer");
     std::memcpy(dst, (const void*)src, bytes);
     return true;
   }
   bool copy(DevPtr dst, DevPtr src, size_t bytes) override {
+    if (!bytes) return true;
+    if (!dst || !src) return fail("emulator copy: null pointer");
     std::memmove((void*)dst, (const void*)src, bytes);
     return true;
   }
   bool memset(DevPtr dst, int value, size_t bytes) override {
+    if (!bytes) return true;
+    if (!dst) return fail("emulator memset: null pointer");
     std::memset((void*)dst, value, bytes);
     return true;
   }
@@ -762,7 +788,12 @@ class EmuDevice : public Device {
     if (!l.handle) return fail("cannot load the emulator library " + lib_path + ": " + library_error());
     l.launch = (int (*)(const char*, unsigned, unsigned, void**))symbol(l.handle, "emu_launch");
     l.has = (int (*)(const char*))symbol(l.handle, "emu_has_kernel");
-    if (!l.launch || !l.has) return fail("emulator library lacks emu_launch / emu_has_kernel");
+    if (!l.launch || !l.has) {
+      close_library(l.handle);
+      return fail("emulator library lacks emu_launch / emu_has_kernel");
+    }
+    auto prev = tagged_.find(tag);
+    if (prev != tagged_.end() && prev->second.handle) close_library(prev->second.handle);
     tagged_[tag] = l;
     return true;
   }
@@ -781,11 +812,14 @@ class EmuDevice : public Device {
   }
   bool sync() override { return true; }
   bool record(int ev) override {
-    times_.at(ev) = std::chrono::steady_clock::now();
+    if (ev < 0 || static_cast<size_t>(ev) >= times_.size()) return fail("emulator event index out of range");
+    times_[static_cast<size_t>(ev)] = std::chrono::steady_clock::now();
     return true;
   }
   bool elapsed_ms(int a, int b, float* ms) override {
-    *ms = std::chrono::duration<float, std::milli>(times_.at(b) - times_.at(a)).count();
+    if (!ms || a < 0 || b < 0 || static_cast<size_t>(a) >= times_.size() || static_cast<size_t>(b) >= times_.size())
+      return fail("emulator event index out of range");
+    *ms = std::chrono::duration<float, std::milli>(times_[static_cast<size_t>(b)] - times_[static_cast<size_t>(a)]).count();
     return true;
   }
   bool reserve_events(int n) override {

@@ -76,7 +76,7 @@ struct Runtime;
 // sets *err on failure. native_direct_io additionally skips dense color/depth/motion conversion buffers and requires
 // external_io + backend 3 + the ported Model M route. Typed textures are bound by the private native caller.
 Runtime* runtime_create(const WgRtConfig& cfg, std::unique_ptr<Device> dev, std::string* err,
-                        bool external_io = false, bool native_direct_io = false);
+                        bool external_io = false, bool native_direct_io = false, bool measure_only = false);
 void runtime_destroy(Runtime* rt);
 // Enqueues one whole frame (does not wait). io may be null.
 bool runtime_frame(Runtime* rt, const WgRtFrame& frame, const FrameIo* io);

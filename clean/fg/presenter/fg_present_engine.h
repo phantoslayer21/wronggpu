@@ -86,6 +86,7 @@ public:
     // a time); PresentRealOnly then presents from it. Without a reservation PresentRealOnly takes any free slot (the
     // fake's behaviour, for tests that do not model image data).
     FgStatus ReserveRealOnlySlot(std::uint32_t* slot);
+    void ReleaseRealOnlySlot();
     bool HasRealOnlyReservation() const { return real_only_slot_ >= 0; }
     FgStatus PresentRealOnly(const FgIntervalPlan& plan, const FgRealImage& real);
     // *cancel_from: first display-path present id the back end must cancel (0: none).

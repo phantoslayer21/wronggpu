@@ -361,6 +361,7 @@ struct Bindings {
     ID3D12PipelineState* pso = nullptr;
     bool stateObjectSet = false;
     void* stateObject = nullptr;
+    bool stateObjectLast = false;
     Pipe gfx, cmp;
     bool topologySet = false;
     D3D12_PRIMITIVE_TOPOLOGY topology{};
@@ -517,11 +518,20 @@ void WatchCall(ListState& s, const void* caller) {
 
 std::atomic<int> g_factLines{0};  // budget of creation / change lines
 
+void ClearPendingSplits(ListState& s);
+
 // After a creation call returned `object`.
 void NoteCreated(int path, D3D12_COMMAND_LIST_TYPE type, const void* allocator, const void* pso, UINT flags, REFIID riid,
                  void* object, const void* caller) {
     ListState& s = StateOf(object);
     void** vt = *static_cast<void***>(object);
+    s.known = false;
+    s.allocator = nullptr;
+    s.openQueries = 0;
+    s.statistics.clear();
+    s.renderPass = false;
+    s.b = Bindings{};
+    ClearPendingSplits(s);
     s.createdBy = uint8_t(path);
     s.createdVtbl = vt;
     s.resetVtbl = nullptr;
@@ -633,6 +643,9 @@ void MergeBundle(Bindings& to, const Bindings& from) {
     }
     if (from.psoSet) to.psoSet = true, to.pso = from.pso;
     if (from.stateObjectSet) to.stateObjectSet = true, to.stateObject = from.stateObject;
+    if (from.psoSet && from.stateObjectSet) to.stateObjectLast = from.stateObjectLast;
+    else if (from.stateObjectSet) to.stateObjectLast = true;
+    else if (from.psoSet) to.stateObjectLast = false;
     for (int p = 0; p < 2; ++p) {
         const Pipe& f = p ? from.cmp : from.gfx;
         Pipe& t = p ? to.cmp : to.gfx;
@@ -910,9 +923,16 @@ int Restore(CmdList* self, const Bindings& b) {
     if (b.heapsSet && b.numHeaps) ORIG(PfnHeaps, WG_VT_LIST_SET_DESCRIPTOR_HEAPS)(self, b.numHeaps, b.heaps), ++n;
     if (b.gfx.sigSet) ORIG(PfnRootSig, WG_VT_LIST_SET_GRAPHICS_ROOT_SIGNATURE)(self, b.gfx.sig), ++n;
     if (b.cmp.sigSet) ORIG(PfnRootSig, WG_VT_LIST_SET_COMPUTE_ROOT_SIGNATURE)(self, b.cmp.sig), ++n;
-    if (b.psoSet) ORIG(PfnPso, WG_VT_LIST_SET_PIPELINE_STATE)(self, b.pso), ++n;
-    if (b.stateObjectSet) {
-        if (auto f = ORIG(PfnStateObject, WG_VT_LIST_SET_PIPELINE_STATE1)) f(self, b.stateObject), ++n;
+    if (b.stateObjectLast) {
+        if (b.psoSet) ORIG(PfnPso, WG_VT_LIST_SET_PIPELINE_STATE)(self, b.pso), ++n;
+        if (b.stateObjectSet) {
+            if (auto f = ORIG(PfnStateObject, WG_VT_LIST_SET_PIPELINE_STATE1)) f(self, b.stateObject), ++n;
+        }
+    } else {
+        if (b.stateObjectSet) {
+            if (auto f = ORIG(PfnStateObject, WG_VT_LIST_SET_PIPELINE_STATE1)) f(self, b.stateObject), ++n;
+        }
+        if (b.psoSet) ORIG(PfnPso, WG_VT_LIST_SET_PIPELINE_STATE)(self, b.pso), ++n;
     }
     for (int p = 0; p < 2; ++p) {
         const Pipe& pipe = p ? b.cmp : b.gfx;
@@ -999,6 +1019,15 @@ struct Lane {
 std::mutex g_splitMutex;            // lanes, pending splits, queues, trace
 std::vector<Lane*> g_lanes;
 std::atomic<int> g_pendingTotal{0};
+
+void ReleaseFromCpu(const void* list, ListState& s, const char* why, bool keepEntries);
+
+void ClearPendingSplits(ListState& s) {
+    if (!g_pendingTotal.load(std::memory_order_relaxed)) return;
+    std::lock_guard<std::mutex> lock(g_splitMutex);
+    if (s.pending.empty()) return;
+    ReleaseFromCpu(nullptr, s, "the list address was reused before submission", false);
+}
 std::atomic<bool> g_installed{false};
 bool g_installFailed = false;
 uint64_t g_splitIds = 0;
@@ -1221,6 +1250,7 @@ void STDMETHODCALLTYPE HPso(CmdList* self, ID3D12PipelineState* p) {
     STATE;
     s.b.psoSet = true;
     s.b.pso = p;
+    s.b.stateObjectLast = false;
 }
 
 void STDMETHODCALLTYPE HBundle(CmdList* self, CmdList* bundle) {
@@ -1267,7 +1297,7 @@ void SetView(Pipe& p, UINT i, uint8_t kind, uint64_t value) {
 }
 
 void SetConstants(Pipe& p, UINT i, UINT count, const void* data, UINT offset) {
-    if (i >= kRootParams || !data || offset + count > 64 * 4) return;
+    if (i >= kRootParams || !data || count > 64 * 4 || offset > 64 * 4 - count) return;
     RootArg& a = p.args[i];
     if (a.kind != 5) {
         a = RootArg{};
@@ -1407,6 +1437,7 @@ void STDMETHODCALLTYPE HResolveQuery(CmdList* self,ID3D12QueryHeap* heap,D3D12_Q
     STATE;
     if(!PrepareStatisticsQueries(s.statistics)) {
         HLog("ERROR: cannot prepare active statistics queries for result aggregation");
+        m.resolve(self,heap,type,first,count,target,offset);
         return;
     }
     const Bindings saved=s.b;
@@ -1469,6 +1500,7 @@ void STDMETHODCALLTYPE HStateObject(CmdList* self, void* so) {
     STATE;
     s.b.stateObjectSet = true;
     s.b.stateObject = so;
+    s.b.stateObjectLast = true;
 }
 
 void STDMETHODCALLTYPE HShadingRate(CmdList* self, UINT rate, const UINT* combiners) {
@@ -1496,14 +1528,11 @@ HRESULT STDMETHODCALLTYPE HCreateCommandList(ID3D12Device* self, UINT mask, D3D1
                                              ID3D12PipelineState* pso, REFIID riid, void** out) {
     const HRESULT hr = Orig<PfnCreateList>(g_deviceVt, self, WG_VT_DEVICE_CREATE_COMMAND_LIST)(self, mask, type, allocator, pso, riid, out);
     if (SUCCEEDED(hr) && out && *out) {
+        NoteCreated(1, type, allocator, pso, 0, riid, *out, WG_RETURN_ADDRESS());
         ListState& s = StateOf(*out);  // the same object pointer for every ID3D12CommandList interface (single inheritance)
         s.known = true;
         s.allocator = allocator;
-        s.openQueries = 0;
-        s.renderPass = false;
-        s.b = Bindings{};
         if (pso) s.b.psoSet = true, s.b.pso = pso;
-        NoteCreated(1, type, allocator, pso, 0, riid, *out, WG_RETURN_ADDRESS());
     }
     return hr;
 }
@@ -1569,9 +1598,13 @@ void STDMETHODCALLTYPE HExecuteCommandLists(ID3D12CommandQueue* self, UINT n, ID
 #if defined(WRONGGPU_SPLIT_PROGRESS_QA)
                 if(g_progressReady.load()) ProcessSplitProgress().Submitted(p.id,self);
 #endif
-                if (!p.released) steps.push_back({1, 0, 0, p.lane->order, p.ticket});
-                if (p.queryDone) steps.push_back({2,0,0,p.queryDone,p.queryDoneValue});
-                steps.push_back({2, 0, 0, p.resume, p.resumeValue});
+                auto pushFence = [&](int kind, ID3D12Fence* f, uint64_t val) {
+                    if (f) f->AddRef();
+                    steps.push_back({kind, 0, 0, f, val});
+                };
+                if (!p.released) pushFence(1, p.lane->order, p.ticket);
+                if (p.queryDone) pushFence(2, p.queryDone, p.queryDoneValue);
+                pushFence(2, p.resume, p.resumeValue);
                 if (ShouldLogFrame(p.id)) {
                     char text[384];
                     std::snprintf(text, sizeof text,
@@ -1595,6 +1628,7 @@ void STDMETHODCALLTYPE HExecuteCommandLists(ID3D12CommandQueue* self, UINT n, ID
         if (st.kind == 0) execute(self, st.end - st.begin, lists + st.begin);
         else if (st.kind == 1) self->Signal(st.fence, st.value);
         else self->Wait(st.fence, st.value);
+        if (st.fence) st.fence->Release();
     }
     for (const std::string& line : lines) HLog("%s", line.c_str());
 }
@@ -2005,10 +2039,11 @@ WgResult SplitImpl(const WgFrame* frame, const WgSplitRequest* request) {
         InternalQueryScope scope;
         void** const before = *reinterpret_cast<void***>(list);
         hr = ListOrig<PfnReset>(list, WG_VT_LIST_RESET)(list, s.allocator, nullptr);
-        // The runtime may have written the list's own table again: hooks and originals first, then the bindings.
-        if (SUCCEEDED(hr) && ownTable) {
+        // The runtime may have written the list's own table again (or switched a class-table list to one): hooks and
+        // originals first, then the bindings.
+        if (SUCCEEDED(hr)) {
             AfterReset(list, s, before);
-            if (!(s.own && s.own->tracked)) {
+            if ((ownTable || s.own) && !(s.own && s.own->tracked)) {
                 g_ownStrikes.store(3);
                 HLog("ERROR: split S%llu: the list's own vtable could not be taken over again after the split's Reset; lists of this kind are "
                      "not split any more", static_cast<unsigned long long>(id));

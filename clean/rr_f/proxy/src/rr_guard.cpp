@@ -321,7 +321,7 @@ Where classify(const void* p, const Env& env, bool follow_iface) {
     }
     if (m) {
       if (env.exports && env.exports(m, kOwnRrExport)) w.owner = Owner::kOwnCopy;
-      else if (env.exports && env.exports(m, kWrongGpuAsiExport)) w.owner = Owner::kWrongGpu;
+      else if (env.exports && (env.exports(m, kWrongGpuAsiExport) || env.exports(m, kWrongGpuFgExport))) w.owner = Owner::kWrongGpu;
       else if (m == env.exe) w.owner = Owner::kExeThunk;
       else w.owner = Owner::kForeign;
       return w;

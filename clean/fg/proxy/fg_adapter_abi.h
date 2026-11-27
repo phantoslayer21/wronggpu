@@ -58,10 +58,14 @@ enum WgFgRole {
 
 enum WgFgOptionalDecl { WG_FG_DECL_NEVER = 0, WG_FG_DECL_MAY = 1, WG_FG_DECL_ALWAYS = 2 };
 
-/* Per-frame flags (same bits as the runtime contract's FgFrameFlag). */
+/* Per-frame flags (bits 0..5 match the runtime contract's FgFrameFlag; adapter-only bits above WG_FG_FLAGS_KNOWN
+ * are consumed during packet assembly and never cross into the runtime contract). */
 enum WgFgFlag {
   WG_FG_FLAG_RESET = 1u << 0, WG_FG_FLAG_MENU = 1u << 1, WG_FG_FLAG_DEPTH_REVERSED = 1u << 2,
-  WG_FG_FLAG_MOTION_RENDER_RES = 1u << 3, WG_FG_FLAG_HDR = 1u << 4, WG_FG_FLAG_REAL_OUTPUT = 1u << 5
+  WG_FG_FLAG_MOTION_RENDER_RES = 1u << 3, WG_FG_FLAG_HDR = 1u << 4, WG_FG_FLAG_REAL_OUTPUT = 1u << 5,
+  /* Constants only: motion_scale_x/y convert raw motion texels to normalized [0, 1] UV units (e.g. Streamline
+   * sl::Constants::mvecScale) rather than motion-region pixels; assemble_locked multiplies by the motion extent. */
+  WG_FG_FLAG_MOTION_SCALE_UV = 1u << 6
 };
 #define WG_FG_FLAGS_KNOWN 0x3fu
 

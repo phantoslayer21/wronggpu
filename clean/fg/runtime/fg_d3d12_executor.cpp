@@ -600,6 +600,8 @@ struct Rec {
     uint64_t wait_handoff = 0, wait_producer = 0;
     std::vector<Deferred>* defer = nullptr;  // set: Dispatch keeps the launch here instead of recording it
     FgExecStage defer_stage = FgExecStage::GenPreNet2;
+    void* owner = nullptr;
+    void (*on_abort)(void*, Rec*) = nullptr;
 
     void NoteSlot(ID3D12Resource* res) {
         for (uint32_t i = 0; i < written_count; ++i)
@@ -607,7 +609,11 @@ struct Rec {
         if (written_count < kMaxWrittenSlots) written_slots[written_count++] = res;
     }
     ~Rec() {
-        if (open) cl->Close();
+        if (open) {
+            cl->Close();
+            open = false;
+            if (on_abort && owner) on_abort(owner, this);
+        }
     }
 };
 
@@ -861,7 +867,12 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
             for (size_t i = 0; i < dumps.size();) {
                 DumpRb& d = dumps[i];
                 ID3D12Fence* completion = d.direct ? handoff_fence.Get() : fence.Get();
-                if (d.fence_value == 0 || (completion->GetCompletedValue() < d.fence_value &&
+                const uint64_t done = completion->GetCompletedValue();
+                if (done == UINT64_MAX) {
+                    dumps.clear();
+                    return;
+                }
+                if (d.fence_value == 0 || (done < d.fence_value &&
                                            !(wait && WaitFence(completion, d.fence_value, desc.wait_ms)))) {
                     ++i;
                     continue;
@@ -1441,16 +1452,23 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
     }
 
     bool WaitFence(ID3D12Fence* f, uint64_t v, uint32_t ms) {
+        if (!f) return v == 0;
+        const uint64_t initial = f->GetCompletedValue();
+        if (initial == UINT64_MAX) return false;
+        if (!v || initial >= v) return true;
         const ULONGLONG until = GetTickCount64() + ms;
-        if (!v || f->GetCompletedValue() >= v) return true;
         if (!ms || !event || FAILED(f->SetEventOnCompletion(v, event))) return false;
         // An earlier timed-out registration can still signal this event.
-        while (f->GetCompletedValue() < v) {
+        for (;;) {
+            const uint64_t cur_v = f->GetCompletedValue();
+            if (cur_v == UINT64_MAX) return false;
+            if (cur_v >= v) return true;
             const ULONGLONG now = GetTickCount64();
-            if (now >= until || WaitForSingleObject(event, static_cast<DWORD>(until - now)) != WAIT_OBJECT_0)
-                return f->GetCompletedValue() >= v;
+            if (now >= until || WaitForSingleObject(event, static_cast<DWORD>(until - now)) != WAIT_OBJECT_0) {
+                const uint64_t fin = f->GetCompletedValue();
+                return fin != UINT64_MAX && fin >= v;
+            }
         }
-        return true;
     }
 
     bool WaitValue(uint64_t v, uint32_t ms) { return WaitFence(fence.Get(), v, ms); }
@@ -1487,6 +1505,19 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         return FgExecResult::Ok;
     }
 
+    static void AbortRec(void* p, Rec* r) {
+        Impl* self = static_cast<Impl*>(p);
+        if (self->cur == r) self->cur = nullptr;
+        self->dumps.erase(std::remove_if(self->dumps.begin(), self->dumps.end(),
+                                         [](const DumpRb& d) { return d.fence_value == 0; }),
+                          self->dumps.end());
+        if (self->desc.keep_outputs) {
+            self->pending.erase(std::remove_if(self->pending.begin(), self->pending.end(),
+                                               [](const PendingRb& x) { return x.rec.fence_value == 0; }),
+                                self->pending.end());
+        }
+    }
+
     // ---- recording -------------------------------------------------------------------------------------------
     FgExecResult Begin(Rec* r, bool on_game_queue = false, bool uses_arena = true, bool aux = false) {
         r->aux = aux && aux_queue;
@@ -1497,6 +1528,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         ID3D12Fence* reuse_fence = r->aux ? aux_fence.Get() : r->direct ? handoff_fence.Get() : fence.Get();
         Entry* e = nullptr;
         const uint64_t done = reuse_fence->GetCompletedValue();
+        if (done == UINT64_MAX || DeviceRemoved()) return Fail(FgExecRefusal::DeviceLost, "device removed");
         for (Entry& x : ring)
             if (x.fence <= done) {
                 e = &x;
@@ -1520,6 +1552,8 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
             return Fail(FgExecRefusal::CommandFailed, "command list reset");
         r->e = e;
         r->cl = e->list.Get();
+        r->owner = this;
+        r->on_abort = &Impl::AbortRec;
         r->open = true;
         r->table = 0;
         r->dirty = false;
@@ -1571,7 +1605,11 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         D3D12_RESOURCE_BARRIER x = {};
         x.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         x.Transition.pResource = res;
-        x.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        const D3D12_RESOURCE_DESC d = res->GetDesc();
+        x.Transition.Subresource =
+            (d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && (d.MipLevels > 1 || d.DepthOrArraySize > 1))
+                ? 0u
+                : D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         x.Transition.StateBefore = a;
         x.Transition.StateAfter = b;
         r.cl->ResourceBarrier(1, &x);
@@ -1644,7 +1682,9 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                 const auto slot = compute_slot_values.find(r->written_slots[i]);
                 if (slot != compute_slot_values.end()) dependency = std::max(dependency, slot->second);
             }
-            if (dependency > fence->GetCompletedValue() && FAILED(q->Wait(fence.Get(), dependency)))
+            const uint64_t done_compute = fence->GetCompletedValue();
+            if (done_compute == UINT64_MAX) return Fail(FgExecRefusal::DeviceLost, "device removed");
+            if (dependency > done_compute && FAILED(q->Wait(fence.Get(), dependency)))
                 return QueueFailure("wait for compute writes");
         }
         if (!r->direct && !r->aux && !JoinGameQueue(r->wait_handoff))
@@ -1865,7 +1905,8 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                                             fb(st.alpha_threshold), fb(st.fraction), 0, 0, 0, 0};
                     std::memcpy(a, v, sizeof(v));
                 } else {
-                    const uint32_t same = (f.hudless.region.bx == cr.region.bx && f.hudless.region.by == cr.region.by);
+                    const uint32_t same = (f.hudless.region.bx == cr.region.bx && f.hudless.region.by == cr.region.by &&
+                                           f.hudless.region.ew == cr.region.ew && f.hudless.region.eh == cr.region.eh);
                     const uint32_t v[15] = {1, col, ctw, 4, 0, cr.region.bx, cr.region.by, cr.region.ew, cr.region.eh,
                                             0, 0, hud, hw, hh, same};
                     std::memcpy(a, v, sizeof(v));
@@ -2089,7 +2130,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                 return true;
             case FgOp::Prefill:
                 D(r, kCopy4, groups_for(static_cast<uint64_t>(g.wo) * g.ho),
-                  {out_off, out_stride, 0, 0, col, ctw, 0, 0, g.wo, g.ho});
+                  {out_off, out_stride, 0, 0, col, ctw, cr.region.bx, cr.region.by, g.wo, g.ho});
                 return true;
             case FgOp::LiteBlend: {
                 FgExecRegion fr;
@@ -2497,6 +2538,12 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         InputTex x;
         x.res = res;
         x.format = d.Format;
+        if (d.Format == DXGI_FORMAT_D32_FLOAT || d.Format == DXGI_FORMAT_D16_UNORM ||
+            d.Format == DXGI_FORMAT_D24_UNORM_S8_UINT || d.Format == DXGI_FORMAT_D32_FLOAT_S8X24_UINT) {
+            *w = std::string(name) + ": non-typeless depth format " + std::to_string(static_cast<uint32_t>(d.Format)) +
+                 " cannot be viewed by shaders";
+            return FgExecRefusal::InputFormat;
+        }
         x.view = view_format(d.Format, &x.channels);
         if (x.view == DXGI_FORMAT_UNKNOWN) {
             *w = std::string(name) + ": format " + std::to_string(static_cast<uint32_t>(d.Format)) + " unsupported";
@@ -2511,6 +2558,10 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         }
         if (x.w > cap_w || x.h > cap_h) {
             *w = std::string(name) + ": texture larger than the capture area";
+            return FgExecRefusal::InputExtent;
+        }
+        if (t.rect.x >= x.w || t.rect.y >= x.h) {
+            *w = std::string(name) + ": region outside its texture";
             return FgExecRefusal::InputExtent;
         }
         const uint32_t rw = t.rect.width ? t.rect.width : x.w - t.rect.x;
@@ -2576,7 +2627,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         // Capture linearizes an sRGB SRV, and its float16 conversion quiets signaling NaNs. Only the linear
         // UNORM formats round-trip every input code through capture and pack.
         const DXGI_FORMAT format = linear_copy_format(out.Format);
-        if (src.view != format ||
+        if (linear_copy_format(src.view) != format ||
             (format != DXGI_FORMAT_R8G8B8A8_UNORM && format != DXGI_FORMAT_B8G8R8A8_UNORM &&
              format != DXGI_FORMAT_R10G10B10A2_UNORM))
             return nullptr;
@@ -2704,9 +2755,14 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
     FgExecResult Finish(Rec& r, FgReadyFence* ready) {
         uint64_t v = 0;
         const FgExecResult s = Submit(&r, &v);
-        if (!v) {
+        if (!v || s != FgExecResult::Ok) {
             dumps.erase(std::remove_if(dumps.begin(), dumps.end(), [](const DumpRb& d) { return d.fence_value == 0; }),
                         dumps.end());
+            if (desc.keep_outputs) {
+                pending.erase(std::remove_if(pending.begin(), pending.end(),
+                                             [](const PendingRb& p) { return p.rec.fence_value == 0; }),
+                              pending.end());
+            }
         }
         for (DumpRb& d : dumps)
             if (d.fence_value == 0) d.fence_value = v;
@@ -3283,6 +3339,13 @@ FgExecResult FgD3d12Executor::RecordSharedGameFrame(const FgSharedDispatchDesc& 
     } else if (!input_srvs) {
         m.Barrier(inputs);
     }
+    struct AuxJoinGuard {
+        Impl* m = nullptr;
+        bool active = false;
+        ~AuxJoinGuard() {
+            if (active && m) (void)m->JoinAux();
+        }
+    } aux_guard{&m, false};
     for (; next_op < ops.size(); ++next_op) {
         const FgExecOp& op = ops[next_op];
         m.TimeStage(*r, op.op == FgOp::Net1 ? FgExecStage::Net1 :
@@ -3313,6 +3376,7 @@ FgExecResult FgD3d12Executor::RecordSharedGameFrame(const FgSharedDispatchDesc& 
                 uint64_t aux_done = 0;
                 s = m.Submit(&aux, &aux_done);
                 if (s != FgExecResult::Ok) return s;
+                aux_guard.active = true;
                 m.hoist_valid = true;
                 m.hoist_token = d.frame_token;
                 m.hoist_n = d.generated_count;
@@ -3328,6 +3392,7 @@ FgExecResult FgD3d12Executor::RecordSharedGameFrame(const FgSharedDispatchDesc& 
     if (split && !forked) r->wait_handoff = h_down;  // every split frame has a P2cPush; kept for safety
     s = m.Submit(r, &v);
     if (s != FgExecResult::Ok) return s;
+    aux_guard.active = false;
     if (!m.JoinAux()) return m.QueueFailure("join the second queue");
     out->menu.frame_token = d.frame_token;
     out->menu.detected = false;
@@ -3512,9 +3577,15 @@ FgExecResult FgD3d12Executor::RecordRealEndpoint(const FgRealDispatchDesc& d, Fg
         from_bb = m.TakeInput(d.game_colour, &bb, &bb_w, "game colour") == FgExecRefusal::None && bb.channels == 4 &&
                   bb.region.ew == m.g.wo && bb.region.eh == m.g.ho;
     }
-    if (d.real_only && m.target && (have_frame || from_bb)) {
-        // a real-only present shows a slot image: reserve one and copy the game frame into it (no slot free: the
-        // presenter answers the present itself)
+    bool reserved_real_only = false;
+    if (d.real_only && m.target) {
+        if (!have_frame && !from_bb) {
+            return m.Fail(FgExecRefusal::InputMissing,
+                          std::string("real-only skip: have_frame=") + (have_frame ? "1" : "0") +
+                              " res=" + (d.game_colour.resource ? "1" : "0") +
+                              " from_bb=" + (from_bb ? "1" : "0") + " (" + bb_w + ")");
+        }
+        // a real-only present shows a slot image: reserve one and copy the game frame into it
         FgStatus rs = m.target->ReserveRealSlotStatus(&slot);
         if (rs == FgStatus::NoSlot) {
             const ULONGLONG until = GetTickCount64() + 100;
@@ -3523,16 +3594,18 @@ FgExecResult FgD3d12Executor::RecordRealEndpoint(const FgRealDispatchDesc& d, Fg
                 rs = m.target->ReserveRealSlotStatus(&slot);
             }
         }
-        write = rs == FgStatus::Ok;
-        if (!write) m.why = std::string("ReserveRealSlot failed: ") + FgStatusName(rs);
-    } else if (d.real_only && m.target && !write) {
-        m.why = std::string("real-only skip: have_frame=") + (have_frame ? "1" : "0") +
-                " res=" + (d.game_colour.resource ? "1" : "0") +
-                " from_bb=" + (from_bb ? "1" : "0") + " (" + bb_w + ")";
+        if (rs != FgStatus::Ok) {
+            return m.Fail(rs == FgStatus::NoSlot ? FgExecRefusal::WaitTimeout : FgExecRefusal::SlotMissing,
+                          std::string("ReserveRealSlot failed: ") + FgStatusName(rs));
+        }
+        write = true;
+        reserved_real_only = true;
     }
     if (write) {
-        if (!have_frame && !from_bb)
+        if (!have_frame && !from_bb) {
+            if (reserved_real_only && m.target) m.target->ReleaseRealSlot();
             return m.Fail(FgExecRefusal::BadArgument, "no captured game frame for this token");
+        }
         if (from_bb) {
             FrameCtx f;
             f.token = d.frame_token;
@@ -3544,8 +3617,10 @@ FgExecResult FgD3d12Executor::RecordRealEndpoint(const FgRealDispatchDesc& d, Fg
         if (s == FgExecResult::Ok) {
             ++m.counters.real_endpoints;
             if (from_bb) ++m.counters.game_colour_copies;
+        } else {
+            if (from_bb) m.frame.valid = false;
+            if (reserved_real_only && m.target) m.target->ReleaseRealSlot();
         }
-        if (s != FgExecResult::Ok && from_bb) m.frame.valid = false;
         return s;
     }
     uint64_t v = 0;
@@ -3670,7 +3745,9 @@ FgExecResult FgD3d12Executor::Net2SelfTest(uint32_t seed, float t, uint32_t runs
 
 uint64_t FgD3d12Executor::LastComputeValue() const { return impl_->next_value; }
 uint64_t FgD3d12Executor::CompletedComputeValue() const {
-    return impl_->fence ? impl_->fence->GetCompletedValue() : 0;
+    if (!impl_->fence) return 0;
+    const uint64_t v = impl_->fence->GetCompletedValue();
+    return v == UINT64_MAX ? 0 : v;
 }
 
 bool FgD3d12Executor::WaitForComputeValue(uint64_t value, uint32_t timeout_ms) {
@@ -3787,6 +3864,7 @@ public:
     }
     bool ReserveRealSlot(uint32_t* slot) override { return p_->ReserveRealSlot(slot) == FgStatus::Ok; }
     FgStatus ReserveRealSlotStatus(uint32_t* slot) override { return p_->ReserveRealSlot(slot); }
+    void ReleaseRealSlot() override { p_->ReleaseRealSlot(); }
 
 private:
     P* p_;
@@ -3794,12 +3872,24 @@ private:
 
 }  // namespace
 
-FgExecutorPresenterSource::~FgExecutorPresenterSource() = default;
+void FgD3d12Executor::UnbindSlotTarget() {
+    Impl& m = *impl_;
+    m.target = nullptr;
+    m.fence_id = 0;
+}
+
+FgExecutorPresenterSource::~FgExecutorPresenterSource() { ReleasePresenter(); }
+
+void FgExecutorPresenterSource::ReleasePresenter() {
+    if (executor_ && target_) executor_->UnbindSlotTarget();
+    target_.reset();
+}
 
 FgStatus FgExecutorPresenterSource::CreatePresenter(const FgCreateDesc& desc, std::unique_ptr<IFgPresenter>* out,
                                                     std::string* why) {
     if (!out || !inner_ || !executor_) return FgStatus::InvalidArgument;
     out->reset();
+    ReleasePresenter();
     std::unique_ptr<IFgPresenter> p;
     const FgStatus s = inner_->CreatePresenter(desc, &p, why);
     if (s != FgStatus::Ok || !p) return s == FgStatus::Ok ? FgStatus::Unsupported : s;

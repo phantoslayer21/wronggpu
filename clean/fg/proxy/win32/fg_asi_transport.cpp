@@ -72,6 +72,12 @@ std::atomic<void*> g_route_next[kFgSlotCount] = {};
 static_assert(sizeof(std::atomic<void*>) == sizeof(void*) && std::atomic<void*>::is_always_lock_free,
               "the host writes a plain pointer into a route's next");
 std::atomic<void*> g_genuine_options{nullptr}, g_genuine_state{nullptr};  // resolved lazily through get-function
+using FgGetNativeInterfaceFn = WgResultCode (*)(void* proxyInterface, void** baseInterface);
+std::atomic<FgGetNativeInterfaceFn> g_get_native_interface{nullptr};
+std::atomic<bool> g_early_dxgi_active{false};
+std::atomic<bool> g_early_hooked_factory{false};
+std::atomic<FgLogFn> g_early_log{nullptr};
+std::atomic<void*> g_early_log_ctx{nullptr};
 std::atomic<uint32_t> g_fg_feature{WG_FEAT_FRAME_GENERATION};
 std::atomic<long> g_in_flight{0};
 
@@ -442,6 +448,7 @@ WgResultCode RouteTags(FgAsiTransport::Impl* r, CallFrame& f, const WgTag* t, ui
             dp = decoded.data();
             for (uint32_t i = 0; i < n; ++i) {
                 bool copied = false;
+                const char* why = "ok";
                 // The session host (when configured) keeps a transient texture alive and fills a missing size or
                 // format. Without one a transient texture could not outlive the tagging call, so it is not kept; a
                 // lasting texture is used as decoded. The resource pointers are never dereferenced here.
@@ -450,22 +457,32 @@ WgResultCode RouteTags(FgAsiTransport::Impl* r, CallFrame& f, const WgTag* t, ui
                     const bool kept = r->tag_retain ? r->tag_retain(r->tag_retain_ctx, t[i].buffer_type, transient,
                                                                     f.cmd, &decoded[i].texture, &copied)
                                                     : !transient;
-                    if (!kept) decoded[i].native_type = WG_FG_NATIVE_TYPE_UNBOUND;
+                    if (!kept) {
+                        decoded[i].native_type = WG_FG_NATIVE_TYPE_UNBOUND;
+                        why = transient ? "retain-transient-failed" : "retain-failed";
+                    }
+                } else {
+                    const WgResource* res = t[i].resource;
+                    if (!res) why = "null-resource";
+                    else if (!res->native) why = "null-native";
+                    else if (res->kind != WG_RES_TEX2D) why = "not-tex2d";
+                    else why = "codec-filtered";
                 }
                 const uint32_t bt = t[i].buffer_type;
                 if (bt == 0 || bt == 1 || bt == 2) {
                     const WgResource* res = t[i].resource;
                     const bool bound = decoded[i].native_type != WG_FG_NATIVE_TYPE_UNBOUND;
-                    char buf[224];
+                    char buf[256];
                     std::snprintf(buf, sizeof buf,
-                                  "vp=%u life=%u %ux%u fmt=%u state=0x%x cmd=%s copied=%s bound=%s",
+                                  "vp=%u life=%u %ux%u fmt=%u state=0x%x cmd=%s copied=%s bound=%s why=%s",
                                   f.vp ? f.vp->id : 0u, t[i].lifetime,
                                   decoded[i].texture.width, decoded[i].texture.height,
                                   decoded[i].texture.format,
                                   res ? res->state : 0u,
                                   f.cmd ? "ok" : "null",
                                   copied ? "yes" : "no",
-                                  bound ? "yes" : "no");
+                                  bound ? "yes" : "no",
+                                  why);
                     NoteCall(*r, "tag(bt=" + std::to_string(bt) + ")", buf);
                 }
             }
@@ -529,8 +546,22 @@ WgResultCode H_Constants(const WgConstants* c, const WgFrameToken* k, const WgVi
         if (c && r->core->fg_taken()) {
             d.struct_size = sizeof(d);
             d.abi_version = WG_FG_ADAPTER_ABI_VERSION;
-            if (r->codec->constants(c, k, v, &d)) dp = &d;
-            else g_ctr.codec_failures.fetch_add(1);
+            if (r->codec->constants(c, k, v, &d)) {
+                dp = &d;
+                bool c2p_nz = false, p2c_nz = false;
+                for (int i = 0; i < 16; ++i) {
+                    if (d.camera_current[i] != 0.0f) c2p_nz = true;
+                    if (d.camera_previous[i] != 0.0f) p2c_nz = true;
+                }
+                char buf[160];
+                std::snprintf(buf, sizeof buf, "mv_scale=(%.6g,%.6g) depth_inv=%u cam_mot=%u c2p=%s p2c=%s",
+                              c->mv_scale[0], c->mv_scale[1], static_cast<unsigned>(c->depth_inverted),
+                              static_cast<unsigned>(c->camera_motion_included), c2p_nz ? "set" : "zero",
+                              p2c_nz ? "set" : "zero");
+                NoteCall(*r, "constants", buf);
+            } else {
+                g_ctr.codec_failures.fetch_add(1);
+            }
         }
         return r->core->constants(dp, c);
     } catch (...) {
@@ -562,6 +593,7 @@ WgResultCode H_Free(uint32_t feature, const WgViewport* v) {
     FgAsiTransport::Impl* r = g_route.load();
     try {
         if (r && r->core->owns_feature(feature)) {
+            r->core->free_viewport(feature, ViewportId(v));
             g_ctr.fg_answered.fetch_add(1);
             return WG_OK;
         }
@@ -642,7 +674,8 @@ WgResultCode H_FgOptions(const WgViewport* v, const void* native) {
             if (r->codec->options(v, native, &d)) dp = &d;
             else g_ctr.codec_failures.fetch_add(1);
         }
-        const WgResultCode res = r->core->set_options(r->fg_feature, ViewportId(v), dp, native);
+        const uint32_t vp_id = r->codec->resolve_viewport_id(v, native);
+        const WgResultCode res = r->core->set_options(r->fg_feature, vp_id, dp, native);
         NoteCall(*r, "set-options", Joined(r->codec->describe_options(native), Result(res) + ", " + Answered(f)));
         return res;
     } catch (...) {
@@ -665,7 +698,8 @@ WgResultCode H_FgState(const WgViewport* v, void* native, const void* native_opt
         WgFgState st = {};
         st.struct_size = sizeof(st);
         st.abi_version = WG_FG_ADAPTER_ABI_VERSION;
-        WgResultCode res = r->core->get_state(r->fg_feature, ViewportId(v), &st, native);
+        const uint32_t vp_id = r->codec->resolve_viewport_id(v, native_options ? native_options : native);
+        WgResultCode res = r->core->get_state(r->fg_feature, vp_id, &st, native);
         if (!f.forwarded && res == WG_OK) {
             if (!native) {
                 res = WG_E_MISSING_INPUT_PARAMETER;
@@ -706,38 +740,47 @@ public:
                              : inner.Present(call.sync_interval, call.flags);
     }
     void BeforeResize() override {
+        InFlight in;
         FgAsiTransport::Impl* r = g_route.load();
         if (r && r->presenter) r->presenter->BeforeResize();
     }
     void AfterResize(HRESULT hr) override {
+        InFlight in;
         FgAsiTransport::Impl* r = g_route.load();
         if (r && r->presenter) r->presenter->AfterResize(hr);
     }
     void BeforeFullscreen(BOOL fs) override {
+        InFlight in;
         FgAsiTransport::Impl* r = g_route.load();
         if (r && r->presenter) r->presenter->BeforeFullscreen(fs);
     }
     void AfterFullscreen(BOOL fs, HRESULT hr) override {
+        InFlight in;
         FgAsiTransport::Impl* r = g_route.load();
         if (r && r->presenter) r->presenter->AfterFullscreen(fs, hr);
     }
     void ColorSpaceChanged(DXGI_COLOR_SPACE_TYPE cs) override {
+        InFlight in;
         FgAsiTransport::Impl* r = g_route.load();
         if (r && r->presenter) r->presenter->ColorSpaceChanged(cs);
     }
     bool GetBuffer(UINT b, REFIID riid, void** out, HRESULT* hr) override {
+        InFlight in;
         FgAsiTransport::Impl* r = g_route.load();
         return r && r->presenter && r->presenter->GetBuffer(b, riid, out, hr);
     }
     bool CurrentBackBufferIndex(UINT* i) override {
+        InFlight in;
         FgAsiTransport::Impl* r = g_route.load();
         return r && r->presenter && r->presenter->CurrentBackBufferIndex(i);
     }
     bool FrameLatencyWaitableObject(HANDLE* h) override {
+        InFlight in;
         FgAsiTransport::Impl* r = g_route.load();
         return r && r->presenter && r->presenter->FrameLatencyWaitableObject(h);
     }
     void Detached() override {
+        InFlight in;
         FgAsiTransport::Impl* r = g_route.load();
         if (r && r->presenter) r->presenter->Detached();
     }
@@ -759,6 +802,15 @@ private:
             d.luid = r.core->capability().adapter.luid;
             IDXGISwapChain4* sc = inner.Inner();
             if (sc) {
+                ID3D12Device* dev = nullptr;
+                if (SUCCEEDED(sc->GetDevice(__uuidof(ID3D12Device), reinterpret_cast<void**>(&dev))) && dev) {
+                    const LUID al = dev->GetAdapterLuid();
+                    if (al.LowPart != 0 || al.HighPart != 0) {
+                        d.luid.low = al.LowPart;
+                        d.luid.high = al.HighPart;
+                    }
+                    dev->Release();
+                }
                 HWND hwnd = nullptr;
                 if (SUCCEEDED(sc->GetHwnd(&hwnd))) d.window_id = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(hwnd));
                 DXGI_SWAP_CHAIN_DESC1 sd = {};
@@ -811,14 +863,25 @@ private:
 
 PresentBridge g_present_bridge;
 
+// Ignore WrongGPU's own hidden 16x16 overlay vtable-probe window so it never steals or resets the game's swap chain.
+bool IsOverlayProbeWindow(HWND hwnd) {
+    if (!hwnd) return false;
+    wchar_t cls[64] = {};
+    const int n = GetClassNameW(hwnd, cls, static_cast<int>(std::size(cls)));
+    return n > 0 && std::wcscmp(cls, L"WrongGPUOverlayProbe") == 0;
+}
+
 // Each chain created through the hooked factory: claimed for the bridge while FG is taken, else a pass-through.
 class ChainSink final : public IFgSwapChainSink {
 public:
-    void Created(FgSwapChain* chain, HWND, const DXGI_SWAP_CHAIN_DESC1*) override {
+    void Created(FgSwapChain* chain, HWND hwnd, const DXGI_SWAP_CHAIN_DESC1*) override {
         InFlight in;
         g_bridge_ctr.chains_created.fetch_add(1);
         FgAsiTransport::Impl* r = g_route.load();
-        if (!r || !chain) return;
+        if (!r || !chain || IsOverlayProbeWindow(hwnd)) return;
+        // Only one live swap chain may drive g_present_bridge / r->presenter at a time:
+        // detach any earlier wrapper first so create-before-release recreation leaves the old chain pass-through.
+        if (!r->core || r->core->fg_taken()) FgSwapChain::DetachCallback(&g_present_bridge);
         if (chain->Attach(&g_present_bridge, r->core, r->owners, WG_FG_OWNER_SWAPCHAIN_WRAPPER) == WG_FG_REASON_NONE) {
             g_bridge_ctr.chains_attached.fetch_add(1);
             if (r->presenter) {
@@ -827,18 +890,18 @@ public:
             }
         }
     }
-    IUnknown* CreationQueue(HWND, const DXGI_SWAP_CHAIN_DESC1& desc, IUnknown* game_queue) override {
+    IUnknown* CreationQueue(HWND hwnd, const DXGI_SWAP_CHAIN_DESC1& desc, IUnknown* game_queue) override {
         InFlight in;
         FgAsiTransport::Impl* r = g_route.load();
         // only for a chain that will be claimed (FG taken), as the extra flags
-        if (!r || !r->presenter || !r->core || !r->core->fg_taken()) return nullptr;
+        if (!r || !r->presenter || !r->core || !r->core->fg_taken() || IsOverlayProbeWindow(hwnd)) return nullptr;
         return r->presenter->CreationQueue(game_queue, desc);
     }
-    UINT ExtraCreateFlags(HWND, const DXGI_SWAP_CHAIN_DESC1& desc) override {
+    UINT ExtraCreateFlags(HWND hwnd, const DXGI_SWAP_CHAIN_DESC1& desc) override {
         InFlight in;
         FgAsiTransport::Impl* r = g_route.load();
         // only while the chain would be claimed (FG taken): a pass-through chain is created exactly as the game asked
-        if (!r || !r->presenter || !r->core || !r->core->fg_taken()) return 0;
+        if (!r || !r->presenter || !r->core || !r->core->fg_taken() || IsOverlayProbeWindow(hwnd)) return 0;
         return r->presenter->ExtraSwapChainFlags(desc);
     }
 };
@@ -846,18 +909,33 @@ public:
 ChainSink g_chain_sink;
 
 // The factory's swap-chain creation hook, once per process (another one already installed: left alone).
-void HookFactory(FgAsiTransport::Impl& r, IUnknown* unknown) {
+// Unwraps a Streamline factory proxy first so FgSwapChain sits BELOW sl::DXGISwapChain: the interposer then sees
+// Present() exactly once per real game frame (synchronously on the game thread) instead of once per generated frame
+// from the presenter worker, preventing mid-frame tag invalidation (e.g. kBufferTypeScalingInputColor).
+void HookFactory(FgAsiTransport::Impl* r, IUnknown* unknown) {
 #if WG_FG_CP2077_MUTANT == 6
     (void)r;
     (void)unknown;
     return;
 #else
     if (FgSwapChainHook::Installed()) return;
+    void* unwrapped = FgAsiTransport::unwrap_native(unknown);
+    IUnknown* target = unwrapped ? static_cast<IUnknown*>(unwrapped) : unknown;
+    const bool was_proxy = target != unknown;
     IDXGIFactory2* f2 = nullptr;
-    if (FAILED(unknown->QueryInterface(__uuidof(IDXGIFactory2), reinterpret_cast<void**>(&f2))) || !f2) return;
-    if (FgSwapChainHook::Install(f2, &g_chain_sink, r.log, r.log_ctx)) {
-        r.hooked_factory.store(true);
+    if (FAILED(target->QueryInterface(__uuidof(IDXGIFactory2), reinterpret_cast<void**>(&f2))) || !f2) {
+        if (!was_proxy || FAILED(unknown->QueryInterface(__uuidof(IDXGIFactory2), reinterpret_cast<void**>(&f2))) || !f2)
+            return;
+        target = unknown;
+    }
+    FgLogFn log = r ? r->log : g_early_log.load();
+    void* log_ctx = r ? r->log_ctx : g_early_log_ctx.load();
+    if (FgSwapChainHook::Install(f2, &g_chain_sink, log, log_ctx)) {
+        if (r) r->hooked_factory.store(true);
+        else g_early_hooked_factory.store(true);
         g_bridge_ctr.factory_hooked = 1;
+        if (log && target != unknown)
+            log(log_ctx, "fg swap chain: unwrapped interposer factory proxy; creation hook sits below the interposer");
     }
     f2->Release();
 #endif
@@ -867,10 +945,11 @@ void HookFactory(FgAsiTransport::Impl& r, IUnknown* unknown) {
 // then the factory note (the route's adapter facts). The result stays the genuine creation's.
 void AfterFactory(HRESULT hr, void** out) {
     FgAsiTransport::Impl* r = g_route.load();
-    if (FAILED(hr) || !r || !out || !*out) return;
+    if (FAILED(hr) || !out || !*out) return;
+    if (!r && !g_early_dxgi_active.load()) return;
     try {
-        HookFactory(*r, static_cast<IUnknown*>(*out));
-        if (r->factory_note) r->factory_note(r->factory_note_ctx, r->core, static_cast<IUnknown*>(*out));
+        HookFactory(r, static_cast<IUnknown*>(*out));
+        if (r && r->factory_note) r->factory_note(r->factory_note_ctx, r->core, static_cast<IUnknown*>(*out));
     } catch (...) {
         g_ctr.codec_failures.fetch_add(1);
     }
@@ -960,6 +1039,15 @@ HMODULE SelfModule() {
     HMODULE m = nullptr;
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                        reinterpret_cast<LPCWSTR>(&H_IsSupported), &m);
+    return m;
+}
+
+HMODULE ModuleContaining(void* p) {
+    HMODULE m = nullptr;
+    if (!p) return nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(p), &m))
+        return nullptr;
     return m;
 }
 
@@ -1138,6 +1226,15 @@ FgPresentBridgeStats FgAsiTransport::present_stats() const {
 void* FgAsiTransport::options_handler() { return reinterpret_cast<void*>(&H_FgOptions); }
 void* FgAsiTransport::state_handler() { return reinterpret_cast<void*>(&H_FgState); }
 
+void* FgAsiTransport::unwrap_native(void* p) {
+    if (!p) return nullptr;
+    auto fn = g_get_native_interface.load();
+    if (!fn) return p;
+    void* base = nullptr;
+    if (fn(p, &base) == WG_OK && base) return base;
+    return p;
+}
+
 void* FgAsiTransport::genuine(uint32_t role) const {
     return role < kFgSlotCount ? g_genuine[role].load() : nullptr;
 }
@@ -1180,7 +1277,11 @@ uint32_t FgAsiTransport::attach_core(const FgAsiConfig& cfg, HMODULE iface, uint
     const std::string& fac = cfg.imports.factory2_name;
     g_genuine[kFgSlotCreateFactory2].store(fac.empty() ? nullptr
                                                        : reinterpret_cast<void*>(GetProcAddress(iface, fac.c_str())));
-    for (uint32_t i = kFgSlotDxgiFactory; i <= kFgSlotDxgiFactory2; ++i) g_genuine[i].store(nullptr);
+    if (!early_dxgi_) {
+        for (uint32_t i = kFgSlotDxgiFactory; i <= kFgSlotDxgiFactory2; ++i) g_genuine[i].store(nullptr);
+    }
+    g_get_native_interface.store(reinterpret_cast<FgGetNativeInterfaceFn>(
+        reinterpret_cast<void*>(GetProcAddress(iface, "slGetNativeInterface"))));
     ResetBridgeCounters();
     g_genuine_options.store(nullptr);
     g_genuine_state.store(nullptr);
@@ -1240,34 +1341,85 @@ void FgAsiTransport::start_routing(const FgAsiConfig& cfg, std::unique_ptr<FgPro
     g_route.store(impl_.get());
 }
 
-// dxgi_factory_fallback: the exe's own imports of the DXGI module's factory creations (import and delay-load tables),
-// redirected to the factory handlers. Called with routing active; returns the slots patched.
+// dxgi_factory_fallback: imports of the DXGI module's factory creations across loaded modules (import and delay-load
+// tables), redirected to the factory handlers. Returns the number of newly patched slots.
 size_t FgAsiTransport::patch_dxgi_fallback() {
     std::vector<std::string> names(kFgSlotCount);
     for (uint32_t i = kFgSlotDxgiFactory; i <= kFgSlotDxgiFactory2; ++i) names[i] = DxgiExportOf(i);
-    HMODULE exe = GetModuleHandleW(nullptr);
     HMODULE dxgi = GetModuleHandleW(Widen(kDxgiLeaf).c_str());
+    HMODULE mods[kMaxModules];
+    DWORD needed = 0;
+    if (!K32EnumProcessModules(GetCurrentProcess(), mods, sizeof mods, &needed)) needed = 0;
+    unsigned count = needed / sizeof(HMODULE);
+    if (count > kMaxModules) count = kMaxModules;
+    const HMODULE self = SelfModule() == GetModuleHandleW(nullptr) ? nullptr : SelfModule();
     g::Budget budget(200000, 100);
+    std::vector<HMODULE> held;
+    struct HeldRelease {
+        std::vector<HMODULE>* v;
+        ~HeldRelease() {
+            for (HMODULE h : *v) FreeLibrary(h);
+        }
+    } held_release{&held};
     size_t patched = 0;
-    for (const FgSlot& sl : FgCollectSlots(exe, kDxgiLeaf, names, budget)) {
-        void* h = handler_for(sl.name_index);
-        void* original = nullptr;
-        if (!h || !g::safe_get(sl.slot, &original) || original == h) continue;
-        // an import slot holds the bound function (or an earlier patch: kept in the chain); a delay-load slot may
-        // still hold the linker's helper thunk, so its genuine function is the module's export
-        void* genuine = (!sl.delay_load && original) ? original
-                        : dxgi ? reinterpret_cast<void*>(GetProcAddress(dxgi, DxgiExportOf(sl.name_index)))
-                               : nullptr;
-        if (!genuine) continue;
-        g_genuine[sl.name_index].store(genuine);
-        if (PatchSlot(sl.slot, h)) {
-            patches_.push_back({sl.slot, original, h, sl.name_index, sl.delay_load, exe});
-            ++patched;
-            log(std::string("fg transport: patched ") + (sl.delay_load ? "delay-load" : "import") + " slot " +
-                FgRoleWord(sl.name_index) + " in " + ModuleLeaf(exe) + " (the game creates its DXGI factory there)");
+    for (unsigned i = 0; i < count && budget.step(); ++i) {
+        if (mods[i] == self || mods[i] == iface_ || mods[i] == dxgi) continue;
+        HMODULE mod = nullptr;
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(mods[i]), &mod) ||
+            mod != mods[i]) {
+            if (mod) FreeLibrary(mod);
+            continue;
+        }
+        held.push_back(mod);
+        for (const FgSlot& sl : FgCollectSlots(mod, kDxgiLeaf, names, budget)) {
+            void* h = handler_for(sl.name_index);
+            void* original = nullptr;
+            if (!h || !g::safe_get(sl.slot, &original) || original == h) continue;
+            bool already = false;
+            for (const FgPatch& p : patches_)
+                if (p.slot == sl.slot) {
+                    already = true;
+                    break;
+                }
+            if (already) continue;
+            void* exp = dxgi ? reinterpret_cast<void*>(GetProcAddress(dxgi, DxgiExportOf(sl.name_index))) : nullptr;
+            void* cur = g_genuine[sl.name_index].load();
+            void* cand = nullptr;
+            if (!sl.delay_load && original) {
+                cand = original;
+            } else if (sl.delay_load && original && ModuleContaining(original) != mod) {
+                cand = original;
+            } else {
+                cand = exp;
+            }
+            if (!cand) continue;
+            // Preserve a prior hook (non-export address) if already captured for this slot.
+            if (!cur || (cand != exp && cur == exp)) g_genuine[sl.name_index].store(cand);
+            if (PatchSlot(sl.slot, h)) {
+                patches_.push_back({sl.slot, original, h, sl.name_index, sl.delay_load, mod});
+                ++patched;
+                log(std::string("fg transport: patched ") + (sl.delay_load ? "delay-load" : "import") + " slot " +
+                    FgRoleWord(sl.name_index) + " in " + ModuleLeaf(mod) + " (the game creates its DXGI factory there)");
+            }
         }
     }
     return patched;
+}
+
+size_t FgAsiTransport::install_dxgi_early(FgLogFn log_fn, void* log_ctx) {
+    if (active_ || early_dxgi_) return 0;
+    log_fn_ = log_fn;
+    log_ctx_ = log_ctx;
+    g_early_log.store(log_fn);
+    g_early_log_ctx.store(log_ctx);
+    g_early_dxgi_active.store(true);
+    const size_t n = patch_dxgi_fallback();
+    if (n > 0) {
+        early_dxgi_ = true;
+    } else {
+        g_early_dxgi_active.store(false);
+    }
+    return n;
 }
 
 uint32_t FgAsiTransport::install(const FgAsiConfig& cfg) {
@@ -1370,13 +1522,24 @@ uint32_t FgAsiTransport::install(const FgAsiConfig& cfg) {
 
         // start-up route facts first (no slot is live yet), then route, then redirect: a slot is live the moment it is
         // written
+        void* export_addr[kFgSlotCount] = {};
+        for (uint32_t i = 0; i < kFgSlotCount; ++i) export_addr[i] = g_genuine[i].load();
         start_routing(cfg, std::move(core));
         for (const Found& f : found) {
             void* h = handler_for(f.slot.name_index);
             void* original = nullptr;
             if (!g::safe_get(f.slot.slot, &original) || original == h) continue;
-            // Chain to an earlier IAT patch (e.g. another plugin on the same slot) instead of bypassing it.
-            if (!f.slot.delay_load && original) g_genuine[f.slot.name_index].store(original);
+            // Chain to an earlier IAT or already-resolved delay-load patch (e.g. another plugin on the same slot)
+            // without letting an unhooked module scanned later clobber an already-captured hook address.
+            void* exp = export_addr[f.slot.name_index];
+            void* cur = g_genuine[f.slot.name_index].load();
+            const bool resolved_hook =
+                original && original != exp && (!f.slot.delay_load || ModuleContaining(original) != f.module);
+            if (resolved_hook) {
+                g_genuine[f.slot.name_index].store(original);
+            } else if (!cur && !f.slot.delay_load && original) {
+                g_genuine[f.slot.name_index].store(original);
+            }
             if (PatchSlot(f.slot.slot, h)) {
                 patches_.push_back({f.slot.slot, original, h, f.slot.name_index, f.slot.delay_load, f.module});
                 log(std::string("fg transport: patched ") + (f.slot.delay_load ? "delay-load" : "import") + " slot " +
@@ -1492,6 +1655,10 @@ uint32_t FgAsiTransport::install_routes(const FgAsiConfig& cfg, HMODULE iface, u
         for (uint32_t i = 0; i < kFgSlotCount; ++i) n += installed(i) ? 1u : 0u;
         g_ctr.routes_installed.store(n);
         routed_ = n > 0;
+        if (n == 0) {
+            restore();
+            return finish(kFgRoutesRefused, "no host routes installed");
+        }
         if (cfg.imports.dxgi_factory_fallback && !installed(kFgSlotCreateFactory2)) patch_dxgi_fallback();
         active_ = true;
         owner_release.keep = true;
@@ -1504,13 +1671,19 @@ uint32_t FgAsiTransport::install_routes(const FgAsiConfig& cfg, HMODULE iface, u
 }
 
 void FgAsiTransport::restore() {
+    g_early_dxgi_active.store(false);
+    const bool early_hooked = early_dxgi_ && g_early_hooked_factory.exchange(false);
     if (impl_) {
         // the creation hook this transport installed comes off; chains claimed for the bridge give their present owner
         // back (they stay wrapped as pass-throughs; the presenter hears Detached while the route still names it)
-        if (impl_->hooked_factory.load()) FgSwapChainHook::Uninstall();
+        if (impl_->hooked_factory.load() || early_hooked) FgSwapChainHook::Uninstall();
         FgSwapChain::DetachCallback(&g_present_bridge);
+    } else if (early_hooked) {
+        FgSwapChainHook::Uninstall();
     }
+    early_dxgi_ = false;
     if (g_route.load() == impl_.get() && impl_) g_route.store(nullptr);
+    g_get_native_interface.store(nullptr);
     for (auto it = patches_.rbegin(); it != patches_.rend(); ++it) {
         void* now = nullptr;
         if (g::safe_get(it->slot, &now) && now == it->handler && WG_FG_WIN32_MUTANT != 7)

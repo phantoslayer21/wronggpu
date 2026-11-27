@@ -194,6 +194,11 @@ FgStatus FgDxgiPresenter::ReserveRealSlot(std::uint32_t* slot) {
     return engine_.ReserveRealOnlySlot(slot);
 }
 
+void FgDxgiPresenter::ReleaseRealSlot() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    engine_.ReleaseRealOnlySlot();
+}
+
 FgPresenterProbe FgDxgiPresenter::Probe() const {
     return FgPresenterProbe{FgPresenterBackend::DxgiFlip, true, true, desc_.max_generated, FgStatus::Ok};
 }
@@ -231,7 +236,10 @@ std::uint64_t FgDxgiPresenter::FirstQueuedPresentId() const {
 FgStatus FgDxgiPresenter::Attach(std::uint64_t chain_id, std::uint64_t epoch) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (claimed_) return engine_.Refuse(FgStatus::WrongState);
-    if (back_buffers_.empty()) return engine_.Refuse(FgStatus::WrongState);  // CompleteResize takes the new chain
+    if (back_buffers_.empty()) {
+        const FgWinResult r = AcquireChain();
+        if (!r.Ok() || back_buffers_.empty()) return engine_.Refuse(FgStatus::WrongState);
+    }
     if (!FgChainRegistry::Process().Claim(chain_id, this)) return engine_.Refuse(FgStatus::Refused);
     const FgStatus s = engine_.Attach(epoch);
     if (s != FgStatus::Ok) {
@@ -324,7 +332,6 @@ FgStatus FgDxgiPresenter::CompleteResize(bool resize_ok, std::uint64_t new_epoch
     }
     have_vblank_ = false;
     local_.clear();
-    latency_credit_ = false;
     return s;
 }
 
@@ -586,7 +593,12 @@ bool FgDxgiPresenter::RecordCopyAndPresentLocked(const Planned& pl) {
 // the head under the lock. A count that was taken but not used stays as a credit for the next present, so the
 // latency object's count never drifts.
 bool FgDxgiPresenter::PresentHead(HANDLE stop) {
-    if (!latency_credit_) {
+    bool have_credit = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        have_credit = latency_credit_;
+    }
+    if (!have_credit) {
         HANDLE hs[2] = {stop, latency_};
         const DWORD w = WaitForMultipleObjects(2, hs, FALSE, kLatencyWaitMs);
         if (w == WAIT_OBJECT_0) return false;
@@ -601,9 +613,11 @@ bool FgDxgiPresenter::PresentHead(HANDLE stop) {
             }
             return true;  // a real image waits and retries
         }
+        std::lock_guard<std::mutex> lock(mutex_);
         latency_credit_ = true;
     }
     std::lock_guard<std::mutex> lock(mutex_);
+    if (!latency_credit_) return true;
     const FgTicks now = FgInterruptNow();
     Planned head;
     if (engine_.State() != FgPresenterState::Attached || !PlanHeadLocked(now, &head)) return true;
@@ -615,16 +629,25 @@ bool FgDxgiPresenter::PresentHead(HANDLE stop) {
 }
 
 void FgDxgiPresenter::Run(HANDLE stop, HANDLE wake) {
+    constexpr FgTicks kSpinWindow = 5000;  // 0.5 ms: bridge waitable-timer wake jitter without burning CPU
     for (;;) {
         bool present_now = false;
+        FgTicks spin_until = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             const FgTicks now = FgInterruptNow();
             StepLocked(now);
             Planned head;
             if (engine_.State() == FgPresenterState::Attached && PlanHeadLocked(now, &head)) {
-                if (now + desc_.timer_lead >= head.issue_at) present_now = true;
-                else timer_.ArmAt(head.issue_at - desc_.timer_lead);
+                const FgTicks target_at = head.issue_at - desc_.timer_lead;
+                if (now >= target_at) {
+                    present_now = true;
+                } else if (target_at - now <= kSpinWindow) {
+                    timer_.Cancel();
+                    spin_until = target_at;
+                } else {
+                    timer_.ArmAt(target_at - kSpinWindow);
+                }
             } else {
                 const FgTicks deadline = engine_.NextDeadline();
                 if (deadline != 0) timer_.ArmAt(deadline + 1);
@@ -636,6 +659,16 @@ void FgDxgiPresenter::Run(HANDLE stop, HANDLE wake) {
                 if (fence) fence->SetEventOnCompletion(f.value, fence_event_);
             }
             if (!CopiesIdleLocked()) copy_fence_->SetEventOnCompletion(copy_value_, copy_event_);
+        }
+        if (spin_until != 0) {
+            while (FgInterruptNow() < spin_until) {
+                if (WaitForSingleObject(stop, 0) == WAIT_OBJECT_0) {
+                    timer_.Cancel();
+                    return;
+                }
+                YieldProcessor();
+            }
+            present_now = true;
         }
         if (present_now) {
             if (!PresentHead(stop)) break;

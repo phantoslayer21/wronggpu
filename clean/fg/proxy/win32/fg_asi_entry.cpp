@@ -406,6 +406,13 @@ __declspec(dllexport) bool OptiPluginInit(const WgHostMenuApi* api, WgHostMenuPl
                 WG_HOST_MENU_HAS(api, set_streamline_callback)) {
                 LogLine(nullptr, "fg: asking OptiScaler for its game-interface hook (plugin interface 3)");
                 routes = api->set_streamline_callback(plugin, &OnHostHooked, nullptr);
+                if (routes && g_generic_deferred && !g_transport->active()) {
+                    const size_t dxgi_patched = g_transport->install_dxgi_early(&LogLine, nullptr);
+                    if (dxgi_patched)
+                        LogLine(nullptr, ("fg: early DXGI factory hook installed (" + std::to_string(dxgi_patched) +
+                                          " slot(s)) ahead of OptiScaler's interface hook")
+                                             .c_str());
+                }
             } else {
                 LogLine(nullptr, ("fg: OptiScaler's plugin interface " + std::to_string(api->version) +
                                   " has no game-interface routes (needs 3); the import slots stay the transport")
@@ -421,6 +428,7 @@ __declspec(dllexport) bool OptiPluginInit(const WgHostMenuApi* api, WgHostMenuPl
 
 __declspec(dllexport) void WrongGPU_FgShutdown() {
     if (g_init.load() != 2 || !g_transport) return;
+    g_core.store(nullptr);
     g_transport->restore();
     LogLine(nullptr, "fg: shut down; every redirected slot put back");
 }

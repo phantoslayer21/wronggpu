@@ -19,9 +19,10 @@ bool ScanoutFormat(DXGI_FORMAT f) {
            f == DXGI_FORMAT_R16G16B16A16_FLOAT;
 }
 
-DXGI_COLOR_SPACE_TYPE ColorSpaceFor(DXGI_FORMAT f) {
-    return f == DXGI_FORMAT_R16G16B16A16_FLOAT ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709
-                                               : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+DXGI_COLOR_SPACE_TYPE ColorSpaceFor(DXGI_FORMAT f, bool hdr) {
+    if (f == DXGI_FORMAT_R16G16B16A16_FLOAT) return DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709;
+    if (f == DXGI_FORMAT_R10G10B10A2_UNORM && hdr) return DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+    return DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
 }
 
 }  // namespace
@@ -120,7 +121,8 @@ FgWinResult FgWinCompPresenter::Initialize() {
     surface_->SetTag(1);
     const RECT src = {0, 0, static_cast<LONG>(desc_.width), static_cast<LONG>(desc_.height)};
     if (FAILED(hr = surface_->SetAlphaMode(DXGI_ALPHA_MODE_IGNORE)) ||
-        FAILED(hr = surface_->SetColorSpace(ColorSpaceFor(desc_.format))) || FAILED(hr = surface_->SetSourceRect(&src)))
+        FAILED(hr = surface_->SetColorSpace(ColorSpaceFor(desc_.format, desc_.hdr))) ||
+        FAILED(hr = surface_->SetSourceRect(&src)))
         return FgWinFail(FgStatus::Refused, FgWinRefusal::CompositionTarget, hr);
 
     if (desc_.bind_window) {
@@ -253,7 +255,12 @@ FgStatus FgWinCompPresenter::ReserveRealSlot(std::uint32_t* slot) {
     return engine_.ReserveRealOnlySlot(slot);
 }
 
-FgStatus FgWinCompPresenter::SetResizeTarget(UINT width, UINT height) {
+void FgWinCompPresenter::ReleaseRealSlot() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    engine_.ReleaseRealOnlySlot();
+}
+
+FgStatus FgWinCompPresenter::SetResizeTarget(std::uint32_t width, std::uint32_t height) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (width < 1 || height < 1 || width > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
         height > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION)
@@ -412,6 +419,8 @@ FgStatus FgWinCompPresenter::CompleteResize(bool resize_ok, std::uint64_t new_ep
         desc_.width = w;
         desc_.height = h;
     }
+    resize_width_ = 0;
+    resize_height_ = 0;
     have_vblank_ = false;
     deferred_.clear();
     submitted_.clear();
@@ -535,13 +544,14 @@ void FgWinCompPresenter::DrainStatisticsLocked() {
                 ComPtr<IPresentStatusPresentStatistics> ps;
                 if (FAILED(st.As(&ps))) break;
                 const PresentStatus v = ps->GetPresentStatus();
-                if (v == PresentStatus_Skipped && EngineIdForPlatform(pid, &eid, true)) engine_.OnPresentSkipped(eid);
-                if (v == PresentStatus_Canceled) EngineIdForPlatform(pid, &eid, true);
+                if ((v == PresentStatus_Skipped || v == PresentStatus_Canceled) && EngineIdForPlatform(pid, &eid, true))
+                    engine_.OnPresentSkipped(eid);
                 break;
             }
             case PresentStatisticsKind_IndependentFlipFrame: {
                 ComPtr<IIndependentFlipFramePresentStatistics> fs;
                 if (FAILED(st.As(&fs))) break;
+                ++info_.indep_flip_frames;
                 if (pid > last_displayed_platform_) last_displayed_platform_ = pid;
                 if (EngineIdForPlatform(pid, &eid, true))
                     engine_.OnPresentDisplayed(eid, static_cast<FgTicks>(fs->GetDisplayedTime().value));
@@ -549,17 +559,21 @@ void FgWinCompPresenter::DrainStatisticsLocked() {
             }
             case PresentStatisticsKind_CompositionFrame: {
                 ComPtr<ICompositionFramePresentStatistics> cs;
-                if (FAILED(st.As(&cs))) break;
-                const COMPOSITION_FRAME_ID fid = cs->GetCompositionFrameId();
-                COMPOSITION_FRAME_STATS fst = {};
-                COMPOSITION_TARGET_ID targets[4] = {};
-                UINT count = 0;
-                if (FAILED(FgDCompGetStatistics(fid, &fst, 4, targets, &count)) || count == 0) break;
-                COMPOSITION_TARGET_STATS ts = {};
-                if (FAILED(FgDCompGetTargetStatistics(fid, &targets[0], &ts)) || ts.presentTime == 0) break;
+                ++info_.comp_frames;
+                FgTicks displayed_at = FgInterruptNow();
+                if (SUCCEEDED(st.As(&cs))) {
+                    const COMPOSITION_FRAME_ID fid = cs->GetCompositionFrameId();
+                    COMPOSITION_FRAME_STATS fst = {};
+                    COMPOSITION_TARGET_ID targets[4] = {};
+                    UINT count = 0;
+                    COMPOSITION_TARGET_STATS ts = {};
+                    if (SUCCEEDED(FgDCompGetStatistics(fid, &fst, 4, targets, &count)) && count > 0 &&
+                        SUCCEEDED(FgDCompGetTargetStatistics(fid, &targets[0], &ts)) && ts.presentTime != 0) {
+                        displayed_at = clock_map_.FromQpc(static_cast<std::int64_t>(ts.presentTime));
+                    }
+                }
                 if (pid > last_displayed_platform_) last_displayed_platform_ = pid;
-                if (EngineIdForPlatform(pid, &eid, true))
-                    engine_.OnPresentDisplayed(eid, clock_map_.FromQpc(static_cast<std::int64_t>(ts.presentTime)));
+                if (EngineIdForPlatform(pid, &eid, true)) engine_.OnPresentDisplayed(eid, displayed_at);
                 break;
             }
             default: break;

@@ -76,6 +76,7 @@ public:
     std::uint32_t RegisterFence(ID3D12Fence* fence, FgWinResult* why);
     ID3D12Resource* SlotResource(std::uint32_t slot) const;
     FgStatus ReserveRealSlot(std::uint32_t* slot);
+    void ReleaseRealSlot();
     std::uint32_t CancelPresentsFrom(std::uint64_t present_id);
     std::uint64_t FirstQueuedPresentId() const;
     // Waits (bounded) until no old work is left and, while quiescing, the swap-chain buffers are released.

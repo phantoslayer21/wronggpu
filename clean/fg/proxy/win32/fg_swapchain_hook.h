@@ -148,7 +148,10 @@ public:
     IUnknown* Queue() const { return queue_; }
     // The queue the real chain was created on instead of the game's (null: the game's queue); a reference is kept.
     void SetPresentQueue(IUnknown* queue);
-    IUnknown* PresentQueue() const { return present_queue_; }
+    IUnknown* PresentQueue() const {
+        std::lock_guard<std::recursive_mutex> lock(mu_);
+        return present_queue_;
+    }
     // Flags the creation added to the game's (FgSwapChainHook, IFgSwapChainSink::ExtraCreateFlags): ORed into every
     // ResizeBuffers / ResizeBuffers1 so the chain keeps them.
     void SetExtraFlags(UINT flags) { extra_flags_.store(flags); }
@@ -230,7 +233,7 @@ private:
     std::atomic<long> refs_{1};
     std::atomic<UINT> extra_flags_{0};
 
-    mutable std::mutex mu_;
+    mutable std::recursive_mutex mu_;
     IFgPresentCallback* callback_ = nullptr;
     FgProxy* core_ = nullptr;
     FgPresentOwners* owners_ = nullptr;
@@ -255,6 +258,8 @@ public:
     virtual IUnknown* CreationQueue(HWND, const DXGI_SWAP_CHAIN_DESC1&, IUnknown* /*game_queue*/) { return nullptr; }
 };
 
+using FgCreateSwapChainFn = HRESULT(STDMETHODCALLTYPE*)(IDXGIFactory* self, IUnknown* device,
+                                                        DXGI_SWAP_CHAIN_DESC* desc, IDXGISwapChain** out);
 using FgCreateForHwndFn = HRESULT(STDMETHODCALLTYPE*)(IDXGIFactory2* self, IUnknown* device, HWND hwnd,
                                                        const DXGI_SWAP_CHAIN_DESC1* desc,
                                                        const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* fullscreen,
@@ -262,19 +267,25 @@ using FgCreateForHwndFn = HRESULT(STDMETHODCALLTYPE*)(IDXGIFactory2* self, IUnkn
 
 class FgSwapChainHook {
 public:
+    // Index of CreateSwapChain in IDXGIFactory's method table: IUnknown 3, IDXGIObject 4, EnumAdapters,
+    // MakeWindowAssociation, GetWindowAssociation.
+    static constexpr unsigned kCreateSwapChainSlot = 10;
     // Index of CreateSwapChainForHwnd in IDXGIFactory2's method table: IUnknown 3, IDXGIObject 4, IDXGIFactory 5,
     // IDXGIFactory1 2, then IsWindowedStereoEnabled.
     static constexpr unsigned kCreateForHwndSlot = 15;
 
-    // Patches the factory class's CreateSwapChainForHwnd slot (shared by every factory of that class). One install per
-    // process; false: already installed, null factory, or the table not writable. The sink is not owned.
+    // Patches the factory class's CreateSwapChain and CreateSwapChainForHwnd slots (shared by every factory of that
+    // class). One install per process; false: already installed, null factory, or the table not writable. The sink is
+    // not owned.
     static bool Install(IDXGIFactory2* factory, IFgSwapChainSink* sink, FgLogFn log, void* log_ctx);
-    // Puts the original back when the slot still holds ours. Chains already wrapped stay wrapped.
+    // Puts the originals back when the slots still hold ours. Chains already wrapped stay wrapped.
     static void Uninstall();
     static bool Installed();
     static uint64_t Wrapped();  // chains wrapped since Install
 
-    // The handler body (public for the tests): the original first; on success the chain is wrapped and the sink asked.
+    // The handler bodies (public for the tests): the original first; on success the chain is wrapped and the sink asked.
+    static HRESULT STDMETHODCALLTYPE CreateSwapChain(IDXGIFactory* self, IUnknown* device,
+                                                     DXGI_SWAP_CHAIN_DESC* desc, IDXGISwapChain** out);
     static HRESULT STDMETHODCALLTYPE CreateForHwnd(IDXGIFactory2* self, IUnknown* device, HWND hwnd,
                                                    const DXGI_SWAP_CHAIN_DESC1* desc,
                                                    const DXGI_SWAP_CHAIN_FULLSCREEN_DESC* fullscreen,

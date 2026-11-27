@@ -174,6 +174,7 @@ static int PatchImports(HMODULE m) {
 static std::wstring Lower(std::wstring s) {
     for (wchar_t& c : s) c = static_cast<wchar_t>(towlower(c));
     for (wchar_t& c : s) if (c == L'/') c = L'\\';
+    if (s.rfind(L"\\\\?\\", 0) == 0) s.erase(0, 4);
     return s;
 }
 
@@ -251,8 +252,12 @@ int wmain(int argc, wchar_t** argv) {
         CHECK(Copy(fakeAmd, slot + L"\\amd_fidelityfx_dx12.wronggpu-original.dll"));
     }
     MakeDirs(data);
+    MakeDirs(data + L"\\wronggpu-setup");
     MakeDirs(scratchLocal);
-    for (const wchar_t* leaf : {L"\\wronggpu.ini", L"\\wronggpu.ini.tmp"}) Remove(data + leaf);
+    for (const wchar_t* leaf : {L"\\wronggpu.ini", L"\\wronggpu.ini.tmp", L"\\wronggpu-setup\\model-choice.ini",
+                                L"\\wronggpu-setup\\model-choice.ini.tmp", L"\\wronggpu-setup\\model-choice.ini.lock",
+                                L"\\wronggpu-setup\\settings.ini"})
+        Remove(data + leaf);
     Remove(root + L"\\wronggpu.ini");
     CHECK(Copy(fakeRuntime, data + L"\\wronggpu_runtime.dll"));
     MakeDirs(opti + L"\\plugins");
@@ -306,9 +311,13 @@ int wmain(int argc, wchar_t** argv) {
         reader.snapshot(&s);
         return s.is_set(slot) ? s.values[slot] : -1;
     };
+    using HostSelectedFn = int32_t (*)(uint64_t);
+    auto hostSelected = reinterpret_cast<HostSelectedFn>(reinterpret_cast<void*>(GetProcAddress(main.module, "WrongGpuHostSelectedV1")));
+    CHECK(hostSelected != nullptr);
     auto choose = [&](uint64_t id, const char* expectedProvider) {
         const int index = EntryIndex(main, id);
         CHECK(index >= 0);
+        if (hostSelected) hostSelected(id);
         wg::Snapshot before;
         reader.snapshot(&before);
         CHECK(main.Select(index, device, 1280, 720, 2560, 1440) == FFX_API_RETURN_OK && main.context);
@@ -322,7 +331,14 @@ int wmain(int argc, wchar_t** argv) {
     };
 
 #if WRONGGPU_MODEL_K
-    // Model K: sr_model=K written (a new generation), persisted to wronggpu.ini.
+    // A bare host create without WrongGpuHostSelectedV1 keeps the model choice record's model (Model M by default).
+    {
+        const int kIndex = EntryIndex(main, 0x5747000000000002ull);
+        CHECK(kIndex >= 0);
+        CHECK(main.Select(kIndex, device, 1280, 720, 2560, 1440) == FFX_API_RETURN_OK && main.context);
+        CHECK(main.ProviderName() == "WrongGPU Model M" && value(WG_OPT_SR_MODEL) == WG_SR_MODEL_M);
+    }
+    // Model K: recorded via WrongGpuHostSelectedV1, sr_model=K written (a new generation), persisted to wronggpu.ini.
     auto g = choose(0x5747000000000002ull, "WrongGPU Model K");
     CHECK(g.second == g.first + 2 && value(WG_OPT_SR_MODEL) == WG_SR_MODEL_K);
     CHECK(ReadText(data + L"\\wronggpu.ini").find("sr_model = K") != std::string::npos);
@@ -361,33 +377,18 @@ int wmain(int argc, wchar_t** argv) {
     }
     main.Release();
 
-    // The host's persisted choice: OptiScaler.ini [WrongGPU] UpscalerIndex, polled (file time at most once per second).
-    auto pollTo = [&](int index, uint32_t slot, int32_t expected) {
-        const auto t0 = std::chrono::steady_clock::now();
-        CHECK(main.WriteIndex(index));
-        const bool ok = WaitFor([&] { return value(slot) == expected; }, 1500);
-        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-        std::printf("poll: UpscalerIndex=%d applied after %.0f ms\n", index, ms);
-        CHECK(ok);
-        return ms;
-    };
-    double worst = 0;
-#if WRONGGPU_MODEL_K
-    worst = std::max(worst, pollTo(EntryIndex(main, 0x5747000000000002ull), WG_OPT_SR_MODEL, WG_SR_MODEL_K));
-    worst = std::max(worst, pollTo(EntryIndex(main, 0x5747000000000001ull), WG_OPT_SR_MODEL, WG_SR_MODEL_M));
-    worst = std::max(worst, pollTo(EntryIndex(main, 0x5747000000000002ull), WG_OPT_SR_MODEL, WG_SR_MODEL_K));
-    const int32_t lastModel = WG_SR_MODEL_K;
-#else
-    worst = std::max(worst, pollTo(EntryIndex(main, 0x5747000000000001ull), WG_OPT_SR_MODEL, WG_SR_MODEL_M));
-    const int32_t lastModel = WG_SR_MODEL_M;
-#endif
-    std::printf("poll: worst %.0f ms (poll budget: file time checked at most once per second + 200 ms tick)\n", worst);
-    CHECK(worst <= 1300.0);
-    // An AMD index: nothing applied.
+    // OptiScaler.ini [WrongGPU] UpscalerIndex is polled for non-model entries, but MUST NOT overwrite sr_model (the
+    // model choice record owns SR model selection, never the host's stored UpscalerIndex).
     {
+        const int32_t beforeModel = value(WG_OPT_SR_MODEL);
+#if WRONGGPU_MODEL_K
+        CHECK(main.WriteIndex(EntryIndex(main, 0x5747000000000002ull)));
+        std::this_thread::sleep_for(std::chrono::milliseconds(1400));
+        CHECK(value(WG_OPT_SR_MODEL) == beforeModel && value(WG_OPT_RR_MODE) == rrMode);
+#endif
         CHECK(main.WriteIndex(int(kOwn)));
         std::this_thread::sleep_for(std::chrono::milliseconds(1400));
-        CHECK(value(WG_OPT_RR_MODE) == rrMode && value(WG_OPT_SR_MODEL) == lastModel);
+        CHECK(value(WG_OPT_RR_MODE) == rrMode && value(WG_OPT_SR_MODEL) == beforeModel);
     }
 
     // ---- one folder per choice: two more instances of the same DLL, each with its sidecar ----
@@ -426,8 +427,8 @@ int wmain(int argc, wchar_t** argv) {
 
     // ---- logs: the registry's words ----
     const std::wstring mainLog = main.SlotDir() + L"\\wronggpu-fsr.log";
-#if WRONGGPU_MODEL_K  // (without Model K the poll never changes the model, so it logs nothing)
-    CHECK(WaitFor([&] { return ReadText(mainLog).find("settings: sr_model=K (optiscaler.ini)") != std::string::npos; }, 3000));
+#if WRONGGPU_MODEL_K
+    CHECK(WaitFor([&] { return ReadText(mainLog).find("the player selected Model K in OptiScaler's upscaler list: recorded") != std::string::npos; }, 3000));
 #endif
     const std::string text = ReadText(mainLog);
     CHECK(text.find("custom slot: loaded from OptiScaler's custom folder \"WrongGPU\"") != std::string::npos);

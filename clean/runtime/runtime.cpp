@@ -676,6 +676,7 @@ struct Runtime {
   uint64_t owned_bytes = 0;
   bool external_io = false;    // inputs and output always come from FrameIo (interop): no own buffers for them
   bool native_direct_io = false;  // typed resources bound by the private native caller; no dense I/O conversion buffers
+  bool measure_only_ = false;  // Pass 1 arena measurement: allocate to record high-water mark, skip GPU uploads/memsets/sync
   bool recon_output = false;   // experimental: D = O, output filter = identity (post_copy)
 
   // buffers
@@ -714,16 +715,17 @@ struct Runtime {
 
   ~Runtime() {
     if (dev) {
-      dev->sync();
+      if (!measure_only_) dev->sync();
       for (DevPtr p : owned) dev->free(p);
     }
   }
 
   bool create(const WgRtConfig& c, std::unique_ptr<Device> given = nullptr, bool external = false,
-              bool native_direct = false) {
+              bool native_direct = false, bool measure_only = false) {
     cfg = c;
     external_io = external;
     native_direct_io = native_direct;
+    measure_only_ = measure_only;
     build_dir = c.build_dir ? c.build_dir : ".";
     ModelId model_id = ModelId::M;  // runtime option model=K (clean/k/runtime/model_k.h); default model M
     if (std::string merr; !model_from_options(c, &model_id, &merr)) return fail(merr);
@@ -737,7 +739,7 @@ struct Runtime {
     if (c.backend == 3 && external && !native_direct_io)
       return fail("native D3D12 external I/O requires the private direct-resource route");
 #ifndef WG_NO_MODEL_K
-    if (model_id == ModelId::K) return create_k(c, std::move(given));
+    if (model_id == ModelId::K) return create_k(c, std::move(given), measure_only);
 #else
     if (model_id == ModelId::K) return fail("Model K is not part of this build");  // (model_from_options says so first)
 #endif
@@ -1310,7 +1312,7 @@ struct Runtime {
         const size_t FH = ceil32(max_rh), FW = ceil32(max_rw), H8 = FH / 8, W8 = FW / 8;
         const size_t nsync = 16 + 7 * ((H8 + 6) / 4);
         if (!(bneck_tmp || alloc(&bneck_tmp, H8 * W8 * 128))) return false;
-        if (!bneck_sync && !(alloc(&bneck_sync, 4 * nsync) && (dev->memset(bneck_sync, 0, 4 * nsync) || dfail())))
+        if (!bneck_sync && !(alloc(&bneck_sync, 4 * nsync) && (measure_only_ || dev->memset(bneck_sync, 0, 4 * nsync) || dfail())))
           return false;
       }
     }
@@ -1484,15 +1486,16 @@ struct Runtime {
     for (auto& kv : blobs) {
       if (kv.first == kFilterStage) continue;  // the output-filter weights are not read from device memory
       DevPtr p;
-      if (!alloc(&p, kv.second.size()) || !dev->upload(p, kv.second.data(), kv.second.size())) return dfail();
+      if (!alloc(&p, kv.second.size()) || (!measure_only_ && !dev->upload(p, kv.second.data(), kv.second.size())))
+        return dfail();
       wdev[kv.first] = p;
     }
-    return alloc_buffers() && dev->sync() ? true : (err.empty() ? dfail() : false);
+    return alloc_buffers() && (measure_only_ || dev->sync()) ? true : (err.empty() ? dfail() : false);
   }
 
 #ifndef WG_NO_MODEL_K
   // Model K (clean/k/runtime/runtime_k.h): the device as for model M, then the K state; model M's state is not made.
-  bool create_k(const WgRtConfig& c, std::unique_ptr<Device> given) {
+  bool create_k(const WgRtConfig& c, std::unique_ptr<Device> given, bool measure_only = false) {
     if (c.max_rw <= 0 || c.max_rh <= 0 || c.ow <= 0 || c.oh <= 0) return fail("invalid render or output size");
     max_rw = c.max_rw;
     max_rh = c.max_rh;
@@ -1516,7 +1519,8 @@ struct Runtime {
     }
     if (!dev) return fail(e);
     k.reset(new KRuntime());
-    if (!k->create(c, dev.get(), [this](DevPtr* p, size_t n) { return alloc(p, n); }, external_io, native_direct_io))
+    if (!k->create(c, dev.get(), [this](DevPtr* p, size_t n) { return alloc(p, n); }, external_io, native_direct_io,
+                   measure_only))
       return fail(k->err());
     blobs = k->blobs();
     notes_text = k->notes();  // one line when the softmax stages take their round-to-odd ports (no silent switch)
@@ -1952,7 +1956,7 @@ struct Runtime {
     const size_t FH = ceil32(max_rh), FW = ceil32(max_rw), H4 = FH / 4, H8 = FH / 8, W8 = FW / 8;
     const size_t nsync = 16 + 8 * ((H4 + 6) / 4);  // kMegaSyncHead + 8 phases x window rows (swin_v2.hip)
     return alloc(&bneck_tmp, H8 * W8 * 128) && alloc(&mid_sync, 4 * nsync) &&
-           (dev->memset(mid_sync, 0, 4 * nsync) || dfail());
+           (measure_only_ || dev->memset(mid_sync, 0, 4 * nsync) || dfail());
   }
 
   // Bottleneck megakernel (after the device and the per-stage choice exist): code object tagged "bneck", its geometry,
@@ -1995,7 +1999,7 @@ struct Runtime {
     // (bneck/swin_bneck6_mb_nc, WG_D3D12_FUSION mb)
     const size_t nsync = 16 + 7 * ((H8 + 6) / 4);
     return (bneck_tmp || alloc(&bneck_tmp, H8 * W8 * 128)) && alloc(&bneck_sync, 4 * nsync) &&
-           (dev->memset(bneck_sync, 0, 4 * nsync) || dfail());
+           (measure_only_ || dev->memset(bneck_sync, 0, 4 * nsync) || dfail());
   }
 
   // Per-stage Swin variants: "stage=variant[,stage=variant...]" (after the device exists).
@@ -2168,9 +2172,9 @@ struct Runtime {
               (native_direct_io || (alloc(&depth, R * 4) && alloc(&motion, R * 8) && alloc(&color_net, R * 16))) &&
               (!own_direct || alloc(&color_net, R * 16)) &&
               alloc(&expo, 32) &&
-              (!native_direct_io || (alloc(&f16lut, kF16LutBytes) && (dev->memset(f16lut, 0, 256) || dfail()))) &&
+              (!native_direct_io || (alloc(&f16lut, kF16LutBytes) && (measure_only_ || dev->memset(f16lut, 0, 256) || dfail()))) &&
               alloc(&expo_partials, 4 * (size_t)cdiv(ny, 4)) && alloc(&expo_computed, 4) && alloc(&expo_sync, 4) &&
-              (dev->memset(expo_sync, 0, 4) || dfail()) && alloc(&feat0, t2 * 64) &&
+              (measure_only_ || dev->memset(expo_sync, 0, 4) || dfail()) && alloc(&feat0, t2 * 64) &&
               alloc(&mnear[0], R * 4) && alloc(&mnear[1], R * 4) && alloc(&mfar, R * 4) && alloc(&mcenter, R * 4) &&
               alloc(&latent[0], R * 4) && alloc(&latent[1], R * 4) && alloc(&reduced, (size_t)hw * hh * 4) &&
               alloc(&skip1, t2 * 64) && alloc(&merged1, t4 * 96) && alloc(&skip2, t4 * 96) &&
@@ -2180,7 +2184,7 @@ struct Runtime {
     for (int i = 0; ok && i < 6; ++i) ok = alloc(&bout[i], t8 * 128);
     if (ok && (fz_xd || fz_any_xd)) {
       const size_t nxd = 16 + (FH / 4 + 7) / 4 + 1;
-      ok = alloc(&xd_sync, 4 * nxd) && (dev->memset(xd_sync, 0, 4 * nxd) || dfail());
+      ok = alloc(&xd_sync, 4 * nxd) && (measure_only_ || dev->memset(xd_sync, 0, 4 * nxd) || dfail());
     }
     if (ok && uses_prep(post_kernel)) ok = alloc(&prep, R * 32);
 #ifdef WG_MODEL_L
@@ -3598,9 +3602,9 @@ struct Runtime {
 };
 
 Runtime* runtime_create(const WgRtConfig& cfg, std::unique_ptr<Device> dev, std::string* err, bool external_io,
-                        bool native_direct_io) {
+                        bool native_direct_io, bool measure_only) {
   std::unique_ptr<Runtime> r(new Runtime());
-  if (!r->create(cfg, std::move(dev), external_io, native_direct_io)) {
+  if (!r->create(cfg, std::move(dev), external_io, native_direct_io, measure_only)) {
     *err = r->err;
     return nullptr;
   }

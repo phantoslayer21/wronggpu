@@ -162,11 +162,12 @@ HMODULE LoadOriginalNextToUs(const wchar_t* fileName, HMODULE self, const std::v
                       "). Calls that need it fail.");
         return nullptr;
     }
-    if (m == self) {
+    const std::string description = FileDescription(path);
+    if (m == self || description.find("WrongGPU") != std::string::npos) {
         L().WriteLine(tag + "ERROR: " + Narrow(path) + " is a copy of WrongGPU's own DLL, not AMD's; it is not used");
+        FreeLibrary(m);
         return nullptr;
     }
-    const std::string description = FileDescription(path);
     L().WriteLine(tag + "AMD's original DLL loaded: " + Narrow(path) + ", file version " + FileVersion(path) +
                   (description.empty() ? "" : ", \"" + description + "\""));
     std::string extra;

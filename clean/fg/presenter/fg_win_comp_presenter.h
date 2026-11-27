@@ -52,6 +52,7 @@ struct FgCompPresenterDesc {
     UINT width = 0;
     UINT height = 0;
     DXGI_FORMAT format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    bool hdr = false;               // HDR10 PQ when format is R10G10B10A2_UNORM
     bool variable_refresh = false;  // the output runs variable refresh: targets are used unsnapped
     FgTicks refresh_period = 0;     // fixed refresh: the scan-out period (0: measured from the compositor)
     std::uint32_t max_generated = kFgMaxGenerated;  // 1..5
@@ -69,6 +70,8 @@ struct FgCompPresenterInfo {
     std::uint32_t d3d11_misc_flags = 0;  // misc flags of the opened slot textures (SHARED_DISPLAYABLE expected)
     bool simultaneous_access = false;
     FgRefreshGrid grid;
+    std::uint64_t indep_flip_frames = 0;  // PresentStatisticsKind_IndependentFlipFrame count
+    std::uint64_t comp_frames = 0;        // PresentStatisticsKind_CompositionFrame count
 };
 
 class FgWinCompPresenter final : public IFgPresenter, private IFgWorkerBody {
@@ -89,8 +92,9 @@ public:
     // A real-only present needs a slot too: reserves one (NoSlot when none is free). The game renders into it and
     // passes it in FgRealImage via PresentRealOnlySlot.
     FgStatus ReserveRealSlot(std::uint32_t* slot);
+    void ReleaseRealSlot();
     // Size of the buffers created by the next successful CompleteResize.
-    FgStatus SetResizeTarget(UINT width, UINT height);
+    FgStatus SetResizeTarget(std::uint32_t width, std::uint32_t height) override;
     // Stale suffix (engine present ids, see FirstQueuedPresentId).
     std::uint32_t CancelPresentsFrom(std::uint64_t present_id);
     std::uint64_t FirstQueuedPresentId() const;

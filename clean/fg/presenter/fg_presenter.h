@@ -222,6 +222,13 @@ public:
     // held until their producer fences complete.
     virtual FgStatus Quiesce() = 0;
 
+    // Size of the buffers created by the next successful CompleteResize (no-op when the back end reads the chain).
+    virtual FgStatus SetResizeTarget(std::uint32_t width, std::uint32_t height) {
+        (void)width;
+        (void)height;
+        return FgStatus::Ok;
+    }
+
     // After Quiesce and the forwarded swap-chain resize: `resize_ok` is the resize's own result. Busy while
     // old-epoch work is in flight; ResizeFailed (and state Failed) when the resize failed; Ok and a fresh epoch
     // otherwise.

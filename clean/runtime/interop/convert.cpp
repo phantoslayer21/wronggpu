@@ -213,7 +213,10 @@ void release(T*& p) {
 bool compile(const char* entry, const char* pass, ID3DBlob** out, std::string* err) {
   HMODULE dll = LoadLibraryW(L"d3dcompiler_47.dll");
   auto fn = dll ? reinterpret_cast<PfnD3DCompile>(reinterpret_cast<void*>(GetProcAddress(dll, "D3DCompile"))) : nullptr;
-  if (!fn) return *err = "d3dcompiler_47.dll (part of Windows) could not be loaded", false;
+  if (!fn) {
+    if (dll) FreeLibrary(dll);
+    return *err = "d3dcompiler_47.dll (part of Windows) could not be loaded", false;
+  }
   ID3DBlob* messages = nullptr;
   const D3D_SHADER_MACRO macros[2] = {{pass, "1"}, {nullptr, nullptr}};
   const HRESULT hr = fn(kShader, sizeof(kShader) - 1, "wronggpu_interop.hlsl", macros, nullptr, entry, "cs_5_0",
@@ -224,6 +227,7 @@ bool compile(const char* entry, const char* pass, ID3DBlob** out, std::string* e
                                            messages->GetBufferSize());
   }
   release(messages);
+  FreeLibrary(dll);
   return SUCCEEDED(hr);
 }
 
@@ -309,11 +313,18 @@ bool Converter::init(ID3D12Device* device, std::string* err) {
   rd.NumParameters = 2;
   rd.pParameters = params;
   HMODULE d3d12 = GetModuleHandleW(L"d3d12.dll");
-  if (!d3d12) d3d12 = LoadLibraryW(L"d3d12.dll");
+  bool free_d3d12 = false;
+  if (!d3d12) {
+    d3d12 = LoadLibraryW(L"d3d12.dll");
+    free_d3d12 = d3d12 != nullptr;
+  }
   auto serialize =
       d3d12 ? reinterpret_cast<PfnSerialize>(reinterpret_cast<void*>(GetProcAddress(d3d12, "D3D12SerializeRootSignature")))
             : nullptr;
-  if (!serialize) return *err = "D3D12SerializeRootSignature not found", false;
+  if (!serialize) {
+    if (free_d3d12) FreeLibrary(d3d12);
+    return *err = "D3D12SerializeRootSignature not found", false;
+  }
   ID3DBlob *blob = nullptr, *blobErr = nullptr;
   HRESULT hr = serialize(&rd, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &blobErr);
   if (SUCCEEDED(hr))
@@ -321,6 +332,7 @@ bool Converter::init(ID3D12Device* device, std::string* err) {
                                       (void**)&root_);
   release(blob);
   release(blobErr);
+  if (free_d3d12) FreeLibrary(d3d12);
   if (FAILED(hr)) return *err = "interop root signature failed", false;
 
   const char* entries[7] = {"inputs", "output", "fallback", "flag", "spin", "inputs16", "motionhi"};

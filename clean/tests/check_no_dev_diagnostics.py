@@ -26,6 +26,7 @@ refuses the payload) and of the release script on the final package (tools/relea
 functions are used by clean/tests/test_dev_diagnostics_off.py in CI.
 """
 import hashlib
+import io
 import json
 import os
 import re
@@ -85,7 +86,8 @@ def _base(name):
 
 def is_runtime_name(name):
     n = _base(name).lower()
-    return n.startswith("wronggpu_runtime") and n.endswith(".dll")
+    return (n.startswith("wronggpu_runtime") and n.endswith(".dll")) or (
+        n.startswith("libwg_runtime") and n.endswith(".so"))
 
 
 def check_bytes(data):
@@ -178,10 +180,28 @@ def check_artifact(name, data):
     carried = dev_only_strings_in(data)
     if carried:
         return False, "carries developer-diagnostic code (%r)" % carried[0], False
+    objs = check_object_names_in(data)
+    if objs:
+        return False, "carries check-only code objects (%r)" % objs[0], False
     harness = test_harness_strings_in(data)
     if harness:
         return False, "carries a test program's switch (%r)" % harness[0], False
     return True, "dev-diagnostics=0" if zero else "nothing to check", zero
+
+
+def _zip_artifacts(prefix, raw, depth=0):
+    out = []
+    with zipfile.ZipFile(io.BytesIO(raw)) as z:
+        for info in z.infolist():
+            if info.is_dir():
+                continue
+            data = z.read(info)
+            label = prefix + "!" + info.filename
+            if depth < 4 and info.filename.lower().endswith(".zip"):
+                out += _zip_artifacts(label, data, depth + 1)
+            else:
+                out.append((label, info.filename, data))
+    return out
 
 
 def artifacts(path):
@@ -191,18 +211,14 @@ def artifacts(path):
         for dirpath, _, names in os.walk(path):
             for n in sorted(names):
                 low = n.lower()
-                if is_runtime_name(n) or low.endswith((".zip", ".exe", ".asi")) or low == "manifest.json":
+                if is_runtime_name(n) or low.endswith((".zip", ".exe", ".asi", ".dll", ".so")) or low == "manifest.json":
                     out += artifacts(os.path.join(dirpath, n))
                 elif PAYLOAD_CHECK_NAMES.search(n):   # a check-only object anywhere in the folder fails the check
                     out.append((os.path.join(dirpath, n), n, b""))
         return out
     if path.lower().endswith(".zip"):
-        with zipfile.ZipFile(path) as z:
-            for info in z.infolist():
-                if info.is_dir():
-                    continue
-                out.append((path + "!" + info.filename, info.filename, z.read(info)))
-        return out
+        with open(path, "rb") as f:
+            return _zip_artifacts(path, f.read(), 0)
     with open(path, "rb") as f:
         out.append((path, path, f.read()))
     return out
@@ -212,6 +228,13 @@ def check_path(path):
     """[(label, ok, text, evidence)]; an empty list or no evidence is a failure of the caller to find a library."""
     results = []
     for label, name, data in artifacts(path):
+        if is_runtime_name(name) and os.path.isfile(label):
+            mf_path = os.path.splitext(label)[0] + ".build.json"
+            if os.path.isfile(mf_path):
+                with open(mf_path, "rb") as f:
+                    ok, text = check_runtime_with_manifest(name, data, f.read())
+                results.append((label, ok, text, ok))
+                continue
         ok, text, evidence = check_artifact(name, data)
         if ok and text == "nothing to check":
             continue  # a file that is neither a runtime nor says anything: not listed

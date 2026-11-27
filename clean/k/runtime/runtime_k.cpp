@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <utility>
 
@@ -460,16 +461,18 @@ const char* KRuntime::timing_info() {
 bool KRuntime::alloc(DevPtr* p, size_t bytes, bool zero) {
   bytes = std::max<size_t>(bytes, 256);
   if (!alloc_(p, bytes)) return fail("model K: device memory (" + std::to_string(bytes >> 20) + " MiB): " + dev_->err());
-  if (zero && !dev_->memset(*p, 0, bytes)) return dfail();
+  if (zero && !measure_only_ && !dev_->memset(*p, 0, bytes)) return dfail();
   return true;
 }
 
-bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool external_io, bool native_direct) {
+bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool external_io, bool native_direct,
+                      bool measure_only) {
   cfg_ = c;
   dev_ = dev;
   alloc_ = std::move(alloc_fn);
   external_io_ = external_io;
   native_direct_ = native_direct;
+  measure_only_ = measure_only;
   if (native_direct_ && (!external_io_ || c.backend != 3))
     return fail("model K: native direct resources need external I/O on the native D3D12 device (backend 3)");
   build_dir_ = c.build_dir ? c.build_dir : ".";
@@ -743,7 +746,8 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   // buffers
   for (auto& kv : blobs_) {
     DevPtr p;
-    if (!alloc(&p, kv.second.size()) || !dev_->upload(p, kv.second.data(), kv.second.size())) return false;
+    if (!alloc(&p, kv.second.size()) || (!measure_only_ && !dev_->upload(p, kv.second.data(), kv.second.size())))
+      return false;
     wdev_[kv.first] = p;
   }
   if (!f16_ && (c.backend == 2 || c.backend == 3)) {
@@ -761,17 +765,18 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
       if (st.head) {
         compact = k_pack_compact_head(weight.data() + stage_sections(st).head, st.C);
         if (!alloc(&d0_compact_head_, compact.size()) ||
-            !dev_->upload(d0_compact_head_, compact.data(), compact.size())) return false;
+            (!measure_only_ && !dev_->upload(d0_compact_head_, compact.data(), compact.size()))) return false;
       }
       const auto bias = k_narrow_bias32(st, weight.data(), compact.data());
       const size_t bytes = bias.size() * sizeof(bias[0]);
       DevPtr& plane = narrow_bias_[name];
-      if (!alloc(&plane, bytes) || !dev_->upload(plane, bias.data(), bytes)) return false;
+      if (!alloc(&plane, bytes) || (!measure_only_ && !dev_->upload(plane, bias.data(), bytes))) return false;
     }
   }
   for (auto& kv : f8data_) {  // network=fused8: the FP8 weights and FP32 biases; device pointers into KF8Params
     DevPtr p;
-    if (!alloc(&p, kv.second.bytes.size()) || !dev_->upload(p, kv.second.bytes.data(), kv.second.bytes.size()))
+    if (!alloc(&p, kv.second.bytes.size()) ||
+        (!measure_only_ && !dev_->upload(p, kv.second.bytes.data(), kv.second.bytes.size())))
       return false;
     KF8Params& q = kv.second.q;
     for (DevPtr* a : {&q.wqkv, &q.mix, &q.wo, &q.w1, &q.w2, &q.bo, &q.b1, &q.b2}) *a += p;
@@ -808,7 +813,7 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   // the own output buffer (tests): dense RGB f32, dense RGBA f32 (FrameIo.out_rgba32f) or RGBA16F rows that fit
   if (!external_io_ && !alloc(&out_, (size_t)W_ * H_ * 16, true)) return false;
   if (split_m_ && !split_alloc()) return false;  // k_split's scratch (filled with the rest by k_fill, below)
-  if (fill_ >= 0) {  // k_fill (test hook): the sentinel in everything a frame writes, before the first frame
+  if (!measure_only_ && fill_ >= 0) {  // k_fill (test hook): the sentinel in everything a frame writes, before the first frame
     auto fillb = [&](DevPtr p, size_t bytes) { return !p || dev_->memset(p, fill_, std::max<size_t>(bytes, 256)); };
     bool ok = true;
     for (const auto& kv : net_) ok = ok && fillb(kv.second, net_bytes_[kv.first]);
@@ -823,14 +828,19 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
     if (!ok) return dfail();
   }
   // the filter-shape table (spec 43 section 7) of every level, computed once; a frame reads its level's set
-  std::vector<uint16_t> tab((size_t)8 * kFilterEntries * kFilterValues);
-  for (int l = 0; l < 8; ++l) k_filter_table(l, 1, tab.data() + (size_t)l * kFilterEntries * kFilterValues);
-  if (!dev_->upload(tables_, tab.data(), tab.size() * 2)) return dfail();
+  if (!measure_only_) {
+    std::vector<uint16_t> tab((size_t)8 * kFilterEntries * kFilterValues);
+    for (int l = 0; l < 8; ++l) k_filter_table(l, 1, tab.data() + (size_t)l * kFilterEntries * kFilterValues);
+    if (!dev_->upload(tables_, tab.data(), tab.size() * 2)) return dfail();
+  }
   if (s_table) {
     if (!alloc(&s_breakpoints_, sizeof *s_table) ||
-        !dev_->upload(s_breakpoints_, s_table->data(), sizeof *s_table))
+        (!measure_only_ && !dev_->upload(s_breakpoints_, s_table->data(), sizeof *s_table)))
       return dfail();
   }
+  // Pass 1 arena measurement (executor_d3d12.cpp): reserve the exact temporary peak of smx_check so arena_high_water()
+  // matches Pass 2 without compiling every PSO, uploading weights, or running the GPU self-check twice.
+  if (measure_only_) return c.backend == 3 ? smx_measure_alloc() : true;
   if (!dev_->sync()) return dfail();
   // the native device prepares (loads, verifies and compiles) every kernel this context can select now: a missing or
   // corrupt shader fails create here, not at the first frame
@@ -1042,6 +1052,30 @@ bool KRuntime::smx_check(bool rodd, bool all, std::vector<std::pair<std::string,
 
 // SMX-SELFCHECK-SOURCE END
 
+// Arena peak reservation of smx_check() for Pass 1 measurement (executor_d3d12.cpp): exact same allocations, zero GPU work.
+bool KRuntime::smx_measure_alloc() {
+  size_t in_bytes = 0, y_bytes = 0, m_bytes = 0, w_bytes = 0;
+  for (const SmxCase& c : kSmxCases) {
+    const KStageInfo& st = stage_info(c.stage);
+    const size_t own = level_tokens(c.wb, c.hb, st.level) * st.C * 2;
+    in_bytes = std::max({in_bytes, own, st.kind == 'd' ? level_tokens(c.wb, c.hb, st.level + 1) * st.C_prev * 2 : 0});
+    y_bytes = std::max(y_bytes, own);
+    if (st.kind == 'e') m_bytes = std::max(m_bytes, level_tokens(c.wb, c.hb, st.level + 1) * st.C_next * 2);
+    w_bytes = std::max(w_bytes, blobs_.at(c.stage).size());
+  }
+  DevPtr din = 0, dw = 0, dy = 0, dm = 0, db = 0;
+  bool ok = dev_->alloc(&din, in_bytes) && dev_->alloc(&dw, w_bytes) && dev_->alloc(&dy, y_bytes) &&
+            dev_->alloc(&dm, std::max<size_t>(m_bytes, 256));
+  if (ok && narrow_bias_.count("d1")) {
+    const auto& d1 = *k_stage("d1");
+    const size_t words = 10u * d1.C + (size_t)d1.heads * 64 * 64;
+    ok = dev_->alloc(&db, words * sizeof(uint32_t));
+  }
+  for (DevPtr p : {din, dw, dy, dm, db})
+    if (p) dev_->free(p);
+  return ok || dfail();
+}
+
 // The mix / round-to-odd probe: the number of results that differ from the exact ones.
 bool KRuntime::smx_probe(bool rodd, int* bad) {
   DevPtr in = 0, out = 0;
@@ -1094,30 +1128,70 @@ bool KRuntime::smx_select(int backend, const std::string& hook) {
     add_note("model K: test hook: the round-to-odd softmax ports without the create-time check");
     return true;
   }
+  // Process-local verified cache for normal runs (no test hook): switching k_mode=fast <-> exact on the same device,
+  // shader build and window table reuses the already-verified softmax rounding result instead of repeating ~85-170
+  // synchronous GPU downloads on the game's render thread (every shader is still integrity-checked by dev_->prepare()).
+  struct SmxCached {
+    bool rodd = false;
+    std::string smx_note;
+    std::string create_note;
+  };
+  static std::mutex s_cache_mu;
+  static std::map<std::string, SmxCached> s_cache;
+  std::string cache_key;
+  bool can_cache = false;
+  if (hook.empty()) {
+    uint8_t luid[8] = {};
+    std::vector<char> manifest_bytes;
+    if (dev_->adapter_luid(luid) && wg_read_file(join(build_dir_, "dx12/manifest.json"), &manifest_bytes) &&
+        !manifest_bytes.empty()) {
+      char luid_hex[17] = {};
+      for (int i = 0; i < 8; ++i) std::snprintf(luid_hex + 2 * i, 3, "%02x", (unsigned)luid[i]);
+      const wgc::Digest md = wgc::Sha256::hash(manifest_bytes.data(), manifest_bytes.size());
+      cache_key = std::string(luid_hex) + "|" + wgc::to_hex(md) + "|" + build_dir_ + "|" + (split_m_ ? "1" : "0") +
+                  "|" + (narrow_bias_.count("d1") ? "1" : "0");
+      for (int i = 0; i < 8; ++i)
+        cache_key += "|" + std::to_string(offsets_table_[i][0]) + "," + std::to_string(offsets_table_[i][1]);
+      can_cache = true;
+      std::lock_guard<std::mutex> lock(s_cache_mu);
+      auto it = s_cache.find(cache_key);
+      if (it != s_cache.end()) {
+        smx_rodd_ = it->second.rodd;
+        smx_note_ = it->second.smx_note;
+        if (!it->second.create_note.empty()) add_note(it->second.create_note);
+        return true;
+      }
+    }
+  }
   int bad[2] = {0, 0};
   std::vector<std::pair<std::string, uint64_t>> h[2];
   const bool all = hook == "report";
-  if (!smx_probe(false, &bad[0]) || !smx_probe(true, &bad[1]) || !smx_check(false, all, &h[0]) ||
-      !smx_check(true, all, &h[1]))
-    return false;
-  // the first check that differs, per form ("" = none); a case without a reference refuses create
-  std::string first[2];
-  for (int f = 0; f < 2; ++f) {
-    if (bad[f]) first[f] = std::string(f ? "k_mix_probe__rodd" : "k_mix_probe") + " " + std::to_string(bad[f]) + " of " +
-                           std::to_string(k_mix_probe::kLanes * 8);
+  auto verify_form = [&](int f, std::string* first_out) -> bool {
+    if (bad[f]) *first_out = std::string(f ? "k_mix_probe__rodd" : "k_mix_probe") + " " + std::to_string(bad[f]) + " of " +
+                             std::to_string(k_mix_probe::kLanes * 8);
     for (const auto& e : h[f]) {
       int at = -1;
       for (int j = 0; j < k_smx_selfcheck::kCount && at < 0; ++j)
         if (e.first == k_smx_selfcheck::kNames[j]) at = j;
       if (at < 0) return fail("model K: k_smx_selfcheck.h has no reference for " + e.first + " (regenerate it)");
-      if (first[f].empty() && e.second != k_smx_selfcheck::kExpected[at]) {
+      if (first_out->empty() && e.second != k_smx_selfcheck::kExpected[at]) {
         const size_t a = e.first.find('@');
-        first[f] = f ? e.first.substr(0, a) + "__rodd" + e.first.substr(a) : e.first;
+        *first_out = f ? e.first.substr(0, a) + "__rodd" + e.first.substr(a) : e.first;
       }
     }
-  }
+    return true;
+  };
+  std::string first[2];
+  if (!smx_probe(false, &bad[0]) || !smx_check(false, all, &h[0])) return false;
+  if (!verify_form(0, &first[0])) return false;
   if (hook == "mix_fail" || hook == "both_fail") first[0] = "test hook";
-  if (hook == "both_fail") first[1] = "test hook";
+  // Normal runs skip the redundant __rodd GPU sweep once the primary mix form passes every probe and case.
+  const bool need_rodd = !hook.empty() || !first[0].empty();
+  if (need_rodd) {
+    if (!smx_probe(true, &bad[1]) || !smx_check(true, all, &h[1])) return false;
+    if (!verify_form(1, &first[1])) return false;
+    if (hook == "both_fail") first[1] = "test hook";
+  }
   if (hook == "report") {
     add_note(report("mix", h[0], bad[0]));
     add_note(report("rodd", h[1], bad[1]));
@@ -1125,17 +1199,30 @@ bool KRuntime::smx_select(int backend, const std::string& hook) {
   if (first[0].empty()) {
     smx_rodd_ = false;
     smx_note_ = " smx=mix";
-    if (!first[1].empty())
-      add_note("model K: the round-to-odd softmax ports failed the create-time check on this driver (" + first[1] +
-               "); the mix form passed it and is used");
+    std::string note_line;
+    if (need_rodd && !first[1].empty()) {
+      note_line = "model K: the round-to-odd softmax ports failed the create-time check on this driver (" + first[1] +
+                  "); the mix form passed it and is used";
+      add_note(note_line);
+    }
+    if (can_cache) {
+      std::lock_guard<std::mutex> lock(s_cache_mu);
+      s_cache[cache_key] = {false, smx_note_, note_line};
+    }
     return true;
   }
   if (first[1].empty()) {
     smx_rodd_ = true;
     std::string token = first[0] == "test hook" ? std::string("hook") : first[0].substr(0, first[0].find(' '));
     smx_note_ = " smx=rodd(" + token + ")";
-    add_note("model K: softmax weight rounding takes the round-to-odd ports (the mix form failed the create-time check: " +
-             first[0] + "); they passed it, output unchanged");
+    const std::string note_line =
+        "model K: softmax weight rounding takes the round-to-odd ports (the mix form failed the create-time check: " +
+        first[0] + "); they passed it, output unchanged";
+    add_note(note_line);
+    if (can_cache) {
+      std::lock_guard<std::mutex> lock(s_cache_mu);
+      s_cache[cache_key] = {true, smx_note_, note_line};
+    }
     return true;
   }
   return fail("model K: the D3D12 softmax stages are not exact on this driver (create-time check: mix form " + first[0] +

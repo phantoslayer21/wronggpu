@@ -207,7 +207,12 @@ class HipExecutor : public Executor {
     wgrt::Device* d = wgrt::runtime_device(rt_);
     int ow = job.ow, oh = job.oh, rw = job.frame.rw, rh = job.frame.rh;
     const size_t pbytes = (size_t)ow * oh * 2, dbytes = (size_t)rw * rh * 4;
+    bool synced = false;
     if (pbytes > guard_pcap_) {
+      if ((guard_prev_[0] || guard_prev_[1]) && !synced) {
+        if (!d->sync()) return;
+        synced = true;
+      }
       guard_pcap_ = 0;
       guard_valid_ = false;
       for (wgrt::DevPtr& p : guard_prev_) {
@@ -218,6 +223,10 @@ class HipExecutor : public Executor {
       guard_pcap_ = pbytes;
     }
     if (dbytes > guard_dcap_) {
+      if (guard_pdepth_ && !synced) {
+        if (!d->sync()) return;
+        synced = true;
+      }
       guard_dcap_ = 0;
       guard_valid_ = false;
       if (guard_pdepth_) d->free(guard_pdepth_);

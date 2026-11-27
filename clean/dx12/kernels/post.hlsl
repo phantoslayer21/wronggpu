@@ -548,7 +548,7 @@ float3 history_cr_span(float qx, float qy)
     // low three bits are clear, so that a product with it is visibly a multiple of 8 to the driver (the Linux compiler
     // otherwise cannot prove 8-byte alignment of the history addresses and splits the 16-byte loads)
     const uint pitch24 = pitch & 0xfffff8u;
-    [branch] if (WaveActiveAllTrue(and((uint)(ix - 1) <= (uint)(P_dw - 4), (uint)(iy - 1) <= (uint)(P_dh - 4)))) {
+    [branch] if (P_dw >= 4 && P_dh >= 4 && WaveActiveAllTrue(and((uint)(ix - 1) <= (uint)(P_dw - 4), (uint)(iy - 1) <= (uint)(P_dh - 4)))) {
         // O1: hist_prev + (ix - 1) 8 + (iy - 1) pitch == ix 8 + iy pitch + (hist_prev - 8 - pitch) mod 2^32, one
         // lshl_add + one mad_u24 (iy in [1, P_dh - 3] and pitch = 8 P_dw < 2^24, so the 24-bit product is the full one)
         // (the constant opaque, g_z: the driver would otherwise split it again into its parts, one add each)

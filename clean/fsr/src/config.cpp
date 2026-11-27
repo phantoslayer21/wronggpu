@@ -414,8 +414,8 @@ void ApplyStateSettings(Config& c, const std::vector<std::pair<std::string, std:
             else if (lv == "standin" || lv == "stand-in") c.upscaler = UpscalerChoice::StandIn;
             else { note("settings.ini: bad value \"" + p.second + "\" for upscaler (wronggpu.ini's kept)"); continue; }
             note("settings.ini: upscaler = " + lv + " (over wronggpu.ini)");
-        } else if (key.rfind("rr_", 0) == 0 || key == "model") {
-            continue;  // the RR plugin's keys and the model choice record's: not the front end's
+        } else if (key.rfind("rr_", 0) == 0 || key == "fg" || key.rfind("fg_", 0) == 0 || key == "model") {
+            continue;  // the RR / FG plugins' keys and the model choice record's: not the front end's
         } else if (key == "m_mode" || key == "l_mode" || key == "k_mode") {
             continue;  // the SR modes: read at each create by the settings bridge (MenuSettings::srMode), so the menu can switch them
         } else if (IsRuntimeOptionKey(key)) {

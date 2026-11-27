@@ -162,6 +162,8 @@ public:
     // state structure at `native` in words. Default: nothing known (empty).
     virtual std::string describe_options(const void*) { return std::string(); }
     virtual std::string describe_state(const void*) { return std::string(); }
+    // Resolves the viewport id from the native chain (if chained) or the explicit viewport argument.
+    virtual uint32_t resolve_viewport_id(const WgViewport* vp, const void*) const { return vp ? vp->id : 0u; }
 };
 
 // Why install() did what it did. Stable numbers (log text and the status export).
@@ -316,6 +318,12 @@ public:
     static void* options_handler();
     static void* state_handler();
 
+    // Early DXGI factory fallback for OptiScaler-hosted deferred generic bindings (installs before the game creates its
+    // DXGI factory, prior to OnHostHooked). Restored by restore().
+    size_t install_dxgi_early(FgLogFn log, void* log_ctx);
+    // Unwraps a Streamline-upgraded COM interface via slGetNativeInterface when resolved on the interface module.
+    static void* unwrap_native(void* p);
+
     // What the handlers route through while this transport is active (internal).
     struct Impl;
 
@@ -332,6 +340,7 @@ private:
     FgImportBinding imports_;  // the installed binding's names (the route names point into it)
     bool routed_ = false;
     bool active_ = false;
+    bool early_dxgi_ = false;
     uint32_t result_ = kFgNullArgument;
     std::unique_ptr<FgProxy> core_;
     std::vector<FgPatch> patches_;

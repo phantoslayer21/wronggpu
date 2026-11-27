@@ -2,7 +2,9 @@
 // WrongGPU installer: the state the wizard (app/wizard.cpp) and the command line (app/main.cpp) share. The engine is
 // wg_core (its wg::Context is App::ctx), the widgets are wg_ui. Moved from setup.cpp. Written for this project.
 #pragma once
+#include <atomic>
 #include <map>
+#include <thread>
 #include <vector>
 
 #include "wg_core/install.h"
@@ -37,6 +39,9 @@ struct App {
     std::vector<StoreGame> libraries;
     bool scanning = false, working = false, finishOk = false;
     wstring finishTitle, finishSub;
+    std::atomic<bool> closing{false};
+    std::thread scanThread;
+    std::vector<std::thread> modelThreads;
 };
 extern App g;  // app/main.cpp
 

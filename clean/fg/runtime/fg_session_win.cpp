@@ -31,6 +31,7 @@ FgStatus FgWinPresenterSource::CreatePresenter(const FgCreateDesc& desc, std::un
     fd.width = desc.output_width;
     fd.height = desc.output_height;
     fd.format = static_cast<DXGI_FORMAT>(desc.output_format);
+    fd.hdr = desc.hdr != 0;
     fd.max_generated = desc.max_generated;
     FgCreatedPresenter created;
     last_ = FgCreatePresenter(fd, &created);

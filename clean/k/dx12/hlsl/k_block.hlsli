@@ -102,7 +102,7 @@ float wgk_hidden_norm2(float h[4])
 // x = +inf (-> +0) or NaN (the hidden norm x = sum of squares + 1 is never below 1).
 float wgk_kf_rsqrt(float x)
 {
-    const bool fin = x >= 1.0f && x - x == 0.0f;
+    const bool fin = x >= 1.0f && (asuint(x) & 0x7f800000u) != 0x7f800000u;
     float y = wg_rsq(x);
     bool done = !fin;
     const double xd = (double)x;

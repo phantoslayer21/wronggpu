@@ -2,6 +2,7 @@
 // WrongGPU frame generation (issue #96, F9): the FG session host of WrongGPU-FG.asi. See fg_asi_session.h.
 // Written for this project.
 #include "fg_asi_session.h"
+#include "fg_asi_transport.h"
 
 #include <wrl/client.h>
 
@@ -18,6 +19,7 @@
 #include "../../runtime/fg_model.h"
 #include "../../runtime/fg_session.h"
 #include "../../runtime/fg_session_win.h"
+#include "../../../runtime/rdna4_win.h"
 #include "../fg_contract_bridge.h"
 
 namespace wgfgp {
@@ -29,16 +31,16 @@ namespace {
 
 constexpr uint32_t kMaxSessionFailures = 3;
 // Lateness control (see the host's LATENESS comment in fg_asi_session.h): the arrival -> first generated image budget
-// starts at 4 ms and grows while generated images miss their display time, up to 30 ms; it eases back 0.5 ms after
-// 16 quiet windows. One window: 60 generating game frames.
-constexpr wgfg::FgTicks kBudgetBase = 40000;
-constexpr wgfg::FgTicks kBudgetMax = 300000;
+// starts at 6 ms and grows while generated images miss their display time, up to 20 ms; it eases back 1.0 ms after
+// 4 quiet windows. One window: 60 generating game frames.
+constexpr wgfg::FgTicks kBudgetBase = 60000;
+constexpr wgfg::FgTicks kBudgetMax = 200000;
 constexpr wgfg::FgTicks kBudgetStepMin = 20000;
-constexpr wgfg::FgTicks kBudgetEase = 5000;
+constexpr wgfg::FgTicks kBudgetEase = 10000;
 constexpr uint32_t kBudgetWindow = 60;
-constexpr uint32_t kBudgetQuietWindows = 16;
-// Presenter slots: enough for the images of three intervals in flight at 6x and the one on screen
-constexpr uint32_t kPresenterSlots = 12;
+constexpr uint32_t kBudgetQuietWindows = 4;
+// Presenter slots: enough for three intervals in flight at 6x (3 * 6 = 18) plus the one on screen and real reserve
+constexpr uint32_t kPresenterSlots = 20;
 // Back-pressure: free presenter slots a game frame waits for (its real image and the reserve), at most 50 ms
 constexpr uint32_t kBackPressureSlots = 2;
 constexpr ULONGLONG kBackPressureMs = 50;
@@ -60,13 +62,40 @@ bool FileExists(const std::string& p) {
 
 wgfg::FgTicks HostClock(void*) { return wgfg::FgInterruptNow(); }
 
-// The facade format of a swap-chain format: the typeless family where the game may view the buffer as sRGB.
+// The fallback facade format of a swap-chain format when castable typed textures are unavailable: typeless only for
+// 8-bit UNORM families that games commonly view as sRGB. R10G10B10A2_UNORM has no sRGB view and stays typed so games
+// calling CreateRenderTargetView(buf, nullptr, ...) or checking GetDesc().Format == 24 never see a typeless buffer.
 DXGI_FORMAT FacadeFormat(DXGI_FORMAT f) {
     switch (f) {
         case DXGI_FORMAT_R8G8B8A8_UNORM: case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return DXGI_FORMAT_R8G8B8A8_TYPELESS;
         case DXGI_FORMAT_B8G8R8A8_UNORM: case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: return DXGI_FORMAT_B8G8R8A8_TYPELESS;
-        case DXGI_FORMAT_R10G10B10A2_UNORM: return DXGI_FORMAT_R10G10B10A2_TYPELESS;
         default: return f;
+    }
+}
+
+DXGI_FORMAT RetainCopyFormat(DXGI_FORMAT f) {
+    switch (f) {
+        case DXGI_FORMAT_D32_FLOAT: return DXGI_FORMAT_R32_TYPELESS;
+        case DXGI_FORMAT_D24_UNORM_S8_UINT: return DXGI_FORMAT_R24G8_TYPELESS;
+        case DXGI_FORMAT_D32_FLOAT_S8X24_UINT: return DXGI_FORMAT_R32G8X24_TYPELESS;
+        case DXGI_FORMAT_D16_UNORM: return DXGI_FORMAT_R16_TYPELESS;
+        default: return f;
+    }
+}
+
+bool FacadeCastablePair(DXGI_FORMAT f, DXGI_FORMAT out[2]) {
+    switch (f) {
+        case DXGI_FORMAT_R8G8B8A8_UNORM:
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+            out[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+            out[1] = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+            return true;
+        case DXGI_FORMAT_B8G8R8A8_UNORM:
+        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+            out[0] = DXGI_FORMAT_B8G8R8A8_UNORM;
+            out[1] = DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+            return true;
+        default: return false;
     }
 }
 
@@ -143,6 +172,7 @@ struct FgAsiSessionHost::Impl {
     UINT facade_index = 0;
     HANDLE latency = nullptr;  // the facade's frame-latency semaphore
     DXGI_FORMAT chain_format = DXGI_FORMAT_UNKNOWN;
+    uint32_t color_space = WG_FG_CS_SDR;
     UINT width = 0, height = 0;
 
     // copy path (facade -> real back buffer)
@@ -182,8 +212,9 @@ struct FgAsiSessionHost::Impl {
     uint32_t quiet_windows = 0;
     uint32_t budget_lines = 0;
 
-    // retained copies of transient tagged textures, one per buffer type (RetainTag); own lock: tagging runs on the
+    // retained copies of transient tagged textures, per-buffer-type ring (RetainTag); own lock: tagging runs on the
     // game's threads and must not wait behind a present
+    static constexpr uint32_t kTagRing = 8;
     struct TagCopy {
         ComPtr<ID3D12Resource> res;
         ComPtr<ID3D12Device> dev;
@@ -191,15 +222,95 @@ struct FgAsiSessionHost::Impl {
         UINT h = 0;
         DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN;
     };
+    struct TagRing {
+        TagCopy slots[kTagRing];
+        uint32_t next = 0;
+    };
+    struct RetiredTagCopy {
+        ComPtr<ID3D12Resource> res;
+        uint64_t retire_present = 0;
+    };
     std::mutex tag_mu;
-    std::map<uint32_t, TagCopy> tag_copies;
+    std::map<uint32_t, TagRing> tag_copies;
+    std::vector<RetiredTagCopy> retired_tag_copies;
+
+    void DrainRetiredTags(bool all) {
+        std::vector<ComPtr<ID3D12Resource>> drop;
+        {
+            std::lock_guard<std::mutex> lock(tag_mu);
+            if (all) {
+                for (auto& e : retired_tag_copies) drop.push_back(std::move(e.res));
+                retired_tag_copies.clear();
+            } else {
+                const uint64_t now = st_presents.load();
+                auto it = retired_tag_copies.begin();
+                while (it != retired_tag_copies.end()) {
+                    if (now >= it->retire_present + kTagRing + 2) {
+                        drop.push_back(std::move(it->res));
+                        it = retired_tag_copies.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+            }
+        }
+    }
+
+    void ResetDeviceState(bool reset_failures) {
+        DestroySession("device reset");
+        if (exec) {
+            exec->WaitIdle(kDestroyWaitMs);
+            exec.reset();
+        }
+        WaitCopy(copy_value, kDestroyWaitMs);
+        ReleaseFacade();
+        list.Reset();
+        for (uint32_t i = 0; i < kCopyRing; ++i) {
+            alloc[i].Reset();
+            alloc_value[i] = 0;
+        }
+        copy_fence.Reset();
+        copy_value = 0;
+        ring = 0;
+        game_fence.Reset();
+        game_value = 0;
+        chain_queue.Reset();
+        queue.Reset();
+        device.Reset();
+        present_queue.Reset();
+        present_device.Reset();
+        inner = nullptr;
+        hwnd = nullptr;
+        chain_flags = 0;
+        chain_format = DXGI_FORMAT_UNKNOWN;
+        color_space = WG_FG_CS_SDR;
+        width = 0;
+        height = 0;
+        if (latency) {
+            CloseHandle(latency);
+            latency = nullptr;
+        }
+        {
+            std::lock_guard<std::mutex> tag_lock(tag_mu);
+            tag_copies.clear();
+            retired_tag_copies.clear();
+        }
+        if (reset_failures) {
+            stats.session_failures = 0;
+            stats.gave_up = false;
+            if (st_phase.load() == kFgPhaseStopped) st_phase.store(kFgPhaseWaiting);
+        }
+    }
 
     void Log(const std::string& line) const {
         if (cfg.log) cfg.log(cfg.log_ctx, line.c_str());
     }
 
     // The first RDNA 4 hardware adapter of `factory`; false when it lists none.
-    static bool FirstRdna4(IUnknown* factory, DXGI_ADAPTER_DESC1* out) {
+    // Identifies hardware by the kernel-mode driver's PCI vendor/device IDs for the adapter's LUID (D3DKMTQueryAdapterInfo,
+    // rdna4_win.h), so DXGI vendor spoofing (e.g. OptiScaler Dxgi=auto/true in Unreal Engine games) never hides RDNA 4.
+    static bool FirstRdna4(IUnknown* factory, DXGI_ADAPTER_DESC1* out, uint32_t* real_vendor, uint32_t* real_device,
+                           bool* spoofed) {
         ComPtr<IDXGIFactory1> f1;
         if (!factory || FAILED(factory->QueryInterface(IID_PPV_ARGS(&f1)))) return false;
         for (UINT i = 0; i < 16; ++i) {
@@ -207,9 +318,25 @@ struct FgAsiSessionHost::Impl {
             if (f1->EnumAdapters1(i, &a) == DXGI_ERROR_NOT_FOUND) break;
             DXGI_ADAPTER_DESC1 d = {};
             if (!a || FAILED(a->GetDesc1(&d)) || (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) continue;
-            if (!FgIsRdna4(d.VendorId, d.DeviceId)) continue;
-            *out = d;
-            return true;
+            const wgrt::AdapterIdentity id = wgrt::read_adapter_identity(d.AdapterLuid);
+            if (wgrt::rdna4_identity(id)) {
+                const bool wine = !id.kmt_known && id.wine_fallback;
+                const uint32_t rv = wine ? id.wine_vendor : id.kmt_vendor;
+                const uint32_t rd = wine ? id.wine_device : id.kmt_device;
+                *out = d;
+                if (real_vendor) *real_vendor = rv;
+                if (real_device) *real_device = rd;
+                if (spoofed) *spoofed = !FgIsRdna4(d.VendorId, d.DeviceId);
+                return true;
+            }
+            // Fallback only when D3DKMT could not open the adapter (e.g. synthetic test doubles without real LUIDs).
+            if (!id.kmt_known && !id.wine_fallback && FgIsRdna4(d.VendorId, d.DeviceId)) {
+                *out = d;
+                if (real_vendor) *real_vendor = d.VendorId;
+                if (real_device) *real_device = d.DeviceId;
+                if (spoofed) *spoofed = false;
+                return true;
+            }
         }
         return false;
     }
@@ -226,7 +353,9 @@ struct FgAsiSessionHost::Impl {
                     tearing;
         }
         DXGI_ADAPTER_DESC1 d = {};
-        const bool found = FirstRdna4(factory, &d);
+        uint32_t rv = 0, rd = 0;
+        bool spoofed = false;
+        const bool found = FirstRdna4(factory, &d, &rv, &rd, &spoofed);
         if (adapter_set) {
             if (game_factory && !adapter_confirmed) {
                 adapter_confirmed = true;
@@ -247,8 +376,8 @@ struct FgAsiSessionHost::Impl {
         WgFgAdapterIdentity id = {};
         id.struct_size = sizeof(id);
         id.abi_version = WG_FG_ADAPTER_ABI_VERSION;
-        id.vendor_id = d.VendorId;
-        id.device_id = d.DeviceId;
+        id.vendor_id = rv;
+        id.device_id = rd;
         id.luid.low = d.AdapterLuid.LowPart;
         id.luid.high = d.AdapterLuid.HighPart;
         id.rdna4 = 1;
@@ -256,9 +385,13 @@ struct FgAsiSessionHost::Impl {
         adapter_id = id;
         adapter_set = true;
         adapter_confirmed = game_factory;
-        char line[128];
-        wsprintfA(line, "fg host: adapter vendor 0x%04x device 0x%04x (RDNA 4, %s)", d.VendorId, d.DeviceId,
-                  game_factory ? "the game's factory" : "start-up probe");
+        char line[192];
+        if (spoofed)
+            wsprintfA(line, "fg host: adapter vendor 0x%04x device 0x%04x (RDNA 4 via driver PCI, DXGI reported 0x%04x:0x%04x, %s)",
+                      rv, rd, d.VendorId, d.DeviceId, game_factory ? "the game's factory" : "start-up probe");
+        else
+            wsprintfA(line, "fg host: adapter vendor 0x%04x device 0x%04x (RDNA 4, %s)", rv, rd,
+                      game_factory ? "the game's factory" : "start-up probe");
         Log(line);
         c->set_adapter(id);
     }
@@ -289,10 +422,38 @@ struct FgAsiSessionHost::Impl {
         rd.Format = FacadeFormat(sd.Format);
         rd.SampleDesc.Count = 1;
         rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        DXGI_FORMAT cast_pair[2] = {};
+        const bool want_cast = FacadeCastablePair(sd.Format, cast_pair);
+#ifdef __ID3D12Device10_INTERFACE_DEFINED__
+        ComPtr<ID3D12Device10> dev10;
+        if (want_cast) device.As(&dev10);
+        D3D12_RESOURCE_DESC1 rd1 = {};
+        rd1.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        rd1.Width = sd.Width;
+        rd1.Height = sd.Height;
+        rd1.DepthOrArraySize = 1;
+        rd1.MipLevels = 1;
+        rd1.Format = sd.Format;
+        rd1.SampleDesc.Count = 1;
+        rd1.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+#else
+        (void)want_cast;
+        (void)cast_pair;
+#endif
         facade.resize(sd.BufferCount);
         for (auto& f : facade) {
-            if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COMMON,
-                                                       nullptr, IID_PPV_ARGS(&f)))) {
+            HRESULT hr = E_FAIL;
+#ifdef __ID3D12Device10_INTERFACE_DEFINED__
+            if (dev10) {
+                hr = dev10->CreateCommittedResource3(&hp, D3D12_HEAP_FLAG_NONE, &rd1, D3D12_BARRIER_LAYOUT_COMMON,
+                                                     nullptr, nullptr, 2, cast_pair, IID_PPV_ARGS(&f));
+            }
+#endif
+            if (FAILED(hr)) {
+                hr = device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COMMON,
+                                                     nullptr, IID_PPV_ARGS(&f));
+            }
+            if (FAILED(hr)) {
                 ReleaseFacade();
                 return false;
             }
@@ -320,10 +481,14 @@ struct FgAsiSessionHost::Impl {
     }
 
     bool WaitCopy(uint64_t v, DWORD ms) {
-        if (!copy_fence || copy_fence->GetCompletedValue() >= v) return true;
+        if (!copy_fence) return true;
+        const uint64_t cur = copy_fence->GetCompletedValue();
+        if (cur == UINT64_MAX) return false;
+        if (cur >= v) return true;
         if (FAILED(copy_fence->SetEventOnCompletion(v, copy_event))) return false;
         WaitForSingleObject(copy_event, ms);
-        return copy_fence->GetCompletedValue() >= v;
+        const uint64_t after = copy_fence->GetCompletedValue();
+        return after != UINT64_MAX && after >= v;
     }
 
     // The facade buffer the game presented, copied into the real chain's current back buffer (the game's queue).
@@ -347,7 +512,10 @@ struct FgAsiSessionHost::Impl {
         list->CopyResource(bb.Get(), src);
         for (D3D12_RESOURCE_BARRIER& x : b) std::swap(x.Transition.StateBefore, x.Transition.StateAfter);
         list->ResourceBarrier(2, b);
-        if (FAILED(list->Close())) return false;
+        if (FAILED(list->Close())) {
+            list.Reset();
+            return false;
+        }
         if (cq != queue.Get()) {
             // the game rendered into the facade buffer on its own queue: the present queue copies after that work
             if (!game_fence && FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&game_fence))))
@@ -577,6 +745,12 @@ struct FgAsiSessionHost::Impl {
         base.queue = chain_queue ? chain_queue.Get() : queue.Get();  // the queue the real chain presents on
         base.swap_chain = inner;
         base.hwnd = hwnd;
+        // On tearing/VRR-capable systems let HWFQ use unsnapped SetTargetTime flip metering so arbitrary uncapped
+        // framerates are paced smoothly without fixed-grid BeginInterval refusals; AUTO only enables variable_refresh
+        // when the chain itself allows tearing (otherwise FgSelectPresenter would pick DxgiFlipTearing and fail).
+        const bool chain_tearing = tearing_supported && (chain_flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0;
+        base.display.variable_refresh =
+            sd.presenter_mode == WG_FG_PRESENTER_HWFQ ? tearing_supported : chain_tearing;
         win_source.reset(new (std::nothrow) wgfg::FgWinPresenterSource(base));
         if (!win_source) return;
         exec_source.reset(new (std::nothrow) wgfg::FgExecutorPresenterSource(win_source.get(), exec.get()));
@@ -596,6 +770,12 @@ struct FgAsiSessionHost::Impl {
                 d.scheduler.display.min_interval = grid.period - grid.period / 20;
                 d.scheduler.display.max_interval = 1000000;  // 10 Hz: a fixed-refresh display has no floor here
                 d.scheduler.adaptive_count = true;
+                const bool fixed_grid_presenter =
+                    sd.presenter_mode == WG_FG_PRESENTER_DXGI_VSYNC ||
+                    (!base.display.variable_refresh &&
+                     (sd.presenter_mode == WG_FG_PRESENTER_HWFQ || sd.presenter_mode == WG_FG_PRESENTER_AUTO));
+                if (fixed_grid_presenter)
+                    d.scheduler.fixed_refresh_period = grid.period;
                 char line[160];
                 std::snprintf(line, sizeof line,
                               "fg host: display refresh %.1f Hz: an interval generates only the images the display can "
@@ -664,15 +844,7 @@ FgAsiSessionHost::FgAsiSessionHost(const FgAsiSessionConfig& cfg, std::unique_pt
 
 FgAsiSessionHost::~FgAsiSessionHost() {
     std::lock_guard<std::recursive_mutex> lock(impl_->mu);
-    impl_->DestroySession("unload");
-    if (impl_->exec) impl_->exec->WaitIdle(kDestroyWaitMs);
-    impl_->WaitCopy(impl_->copy_value, kDestroyWaitMs);
-    impl_->ReleaseFacade();
-    {
-        std::lock_guard<std::mutex> tag_lock(impl_->tag_mu);
-        impl_->tag_copies.clear();
-    }
-    if (impl_->latency) CloseHandle(impl_->latency);
+    impl_->ResetDeviceState(false);
     if (impl_->copy_event) CloseHandle(impl_->copy_event);
     if (impl_->wait_timer) CloseHandle(impl_->wait_timer);
 }
@@ -740,9 +912,17 @@ void FgAsiSessionHost::CoreReady(void* ctx, FgProxy* core) {
             core->set_adapter(m.adapter_id);  // a later install: the adapter found before
             return;
         }
-        // read-only: a factory and its adapter list, no device
+        // read-only: prefer the system's own dxgi.dll (bypassing any game-folder proxy during start-up), else fall back
+        // to CreateDXGIFactory1; FirstRdna4 resolves hardware PCI IDs via D3DKMT either way.
         ComPtr<IDXGIFactory1> f;
-        const HRESULT hr = CreateDXGIFactory1(IID_PPV_ARGS(&f));
+        HRESULT hr = E_FAIL;
+        if (HMODULE sys_dxgi = wgrt::load_system_dll(L"dxgi.dll")) {
+            using MakeFactory = HRESULT(WINAPI*)(REFIID, void**);
+            if (auto mk = reinterpret_cast<MakeFactory>(
+                    reinterpret_cast<void*>(GetProcAddress(sys_dxgi, "CreateDXGIFactory1"))))
+                hr = mk(IID_PPV_ARGS(&f));
+        }
+        if (FAILED(hr) || !f) hr = CreateDXGIFactory1(IID_PPV_ARGS(&f));
         if (FAILED(hr) || !f) {
             // InitializeASI can run inside the host's own start-up, where DXGI may refuse; the probe runs again at the
             // game's first FG support / load call (the transport calls this while FG is not taken) and the game's own
@@ -750,8 +930,8 @@ void FgAsiSessionHost::CoreReady(void* ctx, FgProxy* core) {
             if (++m.probe_failures <= 3) {
                 char line[224];
                 std::snprintf(line, sizeof line,
-                              "fg host: start-up probe: no DXGI factory (0x%08lx, attempt %u); tried again at the "
-                              "game's first FG call, and the game's factory is checked when the game creates it",
+                              "fg host: start-up probe: DXGI factory deferred during start-up (0x%08lx, attempt %u); "
+                              "tried again at the game's first FG call, and the game's factory is checked when the game creates it",
                               static_cast<unsigned long>(hr), m.probe_failures);
                 m.Log(line);
             }
@@ -773,6 +953,7 @@ bool FgAsiSessionHost::RetainTag(void* ctx, uint32_t buffer_type, bool transient
     if (copied_out) *copied_out = false;
     FgAsiSessionHost* self = static_cast<FgAsiSessionHost*>(ctx);
     if (!tex || !tex->resource) return false;
+    tex->resource = FgAsiTransport::unwrap_native(tex->resource);
     const bool need_desc = tex->width == 0 || tex->height == 0 || tex->format == 0;
     if (!transient && !need_desc) return true;
     if (!self) return !transient;
@@ -786,23 +967,31 @@ bool FgAsiSessionHost::RetainTag(void* ctx, uint32_t buffer_type, bool transient
         tex->height = sd.Height;
         tex->format = static_cast<uint32_t>(sd.Format);
         if (tex->rect.width == 0 || tex->rect.height == 0) tex->rect = WgFgRect{0, 0, tex->width, tex->height};
-        if (!transient || !cmd) return true;
+        if (!transient) return true;
+        if (!cmd || tex->state == WG_STATE_NOT_GIVEN) return false;
 
+        void* native_cmd = FgAsiTransport::unwrap_native(cmd);
         ComPtr<ID3D12GraphicsCommandList> cl;
-        if (FAILED(static_cast<IUnknown*>(cmd)->QueryInterface(IID_PPV_ARGS(&cl))) || !cl) return false;
+        if (!native_cmd || FAILED(static_cast<IUnknown*>(native_cmd)->QueryInterface(IID_PPV_ARGS(&cl))) || !cl)
+            return false;
         ComPtr<ID3D12Device> dev;
         if (FAILED(src->GetDevice(IID_PPV_ARGS(&dev))) || !dev) return false;
 
+        const DXGI_FORMAT copy_fmt = RetainCopyFormat(sd.Format);
         ComPtr<ID3D12Resource> dst;
         {
             Impl& m = *self->impl_;
             std::lock_guard<std::mutex> lock(m.tag_mu);
-            Impl::TagCopy& e = m.tag_copies[buffer_type];
+            Impl::TagRing& ring = m.tag_copies[buffer_type];
+            Impl::TagCopy& e = ring.slots[ring.next % Impl::kTagRing];
+            ring.next = (ring.next + 1u) % Impl::kTagRing;
             if (!e.res || e.dev.Get() != dev.Get() || e.w != sd.Width || e.h != sd.Height || e.fmt != sd.Format) {
+                if (e.res) m.retired_tag_copies.push_back({std::move(e.res), m.st_presents.load()});
                 e = Impl::TagCopy();
                 D3D12_HEAP_PROPERTIES hp = {};
                 hp.Type = D3D12_HEAP_TYPE_DEFAULT;
                 D3D12_RESOURCE_DESC cd = sd;
+                cd.Format = copy_fmt;
                 cd.Flags = D3D12_RESOURCE_FLAG_NONE;
                 cd.MipLevels = 1;
                 cd.DepthOrArraySize = 1;
@@ -821,15 +1010,15 @@ bool FgAsiSessionHost::RetainTag(void* ctx, uint32_t buffer_type, bool transient
         }
         if (!dst) return false;
 
-        const bool have_state = tex->state != WG_STATE_NOT_GIVEN;
         const D3D12_RESOURCE_STATES src_state = static_cast<D3D12_RESOURCE_STATES>(tex->state);
-        const bool trans_src = have_state && src_state != D3D12_RESOURCE_STATE_COPY_SOURCE;
+        const bool trans_src = !(src_state & D3D12_RESOURCE_STATE_COPY_SOURCE);
+        const bool full_copy = sd.MipLevels == 1 && sd.DepthOrArraySize == 1;
+        const UINT src_sub = full_copy ? D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES : tex->subresource;
         D3D12_RESOURCE_BARRIER pre[2] = {};
         UINT npre = 0;
         if (trans_src) {
             pre[npre].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-            pre[npre].Transition = {src.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, src_state,
-                                    D3D12_RESOURCE_STATE_COPY_SOURCE};
+            pre[npre].Transition = {src.Get(), src_sub, src_state, D3D12_RESOURCE_STATE_COPY_SOURCE};
             ++npre;
         }
         pre[npre].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -837,7 +1026,7 @@ bool FgAsiSessionHost::RetainTag(void* ctx, uint32_t buffer_type, bool transient
                                 D3D12_RESOURCE_STATE_COPY_DEST};
         ++npre;
         cl->ResourceBarrier(npre, pre);
-        if (sd.MipLevels == 1 && sd.DepthOrArraySize == 1) {
+        if (full_copy) {
             cl->CopyResource(dst.Get(), src.Get());
         } else {
             D3D12_TEXTURE_COPY_LOCATION dloc = {}, sloc = {};
@@ -846,12 +1035,14 @@ bool FgAsiSessionHost::RetainTag(void* ctx, uint32_t buffer_type, bool transient
             dloc.SubresourceIndex = 0;
             sloc.pResource = src.Get();
             sloc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-            sloc.SubresourceIndex = 0;
+            sloc.SubresourceIndex = tex->subresource;
             cl->CopyTextureRegion(&dloc, 0, 0, 0, &sloc, nullptr);
         }
         for (UINT k = 0; k < npre; ++k) std::swap(pre[k].Transition.StateBefore, pre[k].Transition.StateAfter);
         cl->ResourceBarrier(npre, pre);
-        tex->resource = dst.Get();  // the host's cache keeps the reference
+        tex->resource = dst.Get();  // the host's ring keeps the reference
+        tex->format = static_cast<uint32_t>(copy_fmt);
+        tex->subresource = 0;
         tex->state = D3D12_RESOURCE_STATE_COMMON;
         if (copied_out) *copied_out = true;
         return true;
@@ -924,6 +1115,7 @@ HRESULT FgAsiSessionHost::PresentInterval(const FgPresentCall& call, IFgInnerPre
         ++m.stats.session_presents;
         m.BoundQueueDepth();
         m.AdvanceFacade();
+        m.DrainRetiredTags(false);
         return S_OK;
     }
     m.handled = false;
@@ -938,7 +1130,7 @@ HRESULT FgAsiSessionHost::PresentInterval(const FgPresentCall& call, IFgInnerPre
         }
     }
     HRESULT hr;
-    if (!m.facade.empty()) {
+    if (!m.facade.empty() && !call.retry) {
         if (m.chain_flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT) {
             HANDLE w = m.inner ? m.inner->GetFrameLatencyWaitableObject() : nullptr;
             if (w) {
@@ -946,9 +1138,11 @@ HRESULT FgAsiSessionHost::PresentInterval(const FgPresentCall& call, IFgInnerPre
                 CloseHandle(w);
             }
         }
-        m.CopyFacadeToChain();
-        ++m.stats.copy_presents;
-        m.AdvanceFacade();
+        if (m.CopyFacadeToChain()) {
+            ++m.stats.copy_presents;
+            m.AdvanceFacade();
+        }
+        m.DrainRetiredTags(false);
     }
     hr = call.present1 ? inner.Present1(call.sync_interval, call.flags, call.params)
                        : inner.Present(call.sync_interval, call.flags);
@@ -960,10 +1154,15 @@ void FgAsiSessionHost::BeforeResize() {
     impl_->DestroySession("resize");
     impl_->WaitCopy(impl_->copy_value, kDestroyWaitMs);
     impl_->ReleaseFacade();
+    impl_->DrainRetiredTags(true);
 }
 
-void FgAsiSessionHost::AfterResize(HRESULT) {
+void FgAsiSessionHost::AfterResize(HRESULT hr) {
     std::lock_guard<std::recursive_mutex> lock(impl_->mu);
+    if (FAILED(hr)) {
+        impl_->Log("fg host: resize failed; facade not recreated");
+        return;
+    }
     if (!impl_->CreateFacade()) impl_->Log("fg host: facade not recreated after the resize");
 }
 
@@ -973,6 +1172,21 @@ void FgAsiSessionHost::BeforeFullscreen(BOOL) {
 }
 
 void FgAsiSessionHost::AfterFullscreen(BOOL, HRESULT) {}
+
+void FgAsiSessionHost::ColorSpaceChanged(DXGI_COLOR_SPACE_TYPE cs) {
+    Impl& m = *impl_;
+    std::lock_guard<std::recursive_mutex> lock(m.mu);
+    uint32_t next_cs = WG_FG_CS_SDR;
+    if (cs == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 || cs == DXGI_COLOR_SPACE_RGB_STUDIO_G2084_NONE_P2020)
+        next_cs = WG_FG_CS_HDR10_PQ;
+    else if (cs == DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709)
+        next_cs = WG_FG_CS_SCRGB_LINEAR;
+    const bool was_hdr = m.color_space != WG_FG_CS_SDR;
+    const bool now_hdr = next_cs != WG_FG_CS_SDR;
+    m.color_space = next_cs;
+    if (m.core) m.core->set_color_space(next_cs);
+    if (was_hdr != now_hdr && m.session) m.DestroySession("color space change");
+}
 
 bool FgAsiSessionHost::GetBuffer(UINT buffer, REFIID riid, void** out, HRESULT* hr) {
     std::lock_guard<std::recursive_mutex> lock(impl_->mu);
@@ -994,7 +1208,9 @@ bool FgAsiSessionHost::CurrentBackBufferIndex(UINT* index) {
 
 bool FgAsiSessionHost::FrameLatencyWaitableObject(HANDLE* handle) {
     std::lock_guard<std::recursive_mutex> lock(impl_->mu);
-    if (impl_->facade.empty() || !impl_->latency || !handle) return false;
+    if (impl_->facade.empty() || !impl_->latency || !handle ||
+        !(impl_->chain_flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT))
+        return false;
     // the caller closes what it gets, as with the chain's own object
     HANDLE dup = nullptr;
     if (!DuplicateHandle(GetCurrentProcess(), impl_->latency, GetCurrentProcess(), &dup, 0, FALSE,
@@ -1006,34 +1222,47 @@ bool FgAsiSessionHost::FrameLatencyWaitableObject(HANDLE* handle) {
 
 void FgAsiSessionHost::Detached() {
     std::lock_guard<std::recursive_mutex> lock(impl_->mu);
-    impl_->DestroySession("chain released");
-    impl_->WaitCopy(impl_->copy_value, kDestroyWaitMs);
-    impl_->ReleaseFacade();
-    impl_->inner = nullptr;
-    impl_->chain_queue.Reset();
+    impl_->ResetDeviceState(false);
 }
 
 void FgAsiSessionHost::Attached(IDXGISwapChain4* inner, IUnknown* queue) {
     Impl& m = *impl_;
     std::lock_guard<std::recursive_mutex> lock(m.mu);
     if (!inner || !queue) return;
+    ComPtr<ID3D12CommandQueue> next_present_q = std::move(m.attached_present_queue);
+    m.attached_present_queue.Reset();
+    void* native_q = FgAsiTransport::unwrap_native(queue);
     ComPtr<ID3D12CommandQueue> q;
     ComPtr<ID3D12Device> dev;
-    if (FAILED(queue->QueryInterface(IID_PPV_ARGS(&q))) || FAILED(q->GetDevice(IID_PPV_ARGS(&dev)))) {
+    if (!native_q || FAILED(static_cast<IUnknown*>(native_q)->QueryInterface(IID_PPV_ARGS(&q))) ||
+        FAILED(q->GetDevice(IID_PPV_ARGS(&dev)))) {
         m.Log("fg host: the chain's creation queue is not a D3D12 queue; frame generation is not taken");
         return;
+    }
+    const bool new_device = m.device && m.device.Get() != dev.Get();
+    if (m.inner || new_device) {
+        m.ResetDeviceState(new_device);
     }
     m.inner = inner;
     m.queue = q;
     m.device = dev;
-    m.chain_queue = m.attached_present_queue ? m.attached_present_queue : q;
-    m.attached_present_queue.Reset();
+    m.chain_queue = next_present_q ? next_present_q : q;
     if (FAILED(inner->GetHwnd(&m.hwnd))) m.hwnd = nullptr;
-    if (!m.latency) m.latency = CreateSemaphoreW(nullptr, 1, 16, nullptr);
-    if (m.core) m.core->set_device(dev.Get(), q.Get());
     if (!m.CreateFacade()) {
         m.Log("fg host: facade buffers not created; the chain's own buffers stay in use");
+        m.inner = nullptr;
+        m.queue.Reset();
+        m.device.Reset();
+        m.chain_queue.Reset();
+        m.hwnd = nullptr;
         return;
+    }
+    if (!m.latency && (m.chain_flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT))
+        m.latency = CreateSemaphoreW(nullptr, 1, 16, nullptr);
+    m.color_space = (m.chain_format == DXGI_FORMAT_R16G16B16A16_FLOAT) ? WG_FG_CS_SCRGB_LINEAR : WG_FG_CS_SDR;
+    if (m.core) {
+        m.core->set_device(dev.Get(), q.Get());
+        m.core->set_color_space(m.color_space);
     }
     char line[128];
     wsprintfA(line, "fg host: chain attached, %u x %u, format %u, %u buffers (facade), presents on %s", m.width,
@@ -1046,9 +1275,10 @@ IUnknown* FgAsiSessionHost::CreationQueue(IUnknown* game_queue, const DXGI_SWAP_
     Impl& m = *impl_;
     std::lock_guard<std::recursive_mutex> lock(m.mu);
     try {
+        void* native_q = FgAsiTransport::unwrap_native(game_queue);
         ComPtr<ID3D12CommandQueue> gq;
         ComPtr<ID3D12Device> dev;
-        if (!game_queue || FAILED(game_queue->QueryInterface(IID_PPV_ARGS(&gq))) || !gq ||
+        if (!native_q || FAILED(static_cast<IUnknown*>(native_q)->QueryInterface(IID_PPV_ARGS(&gq))) || !gq ||
             FAILED(gq->GetDevice(IID_PPV_ARGS(&dev))) || !dev)
             return nullptr;
         const D3D12_COMMAND_QUEUE_DESC gd = gq->GetDesc();

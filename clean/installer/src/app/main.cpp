@@ -227,6 +227,28 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     if (argc < 2) { if (argv) LocalFree(argv); LauncherInit(L"", false, true); return RunLauncherWindow(); }
     // Apps & features' Uninstall: the window's own uninstall (it asks whether the games keep WrongGPU and shows how it went)
     if (argc == 2 && IEq(argv[1], L"uninstall-launcher")) { LocalFree(argv); LauncherInit(L"", false, true); return RunLauncherWindow(true); }
+    // Window start with sandbox options (--data=, --log=, --noscan) and no CLI verb
+    if (argv[1][0] == L'-') {
+        bool guiOpts = true;
+        wstring dataArg, logArg;
+        bool noScanArg = false;
+        for (int i = 1; i < argc && guiOpts; ++i) {
+            const wstring s = argv[i], ls = Lower(s);
+            if (ls.rfind(L"--data=", 0) == 0) dataArg = s.substr(7);
+            else if (ls == L"--data" && i + 1 < argc) dataArg = argv[++i];
+            else if (ls.rfind(L"--log=", 0) == 0) logArg = s.substr(6);
+            else if (ls == L"--log" && i + 1 < argc) logArg = argv[++i];
+            else if (ls == L"--noscan") noScanArg = true;
+            else guiOpts = false;
+        }
+        if (guiOpts) {
+            LocalFree(argv);
+            gl.dataOverride = dataArg;
+            if (noScanArg) { g.noScan = g.ctx.noScanAlways = true; g.ctx.noLibraryScan = true; }
+            LauncherInit(logArg, false, true);
+            return RunLauncherWindow();
+        }
+    }
     if (argv[1][0] != L'/') { const int code = RunCli(argc, argv); LocalFree(argv); return code; }
     {   // the uninstaller written into each game is the restorer (WrongGPU-Restore.exe) on this route too
         DWORD sz = 0;
@@ -288,6 +310,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         // Uninstall/collect act on the folder that holds the install record (the folder with amd_fidelityfx_dx12.dll).
         if (!g.input.empty()) {
             wstring d = !exeArg.empty() ? Parent(FullPath(exeArg)) : FullPath(dirArg);
+            while (d.size() > 3 && (d.back() == L'\\' || d.back() == L'/')) d.pop_back();
             if (!Exists(RecordPath(d))) { wstring exe = ResolveGameExe(g.input); if (!exe.empty()) { GameTarget t = InspectGame(g.ctx, exe); if (Exists(RecordPath(t.dir))) d = t.dir; } }
             g.target.dir = d;
         }

@@ -570,9 +570,9 @@ def test_slot(t):
     if rc != 0:
         return
     slot = os.path.join(b, "OptiScaler", "custom", "WrongGPU", "ffx", "amd_fidelityfx_upscaler_dx12.dll")
-    t.check("the front end is in the custom slot; no wronggpu_ffx_dx12.dll, no plugins\\WrongGPU.asi, no wronggpu-asi.ini",
+    t.check("the front end is in the custom slot; plugins\\WrongGPU.asi is placed for the Custom tab card; no wronggpu_ffx_dx12.dll, no wronggpu-asi.ini",
             os.path.isfile(slot) and not os.path.exists(os.path.join(b, "wronggpu_ffx_dx12.dll")) and
-            not os.path.exists(os.path.join(b, "plugins", "WrongGPU.asi")) and not os.path.exists(os.path.join(b, "wronggpu-asi.ini")),
+            os.path.isfile(os.path.join(b, "plugins", "WrongGPU.asi")) and not os.path.exists(os.path.join(b, "wronggpu-asi.ini")),
             sorted(os.listdir(b)))
     opt = ini(b, "OptiScaler.ini")
     t.check("OptiScaler.ini: Dx12Upscaler=WrongGPU, FfxDx12SRPath=auto, [WrongGPU] UpscalerIndex=0, [FSR] UpscalerIndex untouched",
@@ -1692,7 +1692,7 @@ def test_sm2_settings(t, opti):
     pkg = os.path.join(t.work, "opti-sm2")
     shutil.rmtree(pkg, ignore_errors=True)
     write(os.path.join(pkg, "OptiScaler.dll"), b"MZ mock OptiScaler (synthetic)")
-    write(os.path.join(pkg, "OptiScaler.ini"), OPTI_INI + "[Spoofing]\nDxgi=auto\nSpoofedDeviceId=auto\n[HostSection]\nUseFakenvapi=auto\n")
+    write(os.path.join(pkg, "OptiScaler.ini"), OPTI_INI + "[Spoofing]\nDxgi=auto\nSpoofedDeviceId=auto\nStreamlineSpoofing=auto\n[HostSection]\nUseFakenvapi=auto\n")
     keys = lambda text: {m.group(1).lower(): m.group(2) for m in re.finditer(r"(?m)^\s*(\w+)\s*=\s*(\S*)\s*$", text)}
     oini = lambda b: read(os.path.join(b, "OptiScaler.ini")).decode("utf-8", "replace")
     steps = lambda msgs: any("turn on OptiScaler's spoofing for the game interface" in w and "keep ray-traced reflections off" in w for w in msgs)
@@ -1702,8 +1702,8 @@ def test_sm2_settings(t, opti):
     installed = oini(b) if rc == 0 else ""
     k = keys(installed)
     msgs = t.j.get("warnings", []) + t.j.get("notes", [])
-    t.check("Spider-Man 2 default install: OptiScaler.ini keeps Dxgi, SpoofedDeviceId and UseFakenvapi as the package has them (Model M only)",
-            rc == 0 and k.get("dxgi") == "auto" and k.get("spoofeddeviceid") == "auto" and k.get("usefakenvapi") == "auto", (rc, t.j.get("message"), k))
+    t.check("Spider-Man 2 default install: OptiScaler.ini keeps Dxgi, SpoofedDeviceId, StreamlineSpoofing and UseFakenvapi as the package has them (Model M only)",
+            rc == 0 and k.get("dxgi") == "auto" and k.get("spoofeddeviceid") == "auto" and k.get("streamlinespoofing") == "auto" and k.get("usefakenvapi") == "auto", (rc, t.j.get("message"), k))
     t.check("Spider-Man 2 default install: no Ray Reconstruction steps in the result", rc == 0 and not steps(msgs), msgs)
     rc = t.run("get", exe, "sm2_rr_experimental")
     t.check("Spider-Man 2: sm2_rr_experimental is off by default",
@@ -1712,8 +1712,8 @@ def test_sm2_settings(t, opti):
     on = oini(b) if rc == 0 else ""
     k = keys(on)
     msgs = t.j.get("warnings", []) + t.j.get("notes", [])
-    t.check("sm2_rr_experimental=on: OptiScaler.ini gets Dxgi=true, SpoofedDeviceId=0x2684 and UseFakenvapi=false (in the section that has it)",
-            rc == 0 and k.get("dxgi") == "true" and k.get("spoofeddeviceid") == "0x2684" and
+    t.check("sm2_rr_experimental=on: OptiScaler.ini gets Dxgi=true, SpoofedDeviceId=0x2684, StreamlineSpoofing=true and UseFakenvapi=false (in the section that has it)",
+            rc == 0 and k.get("dxgi") == "true" and k.get("spoofeddeviceid") == "0x2684" and k.get("streamlinespoofing") == "true" and
             re.search(r"(?ms)^\[HostSection\]\s*^UseFakenvapi\s*=\s*false", on) is not None, (rc, t.j.get("error"), on[-600:]))
     t.check("sm2_rr_experimental=on: no GPU name is written", rc == 0 and "spoofedgpuname" not in k, sorted(k))
     t.check("sm2_rr_experimental=on: the result says the player's steps and that it is not recommended",
@@ -1728,7 +1728,7 @@ def test_sm2_settings(t, opti):
     rc2 = t.run("install", exe, "--opti=" + pkg, "--noscan", "--force", "--experimental")
     k = keys(oini(b)) if rc == 0 and rc2 == 0 else {}
     t.check("sm2_rr_experimental=on: a repair keeps the player's choice (the keys are written again)",
-            rc == 0 and rc2 == 0 and k.get("dxgi") == "true" and k.get("spoofeddeviceid") == "0x2684" and k.get("usefakenvapi") == "false", (rc, rc2, k))
+            rc == 0 and rc2 == 0 and k.get("dxgi") == "true" and k.get("spoofeddeviceid") == "0x2684" and k.get("streamlinespoofing") == "true" and k.get("usefakenvapi") == "false", (rc, rc2, k))
     rc = t.run("set", exe, "sm2_rr_experimental=off")
     t.check("sm2_rr_experimental=off after a repair: the installed values are back", rc == 0 and oini(b) == installed, (rc, oini(b)[-600:]))
     rc = t.run("set", exe, "sm2_rr_experimental=on")

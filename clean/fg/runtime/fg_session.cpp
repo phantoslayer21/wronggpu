@@ -89,6 +89,7 @@ FgSession::~FgSession() {
 
 void FgSession::ReleaseAll() {
     presenter_.reset();
+    if (desc_.presenter_source) desc_.presenter_source->ReleasePresenter();
     scheduler_.reset();
     history_.reset();
     state_ = FgSessionState::None;
@@ -198,43 +199,52 @@ FgSessionResult FgSession::Create(const FgSessionDesc& d) {
             }
         }
 
-        desc_ = d;
-        desc_.create_work = nullptr;  // ran once; the session keeps no copy of it
+        FgSessionDesc pending_desc = d;
+        pending_desc.create_work = nullptr;  // ran once; the session keeps no copy of it
         const uint32_t banks = d.history_banks < FgHistory::kMinBanks   ? FgHistory::kMinBanks
                                : d.history_banks > FgHistory::kMaxBanks ? FgHistory::kMaxBanks
                                                                         : d.history_banks;
-        desc_.history_banks = banks;
-        r.executor = desc_.executor->Configure(desc_.create, banks);
+        pending_desc.history_banks = banks;
+        r.executor = pending_desc.executor->Configure(pending_desc.create, banks);
         if (r.executor != FgExecResult::Ok) {
             r.error = FgSessionError::ExecutorConfigure;
             return Finish(r);
         }
         std::unique_ptr<IFgPresenter> presenter;
         std::string why;
-        r.presenter = desc_.presenter_source->CreatePresenter(desc_.create, &presenter, &why);
+        r.presenter = pending_desc.presenter_source->CreatePresenter(pending_desc.create, &presenter, &why);
         if (r.presenter != FgStatus::Ok || !presenter) {
             if (r.presenter == FgStatus::Ok) r.presenter = FgStatus::Unsupported;
             r.error = FgSessionError::PresenterSource;
-            Log("fg session: presenter refused: " + why);
+            const std::string line = "fg session: presenter refused: " + why;
+            if (line != last_log_) {
+                last_log_ = line;
+                if (pending_desc.log) pending_desc.log(pending_desc.log_ctx, line.c_str());
+            }
+            pending_desc.presenter_source->ReleasePresenter();
             return Finish(r);
         }
-        r.presenter = presenter->Attach(desc_.create.swapchain_id, 1);
+        r.presenter = presenter->Attach(pending_desc.create.swapchain_id, 1);
         if (r.presenter != FgStatus::Ok) {
             r.error = FgSessionError::PresenterAttach;
+            pending_desc.presenter_source->ReleasePresenter();
             return Finish(r);
         }
-        std::unique_ptr<FgTargetScheduler> scheduler(new FgTargetScheduler(desc_.scheduler));
+        std::unique_ptr<FgTargetScheduler> scheduler(new FgTargetScheduler(pending_desc.scheduler));
         r.presenter = scheduler->BeginEpoch(1);
         if (r.presenter != FgStatus::Ok) {
             presenter->Detach();
+            pending_desc.presenter_source->ReleasePresenter();
             r.error = FgSessionError::SchedulerRefused;
             return Finish(r);
         }
-        std::unique_ptr<FgHistory> history(new FgHistory(HistoryDesc(desc_.create), banks));
+        std::unique_ptr<FgHistory> history(new FgHistory(HistoryDesc(pending_desc.create), banks));
+        desc_ = pending_desc;
         presenter_ = std::move(presenter);
         scheduler_ = std::move(scheduler);
         history_ = std::move(history);
     } catch (...) {
+        if (d.presenter_source) d.presenter_source->ReleasePresenter();
         ReleaseAll();
         return Finish(Error(FgSessionError::Internal));
     }
@@ -271,6 +281,13 @@ FgSessionResult FgSession::CompleteResize(bool resize_ok, const FgCreateDesc& re
         r = Gate();
         if (r.error == FgSessionError::None) r.error = FgSessionError::WrongState;
         return Finish(r);
+    }
+    if (resize_ok) {
+        r.presenter = presenter_->SetResizeTarget(resized.output_width, resized.output_height);
+        if (r.presenter != FgStatus::Ok) {
+            r.error = FgSessionError::PresenterCall;
+            return Refuse(r);
+        }
     }
     r.presenter = presenter_->CompleteResize(resize_ok, present_epoch_ + 1);
     if (r.presenter == FgStatus::Busy) {
@@ -406,6 +423,9 @@ FgSessionResult FgSession::RunInterval(const FgFramePacket& packet, const FgInge
         return Lose(r);
     }
     if (r.presenter != FgStatus::Ok) {
+        if (ingest.status == FgFrameStatus::Generated && r.shared_recorded && history_) {
+            history_->MarkRead(desc_.executor->LastComputeValue());
+        }
         r.error = FgSessionError::PresenterCall;
         return Finish(r);
     }

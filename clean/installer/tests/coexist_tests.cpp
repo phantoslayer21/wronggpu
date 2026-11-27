@@ -731,6 +731,11 @@ int main() {
         LastRun ok;
         ParseAsiLog("[1] [WrongGPU.asi] WrongGPU.asi loaded\r\n[2] [WrongGPU.asi] hooked: 2 of 2 Selectable call sites patched\r\n", ok);
         require(ok.plugin == L"hooked" && ok.warnings.empty(), "the plugin hooked: no warning");
+        LastRun card;
+        ParseAsiLog("[1] [WrongGPU.asi] WrongGPU.asi loaded\r\n"
+                    "[2] [WrongGPU.asi] not hooked: OptiScaler's DX12 upscaler menu was not recognised in 1 candidate module(s)\r\n"
+                    "[3] [WrongGPU.asi] card: WrongGPU Upscaler card added to OptiScaler's Custom tab\r\n", card);
+        require(card.plugin == L"card" && card.warnings.empty(), "OptiScaler 10 Custom tab card suppresses legacy menu not-hooked warning");
         require(OptiLogMentionsXess("[info] Inputs: XeSS (libxess) init") && !OptiLogMentionsXess("[info] Inputs: DLSS"), "OptiScaler.log naming XeSS");
         const wstring lg = Join(dir, L"logs");
         Put(Join(lg, L"wronggpu-fsr.log"), fsrLog);

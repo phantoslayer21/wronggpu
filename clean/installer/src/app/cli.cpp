@@ -599,7 +599,9 @@ static int PrepareFgForGame(const wstring& dir, Output& o) {
     } else {
         OpLogBegin();
         GameTarget t;
-        t.dir = t.root = dir;
+        const wstring root = GameRoot(dir);
+        t.dir = dir;
+        t.root = !root.empty() ? root : dir;
         LogLine(g.ctx, L"frame generation: its data is not ready (" + dataWhy + L"); converting it from this game's library " + library);
         const ModelState m = FindModel(g.ctx, &t, L"", {});
         IgnoreJson(o, m.ignored);
@@ -1247,10 +1249,18 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
 }  // namespace
 
 int RunCli(int argc, wchar_t** argv) {
-    const wstring verb = Lower(argv[1]);
+    wstring verb;
     Args a;
     wstring logFile;
-    for (int i = 2; i < argc; ++i) {
+    auto takesValue = [](const wstring& name) {
+        return name == L"out" || name == L"job" || name == L"result" || name == L"batch" || name == L"data" ||
+               name == L"log" || name == L"dir" || name == L"opti" || name == L"model" || name == L"library" ||
+               name == L"startmenu" || name == L"zip" || name == L"out-zip" || name == L"rr-config-fix" ||
+               name == L"preset" || name == L"passes" || name == L"dll" || name == L"repair-after" ||
+               name == L"dump" || name == L"shots" || name == L"apply" || name == L"out-dir" ||
+               name == L"fixture" || name == L"size" || name == L"scales" || name == L"frames" || name == L"theme";
+    };
+    for (int i = 1; i < argc; ++i) {
         const wstring s = argv[i];
         if (s.rfind(L"--", 0) == 0) {
             const size_t eq = s.find(L'=');
@@ -1263,10 +1273,11 @@ int RunCli(int argc, wchar_t** argv) {
             };
             if (eq != wstring::npos) {
                 put(s.substr(eq + 1));
-            } else if ((name == L"out" || name == L"job" || name == L"result" || name == L"batch" || name == L"data" || name == L"log" || name == L"dir" || name == L"opti" ||
-                        name == L"model" || name == L"library" || name == L"startmenu") && i + 1 < argc) {  // (--ignore and --ignore-list need their "=")
+            } else if (takesValue(name) && i + 1 < argc && wstring(argv[i + 1]).rfind(L"--", 0) != 0) {  // (--ignore and --ignore-list need their "=")
                 put(argv[++i]);
             } else a.flags.insert(name);
+        } else if (verb.empty()) {
+            verb = Lower(s);
         } else a.pos.push_back(s);
     }
     gl.dataOverride = a.get(L"data");

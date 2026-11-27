@@ -98,6 +98,8 @@ struct RrProxy::Instance {
   WgRrCreate desc{};
   WgRrOptions opts{};      // options the instance was created with (recreate triggers, 61.3)
   uint64_t opts_version = 1;
+  bool created_without_consts = false;    // allocate() ran before any constants arrived
+  bool created_without_mv_check = false;  // allocate() ran before colour + motion tags arrived
   Lifecycle lc;
   Instance(uint32_t rw, uint32_t rh) : lc(rw, rh) {}
 };
@@ -330,6 +332,7 @@ void RrProxy::destroy_instance(Viewport& v) {
   if (!v.inst) return;
   if (rt_ && rt_->destroy_instance && v.inst->handle) rt_->destroy_instance(rt_->ctx, v.inst->handle);
   v.inst.reset();
+  has_instance_.store(false, std::memory_order_release);
 }
 
 void RrProxy::release_tag(StoredTag& t) {
@@ -592,7 +595,9 @@ void RrProxy::store_tags(std::map<std::pair<uint32_t, uint32_t>, StoredTag>& dst
         break;
       }
     }
-    if (t.lifetime == WG_LIFE_ONLY_DURING_TAG && f_reads(t.buffer_type) && rr_requested_) {
+    const bool rr_explicitly_off = vp_ && vp_->has_options && vp_->opts.mode == 0;
+    if (t.lifetime == WG_LIFE_ONLY_DURING_TAG && f_reads(t.buffer_type) && rr_requested_ && !rr_off_ && !rr_refused_ &&
+        !rr_explicitly_off && rt_) {
       // 62.1: consume (copy) during the tagging call, on its command list
       s.resource = nullptr;
       void* native_cmd = nullptr;
@@ -845,6 +850,15 @@ WgResultCode RrProxy::create_or_update(Viewport& v, const std::vector<StoredTag>
     need = a.mode != b.mode || a.output_width != b.output_width || a.output_height != b.output_height ||
            a.normal_roughness_packing != b.normal_roughness_packing ||
            (v.opts_version >= 3 && memcmp(a.presets, b.presets, sizeof a.presets) != 0);
+    if (!need && !from_allocate && consts && v.inst->created_without_consts) {
+      const uint8_t want_depth_inv = consts->depth_inverted == WG_TRI_TRUE ? 1u : 0u;
+      const uint8_t want_mv_jit = consts->mv_jittered == WG_TRI_TRUE ? 1u : 0u;
+      if (want_depth_inv != v.inst->desc.depth_inverted || want_mv_jit != v.inst->desc.mv_jittered) {
+        need = true;
+      } else {
+        v.inst->created_without_consts = false;
+      }
+    }
   }
   if (!need) return WG_OK;
   if (rr_off_) {  // the player's switch (set_rr_off): never create, even when the game skips <is-supported>
@@ -947,6 +961,14 @@ WgResultCode RrProxy::allocate_body(void* cmd_list, const WgViewport* vp) {
   v->inst->desc = desc;
   v->inst->opts = v->opts;
   v->inst->opts_version = v->opts_version;
+  v->inst->created_without_consts = (consts == nullptr);
+  {
+    const StoredTag* colour = nullptr;
+    const StoredTag* mv = nullptr;
+    v->inst->created_without_mv_check = !(lookup(WG_BT_COLOUR_IN, v->id, none, nullptr, &colour) &&
+                                          lookup(WG_BT_MOTION, v->id, none, nullptr, &mv));
+  }
+  has_instance_.store(true, std::memory_order_release);
   v->logged_range = v->logged_camera_motion = v->logged_mv_res = v->logged_format = v->logged_camera_fallback =
         v->logged_zero = false;
   return WG_OK;
@@ -1107,7 +1129,16 @@ WgResultCode RrProxy::evaluate_body(const WgFrameToken* token, const WgHeader* c
     return WG_E_INVALID_PARAMETER;
   }
   // 62.3: output-resolution motion vectors -> rejected.
-  if (cd.mv_output_resolution) {
+  // If allocate() created the instance before colour/motion tags existed, latch the first frame's check now.
+  bool mv_out_res = cd.mv_output_resolution != 0;
+  if (!creating && v->inst && v->inst->created_without_mv_check) {
+    uint32_t mw = 0, mh = 0;
+    input_size(*mv, &mw, &mh);
+    v->inst->desc.mv_output_resolution = (mw > rw || mh > rh) ? 1u : 0u;
+    v->inst->created_without_mv_check = false;
+    mv_out_res = v->inst->desc.mv_output_resolution != 0;
+  }
+  if (mv_out_res) {
     if (!v->logged_mv_res) {
       v->logged_mv_res = true;
       log("rr: output-resolution motion vectors are not supported (25)");
@@ -1198,6 +1229,9 @@ WgResultCode RrProxy::evaluate_body(const WgFrameToken* token, const WgHeader* c
     v->inst->desc = desc;
     v->inst->opts = v->opts;
     v->inst->opts_version = v->opts_version;
+    v->inst->created_without_consts = false;
+    v->inst->created_without_mv_check = false;
+    has_instance_.store(true, std::memory_order_release);
     v->logged_range = v->logged_camera_motion = v->logged_mv_res = v->logged_format = v->logged_camera_fallback =
         v->logged_zero = false;
   }
@@ -1304,8 +1338,7 @@ uint32_t RrProxy::status_word() const {
 }
 
 bool RrProxy::has_instance() const {
-  std::lock_guard<std::recursive_mutex> lock(mu_);
-  return vp_ && vp_->inst;
+  return has_instance_.load(std::memory_order_acquire);
 }
 bool RrProxy::holds_viewport() const {
   std::lock_guard<std::recursive_mutex> lock(mu_);

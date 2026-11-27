@@ -89,8 +89,9 @@ const OriginalApi* LoadOriginal() {
                           Narrow(path).c_str(), GetLastError());
             return;
         }
-        if (m == g_self) {
+        if (m == g_self || FileDescription(path).find("WrongGPU") != std::string::npos) {
             L().Write("ERROR: %s is a copy of WrongGPU's own DLL, not AMD's; it is not used", Narrow(path).c_str());
+            FreeLibrary(m);
             return;
         }
         g_original.createContext = ProcAddress<PfnFfxCreateContext>(m, "ffxCreateContext");
@@ -170,10 +171,9 @@ struct ModelPlacesOf {
             if (!absolute) dir = data + L"\\" + dir;
             places.push_back({Narrow(dir), "wronggpu.ini model_dir", false});
         }
-        wchar_t exe[MAX_PATH] = {};
-        const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
-        std::wstring exeDir(exe, n);
-        exeDir = exeDir.substr(0, exeDir.find_last_of(L"\\/") == std::wstring::npos ? 0 : exeDir.find_last_of(L"\\/"));
+        std::wstring exeDir = wronggpu::ModuleFilePathWide(nullptr);
+        const size_t sl = exeDir.find_last_of(L"\\/");
+        exeDir = sl == std::wstring::npos ? std::wstring(L".") : exeDir.substr(0, sl);
         const std::wstring gameData = exeDir + L"\\WrongGPU";
         places.push_back({Narrow(gameData + L"\\model"), "the game's data folder", false});
         if (_wcsicmp(data.c_str(), gameData.c_str()) != 0) places.push_back({Narrow(data + L"\\model"), "the data folder (WG_DATA_DIR)", false});
@@ -357,10 +357,9 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
         g_self = instance;
         DisableThreadLibraryCalls(instance);
-        wchar_t file[MAX_PATH] = {};
-        GetModuleFileNameW(instance, file, MAX_PATH);
-        const wchar_t* base = wcsrchr(file, L'\\');
-        base = base ? base + 1 : file;
+        const std::wstring file = wronggpu::ModuleFilePathWide(instance);
+        const size_t sl = file.find_last_of(L"\\/");
+        const wchar_t* base = sl == std::wstring::npos ? file.c_str() : file.c_str() + sl + 1;
         g_hosted = _wcsicmp(base, L"amd_fidelityfx_dx12.dll") != 0;
         L().Write("WrongGPU FSR front end %s (%s) loaded as %s", WRONGGPU_FSR_VERSION, WRONGGPU_FSR_BUILD, Narrow(file).c_str());
         wgwin::PrepareHipEnvironment();

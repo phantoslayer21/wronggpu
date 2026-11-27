@@ -171,6 +171,7 @@ public:
     void AfterResize(HRESULT hr) override;
     void BeforeFullscreen(BOOL) override;
     void AfterFullscreen(BOOL, HRESULT hr) override;
+    void ColorSpaceChanged(DXGI_COLOR_SPACE_TYPE cs) override;
     bool GetBuffer(UINT buffer, REFIID riid, void** out, HRESULT* hr) override;
     bool CurrentBackBufferIndex(UINT* index) override;
     bool FrameLatencyWaitableObject(HANDLE* handle) override;

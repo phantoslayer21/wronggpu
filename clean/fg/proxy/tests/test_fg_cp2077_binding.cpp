@@ -154,7 +154,11 @@ WgConstants MakeConstants(const FgSl214Layout& l, float seed, uint8_t reset) {
     WgConstants c = {};
     c.h.type = l.constants_guid;
     c.h.version = 2;
-    for (int i = 0; i < 16; ++i) c.view_to_clip[i] = seed + 0.125f * static_cast<float>(i);
+    for (int i = 0; i < 16; ++i) {
+        c.view_to_clip[i] = seed + 0.125f * static_cast<float>(i);
+        c.clip_to_prev_clip[i] = seed * 10.0f + 0.25f * static_cast<float>(i);
+        c.prev_clip_to_clip[i] = -seed * 10.0f - 0.5f * static_cast<float>(i);
+    }
     c.jitter[0] = 0.25f * seed;
     c.jitter[1] = -0.375f;
     c.mv_scale[0] = 0.5f;
@@ -972,25 +976,28 @@ void TestTagsAndConstantsCodec() {
     CHECK(codec.presents() == 1 && codec.frame_for_present() == 2);
     CHECK(codec.tags(nullptr, &vp, tags, 1, out) && out[0].texture.frame_token == 2);
 
-    // constants
+    // constants: clip_to_prev_clip -> camera_current, prev_clip_to_clip -> camera_previous, UV motion-scale bit set
     WgConstants c1 = MakeConstants(l, 1.0f, WG_TRI_TRUE);
     WgFgConstants d = {};
     CHECK(codec.constants(&c1, nullptr, &vp, &d));
     CHECK(d.frame_token == 2 && d.viewport_id == 7 && d.jitter_x == 0.25f && d.jitter_y == -0.375f);
     CHECK(d.motion_scale_x == 0.5f && d.motion_scale_y == -0.5f && d.color_space == WG_FG_CS_SDR);
-    CHECK(d.flags == (WG_FG_FLAG_RESET | WG_FG_FLAG_DEPTH_REVERSED));
-    CHECK(d.camera_current[3] == c1.view_to_clip[3] && d.camera_previous[3] == c1.view_to_clip[3]);
+    CHECK(d.flags == (WG_FG_FLAG_RESET | WG_FG_FLAG_DEPTH_REVERSED | WG_FG_FLAG_MOTION_SCALE_UV));
+    CHECK(d.camera_current[3] == c1.clip_to_prev_clip[3] && d.camera_previous[3] == c1.prev_clip_to_clip[3]);
+    CHECK(d.camera_current[12] == c1.clip_to_prev_clip[12] && d.camera_previous[12] == c1.prev_clip_to_clip[12]);
     codec.note_present();
     WgConstants c2 = MakeConstants(l, 2.0f, WG_TRI_FALSE);
     c2.depth_inverted = WG_TRI_FALSE;
     CHECK(codec.constants(&c2, nullptr, &vp, &d));
-    CHECK(d.frame_token == 3 && d.flags == 0 && d.camera_current[5] == c2.view_to_clip[5] &&
-          d.camera_previous[5] == c1.view_to_clip[5]);
+    CHECK(d.frame_token == 3 && d.flags == WG_FG_FLAG_MOTION_SCALE_UV &&
+          d.camera_current[5] == c2.clip_to_prev_clip[5] && d.camera_previous[5] == c2.prev_clip_to_clip[5]);
     WgConstants c2b = MakeConstants(l, 2.5f, WG_TRI_FALSE);  // a second call in the same interval
-    CHECK(codec.constants(&c2b, nullptr, &vp, &d) && d.camera_previous[5] == c1.view_to_clip[5]);
+    CHECK(codec.constants(&c2b, nullptr, &vp, &d) && d.camera_current[5] == c2b.clip_to_prev_clip[5] &&
+          d.camera_previous[5] == c2b.prev_clip_to_clip[5]);
     codec.note_present();
-    WgConstants c3 = MakeConstants(l, 3.0f, WG_TRI_TRUE);  // a reset: no previous matrix across it
-    CHECK(codec.constants(&c3, nullptr, &vp, &d) && d.camera_previous[5] == c3.view_to_clip[5]);
+    WgConstants c3 = MakeConstants(l, 3.0f, WG_TRI_TRUE);
+    CHECK(codec.constants(&c3, nullptr, &vp, &d) && d.camera_current[5] == c3.clip_to_prev_clip[5] &&
+          d.camera_previous[5] == c3.prev_clip_to_clip[5]);
     WgConstants bad = c3;
     bad.h.type = SyntheticGuid(9);
     CHECK(!codec.constants(&bad, nullptr, &vp, &d));
@@ -1217,7 +1224,8 @@ void TestCp2077Session(const GameModule& game) {
     CHECK(ex.last.motion.resource == &f1r.motion && ex.last.depth.resource == &f1r.depth);
     CHECK((ex.last.optional_present & 1u) && ex.last.optional[0].resource == &f1r.hud);
     CHECK(ex.last.frame_token == 1 && ex.last.viewport_id == 7 && ex.last.generated_count == 3 && ex.last.generated_index == 0);
-    CHECK(ex.last.jitter_x == c1.jitter[0] && ex.last.motion_scale_y == -0.5f);
+    CHECK(ex.last.jitter_x == c1.jitter[0] && ex.last.motion_scale_x == 0.5f * 64.0f &&
+          ex.last.motion_scale_y == -0.5f * 32.0f);
     CHECK(ex.last.flags == (WG_FG_FLAG_RESET | WG_FG_FLAG_DEPTH_REVERSED | WG_FG_FLAG_MOTION_RENDER_RES));
     CHECK(ex.last.adapter_luid.low == 77 && ex.session.viewport_id == 7 && ex.session.swapchain_id == w->Id());
     ps = t.present_stats();
@@ -1242,7 +1250,8 @@ void TestCp2077Session(const GameModule& game) {
     CHECK(sc->Present(1, 0) == S_OK);
     CHECK(ex.submits == 2 && ex.last.frame_token == 2 && ex.last.color.resource == static_cast<IUnknown*>(&inner->buffers[2]));
     CHECK(ex.last.motion.resource == &f2r.motion && ex.last.depth.resource == &f2r.depth);
-    CHECK(ex.last.camera_current[5] == c2.view_to_clip[5] && ex.last.camera_previous[5] == c1.view_to_clip[5]);
+    CHECK(ex.last.camera_current[5] == c2.clip_to_prev_clip[5] &&
+          ex.last.camera_previous[5] == c2.prev_clip_to_clip[5]);
     CHECK(ex.last.flags == (WG_FG_FLAG_DEPTH_REVERSED | WG_FG_FLAG_MOTION_RENDER_RES));
     CHECK(inner->presents == 1 + 4 && presenter.presents == 2);
     presenter.generated = 0;

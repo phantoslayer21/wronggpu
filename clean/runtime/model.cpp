@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <set>
 
 #include "../converter/src/json.h"
 #include "../converter/src/sha256.h"
@@ -564,12 +565,15 @@ bool load_wgcm_stages(const std::string& path, const std::string& map_path, cons
   // Index: stages in map order, each with its digest and tensors.
   Reader ix{d, 88, 88 + (size_t)isize};
   std::map<std::string, StageTensors> got;
+  std::set<std::string> seen_stages;
   for (uint64_t s = 0; s < nstages && ix.ok; ++s) {
     const std::string stage = ix.str();
     wgc::Digest stored;
     ix.bytes(stored.data(), 32);
     const uint64_t nt = ix.le(4);
-    if (!ix.ok || nt > 64) break;
+    if (!ix.ok) break;
+    if (nt > 64) return *err = bad + ": too many tensors in stage " + stage, false;
+    if (!seen_stages.insert(stage).second) return *err = bad + ": duplicate stage " + stage, false;
     StageTensors st;
     wgc::Sha256 h;
     h.update(key.data(), key.size());     // keyed SHA-256 = SHA-256(key || data), spec 08 section 4.1
@@ -617,6 +621,7 @@ bool load_wgcm_stages(const std::string& path, const std::string& map_path, cons
     got[stage] = std::move(st);
   }
   if (!ix.ok) return *err = bad + ": truncated index", false;
+  if (ix.pos != ix.end) return *err = bad + ": trailing bytes in index", false;
 
   // Every stage and tensor the runtime needs, with the shapes of spec 08 section 7.2.
   for (const auto& [stage, stage_tensors] : specs) {

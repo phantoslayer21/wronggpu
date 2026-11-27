@@ -734,6 +734,71 @@ void TestPanel(const std::string& scratch) {
     CHECK(fakehost::Seen("section:WrongGPU Frame Generation"));
 }
 
+void TestFacadeFormats(Gpu& gpu, const std::string& dxil) {
+    std::printf("  facade formats (R10G10B10A2_UNORM + R8G8B8A8_UNORM)\n");
+    ComPtr<IDXGIFactory2> f2;
+    CHECK(SUCCEEDED(gpu.factory.As(&f2)));
+    if (!f2) return;
+    D3D12_DESCRIPTOR_HEAP_DESC hd = {};
+    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    hd.NumDescriptors = 4;
+    ComPtr<ID3D12DescriptorHeap> rtv_heap;
+    CHECK(SUCCEEDED(gpu.device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&rtv_heap))));
+    if (!rtv_heap) return;
+
+    const DXGI_FORMAT fmts[2] = {DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM};
+    for (int fi = 0; fi < 2; ++fi) {
+        const DXGI_FORMAT fmt = fmts[fi];
+        FgAsiSessionConfig hc;
+        hc.settings = CoreConfig(0).settings;
+        hc.dxil_dir = dxil;
+        hc.log = &PrintLog;
+        std::unique_ptr<wgfg::FgExecWeights> w(new wgfg::FgExecWeights());
+        wgfg::FgExecSyntheticWeights(11, w.get());
+        std::unique_ptr<FgAsiSessionHost> host(new FgAsiSessionHost(hc, std::move(w)));
+        DXGI_SWAP_CHAIN_DESC1 sd = {};
+        sd.Width = kW;
+        sd.Height = kH;
+        sd.Format = fmt;
+        sd.SampleDesc.Count = 1;
+        sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        sd.BufferCount = 3;
+        sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        sd.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+        IDXGISwapChain1* sc1 = nullptr;
+        CHECK(SUCCEEDED(f2->CreateSwapChainForComposition(gpu.queue.Get(), &sd, nullptr, &sc1)) && sc1);
+        if (!sc1) continue;
+        ComPtr<IDXGISwapChain4> sc4;
+        CHECK(SUCCEEDED(sc1->QueryInterface(IID_PPV_ARGS(&sc4))));
+        sc1->Release();
+        if (!sc4) continue;
+        host->Attached(sc4.Get(), gpu.queue.Get());
+        CHECK(host->Stats().facade);
+        ComPtr<ID3D12Resource> fb;
+        HRESULT ghr = E_FAIL;
+        CHECK(host->GetBuffer(0, IID_PPV_ARGS(&fb), &ghr) && SUCCEEDED(ghr) && fb);
+        if (fb) {
+            const D3D12_RESOURCE_DESC d = fb->GetDesc();
+            if (fmt == DXGI_FORMAT_R10G10B10A2_UNORM) {
+                // R10G10B10A2_UNORM must stay typed (format 24), never typeless: default RTV (nullptr desc) must work.
+                CHECK(d.Format == DXGI_FORMAT_R10G10B10A2_UNORM);
+                gpu.device->CreateRenderTargetView(fb.Get(), nullptr, rtv_heap->GetCPUDescriptorHandleForHeapStart());
+            } else {
+                // R8G8B8A8_UNORM supports both UNORM and sRGB RTVs; typed when ID3D12Device10 castable formats exist.
+                D3D12_RENDER_TARGET_VIEW_DESC rd = {};
+                rd.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+                rd.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+                gpu.device->CreateRenderTargetView(fb.Get(), &rd, rtv_heap->GetCPUDescriptorHandleForHeapStart());
+                if (d.Format == DXGI_FORMAT_R8G8B8A8_UNORM)
+                    gpu.device->CreateRenderTargetView(fb.Get(), nullptr, rtv_heap->GetCPUDescriptorHandleForHeapStart());
+            }
+            CHECK(gpu.device->GetDeviceRemovedReason() == S_OK);
+        }
+        host->Detached();
+        if (g_debug_layer) CHECK(gpu.DebugErrors() == 0);
+    }
+}
+
 int main(int argc, char** argv) {
     bool gpu = false;
     std::string dxil, scratch = ".";
@@ -761,6 +826,8 @@ int main(int argc, char** argv) {
             if (!FgIsRdna4(g.desc.VendorId, g.desc.DeviceId)) {
                 std::printf("  not an RDNA 4 adapter: the host's route is never taken here (GPU leg skipped)\n");
             } else {
+                g_case = "gpu-facade-formats";
+                TestFacadeFormats(g, dxil);
                 if (preset < 0 || preset == 2) {
                     g_case = "gpu-host-lite-2x";
                     RunHost(g, dxil, 2);

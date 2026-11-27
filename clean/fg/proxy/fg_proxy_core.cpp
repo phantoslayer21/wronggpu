@@ -142,8 +142,8 @@ uint32_t FgPresentOwners::owner_of(uint64_t swapchain_id) const {
 }
 
 FgPresentOwners& FgProcessPresentOwners() {
-    static FgPresentOwners owners;
-    return owners;
+    static FgPresentOwners* owners = new FgPresentOwners();  // intentional immortal singleton for late swapchain release
+    return *owners;
 }
 
 // ---- construction, entries ------------------------------------------------------------------------------------------
@@ -197,7 +197,7 @@ uint32_t FgProxy::attach_interposer(const WgFgChainV1* chain, uint32_t file_majo
     entry_max_ = chain->max_generated > WG_FG_MAX_GENERATED ? WG_FG_MAX_GENERATED : chain->max_generated;
     log_locked("fg: interposer attached (interface " + std::to_string(file_major) + "." + std::to_string(file_minor) +
                ", ABI max " + std::to_string(entry_max_) + ")");
-    note_route_locked();
+    note_route_locked(true);
     return WG_FG_REASON_NONE;
 }
 
@@ -220,7 +220,7 @@ uint32_t FgProxy::register_with_host(const WgFgHostV1* host) {
     entry_ = WG_FG_ENTRY_HOST_PROVIDER;
     entry_max_ = host->max_generated > WG_FG_MAX_GENERATED ? WG_FG_MAX_GENERATED : host->max_generated;
     log_locked("fg: host provider registered (ABI max " + std::to_string(entry_max_) + ")");
-    note_route_locked();
+    note_route_locked(true);
     return WG_FG_REASON_NONE;
 }
 
@@ -369,8 +369,9 @@ WgFgCapability FgProxy::capability() const {
     return c;
 }
 
-void FgProxy::note_route_locked() {
+void FgProxy::note_route_locked(bool defer_unprobed_adapter) {
     const uint32_t r = route_reason_locked();
+    if (defer_unprobed_adapter && r == WG_FG_REASON_UNSUPPORTED_ADAPTER && !adapter_known_) return;
     if (route_noted_ && r == last_route_reason_) return;
     route_noted_ = true;
     last_route_reason_ = r;
@@ -685,8 +686,15 @@ uint32_t FgProxy::assemble_locked(const WgFgPresentDesc& d, WgFgPacket* p, uint3
     if (p->render_rect.width == 0 || p->render_rect.height == 0) p->render_rect = p->depth.rect;
     p->jitter_x = c.jitter_x;
     p->jitter_y = c.jitter_y;
-    p->motion_scale_x = c.motion_scale_x;
-    p->motion_scale_y = c.motion_scale_y;
+    if (c.flags & WG_FG_FLAG_MOTION_SCALE_UV) {
+        const float mw = static_cast<float>(p->motion.rect.width ? p->motion.rect.width : p->motion.width);
+        const float mh = static_cast<float>(p->motion.rect.height ? p->motion.rect.height : p->motion.height);
+        p->motion_scale_x = c.motion_scale_x * (mw > 0.0f ? mw : 1.0f);
+        p->motion_scale_y = c.motion_scale_y * (mh > 0.0f ? mh : 1.0f);
+    } else {
+        p->motion_scale_x = c.motion_scale_x;
+        p->motion_scale_y = c.motion_scale_y;
+    }
     std::memcpy(p->camera_current, c.camera_current, sizeof(p->camera_current));
     std::memcpy(p->camera_previous, c.camera_previous, sizeof(p->camera_previous));
     p->flags = c.flags & WG_FG_FLAGS_KNOWN;
@@ -694,7 +702,8 @@ uint32_t FgProxy::assemble_locked(const WgFgPresentDesc& d, WgFgPacket* p, uint3
     if (p->motion.rect.width != 0 && p->motion.rect.height != 0 &&
         (p->motion.rect.width < p->output_rect.width || p->motion.rect.height < p->output_rect.height))
         p->flags |= WG_FG_FLAG_MOTION_RENDER_RES;
-    if (c.color_space != WG_FG_CS_SDR || options_.color_space != WG_FG_CS_SDR) p->flags |= WG_FG_FLAG_HDR;
+    if (c.color_space != WG_FG_CS_SDR || options_.color_space != WG_FG_CS_SDR || swapchain_cs_ != WG_FG_CS_SDR)
+        p->flags |= WG_FG_FLAG_HDR;
     p->preset = effective_preset_;
     p->generated_count = effective_count_;
     p->generated_index = 0;
@@ -728,9 +737,11 @@ int32_t FgProxy::present(const WgFgPresentDesc* desc, WgFgPresentResult* out) {
 #else
     (void)holder;
 #endif
+    const bool new_chain = latched_ && desc->swapchain_id != swapchain_id_;
 #if WG_FG_PROXY_MUTANT != 4
-    if (any_present_ && desc->frame_token <= last_token_) return refuse(WG_FG_REASON_TOKEN_NOT_MONOTONIC);
+    if (any_present_ && !new_chain && desc->frame_token <= last_token_) return refuse(WG_FG_REASON_TOKEN_NOT_MONOTONIC);
 #endif
+    if (new_chain) frames_.clear();
 
     // the interval is consumed here, once
     any_present_ = true;
@@ -809,10 +820,25 @@ bool FgProxy::session_desc(WgFgSessionDesc* out) const {
     s.preset = effective_preset_;
     s.max_generated = effective_max_locked();
     for (uint32_t i = 0; i < WG_FG_OPTIONAL_COUNT; ++i) s.optional_decl[i] = options_.optional_decl[i];
-    s.hdr = options_.color_space != WG_FG_CS_SDR ? 1u : 0u;
+    s.hdr = (options_.color_space != WG_FG_CS_SDR || swapchain_cs_ != WG_FG_CS_SDR) ? 1u : 0u;
     s.presenter_mode = static_cast<uint32_t>(cfg_.settings.presenter);
     *out = s;
     return true;
+}
+
+void FgProxy::set_color_space(uint32_t color_space) {
+    std::lock_guard<std::recursive_mutex> lock(mu_);
+    swapchain_cs_ = color_space;
+}
+
+void FgProxy::free_viewport(uint32_t feature, uint32_t viewport_id) {
+    std::lock_guard<std::recursive_mutex> lock(mu_);
+    if (!owns_feature(feature)) return;
+    if (has_vp_ && viewport_id == session_vp_) {
+        has_vp_ = false;
+        has_options_ = false;
+        frames_.clear();
+    }
 }
 
 // ---- host provider trampolines: no exception leaves them ------------------------------------------------------------

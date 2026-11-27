@@ -32,6 +32,7 @@ struct State {
     wg::IniValues ini;          // wronggpu.ini as read at start (the environment / ini levels of the precedence)
     wg::HostIniPoll poll;
     std::mutex pollMutex;
+    std::mutex writeMutex;
     uint64_t folderEntry = 0;
     bool hosted = false;
     bool initialised = false;
@@ -135,6 +136,7 @@ int32_t SrMode(uint32_t slot, bool liveOnly, std::string* described) {
 
 static bool WriteChoice(uint32_t slot, int32_t value, const char* source) {
     State& s = S();
+    std::lock_guard lock(s.writeMutex);
     if (!s.block.present() || !s.block.is_writer()) return false;
     wg::Snapshot snap;
     s.block.snapshot(&snap);

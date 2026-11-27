@@ -110,13 +110,14 @@ Hook::Context* Hook::Find(void* ctx) {
 }
 
 void Hook::Register(void* ctx, const UpscaleCreateParams& params, const char* kind) {
+    Unregister(ctx);  // a context memory block reused by the game releases any prior upscaler / pending create first
     auto c = std::make_unique<Context>();
     c->hook = this;
     c->id = nextId_++;
     c->kind = kind;
     c->create = params;
     std::lock_guard<std::mutex> lock(mutex_);
-    contexts_[ctx] = std::move(c);  // a context memory block reused by the game replaces the old entry
+    contexts_[ctx] = std::move(c);
 }
 
 void Hook::Unregister(void* ctx) {
@@ -187,7 +188,8 @@ bool Hook::TakePending(Context& c, const std::string& tag) {
     return true;
 }
 
-bool Hook::RunStandIn(Context& c, const ffxDispatchDescUpscale& dispatch, const std::string& tag) {
+bool Hook::RunStandIn(Context& c, const ffxDispatchDescUpscale& dispatch, const std::string& tag, bool* transientNotReady) {
+    if (transientNotReady) *transientNotReady = false;
     if (!c.upscaler && c.pending && !TakePending(c, tag)) return false;
     if (!c.upscaler) {
         std::string why;
@@ -272,6 +274,12 @@ bool Hook::RunStandIn(Context& c, const ffxDispatchDescUpscale& dispatch, const 
     if (platform_.diagnosticResult) platform_.diagnosticResult(c.id, index, r);
     if (!note.empty()) Log(tag + " note C" + std::to_string(c.id) + ": " + note);
     if (r != WG_OK) {
+        if (r == WG_ERROR_NOT_READY && transientNotReady) {
+            *transientNotReady = true;
+            Log(tag + " note C" + std::to_string(c.id) + ": upscaler \"" + c.backend->name + "\" not ready for this frame; AMD FSR upscales this frame");
+            Report(c, UpscaleState::Amd, nullptr, c.device);
+            return false;
+        }
         if (platform_.diagnosticFailure) platform_.diagnosticFailure(c.id, index, c.device);
         Log(tag + " ERROR C" + std::to_string(c.id) + ": upscaler \"" + c.backend->name + "\" dispatch failed: " + WgResultText(r));
         if (c.failReason.empty()) c.failReason = "dispatch failed: " + WgResultText(r);
@@ -426,12 +434,13 @@ ErrorCode Hook::UpContextDispatch(void* ctx, const UpscalerDispatchDescription* 
             return rc;
         }
     }
-    const bool ok = RunStandIn(*c, ApiDispatch(*desc), tag);
+    bool transientNotReady = false;
+    const bool ok = RunStandIn(*c, ApiDispatch(*desc), tag, &transientNotReady);
     ++c->frames;
-    if (!ok && c->pending) {  // WrongGPU's upscaler is still starting: AMD's FSR upscales this frame
+    if (!ok && (c->pending || transientNotReady)) {  // WrongGPU's upscaler is starting or transiently not ready: AMD's FSR upscales this frame
         if (!amdFirst) {
             const ErrorCode rc = o->contextDispatch(ctx, desc);
-            if (log || rc != OK) Log(tag + " -> " + Rc(rc) + " (AMD while WrongGPU's upscaler starts)");
+            if (log || rc != OK) Log(tag + " -> " + Rc(rc) + (transientNotReady ? " (AMD while WrongGPU's upscaler is not ready)" : " (AMD while WrongGPU's upscaler starts)"));
             return rc;
         }
         if (log) Log(tag + " -> FFX_OK (AMD's output kept while WrongGPU's upscaler starts)");
@@ -628,15 +637,18 @@ ErrorCode Hook::F3ContextDispatchUpscale(void* ctx, const Fsr3DispatchUpscaleDes
     if (c && StandInActive() && c->upscalingOnly && fsr3Level && config_.fsr3AmdFirst != "always" && !compare) {
         std::lock_guard<std::mutex> lock(c->mutex);
         if (!c->failed) {
-            const bool ok = RunStandIn(*c, ApiDispatch(*desc), tag);
+            bool transientNotReady = false;
+            const bool ok = RunStandIn(*c, ApiDispatch(*desc), tag, &transientNotReady);
             ++c->frames;
             if (ok) {
                 if (log) Log(tag + " -> FFX_OK (" + Label(*c) + "; AMD's ffxFsr3ContextDispatchUpscale skipped: UPSCALING_ONLY)");
                 return OK;
             }
-            c->failed = true;
+            if (!c->pending && !transientNotReady) c->failed = true;
             const ErrorCode rc = o->contextDispatchUpscale(ctx, desc);
-            Log(tag + " -> " + Rc(rc) + " (AMD after " + Label(*c) + " failed; C" + std::to_string(c->id) + " stays on AMD)");
+            Log(tag + " -> " + Rc(rc) + (c->pending ? " (AMD while WrongGPU's upscaler starts)"
+                                         : transientNotReady ? " (AMD while WrongGPU's upscaler is not ready)"
+                                                             : " (AMD after " + Label(*c) + " failed; C" + std::to_string(c->id) + " stays on AMD)"));
             return rc;
         }
     }
@@ -645,13 +657,16 @@ ErrorCode Hook::F3ContextDispatchUpscale(void* ctx, const Fsr3DispatchUpscaleDes
         if (RunComparison(*c, ApiDispatch(*desc), tag, log)) return OK;
     }
     const uint64_t before = platform_.upscalerSeenOnThread ? platform_.upscalerSeenOnThread() : 0;
-    Fsr3DispatchUpscaleDescription amdDesc = *desc;
-    if (compare && fsr3Level) {  // AMD upscales at this level for the comparison; its history is old at the switch
+    Fsr3DispatchUpscaleDescription amdDesc{};
+    const Fsr3DispatchUpscaleDescription* passDesc = desc;
+    if (decode && compare && fsr3Level) {  // AMD upscales at this level for the comparison; its history is old at the switch
+        amdDesc = *desc;
         std::lock_guard<std::mutex> lock(c->mutex);
         if (!c->compared) amdDesc.reset = true;
         c->compared = true;
+        passDesc = &amdDesc;
     }
-    const ErrorCode rc = o->contextDispatchUpscale(ctx, &amdDesc);
+    const ErrorCode rc = o->contextDispatchUpscale(ctx, passDesc);
     const uint64_t inner = (platform_.upscalerSeenOnThread ? platform_.upscalerSeenOnThread() : 0) - before;
     if (c && rc == OK && c->innerSeen < 0) {
         c->innerSeen = inner > 0 ? 1 : 0;
@@ -678,11 +693,14 @@ ErrorCode Hook::F3ContextDispatchUpscale(void* ctx, const Fsr3DispatchUpscaleDes
         Report(*c, UpscaleState::Amd, nullptr, nullptr);
         return rc;
     }
-    const bool ok = RunStandIn(*c, ApiDispatch(*desc), tag);
+    bool transientNotReady = false;
+    const bool ok = RunStandIn(*c, ApiDispatch(*desc), tag, &transientNotReady);
     ++c->frames;
     if (!ok) {
-        c->failed = true;
-        Log(tag + " -> " + Rc(rc) + " (AMD's output kept; C" + std::to_string(c->id) + " stays on AMD)");
+        if (!c->pending && !transientNotReady) c->failed = true;
+        Log(tag + " -> " + Rc(rc) + (c->pending ? " (AMD's output kept while WrongGPU's upscaler starts)"
+                                     : transientNotReady ? " (AMD's output kept while WrongGPU's upscaler is not ready)"
+                                                         : " (AMD's output kept; C" + std::to_string(c->id) + " stays on AMD)"));
         return rc;
     }
     if (log) Log(tag + " -> " + Rc(rc) + " (AMD, then " + Label(*c) + " over upscaleOutput)");

@@ -108,8 +108,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     if (!exeArg.empty()) {
         dir = Parent(FullPath(exeArg));
         if (!Exists(RecordPath(dir))) { const wstring d = FindInstallDir(FullPath(exeArg)); if (Exists(RecordPath(d))) dir = d; }
-    } else if (!dirArg.empty()) dir = FullPath(dirArg);
-    else if (fromState) dir = Parent(Parent(self));
+    } else if (!dirArg.empty()) {
+        dir = FullPath(dirArg);
+        while (dir.size() > 3 && (dir.back() == L'\\' || dir.back() == L'/')) dir.pop_back();
+    } else if (fromState) dir = Parent(Parent(self));
     SystemInfo sys;
     Ui ui;
     ui.step = [](int, int, const wstring&) {};

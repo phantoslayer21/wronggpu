@@ -274,6 +274,7 @@ class RrProxy {
 
   std::atomic<uint64_t> last_complete_ms_{0};
   std::atomic<bool> last_eval_completed_{false};
+  std::atomic<bool> has_instance_{false};
 };
 
 // The RR plugin's slot watch (a background thread that reads the patched game-interface slots again, and one check at

@@ -514,6 +514,14 @@ int main() {
             require(CheckFgEnable(Join(dir, L"no-such-game"), true, &lib, &why) == FgEnable::NO_LIBRARY && lib.empty() &&
                         why.find(L"no frame generation library (nvngx_dlssg.dll)") != wstring::npos && why.find(L"stays off") != wstring::npos,
                     "fg enable: a game without a frame generation library is refused in words, even with the data ready");
+            const wstring ueRoot = Join(dir, L"ue-fg"), ueBin = Join(ueRoot, L"OakGame\\Binaries\\Win64"),
+                          ueSl = Join(ueRoot, L"Engine\\Plugins\\Nvidia\\StreamlineCore\\Binaries\\ThirdParty\\Win64");
+            EnsureDir(ueBin);
+            EnsureDir(ueSl);
+            WriteFileAtomic(Join(ueSl, L"nvngx_dlssg.dll"), notPe.data(), notPe.size());
+            require(CheckFgEnable(ueBin, false, &lib, &why) == FgEnable::CONVERT && IEq(lib, Join(ueSl, L"nvngx_dlssg.dll")) &&
+                        CheckFgEnable(ueBin, true, &lib, &why) == FgEnable::READY,
+                    "fg enable: Unreal layout finds nvngx_dlssg.dll under Engine\\Plugins from <Game>\\Binaries\\Win64");
 
             // the converter's preset FG by name: only in a build with its map; its own folder and file name
             static const EmbeddedData withFg{nullptr, 0, 900, L"00", 0, L"", 0, L"0.7.0", L"0.7.0", L"0.7.0", nullptr, 0, 0, L"", L"", 903, L"00", 904, L"00"};

@@ -196,7 +196,13 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     if (!environment_number("WG_D3D12_ARENA_MB", 16, 4095, &mb) ||
         !environment_number("WG_D3D12_BATCH", 0, 65535, &batch)) return false;
     arena_bytes_ = mb << 20; batch_ = static_cast<unsigned>(batch);
-    if (arena_override) arena_bytes_ = (arena_override + (1u << 20) - 1) & ~uint64_t((1u << 20) - 1);
+    if (arena_override) {
+      if (arena_override > UINT64_MAX - ((1u << 20) - 1))
+        return fail("native D3D12: arena_override overflows");
+      arena_bytes_ = (arena_override + (1u << 20) - 1) & ~uint64_t((1u << 20) - 1);
+      if (arena_bytes_ <= kNativeAlign + wg::kGeluLutBytes || arena_bytes_ > (4095ULL << 20))
+        return fail("native D3D12: arena_override out of range");
+    }
     // The hybrid selection knob cannot silently omit native stages or create a fallback route.
     const char* selection = std::getenv("WG_DX12_KERNELS");
     if (selection && std::string(selection) != "all")
@@ -473,15 +479,17 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     if (!external_ || inside_pass_) return extension_result(fail("native D3D12 end_external: not recording"), error);
     const bool guard_lifted = guard_lift();   // never leave the caller's list predicated
     need_uav_barrier_ = true; uav_barrier();  // the caller's passes after ours read our results
-    ++ext_recorded_;
     bool ok = true;
     NativeCom<ID3D12GraphicsCommandList2> l2;
     if (marker_map_ && SUCCEEDED(ext_list_->QueryInterface(__uuidof(ID3D12GraphicsCommandList2), l2.pv())) && l2) {
+      ++ext_recorded_;
       D3D12_WRITEBUFFERIMMEDIATE_PARAMETER p{marker_->GetGPUVirtualAddress(), static_cast<UINT>(ext_recorded_)};
       D3D12_WRITEBUFFERIMMEDIATE_MODE mode = D3D12_WRITEBUFFERIMMEDIATE_MODE_MARKER_OUT;
       l2->WriteBufferImmediate(1, &p, &mode);
     } else if (marker_map_) {
       ok = fail("native D3D12 end_external: the caller's list has no ID3D12GraphicsCommandList2 (completion marker)");
+    } else {
+      ++ext_recorded_;
     }
     ok = ok && guard_lifted;
     caller_given_ = false; caller_pred_ = nullptr;   // (given again before the next recording)
@@ -817,9 +825,11 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     return completed && valid;
   }
   bool reserve_events(int n) override {
+    if (external_) return fail("native D3D12 reserve_events: recording into the caller's list");
     if (n < 0 || static_cast<unsigned>(n) > kMaxEvents) return fail("native D3D12: invalid event pool size");
     if (static_cast<size_t>(n) <= events_.size()) return true;
     if (!sync()) return false;
+    if (ext_recorded_ && !wait_external(ext_recorded_)) return false;
     NativeCom<ID3D12QueryHeap> queries;
     D3D12_QUERY_HEAP_DESC q{}; q.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP; q.Count = static_cast<unsigned>(n);
     if (!check(device_->CreateQueryHeap(&q, __uuidof(ID3D12QueryHeap), queries.pv()), "CreateQueryHeap")) return false;
@@ -1517,7 +1527,7 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
     adapter_luid_ = device_->GetAdapterLuid();
 
     dxgi_dll_ = wgrt::load_system_dll(L"dxgi.dll");  // the system's own (not a proxy of the game folder, rdna4_win.h)
-    d3d12_dll_ = LoadLibraryExW(L"d3d12.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    d3d12_dll_ = wgrt::load_system_dll(L"d3d12.dll");
     if (!dxgi_dll_ || !d3d12_dll_) return fail("native D3D12: system DXGI/D3D12 unavailable");
     using MakeFactory = HRESULT(WINAPI*)(REFIID, void**);
     auto factory_function = reinterpret_cast<MakeFactory>(GetProcAddress(dxgi_dll_, "CreateDXGIFactory1"));
@@ -1582,7 +1592,7 @@ class NativeD3D12Device final : public Device, public NativeD3D12Ext {
   }
   bool create_device() {
     dxgi_dll_ = wgrt::load_system_dll(L"dxgi.dll");  // the system's own (not a proxy of the game folder, rdna4_win.h)
-    d3d12_dll_ = LoadLibraryExW(L"d3d12.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    d3d12_dll_ = wgrt::load_system_dll(L"d3d12.dll");
     if (!dxgi_dll_ || !d3d12_dll_) return fail("native D3D12: system DXGI/D3D12 unavailable");
     using MakeFactory = HRESULT(WINAPI*)(REFIID, void**);
     auto factory_function = reinterpret_cast<MakeFactory>(GetProcAddress(dxgi_dll_, "CreateDXGIFactory1"));

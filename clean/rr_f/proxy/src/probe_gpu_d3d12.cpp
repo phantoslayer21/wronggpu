@@ -133,7 +133,11 @@ D3D12_RESOURCE_BARRIER transition(ID3D12Resource* r, D3D12_RESOURCE_STATES from,
   D3D12_RESOURCE_BARRIER b = {};
   b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
   b.Transition.pResource = r;
-  b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+  const D3D12_RESOURCE_DESC d = r->GetDesc();
+  b.Transition.Subresource =
+      (d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && (d.MipLevels > 1 || d.DepthOrArraySize > 1))
+          ? 0u
+          : D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
   b.Transition.StateBefore = from;
   b.Transition.StateAfter = to;
   return b;
@@ -377,6 +381,8 @@ class D3d12ProbeGpu : public ProbeGpu {
     }
     Copy& c = copies_[key];
     D3D12_RESOURCE_DESC want = d;
+    want.MipLevels = 1;
+    want.DepthOrArraySize = 1;
     want.Flags = D3D12_RESOURCE_FLAG_NONE;
     if (c.tex) {
       D3D12_RESOURCE_DESC have = c.tex->GetDesc();
@@ -409,7 +415,19 @@ class D3d12ProbeGpu : public ProbeGpu {
       b[nb++] = transition(s, declared, D3D12_RESOURCE_STATE_COPY_SOURCE);
     b[nb++] = transition(c.tex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
     cl->ResourceBarrier(nb, b);
-    cl->CopyResource(c.tex, s);
+    if (d.MipLevels > 1 || d.DepthOrArraySize > 1) {
+      D3D12_TEXTURE_COPY_LOCATION dst_loc = {};
+      dst_loc.pResource = c.tex;
+      dst_loc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+      dst_loc.SubresourceIndex = 0;
+      D3D12_TEXTURE_COPY_LOCATION src_loc = {};
+      src_loc.pResource = s;
+      src_loc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+      src_loc.SubresourceIndex = 0;
+      cl->CopyTextureRegion(&dst_loc, 0, 0, 0, &src_loc, nullptr);
+    } else {
+      cl->CopyResource(c.tex, s);
+    }
     nb = 0;
     if (!(declared & D3D12_RESOURCE_STATE_COPY_SOURCE))
       b[nb++] = transition(s, D3D12_RESOURCE_STATE_COPY_SOURCE, declared);

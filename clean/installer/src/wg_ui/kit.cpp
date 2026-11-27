@@ -205,23 +205,30 @@ LRESULT CALLBACK ProgressProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             Kit& kit = *KitOf(h);
             PAINTSTRUCT ps{}; HDC dc = m == WM_PRINTCLIENT ? (HDC)wp : BeginPaint(h, &ps);
             RECT rc; GetClientRect(h, &rc);
-            HDC mem = CreateCompatibleDC(dc); HBITMAP bmp = CreateCompatibleBitmap(dc, rc.right, rc.bottom); HGDIOBJ oldBmp = SelectObject(mem, bmp);
-            FillRect(mem, &rc, kit.Brush(kit.BgOf(h)));
-            const INT_PTR hi = (INT_PTR)GetPropW(h, L"wgHi"), pos = (INT_PTR)GetPropW(h, L"wgPos");
-            const float frac = hi > 0 ? std::min(1.0f, std::max(0.0f, (float)pos / (float)hi)) : 0.0f;
-            {
-                Gdiplus::Graphics gr(mem); gr.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-                const float H = (float)rc.bottom, W = (float)rc.right;
-                FillRound(gr, 0, 0, W, H, H / 2, GC(RGB(36, 40, 49)));
-                if (frac > 0) {
-                    Gdiplus::LinearGradientBrush lg(Gdiplus::PointF(0, 0), Gdiplus::PointF(W, 0), GC(kBrandDown), GC(kBrandHot));
-                    Gdiplus::GraphicsPath p; RoundPath(p, 0, 0, std::max(H, W * frac), H, H / 2);
-                    gr.FillPath(&lg, &p);
+            if (dc && rc.right > 0 && rc.bottom > 0) {
+                HDC mem = CreateCompatibleDC(dc); HBITMAP bmp = CreateCompatibleBitmap(dc, rc.right, rc.bottom);
+                if (mem && bmp) {
+                    HGDIOBJ oldBmp = SelectObject(mem, bmp);
+                    FillRect(mem, &rc, kit.Brush(kit.BgOf(h)));
+                    const INT_PTR hi = (INT_PTR)GetPropW(h, L"wgHi"), pos = (INT_PTR)GetPropW(h, L"wgPos");
+                    const float frac = hi > 0 ? std::min(1.0f, std::max(0.0f, (float)pos / (float)hi)) : 0.0f;
+                    {
+                        Gdiplus::Graphics gr(mem); gr.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+                        const float H = (float)rc.bottom, W = (float)rc.right;
+                        FillRound(gr, 0, 0, W, H, H / 2, GC(RGB(36, 40, 49)));
+                        if (frac > 0) {
+                            Gdiplus::LinearGradientBrush lg(Gdiplus::PointF(0, 0), Gdiplus::PointF(W, 0), GC(kBrandDown), GC(kBrandHot));
+                            Gdiplus::GraphicsPath p; RoundPath(p, 0, 0, std::max(H, W * frac), H, H / 2);
+                            gr.FillPath(&lg, &p);
+                        }
+                    }
+                    BitBlt(dc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
+                    SelectObject(mem, oldBmp);
                 }
+                if (bmp) DeleteObject(bmp);
+                if (mem) DeleteDC(mem);
             }
-            BitBlt(dc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
-            SelectObject(mem, oldBmp); DeleteObject(bmp); DeleteDC(mem);
-            EndPaint(h, &ps);
+            if (m == WM_PAINT) EndPaint(h, &ps);
             return 0;
         }
         case WM_DESTROY: RemovePropW(h, L"wgHi"); RemovePropW(h, L"wgPos"); break;

@@ -458,11 +458,11 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
     }
     if (!opti && replace.empty()) Fail(L"None of the game's FSR DLLs in " + dir + L" can be replaced by this installer.", EXIT_REFUSED);
     auto replaced = [&](const wstring& rel) { for (auto* sl : replace) if (IEq(rel, sl->name)) return true; return false; };
-    // OptiScaler mode: WrongGPU's FFX API DLL under its own name, no FSR 3.0 forwarders
-    // OptiScaler 10 (optiscaler.h kOptiSlotFrontEnd): the front end in OptiScaler's custom upscaler slot, no menu plugin
+    // OptiScaler mode: WrongGPU's FFX API DLL under its own name, no FSR 3.0 forwarders.
+    // OptiScaler 10 (optiscaler.h kOptiSlotFrontEnd): the front end in OptiScaler's custom upscaler slot; WrongGPU.asi
+    // still installs so OptiScaler's Custom tab shows the WrongGPU Upscaler card (Model M/K/L + Fast/Exact switching).
     const bool slot = opti && OptiSlotPackage(ctx);
     auto payloadUsed = [&](const PayloadFile& f) {
-        if (slot && OptiOnlyPayload(f.rel)) return false;
         return opti ? !IsSlotName(f.rel) || IEq(f.rel, L"amd_fidelityfx_dx12.dll") : !OptiOnlyPayload(f.rel) && (!IsSlotName(f.rel) || replaced(f.rel));
     };
     // The plugin's place: plugins\ next to OptiScaler, or a folder of its own when Ultimate ASI Loader would start it a

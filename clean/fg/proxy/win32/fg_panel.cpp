@@ -42,13 +42,14 @@ std::string Save(const char* key, const char* value) {
     return o.ok() ? std::string("saved to wronggpu-setup\\settings.ini") : "not saved: " + o.words();
 }
 
-std::string Choose(uint32_t preset, uint32_t multiplier, const char* key, const char* value) {
+std::string Choose(bool set_preset, uint32_t preset, bool set_mult, uint32_t multiplier, const char* key,
+                   const char* value) {
     bool live = false;
     {
         std::lock_guard<std::mutex> lock(g_mu);
-        g_settings.preset = preset;
-        g_settings.multiplier = multiplier;
-        live = g_hooks.apply && g_hooks.apply(preset, multiplier);
+        if (set_preset) g_settings.preset = preset;
+        if (set_mult) g_settings.multiplier = multiplier;
+        live = g_hooks.apply && g_hooks.apply(g_settings.preset, g_settings.multiplier);
     }
     const std::string line = std::string("fg menu: ") + key + "=" + value + " chosen in OptiScaler's menu (" +
                              (live ? "from the next frame" : "from the next game start") + ", " + Save(key, value) +
@@ -134,13 +135,13 @@ FgSettings Current() {
 std::string ChoosePreset(uint32_t preset) {
     const char* spelling = FgPresetSpelling(preset);
     if (!spelling) return std::string();
-    return Choose(preset, Current().multiplier, kFgKeyPreset, spelling);
+    return Choose(true, preset, false, 0, kFgKeyPreset, spelling);
 }
 
 std::string ChooseMultiplier(uint32_t multiplier) {
     if (FgGeneratedCountOf(multiplier) == 0) return std::string();
     const std::string value = std::to_string(multiplier);
-    return Choose(Current().preset, multiplier, kFgKeyMultiplier, value.c_str());
+    return Choose(false, 0, true, multiplier, kFgKeyMultiplier, value.c_str());
 }
 
 bool Init(const WgHostMenuApi* api, WgHostMenuPlugin* plugin, const Hooks& hooks, const FgSettings& start) {

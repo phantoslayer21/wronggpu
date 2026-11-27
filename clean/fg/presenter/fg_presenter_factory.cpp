@@ -166,6 +166,7 @@ FgWinResult FgCreatePresenter(const FgPresenterFactoryDesc& desc, FgCreatedPrese
         cd.width = desc.width;
         cd.height = desc.height;
         cd.format = desc.format;
+        cd.hdr = desc.hdr;
         cd.variable_refresh = desc.display.variable_refresh;
         cd.refresh_period = desc.display.refresh_period;
         cd.max_generated = desc.max_generated;

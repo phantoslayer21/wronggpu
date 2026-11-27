@@ -132,6 +132,7 @@ public:
     void set_adapter(const WgFgAdapterIdentity& id);
     void set_device(void* device, void* queue);
     void set_runtime_facts(bool model_validated, bool presenter_qualified);
+    void set_color_space(uint32_t color_space);
     void set_executor(const WgFgExecutorV1* executor);  // null: none (a taken present then refuses: NO_EXECUTOR)
     // The player's preset and multiplier changed while the game runs (the host menu). Lock-free and callable from any
     // thread (a menu drawn inside a present): the values are taken on the game's thread at its next options call or
@@ -158,6 +159,7 @@ public:
     int32_t get_function(uint32_t feature, const char* name, void** out);
     int32_t set_options(uint32_t feature, uint32_t viewport_id, const WgFgOptions* decoded, const void* native_options);
     int32_t get_state(uint32_t feature, uint32_t viewport_id, WgFgState* decoded, void* native_state);
+    void free_viewport(uint32_t feature, uint32_t viewport_id);
     // shared calls: observed while taken, always forwarded; the result is the next link's
     int32_t tag(const WgFgTag* decoded, uint32_t count, const void* native_tags);
     int32_t constants(const WgFgConstants* decoded, const void* native_constants);
@@ -195,7 +197,7 @@ private:
     uint32_t route_reason_locked() const;
     uint32_t effective_max_locked() const;
     void apply_live_locked();
-    void note_route_locked();
+    void note_route_locked(bool defer_unprobed_adapter = false);
     void note_frame_locked(uint32_t reason, uint32_t real_only);
     void log_locked(const std::string& line) const;
     int32_t role_of(uint32_t native_type) const;
@@ -218,6 +220,7 @@ private:
 
     mutable std::recursive_mutex mu_;
     uint32_t entry_ = WG_FG_ENTRY_NONE;
+    uint32_t swapchain_cs_ = WG_FG_CS_SDR;
     WgFgChainV1 chain_ = {};
     WgFgHostV1 host_ = {};
     WgFgProviderV1 provider_ = {};

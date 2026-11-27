@@ -183,7 +183,8 @@ bool FgExecMakeGeometry(uint32_t wo, uint32_t ho, FgExecGeometry* out, std::stri
 
 bool FgExecMakeRegion(uint32_t tex_w, uint32_t tex_h, uint32_t bx, uint32_t by, uint32_t ew, uint32_t eh,
                       FgExecRegion* out) {
-    if (ew < 1 || eh < 1 || bx + ew > tex_w || by + eh > tex_h || tex_w > (1u << 24) || tex_h > (1u << 24))
+    if (ew < 1 || eh < 1 || static_cast<uint64_t>(bx) + ew > tex_w || static_cast<uint64_t>(by) + eh > tex_h ||
+        tex_w > (1u << 24) || tex_h > (1u << 24))
         return false;
     FgExecRegion r;
     r.tex_w = tex_w;

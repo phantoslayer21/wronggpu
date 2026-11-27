@@ -23,12 +23,12 @@ thread_local int t_callback_depth = 0;  // > 0: this thread is inside a callback
 thread_local int t_creating = 0;        // > 0: inside the original CreateSwapChainForHwnd (no second wrap)
 
 std::mutex& RegistryMutex() {
-    static std::mutex m;
-    return m;
+    static std::mutex* m = new std::mutex();  // intentional immortal singleton: wrappers may release after DLL_PROCESS_DETACH
+    return *m;
 }
 std::map<IDXGISwapChain4*, FgSwapChain*>& Registry() {
-    static std::map<IDXGISwapChain4*, FgSwapChain*> r;
-    return r;
+    static auto* r = new std::map<IDXGISwapChain4*, FgSwapChain*>();
+    return *r;
 }
 
 class DepthScope {
@@ -39,14 +39,25 @@ public:
     DepthScope& operator=(const DepthScope&) = delete;
 };
 
-bool PatchPointer(void** slot, void* value) {
+bool PatchPointerExchange(void** slot, void* value, void** prev_out) {
     DWORD old = 0;
     if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old)) return false;
-    InterlockedExchangePointer(slot, value);
+    void* prev = InterlockedExchangePointer(slot, value);
     DWORD ignored = 0;
     VirtualProtect(slot, sizeof(void*), old, &ignored);
     FlushInstructionCache(GetCurrentProcess(), slot, sizeof(void*));
+    if (prev_out) *prev_out = prev;
     return true;
+}
+
+bool PatchPointerCompareExchange(void** slot, void* value, void* expected) {
+    DWORD old = 0;
+    if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old)) return false;
+    void* prev = InterlockedCompareExchangePointer(slot, value, expected);
+    DWORD ignored = 0;
+    VirtualProtect(slot, sizeof(void*), old, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), slot, sizeof(void*));
+    return prev == expected;
 }
 
 bool IsChainInterface(REFIID riid) {
@@ -152,7 +163,7 @@ size_t FgSwapChain::DetachCallback(IFgPresentCallback* callback) {
     size_t detached = 0;
     for (FgSwapChain* w : held) {
         {
-            std::lock_guard<std::mutex> lock(w->mu_);
+            std::lock_guard<std::recursive_mutex> lock(w->mu_);
             if (w->callback_ == callback) {
                 w->DetachLocked(true);
                 ++detached;
@@ -170,7 +181,7 @@ void FgSwapChain::Log(const std::string& line) const {
 // ---- ownership ------------------------------------------------------------------------------------------------------
 
 uint32_t FgSwapChain::Attach(IFgPresentCallback* callback, FgProxy* core, FgPresentOwners* owners, uint32_t owner) {
-    std::lock_guard<std::mutex> lock(mu_);
+    std::lock_guard<std::recursive_mutex> lock(mu_);
     if (!callback || owner == WG_FG_OWNER_NONE) return WG_FG_REASON_NULL_ARGUMENT;
     if (callback_) return WG_FG_REASON_DOUBLE_ATTACH;
     FgPresentOwners* reg = owners ? owners : &FgProcessPresentOwners();
@@ -211,22 +222,22 @@ void FgSwapChain::DetachLocked(bool notify) {
 }
 
 void FgSwapChain::Detach() {
-    std::lock_guard<std::mutex> lock(mu_);
+    std::lock_guard<std::recursive_mutex> lock(mu_);
     DetachLocked(true);
 }
 
 bool FgSwapChain::Attached() const {
-    std::lock_guard<std::mutex> lock(mu_);
+    std::lock_guard<std::recursive_mutex> lock(mu_);
     return callback_ != nullptr;
 }
 
 uint64_t FgSwapChain::Epoch() const {
-    std::lock_guard<std::mutex> lock(mu_);
+    std::lock_guard<std::recursive_mutex> lock(mu_);
     return epoch_;
 }
 
 FgSwapChainStats FgSwapChain::Stats() const {
-    std::lock_guard<std::mutex> lock(mu_);
+    std::lock_guard<std::recursive_mutex> lock(mu_);
     return stats_;
 }
 
@@ -269,7 +280,7 @@ ULONG STDMETHODCALLTYPE FgSwapChain::Release() {
     const long n = --refs_;
     if (n == 0) {
         {
-            std::lock_guard<std::mutex> lock(mu_);
+            std::lock_guard<std::recursive_mutex> lock(mu_);
             DetachLocked(true);  // the present owner goes with the chain
         }
         delete this;
@@ -293,7 +304,7 @@ HRESULT FgSwapChain::PresentCommon(bool present1, UINT sync_interval, UINT flags
         ++stats_.bypass_presents;
         return RawPresent(present1, sync_interval, flags, params);
     }
-    std::lock_guard<std::mutex> lock(mu_);
+    std::lock_guard<std::recursive_mutex> lock(mu_);
     if ((flags & DXGI_PRESENT_TEST) && WG_FG_WIN32_MUTANT != 5) {  // occlusion test: no interval, no history, no callback
         ++stats_.test_presents;
         return RawPresent(present1, sync_interval, flags, params);
@@ -369,7 +380,7 @@ HRESULT STDMETHODCALLTYPE FgSwapChain::Present1(UINT sync_interval, UINT flags, 
 HRESULT STDMETHODCALLTYPE FgSwapChain::ResizeBuffers(UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags) {
     flags |= extra_flags_.load();  // the creation's extra flags stay on the chain
     if (t_callback_depth > 0) return inner_->ResizeBuffers(count, width, height, format, flags);
-    std::lock_guard<std::mutex> lock(mu_);
+    std::lock_guard<std::recursive_mutex> lock(mu_);
     pending_ = false;
     ++stats_.resizes;
     if (callback_) {
@@ -388,6 +399,7 @@ HRESULT STDMETHODCALLTYPE FgSwapChain::ResizeBuffers(UINT count, UINT width, UIN
 }
 
 void FgSwapChain::SetPresentQueue(IUnknown* queue) {
+    std::lock_guard<std::recursive_mutex> lock(mu_);
     if (queue) queue->AddRef();
     if (present_queue_) present_queue_->Release();
     present_queue_ = queue;
@@ -396,14 +408,24 @@ void FgSwapChain::SetPresentQueue(IUnknown* queue) {
 HRESULT STDMETHODCALLTYPE FgSwapChain::ResizeBuffers1(UINT count, UINT width, UINT height, DXGI_FORMAT format, UINT flags,
                                                       const UINT* node_masks, IUnknown* const* queues) {
     flags |= extra_flags_.load();  // the creation's extra flags stay on the chain
+    if (t_callback_depth > 0) {
+        std::vector<IUnknown*> present_queues;
+        {
+            std::lock_guard<std::recursive_mutex> lock(mu_);
+            if (present_queue_ && queues && count > 0 && count <= 16) {
+                present_queues.assign(count, present_queue_);
+                queues = present_queues.data();
+            }
+        }
+        return inner_->ResizeBuffers1(count, width, height, format, flags, node_masks, queues);
+    }
+    std::lock_guard<std::recursive_mutex> lock(mu_);
     // a chain created on the present queue keeps presenting there: the game's queues are replaced for every buffer
     std::vector<IUnknown*> present_queues;
     if (present_queue_ && queues && count > 0 && count <= 16) {
         present_queues.assign(count, present_queue_);
         queues = present_queues.data();
     }
-    if (t_callback_depth > 0) return inner_->ResizeBuffers1(count, width, height, format, flags, node_masks, queues);
-    std::lock_guard<std::mutex> lock(mu_);
     pending_ = false;
     ++stats_.resizes;
     if (callback_) {
@@ -423,7 +445,7 @@ HRESULT STDMETHODCALLTYPE FgSwapChain::ResizeBuffers1(UINT count, UINT width, UI
 
 HRESULT STDMETHODCALLTYPE FgSwapChain::SetFullscreenState(BOOL fullscreen, IDXGIOutput* target) {
     if (t_callback_depth > 0) return inner_->SetFullscreenState(fullscreen, target);
-    std::lock_guard<std::mutex> lock(mu_);
+    std::lock_guard<std::recursive_mutex> lock(mu_);
     pending_ = false;
     if (callback_) {
         IFgPresentCallback* cb = callback_;
@@ -442,7 +464,7 @@ HRESULT STDMETHODCALLTYPE FgSwapChain::SetFullscreenState(BOOL fullscreen, IDXGI
 
 HRESULT STDMETHODCALLTYPE FgSwapChain::SetColorSpace1(DXGI_COLOR_SPACE_TYPE space) {
     if (t_callback_depth > 0) return inner_->SetColorSpace1(space);
-    std::lock_guard<std::mutex> lock(mu_);
+    std::lock_guard<std::recursive_mutex> lock(mu_);
     const HRESULT hr = inner_->SetColorSpace1(space);
     if (SUCCEEDED(hr) && callback_) {
         IFgPresentCallback* cb = callback_;
@@ -456,7 +478,7 @@ HRESULT STDMETHODCALLTYPE FgSwapChain::SetColorSpace1(DXGI_COLOR_SPACE_TYPE spac
 
 HRESULT STDMETHODCALLTYPE FgSwapChain::GetBuffer(UINT buffer, REFIID riid, void** surface) {
     if (t_callback_depth > 0) return inner_->GetBuffer(buffer, riid, surface);
-    std::lock_guard<std::mutex> lock(mu_);
+    std::lock_guard<std::recursive_mutex> lock(mu_);
     if (callback_) {
         IFgPresentCallback* cb = callback_;
         HRESULT hr = S_OK;
@@ -469,7 +491,7 @@ HRESULT STDMETHODCALLTYPE FgSwapChain::GetBuffer(UINT buffer, REFIID riid, void*
 
 UINT STDMETHODCALLTYPE FgSwapChain::GetCurrentBackBufferIndex() {
     if (t_callback_depth > 0) return inner_->GetCurrentBackBufferIndex();
-    std::lock_guard<std::mutex> lock(mu_);
+    std::lock_guard<std::recursive_mutex> lock(mu_);
     if (callback_) {
         IFgPresentCallback* cb = callback_;
         UINT index = 0;
@@ -483,7 +505,7 @@ UINT STDMETHODCALLTYPE FgSwapChain::GetCurrentBackBufferIndex() {
 
 HANDLE STDMETHODCALLTYPE FgSwapChain::GetFrameLatencyWaitableObject() {
     if (t_callback_depth > 0) return inner_->GetFrameLatencyWaitableObject();
-    std::lock_guard<std::mutex> lock(mu_);
+    std::lock_guard<std::recursive_mutex> lock(mu_);
     if (callback_) {
         IFgPresentCallback* cb = callback_;
         HANDLE h = nullptr;
@@ -564,7 +586,9 @@ HRESULT STDMETHODCALLTYPE FgSwapChain::SetHDRMetaData(DXGI_HDR_METADATA_TYPE typ
 namespace {
 std::mutex g_hook_mu;
 std::atomic<FgCreateForHwndFn> g_orig_create{nullptr};  // kept after Uninstall: a late call still forwards
+std::atomic<FgCreateSwapChainFn> g_orig_create_sc{nullptr};
 void** g_create_slot = nullptr;
+void** g_create_sc_slot = nullptr;
 std::atomic<IFgSwapChainSink*> g_sink{nullptr};
 std::atomic<FgLogFn> g_hook_log{nullptr};
 std::atomic<void*> g_hook_log_ctx{nullptr};
@@ -596,11 +620,31 @@ bool FgSwapChainHook::Install(IDXGIFactory2* factory, IFgSwapChainSink* sink, Fg
     g_hook_log_ctx.store(log_ctx);
     g_sink.store(sink);
     g_orig_create.store(reinterpret_cast<FgCreateForHwndFn>(original));
-    if (!PatchPointer(slot, reinterpret_cast<void*>(&FgSwapChainHook::CreateForHwnd))) {
+    void* prev = nullptr;
+    if (!PatchPointerExchange(slot, reinterpret_cast<void*>(&FgSwapChainHook::CreateForHwnd), &prev)) {
         HookLog("fg swap chain: the factory's method table could not be written; no creation hook");
+        g_sink.store(nullptr);
+        g_orig_create.store(nullptr);
+        g_hook_log.store(nullptr);
+        g_hook_log_ctx.store(nullptr);
         return false;
     }
+    if (prev && prev != reinterpret_cast<void*>(&FgSwapChainHook::CreateForHwnd))
+        g_orig_create.store(reinterpret_cast<FgCreateForHwndFn>(prev));
     g_create_slot = slot;
+    void** sc_slot = &table[kCreateSwapChainSlot];
+    void* sc_orig = *sc_slot;
+    if (sc_orig && sc_orig != reinterpret_cast<void*>(&FgSwapChainHook::CreateSwapChain)) {
+        g_orig_create_sc.store(reinterpret_cast<FgCreateSwapChainFn>(sc_orig));
+        void* sc_prev = nullptr;
+        if (PatchPointerExchange(sc_slot, reinterpret_cast<void*>(&FgSwapChainHook::CreateSwapChain), &sc_prev)) {
+            if (sc_prev && sc_prev != reinterpret_cast<void*>(&FgSwapChainHook::CreateSwapChain))
+                g_orig_create_sc.store(reinterpret_cast<FgCreateSwapChainFn>(sc_prev));
+            g_create_sc_slot = sc_slot;
+        } else {
+            g_orig_create_sc.store(nullptr);
+        }
+    }
     g_wrapped.store(0);
     HookLog("fg swap chain: creation hook installed");
     return true;
@@ -609,9 +653,14 @@ bool FgSwapChainHook::Install(IDXGIFactory2* factory, IFgSwapChainSink* sink, Fg
 void FgSwapChainHook::Uninstall() {
     std::lock_guard<std::mutex> lock(g_hook_mu);
     if (!g_create_slot) return;
-    if (*g_create_slot == reinterpret_cast<void*>(&FgSwapChainHook::CreateForHwnd))
-        PatchPointer(g_create_slot, reinterpret_cast<void*>(g_orig_create.load()));
+    PatchPointerCompareExchange(g_create_slot, reinterpret_cast<void*>(g_orig_create.load()),
+                                reinterpret_cast<void*>(&FgSwapChainHook::CreateForHwnd));
+    if (g_create_sc_slot) {
+        PatchPointerCompareExchange(g_create_sc_slot, reinterpret_cast<void*>(g_orig_create_sc.load()),
+                                    reinterpret_cast<void*>(&FgSwapChainHook::CreateSwapChain));
+    }
     g_create_slot = nullptr;
+    g_create_sc_slot = nullptr;
     g_sink.store(nullptr);
     HookLog("fg swap chain: creation hook removed");
 }
@@ -622,6 +671,87 @@ bool FgSwapChainHook::Installed() {
 }
 
 uint64_t FgSwapChainHook::Wrapped() { return g_wrapped.load(); }
+
+HRESULT STDMETHODCALLTYPE FgSwapChainHook::CreateSwapChain(IDXGIFactory* self, IUnknown* device,
+                                                           DXGI_SWAP_CHAIN_DESC* desc, IDXGISwapChain** out) {
+    const FgCreateSwapChainFn orig = g_orig_create_sc.load();
+    if (!orig) return DXGI_ERROR_INVALID_CALL;
+    if (t_creating > 0) return orig(self, device, desc, out);
+    HRESULT hr;
+    IFgSwapChainSink* sink = g_sink.load();
+    UINT extra = 0;
+    IUnknown* present_queue = nullptr;
+    DXGI_SWAP_CHAIN_DESC1 d1 = {};
+    HWND hwnd = nullptr;
+    if (desc) {
+        d1.Width = desc->BufferDesc.Width;
+        d1.Height = desc->BufferDesc.Height;
+        d1.Format = desc->BufferDesc.Format;
+        d1.SampleDesc = desc->SampleDesc;
+        d1.BufferUsage = desc->BufferUsage;
+        d1.BufferCount = desc->BufferCount;
+        d1.SwapEffect = desc->SwapEffect;
+        d1.Flags = desc->Flags;
+        hwnd = desc->OutputWindow;
+    }
+    if (sink && desc) {
+        try {
+            extra = sink->ExtraCreateFlags(hwnd, d1) & ~desc->Flags;
+        } catch (...) {
+            extra = 0;
+        }
+        try {
+            present_queue = sink->CreationQueue(hwnd, d1, device);
+        } catch (...) {
+            present_queue = nullptr;
+        }
+        if (present_queue == device) present_queue = nullptr;
+    }
+    {
+        CreatingScope creating;
+        IUnknown* const on = present_queue ? present_queue : device;
+        if (extra && desc) {
+            DXGI_SWAP_CHAIN_DESC d = *desc;
+            d.Flags |= extra;
+            hr = orig(self, on, &d, out);
+            if (FAILED(hr)) {
+                HookLog("fg swap chain: creation with the presenter's flags failed; created as the game asked");
+                extra = 0;
+                present_queue = nullptr;
+                hr = orig(self, device, desc, out);
+            }
+        } else {
+            hr = orig(self, on, desc, out);
+            if (FAILED(hr) && present_queue) {
+                HookLog("fg swap chain: creation on the present queue failed; created on the game's queue");
+                present_queue = nullptr;
+                hr = orig(self, device, desc, out);
+            }
+        }
+    }
+    if (FAILED(hr) || !out || !*out) return hr;
+    IDXGISwapChain* raw = *out;
+    IDXGISwapChain1* sc1 = nullptr;
+    if (FAILED(raw->QueryInterface(__uuidof(IDXGISwapChain1), reinterpret_cast<void**>(&sc1))) || !sc1) return hr;
+    FgSwapChain* w = nullptr;
+    if (FAILED(FgSwapChain::Create(sc1, device, g_hook_log.load(), g_hook_log_ctx.load(), &w)) || !w) {
+        sc1->Release();
+        return hr;  // not an IDXGISwapChain4: the game keeps the real chain
+    }
+    raw->Release();  // FgSwapChain took over sc1; release the caller's original IDXGISwapChain reference
+    w->SetExtraFlags(extra);
+    if (present_queue) w->SetPresentQueue(present_queue);
+    *out = static_cast<IDXGISwapChain*>(w);
+    g_wrapped.fetch_add(1);
+    if (sink) {
+        try {
+            sink->Created(w, hwnd, desc ? &d1 : nullptr);
+        } catch (...) {
+            HookLog("fg swap chain: the creation sink failed; the chain stays a pass-through");
+        }
+    }
+    return hr;
+}
 
 HRESULT STDMETHODCALLTYPE FgSwapChainHook::CreateForHwnd(IDXGIFactory2* self, IUnknown* device, HWND hwnd,
                                                          const DXGI_SWAP_CHAIN_DESC1* desc,

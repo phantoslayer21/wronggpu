@@ -1745,6 +1745,7 @@ string JobText(const OpRequest& r, const wstring& localAppData, const wstring& l
          "\r\nforce=" + (r.force ? "1" : "0") + "\r\nnoscan=" + (r.noScan ? "1" : "0") + "\r\n";
     if (r.hasProfile)
         for (size_t i = 0; i < kSettingCount; ++i) t += string("profile.") + kSettings[i].key + "=" + r.profile.get(kSettings[i].key) + "\r\n";
+    if (r.modelChosen) t += "modelchosen=1\r\n";
     for (auto& e : r.optiEdits) t += "optikey." + e.first + "=" + e.second + "\r\n";
     if (r.movePlugins) t += "moveplugins=1\r\n";
     // the files the player agreed to move, each with the SHA-256 it had then: "<path>|<sha256>"
@@ -1794,6 +1795,7 @@ bool ParseJob(const string& text, OpRequest& r, wstring& localAppData, wstring& 
         else if (k == "optionly") r.optiOnly = Truthy(kv.second);
         else if (k == "rrconfigonly") r.rrConfigOnly = Truthy(kv.second);
         else if (k == "rrconfigset") r.rrConfigSet = kv.second;
+        else if (k == "modelchosen") r.modelChosen = Truthy(kv.second);
         else if (k.rfind("optikey.", 0) == 0) r.optiEdits.push_back({k.substr(8), kv.second});
         else if (k.rfind("profile.", 0) == 0) {
             if (!r.hasProfile) { r.profile = DefaultProfile(); r.hasProfile = true; }
