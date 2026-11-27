@@ -46,7 +46,7 @@ struct BindingData {
     uint32_t tag_lifetime_mask;
     uint32_t min_size;
     uint32_t dynamic_supported;
-    uint32_t qualified;
+    uint32_t qualified, game_has_multiplier;
 };
 
 #define WG_FG_TB_DATA(P)                                                                                               \
@@ -71,7 +71,7 @@ struct BindingData {
             {WG_FG_TB_##P##_DECL_HUDLESS, WG_FG_TB_##P##_DECL_UI_ALPHA, WG_FG_TB_##P##_DECL_DISTORTION,                \
              WG_FG_TB_##P##_DECL_NO_WARP},                                                                             \
             WG_FG_TB_##P##_TAG_LIFETIME_MASK, WG_FG_TB_##P##_MIN_SIZE, WG_FG_TB_##P##_DYNAMIC_SUPPORTED,               \
-            WG_FG_TB_##P##_QUALIFIED                                                                                   \
+            WG_FG_TB_##P##_QUALIFIED, WG_FG_TB_##P##_GAME_HAS_MULTIPLIER                                     \
     }
 
 FgTitleBinding Build(const BindingData& d) {
@@ -79,6 +79,7 @@ FgTitleBinding Build(const BindingData& d) {
     b.id = d.id;
     b.title = d.title;
     b.exe_leaf = d.exe_leaf;
+    b.game_has_multiplier = d.game_has_multiplier != 0;
     b.fg_feature = d.fg_feature;
 
     FgImportBinding& im = b.imports;

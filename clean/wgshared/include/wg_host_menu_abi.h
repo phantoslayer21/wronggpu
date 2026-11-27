@@ -21,7 +21,7 @@ typedef void (*WgHostDrawFn)(void* user);
 
 struct WgHostMenuApi {
   uint32_t size;     // bytes of the host's table
-  uint32_t version;  // 1
+  uint32_t version;  // host ABI version
   // registration
   bool (*register_tab)(WgHostMenuPlugin* plugin, const char* name, const char* description, WgHostDrawFn draw, void* user);
   // layout (inside a draw callback)
@@ -85,6 +85,10 @@ struct WgHostMenuApi {
   // its extended restore also the root arguments, descriptor heaps and pipeline state) as the game last bound them.
   void (*begin_cmd_list_work)(WgHostMenuPlugin* plugin, void* command_list);
   void (*end_cmd_list_work)(WgHostMenuPlugin* plugin, void* command_list);
+  // Version 6: process-lifetime FG ownership and output FPS. A null name stops reporting activity.
+  bool (*report_frame_generation)(WgHostMenuPlugin* plugin, const char* name, const char* state, const char* text,
+                                  const char* input, float displayed_fps, float base_fps, bool generating);
+  bool (*register_frame_gen_section)(WgHostMenuPlugin* plugin, WgHostDrawFn draw, void* user);
 };
 
 struct WgHostSlRoute {
@@ -125,5 +129,9 @@ static_assert(sizeof(WgHostNgxRr) == 5 * sizeof(void*) && offsetof(WgHostNgxRr, 
 // The export the host looks for; return false to add nothing.
 typedef bool (*WgHostMenuInitFn)(const WgHostMenuApi* api, WgHostMenuPlugin* plugin);
 #define WG_HOST_MENU_INIT_EXPORT "OptiPluginInit"
+
+// Version 6 optionally calls this export before InitializeASI; no hooks may be installed until the claim succeeds.
+typedef void (*WgHostPrepareAsiFn)(void);
+#define WG_HOST_MENU_PREPARE_ASI_EXPORT "OptiPluginPrepareASI"
 
 }  // extern "C"

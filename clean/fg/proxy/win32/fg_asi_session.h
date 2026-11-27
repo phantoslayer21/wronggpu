@@ -134,6 +134,10 @@ struct FgAsiLiveStatus {
     uint32_t presenter = 0;   // wgfg::FgPresenterChoice of the session's presenter (0: none yet)
     uint64_t presents = 0;    // game presents the host saw
     bool host_overlay = false;
+    uint32_t scheduled_count = 0;   // generated images in the display schedule
+    uint32_t schedule_reason = 0;   // wgfg::FgRealOnlyReason when the schedule contains only the real frame
+    float displayed_fps = 0.0f;     // total reported by the presenter, 0 until sampled
+    float base_fps = 0.0f;          // real images from the same sample
 };
 
 class FgAsiSessionHost final : public IFgPresentCallback {

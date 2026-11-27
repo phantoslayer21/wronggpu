@@ -14,6 +14,7 @@
  "factory_import": "CreateDXGIFactory2",
  "abi_max_generated": 5,
  "ui_max_generated": 5,
+ "game_has_multiplier": true,
  "presets": ["A", "B", "C"],
  "options": {
   "guid": "fac5f1cb-2dfd-4f36-a1e6-3a9e865256c5",

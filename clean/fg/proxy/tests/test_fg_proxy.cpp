@@ -360,11 +360,11 @@ int DriveFeature(Rig& rig, uint32_t feature) {
 
 void TestSettingsDefaultsAndParse() {
     FgSettings d;
-    CHECK(!d.enabled && d.preset == 0 && d.multiplier == 2 && d.presenter == FgPresenterChoice::Auto);
+    CHECK(!d.enabled && d.preset == 0 && d.multiplier == kFgAutoMultiplier && d.presenter == FgPresenterChoice::Auto);
     CHECK(FgSettingsValid(d));
     std::vector<FgSettingsIssue> issues;
     FgSettings e = FgSettingsFromKeyValues({}, &issues);
-    CHECK(!e.enabled && e.preset == 0 && e.multiplier == 2 && e.presenter == FgPresenterChoice::Auto && issues.empty());
+    CHECK(!e.enabled && e.preset == 0 && e.multiplier == kFgAutoMultiplier && e.presenter == FgPresenterChoice::Auto && issues.empty());
 
     FgSettings s = FgSettingsFromKeyValues(
         {{"rr_mode", "quality"}, {"fg", "on"}, {"fg_preset", "C"}, {"fg_multiplier", "6"}, {"fg_presenter", "hwfq"}},
@@ -392,7 +392,7 @@ void TestSettingsDefaultsAndParse() {
     for (const char* v : bad_mult) {
         issues.clear();
         s = FgSettingsFromKeyValues({{"fg_multiplier", v}}, &issues);
-        CHECK(s.multiplier == 2 && issues.size() == 1);
+        CHECK(s.multiplier == kFgAutoMultiplier && issues.size() == 1);
     }
     const char* bad_presenter[] = {"Auto", "HWFQ", "vsync", "tearing", "dxgi", "dxgi-vsync", ""};
     for (const char* v : bad_presenter) {
@@ -421,7 +421,7 @@ void TestSettingsRoundTrip() {
     int combos = 0;
     for (int en = 0; en < 2; ++en)
         for (uint32_t p = 0; p < 3; ++p)
-            for (uint32_t m = 2; m <= 6; ++m)
+            for (uint32_t m : {kFgAutoMultiplier, 2u, 3u, 4u, 5u, 6u})
                 for (uint32_t pr = 0; pr < 4; ++pr) {
                     FgSettings s;
                     s.enabled = en != 0;
@@ -436,7 +436,7 @@ void TestSettingsRoundTrip() {
                           back.presenter == s.presenter);
                     ++combos;
                 }
-    CHECK(combos == 120);
+    CHECK(combos == 144);
 
     // apply: FG keys replaced in place or appended; every other entry stays where it is with its value
     FgKeyValues kv = {{"rr_mode", "balanced"}, {"fg_preset", "B"}, {"model", "m"}, {"rr_enabled", "1"}};
@@ -1338,6 +1338,67 @@ void TestRuntimeContractBridge() {
 
 }  // namespace
 
+void TestPanelMultiplierPolicy() {
+    for (bool qualified : {false, true}) {
+        FgProxyConfig cfg = QualifiedConfig();
+        cfg.panel_multipliers = true;
+        cfg.game_has_multiplier = qualified;
+        cfg.settings.multiplier = 4;
+        Rig rig(cfg);
+        CHECK(rig.proxy.claim_present(kChain, WG_FG_OWNER_NATIVE_ADAPTER) == WG_FG_REASON_NONE);
+
+        auto o = Options(WG_FG_COUNT_NOT_SET);
+        CHECK(rig.proxy.set_options(kFeatFg, 1, &o, nullptr) == WG_OK);
+        rig.feed(1);
+        CHECK(rig.present(1).effective_count == (qualified ? 1u : 3u));
+        CHECK(rig.proxy.game_requested_count() == 0);
+
+        o.generated_count = 1;
+        CHECK(rig.proxy.set_options(kFeatFg, 1, &o, nullptr) == WG_OK);
+        rig.feed(2);
+        CHECK(rig.present(2).effective_count == 1 && rig.proxy.game_requested_count() == 1);
+        CHECK((rig.exec.last.flags & WG_FG_FLAG_RESET) == 0);
+
+        // Both title kinds honour valid requests above the manual setting, without priming history again.
+        o.generated_count = 4;
+        CHECK(rig.proxy.update_live_settings(0, 2));
+        CHECK(rig.proxy.set_options(kFeatFg, 1, &o, nullptr) == WG_OK);
+        rig.feed(3);
+        CHECK(rig.present(3).effective_count == 4 && rig.proxy.game_requested_count() == 4);
+        CHECK((rig.exec.last.flags & WG_FG_FLAG_RESET) == 0);
+
+        CHECK(rig.proxy.update_live_settings(1, 2));
+        rig.feed(4);
+        CHECK(rig.present(4).effective_preset == 1 && rig.exec.last.generated_count == 4);
+        CHECK((rig.exec.last.flags & WG_FG_FLAG_RESET) != 0);
+        rig.feed(5);
+        CHECK(rig.present(5).effective_count == 4);
+        CHECK((rig.exec.last.flags & WG_FG_FLAG_RESET) == 0);
+
+        rig.proxy.enable_generation(false);
+        rig.feed(6);
+        CHECK(rig.present(6).real_only == WG_FG_REAL_ONLY_DISABLED);
+        rig.proxy.enable_generation(true);
+        rig.feed(7);
+        CHECK(rig.present(7).effective_count == 4);
+
+        CHECK(rig.proxy.update_live_settings(1, kFgAutoMultiplier));
+        o.generated_count = WG_FG_COUNT_NOT_SET;
+        CHECK(rig.proxy.set_options(kFeatFg, 1, &o, nullptr) == WG_OK);
+        rig.feed(8);
+        CHECK(rig.present(8).effective_count == 1);
+    }
+
+    FgProxyConfig cfg = QualifiedConfig();
+    cfg.panel_multipliers = true;
+    cfg.binding.ui_max_generated = 3;
+    Rig capped(cfg);
+    auto o = Options(5);
+    CHECK(capped.proxy.options_max_generated() == 5 && capped.proxy.advertised_max_generated() == 3);
+    CHECK(capped.proxy.set_options(kFeatFg, 1, &o, nullptr) == WG_OK);
+    CHECK(capped.proxy.game_requested_count() == 5 && capped.proxy.state().effective_count == 3);
+}
+
 int main() {
     TestSettingsDefaultsAndParse();
     TestSettingsRoundTrip();
@@ -1352,6 +1413,7 @@ int main() {
     TestAssemblyFailures();
     TestEntries();
     TestLiveSettings();
+    TestPanelMultiplierPolicy();
 #if defined(WG_FG_HAVE_RUNTIME_CONTRACT)
     TestRuntimeContractBridge();
     std::printf("runtime contract bridge: checked\n");

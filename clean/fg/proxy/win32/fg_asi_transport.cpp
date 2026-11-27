@@ -658,7 +658,7 @@ WgResultCode H_FgOptions(const WgViewport* v, const void* native) {
     try {
         if (r->core->owns_feature(r->fg_feature)) {
             // the interface's own checks, in its order, before anything is decoded (FG is ours: one owner)
-            const WgResultCode chk = r->codec->check_options(v, native, r->core->advertised_max_generated());
+            const WgResultCode chk = r->codec->check_options(v, native, r->core->options_max_generated());
             if (chk != WG_OK) {
                 g_ctr.fg_answered.fetch_add(1);
                 NoteCall(*r, "set-options", Joined(r->codec->describe_options(native),

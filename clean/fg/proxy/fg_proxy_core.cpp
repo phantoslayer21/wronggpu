@@ -268,7 +268,7 @@ void FgProxy::set_executor(const WgFgExecutorV1* executor) {
 bool FgProxy::update_live_settings(uint32_t preset, uint32_t multiplier) {
     // cfg_.binding is fixed after construction: read without the lock (this call never takes it)
     if (preset >= WG_FG_PRESET_COUNT || !(cfg_.binding.presets_mask & (1u << preset)) ||
-        FgGeneratedCountOf(multiplier) == 0)
+        (multiplier != kFgAutoMultiplier && FgGeneratedCountOf(multiplier) == 0))
         return false;
     uint64_t cur = live_.load(std::memory_order_relaxed);
     for (;;) {
@@ -278,8 +278,17 @@ bool FgProxy::update_live_settings(uint32_t preset, uint32_t multiplier) {
     }
 }
 
-// The live settings a menu handed over, taken on the game's thread (core lock held): the player's preset and cap, and
-// the effective preset / count of the accepted options re-derived by the same rules as set_options.
+bool FgProxy::use_game_count(uint32_t game_count) const {
+    return cfg_.panel_multipliers &&
+           (cfg_.game_has_multiplier || (game_count >= 1 && game_count <= WG_FG_MAX_GENERATED));
+}
+
+uint32_t FgProxy::count_for_options_locked(uint32_t game_count) const {
+    if (game_count != WG_FG_COUNT_NOT_SET) return game_count;
+    return use_game_count(game_count) ? 1u : manual_count_locked();
+}
+
+// A menu change takes effect on the game thread. Recompute the same count used by set_options.
 void FgProxy::apply_live_locked() {
     const uint64_t v = live_.load(std::memory_order_acquire);
     const uint32_t seq = static_cast<uint32_t>(v >> 32);
@@ -298,17 +307,17 @@ void FgProxy::apply_live_locked() {
             effective_preset_ = preset;
         }
         if (options_.enable) {
-            const uint32_t cap = effective_max_locked();
-            const uint32_t requested =
-                options_.generated_count == WG_FG_COUNT_NOT_SET ? FgGeneratedCountOf(multiplier) : options_.generated_count;
+            const uint32_t game_count = options_.generated_count;
+            const uint32_t cap = use_game_count(game_count) ? advertised_max_generated() : effective_max_locked();
+            const uint32_t requested = count_for_options_locked(game_count);
             effective_count_ = requested > cap ? cap : requested;
             game += "; generating " + std::to_string(effective_count_) + " per game frame (the game asks for " +
                     std::to_string(requested) + ")";
         }
     }
+    const std::string multiplier_text = multiplier == kFgAutoMultiplier ? "auto" : std::to_string(multiplier) + "x";
     log_locked(std::string("fg: live settings: preset ") + FgPresetSpelling(preset) + ", multiplier " +
-               std::to_string(multiplier) + "x (player cap " + std::to_string(FgGeneratedCountOf(multiplier)) +
-               "), from this frame" + game);
+               multiplier_text + " (player cap " + std::to_string(manual_count_locked()) + "), from this frame" + game);
 }
 
 void FgProxy::set_feature_function(const std::string& name, void* fn) {
@@ -348,10 +357,18 @@ uint32_t FgProxy::advertised_max_generated() const {
     return Min3(WG_FG_MAX_GENERATED, entry_max_, cfg_.binding.ui_max_generated);
 }
 
+uint32_t FgProxy::options_max_generated() const {
+    return cfg_.panel_multipliers ? WG_FG_MAX_GENERATED : advertised_max_generated();
+}
+
+uint32_t FgProxy::manual_count_locked() const {
+    return std::max(1u, FgGeneratedCountOf(cfg_.settings.multiplier));
+}
+
 uint32_t FgProxy::effective_max_locked() const {
     if (route_reason_locked() != WG_FG_REASON_NONE) return 0;
     return Min3(Min3(WG_FG_MAX_GENERATED, entry_max_, cfg_.binding.ui_max_generated),
-                FgGeneratedCountOf(cfg_.settings.multiplier), WG_FG_MAX_GENERATED);
+                manual_count_locked(), WG_FG_MAX_GENERATED);
 }
 
 WgFgCapability FgProxy::capability() const {
@@ -378,7 +395,7 @@ void FgProxy::note_route_locked(bool defer_unprobed_adapter) {
     if (r == WG_FG_REASON_NONE)
         log_locked("fg: frame generation taken (max generated " +
                    std::to_string(Min3(WG_FG_MAX_GENERATED, entry_max_, cfg_.binding.ui_max_generated)) +
-                   ", player cap " + std::to_string(FgGeneratedCountOf(cfg_.settings.multiplier)) + ")");
+                   ", player cap " + std::to_string(manual_count_locked()) + ")");
     else
         log_locked(std::string("fg: frame generation not taken: ") + ReasonName(r) + "; every call forwards");
 }
@@ -449,10 +466,10 @@ int32_t FgProxy::set_options(uint32_t feature, uint32_t viewport_id, const WgFgO
     }
     for (uint32_t i = 0; r == WG_FG_REASON_NONE && i < WG_FG_OPTIONAL_COUNT; ++i)
         if (decoded->optional_decl[i] > WG_FG_DECL_ALWAYS) r = WG_FG_REASON_BAD_OPTIONAL_DECL;
+    const uint32_t game_count = r == WG_FG_REASON_NONE ? decoded->generated_count : WG_FG_COUNT_NOT_SET;
     if (r == WG_FG_REASON_NONE && decoded->enable) {
-        const uint32_t cap = effective_max_locked();
-        requested = decoded->generated_count == WG_FG_COUNT_NOT_SET ? FgGeneratedCountOf(cfg_.settings.multiplier)
-                                                                    : decoded->generated_count;
+        const uint32_t cap = use_game_count(game_count) ? advertised_max_generated() : effective_max_locked();
+        requested = count_for_options_locked(game_count);
         count = requested > cap ? cap : requested;
         if (count == 0) r = WG_FG_REASON_BAD_GENERATED_COUNT;
     }
@@ -467,6 +484,8 @@ int32_t FgProxy::set_options(uint32_t feature, uint32_t viewport_id, const WgFgO
     if (count != requested && requested != last_clamped_)
         log_locked("fg: requested generated count " + std::to_string(requested) + " clamped to " + std::to_string(count));
     last_clamped_ = count != requested ? requested : 0;
+    if (cfg_.panel_multipliers && (decoded->enable || cfg_.game_has_multiplier))
+        game_requested_count_.store(game_count >= 1 && game_count <= WG_FG_MAX_GENERATED ? game_count : 0);
     options_ = *decoded;
     has_options_ = true;
     session_vp_ = viewport_id;
@@ -494,7 +513,7 @@ WgFgState FgProxy::state() const {
     s.struct_size = sizeof(s);
     s.abi_version = WG_FG_ADAPTER_ABI_VERSION;
     s.taken = route_reason_locked() == WG_FG_REASON_NONE ? 1u : 0u;
-    s.enabled = has_options_ && options_.enable ? 1u : 0u;
+    s.enabled = has_options_ && options_.enable && menu_enabled_.load() ? 1u : 0u;
     s.effective_preset = effective_preset_;
     s.effective_count = s.enabled ? effective_count_ : 0u;
     s.max_generated = s.taken ? Min3(WG_FG_MAX_GENERATED, entry_max_, cfg_.binding.ui_max_generated) : 0u;
@@ -768,15 +787,21 @@ int32_t FgProxy::present(const WgFgPresentDesc* desc, WgFgPresentResult* out) {
         queue_epoch_ = desc->queue_epoch;
         swapchain_epoch_ = desc->swapchain_epoch;
     }
-    if (reason == WG_FG_REASON_NONE && (!has_options_ || !options_.enable || effective_count_ == 0))
+    if (reason == WG_FG_REASON_NONE &&
+        (!menu_enabled_.load() || !has_options_ || !options_.enable || effective_count_ == 0))
         real_only = WG_FG_REAL_ONLY_DISABLED;
     if (reason == WG_FG_REASON_NONE && real_only == WG_FG_REAL_ONLY_NONE)
         reason = assemble_locked(*desc, &packet, &real_only);
     if (reason == WG_FG_REASON_NONE && real_only == WG_FG_REAL_ONLY_NONE) {
+        // A/B/C change the blend graph or UI inputs. Prime those inputs at the next interval.
+        if (cfg_.panel_multipliers && submitted_preset_ != WG_FG_PRESET_NOT_SET && submitted_preset_ != packet.preset)
+            packet.flags |= WG_FG_FLAG_RESET;
         WgFgSessionDesc session = {};
         if (!has_executor_) reason = WG_FG_REASON_NO_EXECUTOR;
         else if (!session_desc(&session) || executor_.submit(executor_.self, &packet, &session) != 0)
             reason = WG_FG_REASON_EXECUTOR_REFUSED;
+        else
+            submitted_preset_ = packet.preset;
     }
     prune_locked(desc->frame_token);
     note_frame_locked(reason, real_only);
@@ -818,7 +843,7 @@ bool FgProxy::session_desc(WgFgSessionDesc* out) const {
     s.render_max_height = options_.render_max_height;
     s.dynamic_resolution = options_.dynamic_resolution;
     s.preset = effective_preset_;
-    s.max_generated = effective_max_locked();
+    s.max_generated = cfg_.panel_multipliers ? advertised_max_generated() : effective_max_locked();
     for (uint32_t i = 0; i < WG_FG_OPTIONAL_COUNT; ++i) s.optional_decl[i] = options_.optional_decl[i];
     s.hdr = (options_.color_space != WG_FG_CS_SDR || swapchain_cs_ != WG_FG_CS_SDR) ? 1u : 0u;
     s.presenter_mode = static_cast<uint32_t>(cfg_.settings.presenter);

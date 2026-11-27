@@ -550,7 +550,10 @@ void RunHost(Gpu& gpu, const std::string& dxil, uint32_t preset) {
 namespace fakehost {
 WgHostDrawFn g_draw = nullptr;
 std::string g_title;
-int g_cards = 0, g_tabs = 0;
+int g_cards = 0, g_tabs = 0, g_sections = 0;
+std::string g_report_state;
+float g_report_rate = 0, g_report_base = 0;
+bool g_report_generating = false;
 std::vector<std::string> g_seen;
 int32_t g_force = -1;
 std::string g_force_label;
@@ -565,6 +568,23 @@ bool RegisterTab(WgHostMenuPlugin*, const char* name, const char*, WgHostDrawFn 
     g_title = name;
     g_draw = draw;
     return true;
+}
+bool RegisterFrameGenSection(WgHostMenuPlugin*, WgHostDrawFn draw, void*) {
+    ++g_sections;
+    g_draw = draw;
+    return true;
+}
+bool ReportFrameGeneration(WgHostMenuPlugin*, const char*, const char* state, const char*, const char*,
+                           float rate, float base, bool generating) {
+    g_report_state = state ? state : "";
+    g_report_rate = rate;
+    g_report_base = base;
+    g_report_generating = generating;
+    return true;
+}
+bool Checkbox(const char* label, bool*) {
+    g_seen.push_back(std::string("checkbox:") + label);
+    return false;
 }
 void Section(const char* t) { g_seen.push_back(std::string("section:") + t); }
 void Text(const char* t) { g_seen.push_back(t); }
@@ -732,6 +752,58 @@ void TestPanel(const std::string& scratch) {
     fakehost::g_seen.clear();
     fakehost::g_draw(nullptr);
     CHECK(fakehost::Seen("section:WrongGPU Frame Generation"));
+
+    static WgHostMenuApi v6 = fakehost::Api(true);
+    v6.version = 6;
+    v6.checkbox = &fakehost::Checkbox;
+    v6.report_frame_generation = &fakehost::ReportFrameGeneration;
+    v6.register_frame_gen_section = &fakehost::RegisterFrameGenSection;
+    CHECK(panel::Init(&v6, nullptr, hooks, start));
+    CHECK(fakehost::g_sections == 1 && fakehost::g_cards == 1 && fakehost::g_tabs == 1);
+    CHECK(panel::ClaimOutput(&v6, nullptr));
+    CHECK(fakehost::g_report_state == "Waiting");
+    g_panel_status.game_has_multiplier = true;
+    g_panel_status.game_requested_count = 2;
+    g_panel_status.live.count = 2;
+    g_panel_status.live.scheduled_count = 2;
+    g_panel_status.live.displayed_fps = 120.0f;
+    g_panel_status.live.base_fps = 41.0f;
+    g_panel_status.live.presenter = static_cast<uint32_t>(wgfg::FgPresenterChoice::WindowsCompositionHwfq);
+    fakehost::g_seen.clear();
+    fakehost::g_draw(nullptr);
+    CHECK(fakehost::Seen("Generating 3x (game), preset A, HWFQ"));
+    CHECK(fakehost::Seen("Multiplier: 3x") && fakehost::Seen("set in the game's graphics menu"));
+    CHECK(!fakehost::Seen("combo:Multiplier") && fakehost::Seen("combo:Presenter"));
+    panel::Publish(g_panel_status, true);
+    CHECK(fakehost::g_report_state == "3x" && fakehost::g_report_rate == 120.0f);
+    CHECK(fakehost::g_report_base == 41.0f && fakehost::g_report_generating);
+
+    g_panel_status.live.scheduled_count = 1;
+    fakehost::g_seen.clear();
+    fakehost::g_draw(nullptr);
+    CHECK(fakehost::Seen("Scheduled: 2x (display cap)"));
+    g_panel_status.live.scheduled_count = 0;
+    g_panel_status.live.schedule_reason = static_cast<uint32_t>(wgfg::FgRealOnlyReason::LatencyCap);
+    fakehost::g_seen.clear();
+    fakehost::g_draw(nullptr);
+    CHECK(fakehost::Seen("Real frames only:"));
+    panel::Publish(g_panel_status, true);
+    CHECK(fakehost::g_report_state == "Real only" && fakehost::g_report_rate == 0.0f);
+    CHECK(fakehost::g_report_base == 0.0f && !fakehost::g_report_generating);
+
+    g_panel_status.game_has_multiplier = false;
+    g_panel_status.game_requested_count = 1;
+    fakehost::g_seen.clear();
+    fakehost::g_draw(nullptr);
+    CHECK(fakehost::Seen("Game request: 2x") && !fakehost::Seen("graphics menu"));
+    g_panel_status.game_requested_count = 0;
+    fakehost::g_seen.clear();
+    fakehost::g_draw(nullptr);
+    CHECK(fakehost::Seen("combo:Multiplier"));
+    g_panel_status.enabled = false;
+    panel::Publish(g_panel_status, true);
+    CHECK(fakehost::g_report_state == "Off" && fakehost::g_report_rate == 0.0f && !fakehost::g_report_generating);
+    panel::ReleaseOutput();
 }
 
 void TestFacadeFormats(Gpu& gpu, const std::string& dxil) {

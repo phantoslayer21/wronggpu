@@ -69,6 +69,13 @@ function(wg_fg_generate_binding json_path out_header P)
     def(DYNAMIC_SUPPORTED 0)
   endif()
 
+  string(JSON mfg ERROR_VARIABLE mfgerr GET "${j}" game_has_multiplier)
+  if(NOT mfgerr AND mfg)
+    def(GAME_HAS_MULTIPLIER 1)
+  else()
+    def(GAME_HAS_MULTIPLIER 0)
+  endif()
+
   # the interface: file name, version gate, export name per role, shared GUIDs (the RR binding's)
   wg_fg_json_get(iface_rel "${j}" "interface_file" interface_file)
   file(READ "${dir}/${iface_rel}" ij)

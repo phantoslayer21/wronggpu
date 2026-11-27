@@ -199,6 +199,9 @@ struct FgAsiSessionHost::Impl {
     std::atomic<uint32_t> st_phase{kFgPhaseWaiting}, st_reason{0}, st_real_only{0}, st_preset{0}, st_count{0},
         st_presenter{0};
     std::atomic<uint64_t> st_presents{0};
+    std::atomic<uint32_t> st_scheduled{0}, st_schedule_reason{0};
+    std::atomic<float> st_displayed_fps{0.0f}, st_base_fps{0.0f};
+    uint64_t display_sample_at = 0, display_sample_frames = 0, display_sample_real = 0;
     bool overlay_choice_logged = false;
     HANDLE wait_timer = nullptr;      // back-pressure waits (high resolution)
     uint64_t back_pressure_waits = 0; // game frames that waited for a presenter slot
@@ -617,6 +620,11 @@ struct FgAsiSessionHost::Impl {
         window_frames = 0;
         window_have = false;
         quiet_windows = 0;
+        display_sample_at = 0;
+        st_displayed_fps.store(0.0f);
+        st_base_fps.store(0.0f);
+        st_scheduled.store(0);
+        st_schedule_reason.store(0);
         ++stats.sessions_destroyed;
     }
 
@@ -868,6 +876,10 @@ FgAsiLiveStatus FgAsiSessionHost::LiveStatus() const {
     s.presenter = m.st_presenter.load();
     s.presents = m.st_presents.load();
     s.host_overlay = m.host_overlay.load();
+    s.scheduled_count = m.st_scheduled.load();
+    s.schedule_reason = m.st_schedule_reason.load();
+    s.displayed_fps = m.st_displayed_fps.load();
+    s.base_fps = m.st_base_fps.load();
     return s;
 }
 
@@ -1063,6 +1075,24 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
         m.WaitForPresenterRoom();
         wgfg::FgSessionResult sr;
         const int32_t rc = wgfg::FgSessionPresent(core, m.session.get(), desc, out, &sr);
+        const uint64_t now = GetTickCount64();
+        if (const auto* presenter = m.session ? m.session->Presenter() : nullptr;
+            presenter && now - m.display_sample_at >= 250) {
+            const auto shown = presenter->Stats();
+            const uint64_t frames = shown.displayed_real + shown.displayed_generated;
+            const auto rate = [&](uint64_t count, uint64_t last) {
+                return m.display_sample_at && count >= last
+                           ? static_cast<float>(1000.0 * (count - last) / (now - m.display_sample_at))
+                           : 0.0f;
+            };
+            m.st_displayed_fps.store(rate(frames, m.display_sample_frames));
+            m.st_base_fps.store(rate(shown.displayed_real, m.display_sample_real));
+            m.display_sample_frames = frames;
+            m.display_sample_real = shown.displayed_real;
+            m.display_sample_at = now;
+        }
+        m.st_scheduled.store(sr.scheduled);
+        m.st_schedule_reason.store(static_cast<uint32_t>(sr.plan_real_only));
         m.st_presents.fetch_add(1);
         if (out) {
             if (out->status == WG_FG_PRESENT_GENERATE) {

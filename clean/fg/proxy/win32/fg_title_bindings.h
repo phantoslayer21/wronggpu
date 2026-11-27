@@ -27,6 +27,7 @@ namespace win32 {
 struct FgTitleBinding {
     bool valid = false;        // every value parsed (GUIDs, sizes, numbers); a binding that is not valid is never used
     std::string id, title, exe_leaf;
+    bool game_has_multiplier = false;  // this title has a qualified in-game MFG selector
     uint32_t fg_feature = WG_FEAT_FRAME_GENERATION;
     FgImportBinding imports;   // interface file, version gate, export names, feature-function names, factory import
     FgBinding core;            // the core's binding: input buffer types, function names, UI range, presets
