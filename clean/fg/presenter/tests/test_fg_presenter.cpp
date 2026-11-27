@@ -1415,14 +1415,14 @@ void TestTearingSchedulerFitsPresenterThroughput() {
 
 void TestRc2SchedulerPacing() {
     g_case = "rc2 scheduler pacing";
-    {
+    for (const bool adaptive : {true, false}) {
         // At 30 fps on a 120 Hz grid, 4x and 2x fit exactly. A temporary cap at 3x skips the unsupported count.
         FgSchedulerConfig sc = DefaultScheduler();
         sc.fixed_refresh_period = 83333;
         sc.display.min_interval = sc.fixed_refresh_period;
         sc.display.margin = 0;
         sc.display.hysteresis = 0;
-        sc.adaptive_count = true;
+        sc.adaptive_count = adaptive;
         sc.first_image_budget = 40000;
         Rig r(sc, DefaultFake());
         FgTicks t = kSecond;

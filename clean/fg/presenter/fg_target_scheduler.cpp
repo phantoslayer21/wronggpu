@@ -313,7 +313,7 @@ std::uint32_t FgTargetScheduler::UpdateCount(std::uint32_t requested, FgTicks pe
             effective_ = adaptive ? Largest(effective_ - 1, period) : 0;
         }
     }
-    std::uint32_t up = adaptive ? (effective_ < requested ? effective_ + 1 : 0) : (effective_ == 0 ? requested : 0);
+    std::uint32_t up = effective_ < requested ? (adaptive ? effective_ + 1 : requested) : 0;
     if (up > 0) {
         // A fixed grid can support 2x and 4x with no legal 3x plan.
         if (adaptive && config_.fixed_refresh_period > 0) {
