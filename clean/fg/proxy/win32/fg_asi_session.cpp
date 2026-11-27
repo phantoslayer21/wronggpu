@@ -1340,11 +1340,12 @@ struct FgAsiSessionHost::Impl {
                               st_latency_limit.load());
 
         const uint64_t on_time = sched > missed ? sched - missed : 0;
-        const bool need_more_budget = missed * 50 > sched && (d_origins.Empty() || d_p95 + 2500 > budget);
+        const bool producer_miss_window = missed * 50 > sched;
+        const bool need_more_budget = producer_miss_window && (d_origins.Empty() || d_p95 + 2500 > budget);
         if (need_more_budget) budget_limits.RecordMiss(budget);
-        const wgfg::FgTicks b_cap = budget_limits.Cap(kBudgetBase, d_p95);
+        const wgfg::FgTicks b_cap = budget_limits.Cap(kBudgetBase, d_p95, producer_miss_window);
         wgfg::FgTicks next = budget;
-        if (missed * 50 > sched) {  // > 2% of scheduled generated images missed
+        if (producer_miss_window) {  // > 2% of scheduled generated images missed
             quiet_windows = 0;
             wgfg::FgTicks want = budget;
             if (need_more_budget && budget < b_cap) {
@@ -1400,7 +1401,7 @@ struct FgAsiSessionHost::Impl {
                     Log(line);
                 } else {
                     const wgfg::FgTicks excess_cap =
-                        budget > 225000 ? 55000 : (budget > 165000 ? 25000 : (budget > 135000 ? 17000 : 10000));
+                        FirstImageFastEaseStepCap(budget, consumed_admission, last_generating_count);
                     const wgfg::FgTicks step =
                         large_excess ? std::min<wgfg::FgTicks>(excess_cap, std::max(kBudgetEaseFast, (budget - floor_b) / 2))
                                      : (far_above_miss ? kBudgetEaseFast : kBudgetEaseProbe);

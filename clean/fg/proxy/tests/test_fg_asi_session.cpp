@@ -2470,6 +2470,20 @@ void TestBudgetCapNeedsReliableSamplesAndPreservesFloors() {
     CHECK(limits.miss_floor == 140000);
     CHECK(limits.Cap(40000, 120000) == 145000);
     CHECK(limits.Cap(40000, 158000) == 161000);
+
+    // adm2-default-x2 warm-up: a sampled 8.0 ms cap, 11.4 ms p95 and a 15.5 ms running budget.
+    FirstImageBudgetLimits warmup;
+    warmup.Observe(6, 15000, 1);
+    CHECK(warmup.Cap(40000, 114000) == 117000);
+    CHECK(std::min<int64_t>(155000, warmup.Cap(40000, 114000, true)) == 155000);
+}
+
+void TestHighCountPresentBudgetEasesInSmallSteps() {
+    g_case = "pacing-high-count-easing";
+    CHECK(FirstImageFastEaseStepCap(194000, false, 5) == 10000);
+    CHECK(FirstImageFastEaseStepCap(194000, true, 5) == 25000);
+    CHECK(FirstImageFastEaseStepCap(194000, false, 3) == 25000);
+    CHECK(FirstImageFastEaseStepCap(219000, false, 5) == 25000);
 }
 
 int main(int argc, char** argv) {
@@ -2494,6 +2508,7 @@ int main(int argc, char** argv) {
     TestReadyBudgetCapAfterSpeedup();
     TestFirstImageBudgetEasingFloor();
     TestBudgetCapNeedsReliableSamplesAndPreservesFloors();
+    TestHighCountPresentBudgetEasesInSmallSteps();
     std::printf("cpu: %d checks, %d failed\n", g_checks, g_failed);
     if (gpu) {
         g_case = "gpu-init";

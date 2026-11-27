@@ -66,9 +66,16 @@ struct FirstImageBudgetLimits {
     int64_t EasingFloor(int64_t minimum, int64_t readiness_p95) const {
         return std::min(kFirstImageBudgetMax, FirstImageBudgetFloor(minimum, readiness_p95, miss_floor));
     }
-    int64_t Cap(int64_t minimum, int64_t readiness_p95) const {
+    int64_t Cap(int64_t minimum, int64_t readiness_p95, bool producer_miss_window = false) const {
+        if (producer_miss_window) return kFirstImageBudgetMax;
         return std::max(sampled_cap, EasingFloor(minimum, readiness_p95));
     }
 };
+
+constexpr int64_t FirstImageFastEaseStepCap(int64_t budget, bool consumed_admission, uint32_t scheduled) {
+    // A first-present gate can hide the producer tail during a high-count downward step.
+    if (!consumed_admission && scheduled >= 4 && budget <= 205000) return 10000;
+    return budget > 225000 ? 55000 : (budget > 165000 ? 25000 : (budget > 135000 ? 17000 : 10000));
+}
 
 }  // namespace wgfgp::win32
