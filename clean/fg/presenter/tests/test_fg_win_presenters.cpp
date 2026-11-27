@@ -431,6 +431,7 @@ void TestEngineLateAndLeases() {
     // index 1 misses its deadline: dropped, its lease held until its fence completes
     e.Pump(p.targets[0].deadline + 1);
     CHECK(e.Stats().dropped_late == 1 && e.LeasesHeld() == 1);
+    CHECK(e.Stats().generated_late_ready_pre_queue == 0);
     CHECK(e.SlotState(res.slots[0].slot) == FgEngineSlotState::Draining);
     fences.Set(f, 10);
     e.Pump(p.targets[0].deadline + 2);
@@ -442,12 +443,44 @@ void TestEngineLateAndLeases() {
     e.TakeOutbox(&out);
     CHECK(out.size() == 1 && out[0].real);
     CHECK(e.Stats().dropped_late == 2);  // index 2 passed its deadline too
+    CHECK(e.Stats().generated_late_ready_pre_queue == 1);
     // a deadline already past at reservation is refused right there (no slot spent)
     FgIntervalPlan q = MakePlan(1, 2, 2, p.targets[2].target, 166667, 1);
     CHECK(e.BeginInterval(q, q.targets[0].deadline + 1, &res) == FgStatus::Ok);
     CHECK(!res.slots[0].reserved && res.slots[0].refused == FgDropReason::Late && res.slots[1].reserved);
     CHECK(e.Stats().real_only_intervals[static_cast<std::uint32_t>(FgRealOnlyReason::Pressure)] == 0);
     CHECK(e.Stats().real_only_intervals[static_cast<std::uint32_t>(FgRealOnlyReason::Late)] == 1);
+}
+
+void TestEngineCountsStallDropsOnlyOnce() {
+    g_case = "engine-stall-cause";
+    ScriptFences fences;
+    const auto fence = fences.Create();
+    fences.Set(fence, 1);
+    FgPresentEngine engine(EngineConfig(), &fences);
+    CHECK(engine.Attach(1) == FgStatus::Ok);
+    const auto t = 500 * kMs;
+    const auto plan = MakePlan(1, 1, 1, t, 166667, 1);
+    FgIntervalReservation reservation;
+    CHECK(engine.BeginInterval(plan, t, &reservation) == FgStatus::Ok);
+    FgIntervalSubmission submission;
+    submission.epoch = submission.interval_id = 1;
+    submission.count = 2;
+    for (uint32_t i = 0; i < 2; ++i) {
+        submission.ready[i] = {fence, 1};
+        submission.produced[i] = true;
+    }
+    CHECK(engine.SubmitInterval(submission, t) == FgStatus::Ok);
+    engine.Pump(t);
+    std::vector<FgEnginePresent> out;
+    engine.TakeOutbox(&out);
+    CHECK(out.size() == 2);
+    if (out.size() != 2) return;
+    CHECK(engine.OnPresentDropped(out[0].present_id, FgDropReason::Late, true));
+    CHECK(!engine.OnPresentDropped(out[0].present_id, FgDropReason::Late, true));
+    CHECK(!engine.OnPresentDropped(out[1].present_id, FgDropReason::Late, true));
+    const auto& stats = engine.Stats();
+    CHECK(stats.dropped_late == 1 && stats.generated_late_after_stall == 1 && stats.generated_late_pre_queue == 0);
 }
 
 void TestEngineCancelAndRevoke() {
@@ -1711,6 +1744,7 @@ int main(int argc, char** argv) {
     TestEngineOwnership();
     TestEngineNoSlotUntilReleased();
     TestEngineLateAndLeases();
+    TestEngineCountsStallDropsOnlyOnce();
     TestEngineCancelAndRevoke();
     TestEngineFeedback();
     TestEngineLifecycle();

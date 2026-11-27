@@ -44,6 +44,7 @@ using FgRealRetireFn = void (*)(void* ctx, std::uint64_t frame_id, std::uint64_t
 // Must not re-enter the engine.
 constexpr std::uint8_t kFgTraceRealConsumed = 8;
 constexpr std::uint8_t kFgTraceInnerPresentDuration = 9;
+constexpr std::uint8_t kFgTraceStalledPresent = 10;
 using FgPresentTraceFn = void (*)(void* ctx, std::uint64_t interval_id, std::uint64_t frame_id,
                                   std::uint32_t index, bool real,
                                   std::uint8_t event_kind, FgTicks ts, FgTicks target);
@@ -144,9 +145,9 @@ public:
     // DXGI hands an in-flight present to the worker. Cancellation only touches the remaining queued suffix.
     bool LeasePresent(std::uint32_t slot, std::uint64_t present_id);
     void FinishLeasedPresent(std::uint32_t slot, FgTicks submitted, FgTicks estimate, bool presented,
-                             FgTicks call_duration = 0);
+                             FgTicks call_duration = 0, bool stalled = false);
     bool OnPresentSkipped(std::uint64_t present_id);    // the display path skipped it (a newer present was ready)
-    bool OnPresentDropped(std::uint64_t present_id, FgDropReason reason);  // the back end did not present it
+    bool OnPresentDropped(std::uint64_t present_id, FgDropReason reason, bool after_stall = false);
     // The display path no longer uses the slot's buffer (available event / copy finished). Only a Retired slot, or a
     // Queued / Displayed one the back end consumed by a copy (consumed_by_copy), becomes Free.
     bool OnSlotReleased(std::uint32_t slot, bool consumed_by_copy);
@@ -296,6 +297,7 @@ enum class FgTearingDrop : std::uint8_t { None, Deadline, Collision };
 
 struct FgTearingPlanDecision {
     FgTicks issue_at = 0;
+    FgTicks latest_at = 0;
     FgTearingDrop drop = FgTearingDrop::None;
 
     bool DropLate() const { return drop != FgTearingDrop::None; }
@@ -343,7 +345,7 @@ inline bool FgVrrVsyncQueueFull(std::uint32_t submitted, std::uint32_t displayed
 
 inline FgTearingPlanDecision FgPlanTearingImage(FgTicks target, bool real, FgTicks now, FgTicks earliest,
                                                 FgTicks min_interval, FgTicks base_late_tolerance, bool has_next,
-                                                FgTicks next_target) {
+                                                FgTicks next_target, bool stalled = false, bool ready_tail = false) {
     FgTearingPlanDecision d;
     d.issue_at = target > earliest ? target : earliest;
     if (real) return d;
@@ -354,15 +356,21 @@ inline FgTearingPlanDecision FgPlanTearingImage(FgTicks target, bool real, FgTic
         const FgTicks scaled = slot_allow < 15000 ? 15000 : (slot_allow > 40000 ? 40000 : slot_allow);
         if (scaled > tol) tol = scaled;
     }
-    if (now > target + tol) {
+    const FgTicks issue = std::max(now, d.issue_at);
+    const FgTicks gap = std::max<FgTicks>(min_interval, 2500);
+    const bool recover_tail = stalled && ready_tail && has_next;
+    // A ready tail can use the existing 4 ms pending-image envelope, provided it does
+    // not push its real endpoint beyond that same envelope.
+    d.latest_at = target + tol;
+    if (recover_tail)
+        d.latest_at = std::max(d.latest_at, std::min(target + 40000, next_target + 40000 - gap));
+    if (now > d.latest_at || (stalled && issue > d.latest_at)) {
         d.drop = FgTearingDrop::Deadline;
         return d;
     }
     if (has_next) {
-        const FgTicks issue = now > d.issue_at ? now : d.issue_at;
-        const FgTicks gap = min_interval > 2500 ? min_interval : 2500;
         // Absorb submission jitter without reducing the physical minimum gap between issues.
-        const FgTicks slip_allow = tol < slot_allow ? tol : slot_allow;
+        const FgTicks slip_allow = recover_tail ? 40000 : std::min(tol, slot_allow);
         if (issue + gap > next_target + slip_allow) d.drop = FgTearingDrop::Collision;
     }
     return d;

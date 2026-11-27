@@ -100,6 +100,8 @@ struct FgSchedulerConfig {
     bool menu_reprimes_history = true;  // a menu frame is not history for the next interval
     bool overflow_fill = false;        // host may pace the release after submitting a fill plan
     bool first_present_admission = false;  // subtract known waits for this scheduler's prior first image
+    bool consumed_admission = false;       // track producer arrivals separately from display-count qualification
+    bool guard_overflow_delivery = false;
 };
 
 // One game frame as the game presents it.
@@ -149,6 +151,7 @@ public:
     // Optional upper cap on scheduled generated count when producer misses persist.
     // 0 clears the override.
     void SetMaxGeneratedCap(std::uint32_t cap);
+    void SetOverflowReady(bool ready) { overflow_ready_ = ready; }
     std::uint32_t MaxGeneratedCap() const { return max_generated_cap_; }
 
 private:
@@ -169,9 +172,11 @@ private:
     FgIntervalEstimator uncapped_estimator_;
     FgTicks uncapped_arrival_ = 0;
     FgTicks cadence_arrival_ = 0, previous_credit_wait_ = 0;
+    FgTicks playout_period_ = 0;
     std::uint32_t fill_requested_ = 0;
     std::uint32_t fill_count_ = 0;
     std::uint32_t fill_overrun_ = 0;
+    bool overflow_ready_ = false;
     bool epoch_started_ = false;
     bool lost_ = false;
     std::uint64_t epoch_ = 0;

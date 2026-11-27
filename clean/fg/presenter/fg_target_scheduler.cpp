@@ -213,7 +213,9 @@ FgStatus FgTargetScheduler::BeginEpoch(std::uint64_t epoch) {
     uncapped_estimator_.Reset();
     uncapped_arrival_ = 0;
     cadence_arrival_ = previous_credit_wait_ = 0;
+    playout_period_ = 0;
     fill_requested_ = fill_count_ = fill_overrun_ = 0;
+    overflow_ready_ = false;
     anchored_ = false;
     have_target_ = false;
     last_real_target_ = 0;
@@ -317,6 +319,8 @@ std::uint32_t FgTargetScheduler::UpdateCount(std::uint32_t requested, FgTicks pe
         }
     }
     std::uint32_t up = effective_ < requested ? (adaptive ? effective_ + 1 : requested) : 0;
+    if (up > 1 && up < requested && config_.guard_overflow_delivery && !overflow_ready_ &&
+        !Fits(requested, period, w.hysteresis)) up = 0;
     if (up > 0) {
         // A fixed grid can support 2x and 4x with no legal 3x plan.
         if (adaptive && config_.fixed_refresh_period > 0) {
@@ -346,7 +350,8 @@ FgTargetScheduler::FillPlan FgTargetScheduler::UpdateFill(std::uint32_t requeste
     const bool changed = requested != fill_requested_;
     fill_requested_ = requested;
     const FgTicks uncapped = uncapped_estimator_.Period();
-    if (!eligible || changed || uncapped <= 0 || latest_uncapped <= 0) {
+    if (!eligible || changed || (config_.guard_overflow_delivery && !overflow_ready_) ||
+        uncapped <= 0 || latest_uncapped <= 0) {
         fill_count_ = fill_overrun_ = 0;
         return {};
     }
@@ -498,6 +503,23 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
         last_reduction_reason_ = FgRealOnlyReason::LatencyCap;
     }
 
+    const bool track_playout = config_.consumed_admission && adaptive_vrr && n > 0;
+    if (track_playout) {
+        const auto nominal = period_estimate;
+        if (playout_period_ == 0 || ev == FgIntervalEstimator::Event::Discontinuity) {
+            playout_period_ = nominal;
+        } else if (arrival_delta >= nominal / 2 && arrival_delta <= nominal * 2) {
+            // Track elapsed time, including ordinary slow-tail samples that the median
+            // ignores. Qualification above still uses the median to select the count.
+            playout_period_ += (arrival_delta - playout_period_) / 16;
+        }
+        const auto floor = (static_cast<FgTicks>(n) + 1) * w.min_interval;
+        period_estimate = std::max({floor, fill.period,
+                                    Clamp(playout_period_, nominal - nominal / 8, nominal + nominal / 8)});
+    } else {
+        playout_period_ = 0;
+    }
+
     const auto needed_lead = [&](std::uint32_t count) {
         return RequiredLead(period_estimate, count == 0 && last_interval_count_ > 0 ? effective : count);
     };
@@ -552,7 +574,8 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
                 anchor_reason = FgReanchorReason::GeneratedDeadline;
                 shortfall_run_ = 0;
             } else if (lead + slack < lead_need) {
-                if (++shortfall_run_ >= (adaptive_vrr ? 3u : 2u)) {
+                if (track_playout) shortfall_run_ = 1;
+                else if (++shortfall_run_ >= (adaptive_vrr ? 3u : 2u)) {
                     anchor_reason = FgReanchorReason::LeadShortfall;
                     shortfall_run_ = 0;
                 }
@@ -627,7 +650,9 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
         if (diff > deadband) {
             const bool recover_single = adaptive_vrr && n == 1 && period_estimate / 3 < w.min_interval &&
                                         shortfall_run_ > 0;
-            const FgTicks limit = n > 0 ? period_estimate / (recover_single ? 16 : 128) : period_estimate / 8;
+            const bool recover_playout = track_playout && shortfall_run_ > 0;
+            const FgTicks limit = n == 0 || recover_playout ? period_estimate / 8
+                                                           : period_estimate / (recover_single ? 16 : 128);
             correction = Clamp(diff / 8, 0, limit);
         } else if (diff < -deadband) {
             const FgTicks limit = diff < -period_estimate / 4 ? period_estimate / 4 : period_estimate / 8;

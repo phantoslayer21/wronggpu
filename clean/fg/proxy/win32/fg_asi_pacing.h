@@ -130,6 +130,33 @@ inline FirstImageProducerWindow ProducerWindow(const wgfg::FgPresentStats& now, 
     return {now.generated_scheduled - base.generated_scheduled, now.generated_late_pre_queue - base.generated_late_pre_queue};
 }
 
+// Output oversubscription is independent of the producer budget. A presenter miss does
+// not buy more producer lead, and a clean window only earns a higher count with measured slack.
+struct OverflowDelivery {
+    uint32_t cap = 0;
+    uint32_t clean_windows = 0;
+    bool ready = false;
+
+    void Observe(uint64_t offered, uint64_t missed, uint32_t active, uint32_t requested, bool overflow,
+                 bool has_headroom, bool full_window) {
+        if (offered == 0 || active == 0) return;
+        if (missed * 100 >= offered) {
+            ready = false;
+            clean_windows = 0;
+            if (overflow && active > 1 && missed >= 2) cap = cap ? std::min(cap, active - 1) : active - 1;
+        } else if (full_window) {
+            if (!has_headroom) {
+                ready = false;
+                clean_windows = 0;
+            } else if (++clean_windows >= 4) {
+                clean_windows = 0;
+                if (cap != 0) cap = cap + 1 >= requested ? 0 : cap + 1;
+                ready = true;
+            }
+        }
+    }
+};
+
 inline void ResetFirstImageBudgetWindow(FirstImageBudgetLimits& limits, wgfg::FgPresentStats& baseline,
                                       const wgfg::FgPresentStats& current) {
     limits = {};

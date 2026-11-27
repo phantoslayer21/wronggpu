@@ -555,21 +555,26 @@ bool FgDxgiPresenter::PlanHeadLocked(FgTicks now, Planned* out) {
             const FgTicks next_target = next_ready ? local_[1].target : engine_.HeadPendingTarget();
             const FgTicks earliest = FgTearingEarliestIssue(last_present_start_, last_present_done_, desc_.min_interval,
                                                             desc_.refresh_period);
+            const auto start_floor = last_present_start_ + desc_.min_interval;
+            const bool stalled = earliest > start_floor;
+            const bool ready_tail = p.index > 1 && next_ready && local_[1].real &&
+                                    local_[1].interval_id == p.interval_id;
             const FgTearingPlanDecision td = FgPlanTearingImage(p.target, p.real, now, earliest, desc_.min_interval,
-                                                                desc_.late_tolerance, next_target > p.target, next_target);
+                                                                desc_.late_tolerance, next_target > p.target, next_target,
+                                                                stalled, ready_tail);
             if (td.DropLate()) {
+                const bool ran_over_deadline = stalled && last_present_start_ <= td.latest_at &&
+                                               last_present_done_ > td.latest_at;
+                const bool denied_by_guard = stalled &&
+                    !FgPlanTearingImage(p.target, false, now, start_floor, desc_.min_interval,
+                                        desc_.late_tolerance, next_target > p.target, next_target).DropLate();
                 if (td.drop == FgTearingDrop::Deadline) {
                     ++info_.tearing_drop_deadline;
                 } else {
                     ++info_.tearing_drop_collision;
-                    const FgTicks start_floor = last_present_start_ + desc_.min_interval;
-                    if (earliest > start_floor &&
-                        !FgPlanTearingImage(p.target, false, now, start_floor, desc_.min_interval,
-                                            desc_.late_tolerance, true, next_target).DropLate()) {
-                        ++info_.tearing_collision_completion_floor;
-                    }
+                    if (denied_by_guard) ++info_.tearing_collision_completion_floor;
                 }
-                engine_.OnPresentDropped(p.present_id, FgDropReason::Late);
+                engine_.OnPresentDropped(p.present_id, FgDropReason::Late, ran_over_deadline || denied_by_guard);
                 local_.pop_front();
                 continue;
             }
@@ -750,9 +755,11 @@ bool FgDxgiPresenter::PresentHead(HANDLE stop) {
         return true;
     }
     const FgTicks duration = present_started > 0 ? present_done - present_started : 0;
+    const FgTicks refresh = desc_.refresh_period > 0 ? desc_.refresh_period : desc_.min_interval;
     // Keep the submission and display estimates anchored to the return from the Present call.
     engine_.FinishLeasedPresent(head.present.slot, SUCCEEDED(hr) ? present_done : 0,
-                                FixedGrid() ? head.shown_at : present_done, shown, duration);
+                                FixedGrid() ? head.shown_at : present_done, shown, duration,
+                                shown && refresh > 0 && duration > refresh / 2);
     if (FAILED(hr)) {
         engine_.MarkFailed();
         local_.clear();

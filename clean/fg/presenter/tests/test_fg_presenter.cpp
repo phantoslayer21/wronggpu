@@ -1392,6 +1392,19 @@ void TestTearingPhysicalGapAfterSlowCall() {
     CHECK(FgVrrVsyncQueueFull(12, 10));
     CHECK(FgVrrVsyncQueueFull(0, 0xfffffffeu));
     CHECK(!FgVrrVsyncQueueFull(10, 11));
+
+    const FgTicks after_stall = started + 60000;
+    const auto stale = FgPlanTearingImage(started, false, started + 30000, after_stall, floor,
+                                          20000, false, 0, true);
+    CHECK(stale.DropLate());
+    const FgTicks tail = started + 30000;
+    const FgTicks endpoint = started + 60000;
+    CHECK(FgPlanTearingImage(tail, false, tail + 15000, after_stall, floor, 20000,
+                             true, endpoint).DropLate());
+    const auto recovered = FgPlanTearingImage(tail, false, tail + 15000, after_stall, floor, 20000,
+                                              true, endpoint, true, true);
+    CHECK(!recovered.DropLate() && recovered.issue_at == after_stall);
+    CHECK(recovered.issue_at + floor <= endpoint + 40000);
 }
 
 void TestTearingSchedulerFitsPresenterThroughput() {
@@ -1430,6 +1443,7 @@ void TestOverflowFillPacesOnlyTheNextGameRelease() {
     auto cfg = DefaultScheduler();
     cfg.adaptive_count = true;
     cfg.overflow_fill = true;
+    cfg.guard_overflow_delivery = true;
     cfg.display.min_interval = FgVrrMinInterval(27778, false);
     cfg.display.margin = 200;
     cfg.display.hysteresis = 400;
@@ -1450,6 +1464,8 @@ void TestOverflowFillPacesOnlyTheNextGameRelease() {
         CHECK(release_wait >= 0 && release_wait * 100 <= base * 12);
         return plan;
     };
+    for (int i = 0; i < 16; ++i) CHECK(step(80000, 5).fill_release_wait == 0);
+    scheduler.SetOverflowReady(true);
     for (int i = 0; i < 30; ++i) {
         const auto plan = step(80000, 5);
         if (i >= 10) {
@@ -1463,6 +1479,9 @@ void TestOverflowFillPacesOnlyTheNextGameRelease() {
     for (int i = 0; i < 4; ++i) CHECK(step(80000, 5).fill_release_wait == 0);  // >16% exit, four in a row
     for (int i = 0; i < 20; ++i) step(80000, 5);
     CHECK(step(80000, 5).fill_period == 86799);
+    scheduler.SetOverflowReady(false);
+    CHECK(step(80000, 5).fill_release_wait == 0);
+    scheduler.SetOverflowReady(true);
     CHECK(step(76000, 5).fill_release_wait == 0);            // between the 12% and 16% limits
     CHECK(step(80000, 4).fill_period == 0);                   // requested multiplier changed
     for (int i = 0; i < 20; ++i) step(80000, 4);
@@ -1681,6 +1700,37 @@ void TestRtOffWrappedPresentReplay() {
         CHECK(routine.completion_floor == 0);
         CHECK(spiked.completion_floor > 0);
     }
+}
+
+void TestConsumedRateTracksSkewedArrivalCadence() {
+    g_case = "consumed cadence with a slow-tail frame every fifth interval";
+    auto cfg = DefaultScheduler();
+    cfg.first_image_budget = 85000;
+    cfg.bridge_and_submit_margin = 2500;
+    cfg.display.min_interval = FgVrrMinInterval(27778, false);
+    cfg.display.margin = 200;
+    cfg.display.hysteresis = 400;
+    cfg.display.reenter_intervals = 3;
+    cfg.adaptive_count = true;
+    cfg.consumed_admission = true;
+    FgTargetScheduler scheduler(cfg);
+    CHECK(scheduler.BeginEpoch(1) == FgStatus::Ok);
+    FgTicks arrival = kSecond;
+    unsigned generating = 0, soft = 0, anchors = 0, missed = 0;
+    for (uint64_t i = 1; i <= 1000; ++i) {
+        arrival += i % 5 == 0 ? 103000 : 71500;
+        const auto origin = arrival + (i % 5 == 0 ? 21000 : 8000);
+        FgIntervalPlan plan;
+        CHECK(scheduler.Commit({1, i, arrival, 1, true, false, origin}, &plan) == FgStatus::Ok);
+        if (i <= 50 || plan.generated_count == 0) continue;
+        ++generating;
+        if (plan.reanchored) ++anchors;
+        if (plan.reanchor_reason == FgReanchorReason::LeadShortfall) ++soft;
+        if (origin + 80000 > plan.targets[0].target + 39000) ++missed;
+    }
+    std::printf("    consumed skewed cadence: generated=%u reanchors=%u soft=%u late=%u\n",
+                generating, anchors, soft, missed);
+    CHECK(generating >= 940 && anchors < 10 && missed < 10);
 }
 
 void TestRtOffAdmissionWaitKeepsProducerLead() {
@@ -2015,6 +2065,7 @@ int main() {
     TestRtOffTearingFloorReplay();
     TestDxgiDisplayCadence();
     TestRtOffWrappedPresentReplay();
+    TestConsumedRateTracksSkewedArrivalCadence();
     TestRtOffAdmissionWaitKeepsProducerLead();
     std::printf("test_fg_presenter: %d checks, %d failure(s)\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
