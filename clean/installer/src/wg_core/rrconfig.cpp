@@ -39,6 +39,15 @@ static wstring Trimmed(wstring s) { while (!s.empty() && (s.back() == L'\\' || s
 #endif
 
 wstring PlayerDocumentsDir(Context& ctx) {
+    if (!DataOverride().empty()) {
+        if (!ctx.playerDocuments.empty() && PathWithin(ctx.playerDocuments, DataOverride(), true)) return ctx.playerDocuments;
+#ifdef WRONGGPU_TESTING
+        const wstring fixture = EnvVar(L"WRONGGPU_TEST_DOCUMENTS");
+        return PathWithin(fixture, DataOverride(), true) ? fixture : wstring();
+#else
+        return Join(DataOverride(), L"Documents");
+#endif
+    }
 #ifdef WRONGGPU_TESTING
     // a test root only (the job's, else WRONGGPU_TEST_DOCUMENTS), never this PC's Documents
     const wstring t = !ctx.playerDocuments.empty() ? ctx.playerDocuments : EnvVar(L"WRONGGPU_TEST_DOCUMENTS");
@@ -51,6 +60,7 @@ wstring PlayerDocumentsDir(Context& ctx) {
 }
 
 static wstring LocalAppDataDir() {
+    if (!DataOverride().empty()) return DataOverride();
     const wstring l = EnvVar(L"LOCALAPPDATA");  // the elevated worker sets the player's from its job
 #ifdef WRONGGPU_TESTING
     if (l.empty() || IEq(Trimmed(FullPath(l)), Trimmed(KnownFolder(FOLDERID_LocalAppData)))) return L"";  // a test root only

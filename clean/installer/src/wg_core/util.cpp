@@ -2,6 +2,7 @@
 // WrongGPU launcher core: small helpers (strings, paths, files, SHA-256), moved unchanged from setup.cpp. Written for
 // this project.
 #include "util.h"
+#include "context.h"
 
 #include <atomic>
 
@@ -232,6 +233,25 @@ bool PinnedFile::Close() {
     restoreAttrs_ = 0;
     return ok;
 }
+HANDLE PinnedFile::Release() {
+    const HANDLE h = h_;
+    h_ = INVALID_HANDLE_VALUE;
+    restoreAttrs_ = 0;
+    return h;
+}
+
+bool PinnedFile::RenameNew(const wstring& path, DWORD* err) {
+    const wstring name = L"\\??\\" + FullPath(path);
+    const size_t size = sizeof(FILE_RENAME_INFO) + name.size() * sizeof(wchar_t);
+    std::vector<unsigned char> storage(size, 0);
+    auto* info = reinterpret_cast<FILE_RENAME_INFO*>(storage.data());
+    info->FileNameLength = static_cast<DWORD>(name.size() * sizeof(wchar_t));
+    memcpy(info->FileName, name.data(), info->FileNameLength);
+    if (SetFileInformationByHandle(h_, FileRenameInfo, info, static_cast<DWORD>(size))) return true;
+    if (err) *err = GetLastError();
+    return false;
+}
+
 wstring PinnedFile::Sha256() { return h_ == INVALID_HANDLE_VALUE ? wstring() : HashHandle(h_); }
 bool PinnedFile::Delete(DWORD* err) {
     if (h_ == INVALID_HANDLE_VALUE) { if (err) *err = ERROR_INVALID_HANDLE; return false; }
@@ -497,20 +517,24 @@ bool TestLibraries(wstring* folder) {
 
 #ifdef WRONGGPU_TESTING
 // A path as one form for the scope test: \\?\C:\x and \??\C:\x as C:\x, \\?\UNC\srv\share as \\srv\share, then full.
+#endif
+
 static wstring ScopeForm(const wstring& p) {
     wstring s = p;
     if (StartsWithI(s, L"\\\\?\\UNC\\")) s = L"\\\\" + s.substr(8);
     else if (StartsWithI(s, L"\\\\?\\") || StartsWithI(s, L"\\??\\")) s = s.substr(4);
+    std::replace(s.begin(), s.end(), L'/', L'\\');
     s = FullPath(s);
     while (s.size() > 3 && s.back() == L'\\') s.pop_back();
     return s;
 }
 
+#ifdef WRONGGPU_TESTING
 // Test builds: the access log (WRONGGPU_TEST_ACCESS_LOG). A new log starts with "run <WRONGGPU_TEST_RUN_ID>" (the tests' guard
 // checks it is this run's); every line is appended before the read it records. false: not written (the read is refused).
 static bool TestAccessLine(const wstring& line) {
     const wstring log = EnvVar(L"WRONGGPU_TEST_ACCESS_LOG");
-    if (log.empty()) return false;
+    if (log.empty() || !GamePathAllowed(log)) return false;
     HANDLE h = CreateFileW(log.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, CREATE_NEW,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
     string text;
@@ -528,6 +552,8 @@ static bool TestAccessLine(const wstring& line) {
     CloseHandle(h);
     return ok;
 }
+
+#endif
 
 // The final form of a path that exists: the name Windows resolves it to (every junction and link above it followed), as
 // C:\... or \\server\...; empty when it cannot be opened.
@@ -572,15 +598,26 @@ static bool RealPathOk(const wstring& lexical, const wchar_t** why) {
     }
     return true;
 }
-#endif
+
+bool PathWithin(const wstring& path, const wstring& root, bool requirePlain) {
+    if (path.empty() || root.empty()) return false;
+    const wstring p = ScopeForm(path), r = ScopeForm(root);
+    if (r.size() < 3 || r[1] != L':' || p.size() < 3 || p[1] != L':' ||
+        p.find(L':', 2) != wstring::npos || r.find(L':', 2) != wstring::npos) return false;
+    const bool inside = IEq(p, r) || (p.size() > r.size() && StartsWithI(p, r) && (p[r.size()] == L'\\' || r.back() == L'\\'));
+    const wchar_t* why = nullptr;
+    return inside && (!requirePlain || (RealPathOk(r, &why) && RealPathOk(p, &why)));
+}
 
 bool LibraryAccess(const wstring& path) {
     ++g_libraryAccesses;
 #ifdef WRONGGPU_TESTING
     wstring folder;
     if (!TestLibraries(&folder)) {
-        TestAccessLine(L"library access: " + path);  // (a test build without the tests' list: logged where asked, never held back)
-        return true;
+        // Tests linked directly against the core use only their own fixture arguments.
+        if (DataOverride().empty()) return true;
+        TestAccessLine(L"library access refused: " + path);
+        return false;
     }
     // the tests' scope: the folder that holds WRONGGPU_TEST_LIBRARIES (the test run's own folder), as it really is; nothing
     // else is read, and nothing is read whose access line could not be written (fail closed)
@@ -588,7 +625,7 @@ bool LibraryAccess(const wstring& path) {
     const wstring p = ScopeForm(path);
     const wchar_t* why = nullptr;
     bool inside = !root.empty() && (IEq(p, root) || (p.size() > root.size() && StartsWithI(p, root) && (p[root.size()] == L'\\' || root.back() == L'\\')));
-    if (inside && GetFileAttributesW(root.c_str()) != INVALID_FILE_ATTRIBUTES && !IEq(FinalForm(root), LongForm(root))) { inside = false; why = L"the test folder resolves elsewhere"; }
+    if (inside && !GamePathAllowed(path)) { inside = false; why = L"outside the test build's --data folder"; }
     if (inside && !RealPathOk(p, &why)) inside = false;
     if (!inside) {
         TestAccessLine(L"library access refused: " + path + (why ? wstring(L" (") + why + L")" : wstring()));
@@ -596,23 +633,18 @@ bool LibraryAccess(const wstring& path) {
     }
     return TestAccessLine(L"library access: " + path);
 #else
-    (void)path;
-    return true;
+    return GamePathAllowed(path);
 #endif
 }
 
 bool LibraryRegistryAccess(const wchar_t* what) {
     ++g_libraryAccesses;
 #ifdef WRONGGPU_TESTING
-    if (!TestLibraries()) {
-        TestAccessLine(wstring(L"library access: registry ") + what);
-        return true;
-    }
     TestAccessLine(wstring(L"library access refused: registry ") + what);
     return false;
 #else
     (void)what;
-    return true;
+    return DataOverride().empty();
 #endif
 }
 

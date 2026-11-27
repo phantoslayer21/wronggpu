@@ -105,6 +105,8 @@ public:
     // Deletes the file through the handle (FileDispositionInfoEx with POSIX semantics, the read-only attribute ignored; the
     // older FileDispositionInfo where that is not supported) and closes it. The name is free when this returns true.
     bool Delete(DWORD* err = nullptr);
+    bool RenameNew(const wstring& path, DWORD* err = nullptr);
+    HANDLE Release();  // transfers the pin to the operation's binary guard
     // Replaces the bytes through the handle (forWrite) with src's, which are hashed first and must be `srcSha` (nothing is
     // touched otherwise); the attributes and times of src are put on the file. false: err holds why (ERROR_FILE_CORRUPT when
     // src is not srcSha). Not atomic against a stop: the record and the backup are kept until the restore is complete.
@@ -156,6 +158,8 @@ std::vector<wstring> FindFilesNamed(const wstring& root, const wchar_t* name, si
 // - TestAccessStart(program): a test build with the tests' list writes "process <pid> <program> start" (every program run
 //   leaves a line, so the guard can tell a run that logged nothing). LibraryAccessCount counts the questions (every build).
 // - TestLibraries(folder): such a test build (WRONGGPU_TEST_LIBRARIES set, its value in folder); false in other builds.
+// Component-wise containment; requirePlain additionally rejects links and hard links along the path.
+bool PathWithin(const wstring& path, const wstring& root, bool requirePlain = false);
 bool LibraryAccess(const wstring& path);
 bool LibraryRegistryAccess(const wchar_t* what);
 void TestAccessStart(const wchar_t* program);

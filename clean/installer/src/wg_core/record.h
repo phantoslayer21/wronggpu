@@ -117,14 +117,14 @@ struct RunJournal;
 // is there already (one an earlier uninstall kept: never overwritten), the first free backup\<rel>.<n>, which goes into
 // e.backup (and so into the record). The kept file stays; it is logged and (warnings) listed. Checked against e.orig.
 // j: the run journal (each create written down before it). Returns the backup's path.
-wstring CopyBackup(Context& ctx, const wstring& dir, Entry& e, const wstring& source, RunJournal* j, std::vector<wstring>* warnings);
+wstring CopyBackup(Context& ctx, const wstring& dir, Entry& e, const wstring& source, RunJournal* j, std::vector<wstring>* warnings, PinnedFile* held = nullptr);
 wstring LegacyStateDir(const wstring& dir);
 wstring LegacyRecordPath(const wstring& dir);
 wstring LegacyBackupPath(const wstring& dir, const wstring& rel);
 // Reads a record. One read from <dir>\wronggpu-setup\install.record that names another folder is the record of dir all the
 // same (a moved game folder): rebased to dir in memory (Record::movedFrom), never refused for it.
 bool LoadRecord(const wstring& path, Record& m);
-void SaveRecord(const wstring& path, const Record& m);
+void SaveRecord(const wstring& path, const Record& m, bool create = false);
 // rc6 L1: a rebased record (movedFrom) written in its folder: OptiScaler.ini's paths into the old folder (its front end, its
 // plugins folder) pointed at the new one, the record and owned-files.json saved, the game's own Apps & features entry (a
 // record with a regkey) pointed at the new folder, and on the managed list the new folder in the old one's place (the old
@@ -157,7 +157,7 @@ extern const wchar_t* const kPartlyRestored;
 bool AnyPartly(const std::vector<wstring>& warnings);
 // The player's original of `rel` (from `source`, its SHA-256 `sha`) kept in the folder that survives: an earlier kept copy
 // with these bytes is used again, else a new <time> generation. Checked byte for byte; throws on failure. Returns its path.
-wstring KeptOriginal(const wstring& dir, const wstring& rel, const wstring& source, const wstring& sha);
+wstring KeptOriginal(const wstring& dir, const wstring& rel, const wstring& source, const wstring& sha, PinnedFile* held = nullptr);
 // The OptiScaler.ini in `dir` is the one WrongGPU last wrote (its hash is the record's). The restore goes by this alone.
 bool OptiIniWrittenByUs(const wstring& dir, const Record& m);
 // The OptiScaler setup next to the game is still WrongGPU's: the OptiScaler DLL the record installed is there under its name
@@ -256,8 +256,8 @@ wstring LeftText(const wstring& where, const std::vector<wstring>& rels);
 // operation runs. Keep the returned gate for the whole operation, on the thread that took it; a nested GuardOperation for the
 // same folder on the same thread returns nullptr (the outer gate covers it). Refuses (EXIT_REFUSED, "Nothing was changed:
 // ...", naming the file) while a binary is in use by the game or another program, while that cannot be told, and while
-// another WrongGPU program holds the lock or it may not be opened. Inside it, the operation writes binaries with PutBinary /
-// PutBinaryFrom (renamed in complete and held at once; a load in that moment stops the operation) and deletes held ones with
+// another WrongGPU program holds the lock or it may not be opened. Inside it, the operation writes binaries with PutBinary
+// (renamed in complete and held at once; a load in that moment stops the operation) and deletes held ones with
 // DeleteHeldBinary; GateHolds tells which files the gate holds (their reads still work; their writes go through the gate).
 // The state files (settings.ini, model-choice.ini) are written inside the same hold (the state lock is recursive per thread).
 struct OperationGate {
@@ -275,8 +275,8 @@ struct OperationGate {
 std::unique_ptr<OperationGate> GuardOperation(const wstring& dir, const Record* m, bool holdBinaries = true);
 bool IsBinaryName(const wstring& rel);  // .dll / .asi: what a game loads
 bool GateHolds(const wstring& path);
-void PutBinary(const wstring& path, const void* data, size_t size);
-void PutBinaryFrom(const wstring& path, const wstring& source);
+void ReleaseRestoreBinaries();
+void PutBinary(const wstring& path, const void* data, size_t size, PinnedFile* held = nullptr);
 DWORD DeleteHeldBinary(const wstring& path);  // ERROR_SUCCESS, ERROR_NOT_FOUND (not held), or the delete's error
 std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool failedInstall, bool keepState,
                                std::map<wstring, wstring>* keptWarnings = nullptr);

@@ -222,7 +222,7 @@ bool NeedsElevation(const wstring& dir);
 // modelChosen: the player explicitly applied the profile's model (`set <game> model=<m>`): the game's model choice record
 // gets the launcher's choice with the next seq even when the model is the same (clean/fsr/src/model_choice_record.h).
 void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vector<wstring>& notes, std::vector<wstring>* warnings = nullptr,
-                  bool modelChosen = false);
+                  bool modelChosen = false, bool installing = false);
 // The launcher's model choice into the game's model choice record (wronggpu-setup\model-choice.ini), with the next seq,
 // source=launcher. Call it holding the record's lock (wgchoice::Lock). false: not written (said in the notes and warnings).
 bool WriteLauncherModelChoice(Context& ctx, const wstring& dir, char model, std::vector<wstring>& notes, std::vector<wstring>* warnings);

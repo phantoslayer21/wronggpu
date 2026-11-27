@@ -76,13 +76,12 @@ wstring PlainError(const SetupError& e) {
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
-    TestAccessStart(L"restorer");  // (#243: a test build run by the tests leaves a line for every run)
     SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
     static const EmbeddedData data{nullptr, 0, 0, L"", 0, L"", 0, WRONGGPU_VERSION_STR};
     Context ctx;
     ctx.data = &data;
     bool silent = false, collect = false, uninstall = false, bad = false;
-    wstring dirArg, exeArg, outZip;
+    wstring dirArg, exeArg, outZip, dataArg;
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     for (int i = 1; i < argc; ++i) {
@@ -95,10 +94,19 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         else if (la.rfind(L"/d=", 0) == 0) dirArg = a.substr(3);
         else if (la.rfind(L"/exe=", 0) == 0) exeArg = a.substr(5);
         else if (la.rfind(L"/out=", 0) == 0) outZip = a.substr(5);
+        else if (la.rfind(L"/data=", 0) == 0 || la.rfind(L"--data=", 0) == 0) dataArg = a.substr(a[0] == L'/' ? 6 : 7);
         else if (la.rfind(L"/log=", 0) == 0) ctx.logFile = a.substr(5);
         else bad = true;
     }
     if (argv) LocalFree(argv);
+    wstring dataError;
+    if (!SetDataOverride(dataArg, dataError)) {
+        if (!silent) MessageBoxW(nullptr, dataError.c_str(), L"WrongGPU", MB_ICONERROR);
+        return EXIT_USAGE;
+    }
+    TestAccessStart(L"restorer");
+    for (const auto* path : {&dirArg, &exeArg, &outZip, &ctx.logFile})
+        if (!path->empty() && !GamePathAllowed(*path)) return EXIT_REFUSED;
     if (ctx.logFile.empty()) ctx.logFile = DefaultLogPath();
     if (bad && silent) { LogLine(ctx, L"unknown command-line option"); return EXIT_USAGE; }
     const wstring self = SelfPath();
@@ -112,6 +120,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         dir = FullPath(dirArg);
         while (dir.size() > 3 && (dir.back() == L'\\' || dir.back() == L'/')) dir.pop_back();
     } else if (fromState) dir = Parent(Parent(self));
+    if (!dir.empty() && !GamePathAllowed(dir)) return EXIT_REFUSED;
     SystemInfo sys;
     Ui ui;
     ui.step = [](int, int, const wstring&) {};

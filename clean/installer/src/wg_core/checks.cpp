@@ -311,7 +311,8 @@ HipInfo CheckHip(Context& ctx) {
         HANDLE rd = nullptr, wr = nullptr;
         if (!CreatePipe(&rd, &wr, &sa, 0)) continue;
         SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
-        wstring cmd = L"\"" + SelfPath() + L"\" \"/HIPPROBE=" + dll + L"\" \"/LOG=" + ctx.logFile + L"\"";
+        wstring cmd = L"\"" + SelfPath() + L"\" /S \"/HIPPROBE=" + dll + L"\" \"/LOG=" + ctx.logFile + L"\"" +
+                      (DataOverride().empty() ? L"" : L" \"/DATA=" + DataOverride() + L"\"");
         STARTUPINFOW si{}; si.cb = sizeof(si); si.dwFlags = STARTF_USESTDHANDLES; si.hStdOutput = wr; si.hStdError = wr; si.hStdInput = nullptr;
         PROCESS_INFORMATION pi{};
         std::vector<wchar_t> buf(cmd.begin(), cmd.end()); buf.push_back(0);

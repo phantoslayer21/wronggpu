@@ -248,7 +248,7 @@ void RecoverRrData(Context& ctx) {
 
 bool RrDataValid(Context& ctx, wstring* why) {
     if (!LoadFMap(ctx)) { if (why) *why = ctx.fMapError; return false; }
-    if (!IsFile(RrDataFile())) { if (why) *why = L"no converted Ray Reconstruction data on this PC"; return false; }
+    if (!GamePathAllowed(RrDataFile()) || !IsFile(RrDataFile())) { if (why) *why = L"no converted Ray Reconstruction data on this PC"; return false; }
     string w;
     const bool ok = wgc::verify_model_file(*ctx.fMap.map, std::filesystem::path(RrDataFile()), w);
     if (why) *why = FromUtf8(w);
@@ -448,7 +448,7 @@ bool ConvertRrData(Context& ctx, const wstring& dll, const std::vector<StoreGame
     if (dll.empty()) {
         for (auto& d : ManagedGames()) {  // the launcher's games first (their own RR model files), then the libraries
             Record m;
-            if (LoadRecord(RecordPath(d), m) && !m.legacy) where.push_back({GameDisplayName(m.exe), GameRoot(m.exe.empty() ? d : Parent(m.exe)), L"", L"Managed"});
+            if (LoadRecord(RecordPath(d), m) && !m.legacy && (m.exe.empty() || GamePathAllowed(m.exe))) where.push_back({GameDisplayName(m.exe), GameRoot(m.exe.empty() ? d : Parent(m.exe)), L"", L"Managed"});
         }
         for (auto& g : libraries) where.push_back(g);
     }
@@ -531,6 +531,8 @@ int WriteStateKeys(Context& ctx, const wstring& dir, const std::vector<std::pair
 }
 
 int WriteRrState(Context& ctx, const wstring& dir, const Profile& p, bool dataReady, wstring* why, const string* prevMode) {
+    if (!GamePathAllowed(dir) || !GamePathAllowed(Join(StateDir(dir), L"settings.ini")) ||
+        (!dataReady && IsFile(RrDataFile()))) return 0;
     const string want = p.get("rr_mode").empty() ? string("fast") : p.get("rr_mode");
     const string enabled = p.get("rr_enabled") != "off" && dataReady ? "1" : "0";
     // decided under the state lock from the file as it is now (wg_state.h UpdateSettings), so a mode the game's menu saved
@@ -558,6 +560,7 @@ bool MigrateRrState(Context& ctx, const wstring& dir) {
     string text;
     if (!e || e->inst.empty() || !ReadAll(Join(dir, kRrSettings), text)) return false;
     if (IEq(Sha256Bytes(text.data(), text.size()), e->inst)) return false;  // WrongGPU's own file, unchanged: nothing to carry
+    if (IsFile(RrDataFile()) && !RrDataValid(ctx)) return false;
     // changed since the launcher last wrote it (an older RR plugin's save, or the player's edit): the player's file from now on;
     // its mode carries over into the state folder so nothing changes in the game
     std::vector<std::pair<string, string>> keys;
@@ -611,6 +614,8 @@ bool FoldRrFromGame(const wstring& dir, Profile& p) {
 }
 
 int RefreshRrSettings(Context& ctx, const wstring& dir, bool dataReady, wstring* why) {
+    if (!PathWithin(dir, AppDataPath(), true) || !PathWithin(Join(StateDir(dir), L"settings.ini"), AppDataPath(), true) ||
+        !LoadFMap(ctx) || (!dataReady && IsFile(RrDataFile()))) return 0;
     Record m;
     if (!LoadRecord(RecordPath(dir), m) || m.legacy || !RecordHasRr(m)) return 0;
     MigrateRrState(ctx, dir);
@@ -625,15 +630,18 @@ std::vector<RrSettingsFailure> RefreshAllRrSettings(Context& ctx, const wstring&
     std::vector<RrSettingsFailure> failed;
     std::vector<wstring> dirs;
     for (auto& d : ManagedGames()) {
+        if (!PathWithin(d, AppDataPath(), true)) continue;
+        if (!PathWithin(Join(StateDir(d), L"settings.ini"), AppDataPath(), true)) continue;
         Record m;
         if (!except.empty() && IEq(FullPath(d), FullPath(except))) continue;
         if (LoadRecord(RecordPath(d), m) && !m.legacy && RecordHasRr(m)) dirs.push_back(d);
     }
     if (dirs.empty()) return failed;
-    const bool ready = RrDataValid(ctx);  // once (it reads and hashes the whole file), not per game
+    // An absent or unrecognized cache is no authority to turn another game's RR off.
+    if (!RrDataValid(ctx)) return failed;
     for (auto& d : dirs) {
         wstring why;
-        if (RefreshRrSettings(ctx, d, ready, &why) < 0) failed.push_back({d, why});
+        if (RefreshRrSettings(ctx, d, true, &why) < 0) failed.push_back({d, why});
     }
     return failed;
 }

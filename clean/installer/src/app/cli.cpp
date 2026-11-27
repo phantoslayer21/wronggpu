@@ -209,7 +209,8 @@ OpResult RunElevated(const OpRequest& r, HWND owner) {
                               PlayerDocumentsDir(g.ctx));
     WriteFileAtomic(job, text.data(), text.size());
     DWORD code = 0;
-    if (!StartElevated(L"apply \"--job=" + job + L"\" \"--result=" + result + L"\"", owner, code)) {
+    if (!StartElevated(L"apply \"--job=" + job + L"\" \"--result=" + result + L"\"" +
+                       (DataOverride().empty() ? L"" : L" \"--data=" + DataOverride() + L"\""), owner, code)) {
         DeleteFileW(job.c_str());
         res.code = EXIT_REFUSED;
         res.message = kNotGranted;
@@ -242,7 +243,8 @@ static std::vector<OpResult> RunElevatedBatch(const std::vector<OpRequest>& rs, 
     const string list = BatchText(files, stop);
     WriteFileAtomic(batch, list.data(), list.size());
     DWORD code = 0;
-    const bool started = StartElevated(L"apply \"--batch=" + batch + L"\"", owner, code);
+    const bool started = StartElevated(L"apply \"--batch=" + batch + L"\"" +
+                                      (DataOverride().empty() ? L"" : L" \"--data=" + DataOverride() + L"\""), owner, code);
     bool failed = false;
     for (size_t i = 0; i < rs.size(); ++i) {
         string text;
@@ -692,6 +694,7 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
         if (a.pos.empty()) { o.j.S("error", L"name one or more files"); return EXIT_USAGE; }
         o.j.Key("files").Arr();
         for (auto& p : a.pos) {
+            if (!GamePathAllowed(p)) Fail(L"This WrongGPU launcher can only access files inside its --data folder.", EXIT_REFUSED);
             const Fingerprint f = IdentifyFile(FullPath(p));
             o.j.Obj().S("file", FullPath(p)).S("tool", ToolKey(f.tool)).S("name", ToolName(f.tool)).B("pe", f.pe).S("version", f.version)
                 .S("company", f.company).S("product", f.product).S("evidence", f.evidence).End();
@@ -827,16 +830,21 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
             OpRequest r; wstring lad, logFile, why, sid, docs;
             int perEntry = -1;
             OpResult res;
-            if (job.empty() || result.empty() || !ReadAll(job, text)) { res.code = EXIT_USAGE; res.message = L"apply needs --job=<file> and --result=<file>"; }
+            if (job.empty() || result.empty() || !GamePathAllowed(job) || !GamePathAllowed(result) || !ReadAll(job, text)) { res.code = EXIT_USAGE; res.message = L"apply needs --job=<file> and --result=<file>"; }
             else if (!ParseJob(text, r, lad, logFile, &why, &sid, &perEntry, &docs)) { res.code = EXIT_USAGE; res.message = L"bad job file: " + why; }
+            else if ((!logFile.empty() && !GamePathAllowed(logFile)) || (!r.modelDll.empty() && !GamePathAllowed(r.modelDll)) ||
+                     (!r.optiPackage.empty() && r.optiPackage.find(L"://") == wstring::npos && !GamePathAllowed(r.optiPackage))) {
+                res.code = EXIT_REFUSED;
+                res.message = L"This WrongGPU launcher can only access files inside its --data folder.";
+            }
             else {
-                SetEnvironmentVariableW(L"LOCALAPPDATA", lad.c_str());  // the player's model and shared data, not this account's
+                if (DataOverride().empty()) SetEnvironmentVariableW(L"LOCALAPPDATA", lad.c_str());  // the player's model and shared data, not this account's
                 g.ctx.playerDocuments = docs;  // and the player's Documents (rrconfig.h), not this account's
                 if (!logFile.empty()) g.ctx.logFile = logFile;
                 // run by another account (an administrator's name typed at the prompt): the Apps & features entries go to the
                 // player's hive, where the player's launcher and Settings > Apps look
                 HKEY hive = nullptr;
-                if (!hiveSet && !sid.empty() && !IEq(sid, CurrentUserSid())) {
+                if (DataOverride().empty() && !hiveSet && !sid.empty() && !IEq(sid, CurrentUserSid())) {
                     hiveSet = true;
                     if (RegOpenKeyExW(HKEY_USERS, sid.c_str(), 0, KEY_READ | KEY_WRITE, &hive) == ERROR_SUCCESS) SetUninstallHive(hive);
                     else LogLine(g.ctx, L"elevated worker: the player's registry hive cannot be opened; Apps & features entries go to this account");
@@ -847,7 +855,7 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
                 r.noScan = r.noScan || g.ctx.noScanAlways;  // apply --noscan: the job's own searches too (#243)
                 res = RunOp(g.ctx, r, ui);
             }
-            if (!result.empty()) { const string rt = ResultText(res); try { WriteFileAtomic(result, rt.data(), rt.size()); } catch (const SetupError&) {} }
+            if (!result.empty() && GamePathAllowed(result)) { const string rt = ResultText(res); try { WriteFileAtomic(result, rt.data(), rt.size()); } catch (const SetupError&) {} }
             return res;
         };
         if (!a.get(L"batch").empty()) {
@@ -861,7 +869,7 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
                 if (stop && failed) {  // an earlier game failed: this one is not run, and its result says so
                     OpResult skip; skip.code = kOpNotRun; skip.message = L"not run: an earlier game failed";
                     const string rt = ResultText(skip);
-                    try { WriteFileAtomic(j.second, rt.data(), rt.size()); } catch (const SetupError&) {}
+                    try { if (GamePathAllowed(j.second)) WriteFileAtomic(j.second, rt.data(), rt.size()); } catch (const SetupError&) {}
                     continue;
                 }
                 const OpResult res = runJob(j.first, j.second);
@@ -1283,7 +1291,34 @@ int RunCli(int argc, wchar_t** argv) {
         } else a.pos.push_back(s);
     }
     gl.dataOverride = a.get(L"data");
+    wstring dataError;
+    if (((a.has(L"data") || a.opt.count(L"data")) && gl.dataOverride.empty()) || !SetDataOverride(gl.dataOverride, dataError)) {
+        if (dataError.empty()) dataError = L"--data needs a folder.";
+        Print(dataError);
+        Output refused;
+        refused.j.Obj().S("verb", verb).S("error", dataError);
+        refused.code = EXIT_USAGE;
+        return refused.finish();
+    }
+    gl.dataOverride = DataOverride();
+    TestAccessStart(L"WrongGPU");
     logFile = a.get(L"log");
+    for (const auto& name : {L"log", L"out", L"dir", L"model", L"library", L"startmenu", L"zip", L"out-zip",
+                             L"job", L"result", L"batch", L"dll", L"repair-after", L"dump", L"shots", L"out-dir", L"fixture"})
+        if (!a.get(name).empty() && !GamePathAllowed(a.get(name))) {
+            Print(L"This WrongGPU launcher can only access files inside its --data folder.");
+            return EXIT_REFUSED;
+        }
+    for (const auto* paths : {&a.libraries, &a.ignoreLists})
+        for (const auto& path : *paths)
+            if (!GamePathAllowed(path)) {
+                Print(L"This WrongGPU launcher can only access files inside its --data folder.");
+                return EXIT_REFUSED;
+            }
+    if (verb == L"uninstall-launcher") {
+        LauncherInit(logFile, false, true);
+        return RunLauncherWindow(true);
+    }
     LauncherInit(logFile, verb == L"apply");
     Output o;
     o.outFile = a.get(L"out");

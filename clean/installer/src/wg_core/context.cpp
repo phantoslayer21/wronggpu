@@ -3,6 +3,7 @@
 // this project.
 #include "context.h"
 #include <cwctype>
+#include <shlobj.h>
 #include "payload.h"
 
 namespace wg {
@@ -28,8 +29,41 @@ void LogLine(Context& ctx, const wstring& s) {
     if (h == INVALID_HANDLE_VALUE) return;
     DWORD w; WriteFile(h, line.data(), (DWORD)line.size(), &w, nullptr); CloseHandle(h);
 }
-// %LOCALAPPDATA%\WrongGPU, only its name (nothing is created: a path to show, read or test).
+static wstring g_dataOverride;
+const wstring& DataOverride() { return g_dataOverride; }
+
+bool SetDataOverride(const wstring& path, wstring& why) {
+    const wstring full = path.empty() ? wstring() : FullPath(path);
+#ifdef WRONGGPU_TESTING
+    PWSTR local = nullptr;
+    const HRESULT got = SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DONT_VERIFY, nullptr, &local);
+    const wstring real = SUCCEEDED(got) && local ? Join(local, L"WrongGPU") : wstring();
+    CoTaskMemFree(local);
+    if (full.empty() || real.empty() || PathWithin(full, real) || PathWithin(real, full) || !PathWithin(full, full, true)) {
+        why = L"This WrongGPU test build requires --data pointing to an isolated fixture folder.";
+        return false;
+    }
+#endif
+    if (!full.empty()) {
+        for (const auto* name : {L"model", L"logs", L"jobs", L"rr-prepare", L"temp", L"launcher.ini", L"launcher.log",
+                                 L"managed-games.txt", L"ignore-files.txt", L"launcher-registry.hiv"}) {
+            if (!PathWithin(Join(full, name), full, true)) {
+                why = L"A launcher path in --data resolves through a link.";
+                return false;
+            }
+        }
+    }
+    g_dataOverride = full;
+    return true;
+}
+
+bool GamePathAllowed(const wstring& path) {
+    return g_dataOverride.empty() || PathWithin(path, g_dataOverride, true);
+}
+
+// The active shared data path, without creating it.
 wstring AppDataPath() {
+    if (!g_dataOverride.empty()) return g_dataOverride;
     wstring base = EnvVar(L"LOCALAPPDATA");
     if (base.empty()) { wchar_t b[MAX_PATH]; GetTempPathW(MAX_PATH, b); base = b; }
     return Join(base, L"WrongGPU");
@@ -37,7 +71,7 @@ wstring AppDataPath() {
 // %LOCALAPPDATA%\WrongGPU (created on first use).
 wstring AppDataDir() {
     const wstring dir = AppDataPath();
-    CreateDirectoryW(dir.c_str(), nullptr);
+    EnsureDir(dir);
     return dir;
 }
 wstring DefaultLogPath() { return Join(AppDataDir(), L"setup.log"); }

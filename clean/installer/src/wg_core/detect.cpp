@@ -315,6 +315,7 @@ std::vector<Found> DetectGames(const std::vector<StoreGame>& roots) {
 
 // Accepts a game .exe, a store folder or the folder with the exe; returns the game executable (or empty).
 wstring ResolveGameExe(wstring in) {
+    if (!GamePathAllowed(in)) return L"";
     while (!in.empty() && (in.front() == L'"' || in.front() == L' ')) in.erase(in.begin());
     while (!in.empty() && (in.back() == L'"' || in.back() == L' ' || in.back() == L'\\' || in.back() == L'/')) in.pop_back();
     if (in.empty()) return L"";
@@ -458,6 +459,7 @@ wstring SteamAppId(const wstring& exe) {
 // The folder with the FidelityFX DLLs the game loads: the exe folder if it has one of them, else the first folder below
 // the game root that has the FFX API DLL, else the first that has an FSR 3.0 component DLL.
 wstring FindInstallDir(const wstring& exe) {
+    if (!GamePathAllowed(exe)) return L"";
     const wstring exeDir = Parent(exe);
     if (IsFile(RecordPath(exeDir))) return exeDir;  // an install next to the exe (OptiScaler mode)
     for (auto& sl : kSlots) if (IsFile(Join(exeDir, sl.name))) return exeDir;
@@ -495,6 +497,8 @@ bool StartsOnPresetK(const wstring& dir, const Record* rec) {
     return rec && !rec->model.empty() && IEq(Parent(rec->model), Join(ModelBaseDir(), L"K"));
 }
 GameTarget InspectGame(Context& ctx, const wstring& exe, const wstring& displayName) {
+    if (!GamePathAllowed(exe) || !GamePathAllowed(GameRoot(Parent(exe))))
+        Fail(L"This WrongGPU launcher can only access games inside its --data folder.", EXIT_REFUSED);
     GameTarget t;
     t.exe = exe; t.exeDir = Parent(exe); t.root = GameRoot(t.exeDir);
     const KnownGame* k = Validated(exe);

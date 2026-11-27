@@ -127,6 +127,10 @@ struct Context {
 };
 
 void LogLine(Context& ctx, const wstring& s);
+// The explicit launcher data root, set before initialization and passed to elevated workers.
+const wstring& DataOverride();
+bool SetDataOverride(const wstring& path, wstring& why);
+bool GamePathAllowed(const wstring& path);
 wstring AppDataPath();  // %LOCALAPPDATA%\WrongGPU, not created
 wstring AppDataDir();   // the same, created if missing
 wstring DefaultLogPath();

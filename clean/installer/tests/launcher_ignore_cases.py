@@ -42,10 +42,12 @@ def run(T, base, opti, game):
     work = facts.new_run_folder(base.work, "convert-ignore")  # a new folder of its own, with its own fresh tmp (T)
     t = T(base.exe, work, base.model, base.hip)
     t.check = base.check  # one count, one list of failures
-    shared = os.path.join(t.env["LOCALAPPDATA"], "WrongGPU")
+    shared = t.data
+    fixture_opti = os.path.join(work, "opti-package")
+    shutil.copytree(opti, fixture_opti)
     lst = os.path.join(shared, "ignore-files.txt")
     src_txt = os.path.join(shared, "model", "model-source.txt")
-    flags = ("--opti=" + opti, "--noscan", "--force", "--experimental")
+    flags = ("--opti=" + fixture_opti, "--noscan", "--force", "--experimental")
 
     def said():
         return " ".join([t.j.get("message", ""), t.j.get("error", "")] + list(t.j.get("warnings", [])) + list(t.j.get("notes", [])))
@@ -87,8 +89,7 @@ def run(T, base, opti, game):
         if not [n for n in os.listdir(t.env["LOCALAPPDATA"]) if ".cleanup-" in n]:
             break
         time.sleep(0.2)
-    t.check("convert-ignore: the last game's uninstall keeps ignore-files.txt byte for byte (the rest of the shared folder goes) and says so",
-            rc_a == 0 and rc_b == 0 and os.path.isfile(lst) and read(lst) == list_bytes and sorted(os.listdir(shared)) == ["ignore-files.txt"] and
-            any(w.startswith(KEPT) for w in t.j.get("warnings", [])), (rc_a, rc_b, sorted(os.listdir(shared)) if os.path.isdir(shared) else None, t.j.get("warnings")))
+    t.check("convert-ignore: the last game's uninstall removes the cache and keeps the scoped ignore file",
+            rc_a == 0 and rc_b == 0 and os.path.isfile(lst) and read(lst) == list_bytes and not os.path.isdir(os.path.join(shared, "model")), (rc_a, rc_b, sorted(os.listdir(shared)) if os.path.isdir(shared) else None, t.j.get("warnings")))
     os.remove(lst)
     shutil.rmtree(work, ignore_errors=True)

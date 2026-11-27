@@ -72,6 +72,7 @@ static void RebaseRecord(Record& m, const wstring& dir) {
 }
 
 bool LoadRecord(const wstring& path, Record& m) {
+    if (!GamePathAllowed(path)) return false;
     string raw;
     if (!ReadAll(path, raw)) return false;
     m = Record();  // the file's record alone (#219: a second load into the same Record listed every entry again)
@@ -155,12 +156,13 @@ bool LoadRecord(const wstring& path, Record& m) {
         for (auto& e : m.e) if (e.backup.empty() && e.action == o[0] && IEq(e.rel, o[1])) { e.backup = o[2]; break; }
     // rc6 L1: the record of a game folder that was moved names the old folder; read from <dir>\wronggpu-setup\install.record
     // it is the record of dir (its entries are relative to it, its backup is next to it): rebased to dir
+    if ((!m.exe.empty() && !GamePathAllowed(m.exe)) || (!m.game.empty() && !GamePathAllowed(m.game))) return false;
     if (header && !m.game.empty() && !m.legacy && IEq(BaseName(path), L"install.record") && IEq(BaseName(Parent(path)), kStateDirName))
         RebaseRecord(m, Parent(Parent(path)));
     return header && !m.game.empty();
 }
 // Always written as v2 (the launcher's format; a 0.5.x uninstaller reads it too, see record.h).
-void SaveRecord(const wstring& path, const Record& m) {
+void SaveRecord(const wstring& path, const Record& m, bool create) {
     wstring t = L"WRONGGPU-RECORD 2\r\nversion\t" + m.version + L"\r\ngame\t" + m.game + L"\r\nexe\t" + m.exe + L"\r\nstatus\t" + m.status +
                 L"\r\nregkey\t" + m.regkey + L"\r\nmodel\t" + m.model + L"\r\n";
     if (!m.modelM.empty()) t += L"model-m\t" + m.modelM + L"\r\n";
@@ -191,7 +193,10 @@ void SaveRecord(const wstring& path, const Record& m) {
         if (!e.backup.empty()) t += L"backup\t" + e.action + L"\t" + e.rel + L"\t" + e.backup + L"\r\n";
     string u = ToUtf8(t);
     EnsureDir(Parent(path));
-    WriteFileAtomic(path, u.data(), u.size());
+    if (create) {
+        const DWORD err = wgstate::OperationGuard::PutNew(path, u.data(), u.size());
+        if (err != ERROR_SUCCESS) Fail(L"Cannot create " + path + L": " + ErrText(err));
+    } else WriteFileAtomic(path, u.data(), u.size());
 }
 
 // Resolve a record-relative path below the install folder, refusing traversal and links.
@@ -240,7 +245,26 @@ bool OptiSetupIsOurs(const wstring& dir, const Record& m) {
 // The registry hive of the Apps & features entries: the player's. HKEY_CURRENT_USER, except in the elevated worker run
 // by another account (an administrator's credentials typed at the UAC prompt): the player's hive under HKEY_USERS.
 static HKEY g_uninstallHive = nullptr;
-HKEY UninstallHive() { return g_uninstallHive ? g_uninstallHive : HKEY_CURRENT_USER; }
+HKEY UninstallHive() {
+#ifndef WRONGGPU_TESTING
+    if (DataOverride().empty()) return g_uninstallHive ? g_uninstallHive : HKEY_CURRENT_USER;
+#endif
+    struct PrivateHive {
+        HKEY key = nullptr;
+        ~PrivateHive() { if (key) RegCloseKey(key); }
+    };
+    static std::mutex lock;
+    static PrivateHive hive;
+    std::lock_guard<std::mutex> guard(lock);
+    if (!hive.key) {
+        const wstring root = DataOverride().empty() ? EnvVar(L"LOCALAPPDATA") : AppDataDir();
+        const wstring file = Join(root, L"launcher-registry.hiv");
+        if (!PathWithin(file, root, true)) Fail(L"The launcher registry file resolves outside --data.");
+        const LONG err = RegLoadAppKeyW(file.c_str(), &hive.key, KEY_READ | KEY_WRITE, 0, 0);
+        if (err != ERROR_SUCCESS) Fail(L"Cannot open the launcher registry in --data: " + ErrText(err));
+    }
+    return hive.key;
+}
 void SetUninstallHive(HKEY hive) { g_uninstallHive = hive; }
 wstring RegKeyFor(const wstring& dir, const wchar_t* prefix) {
     uint32_t h = 2166136261u;
@@ -259,9 +283,10 @@ void RegisterUninstall(Context& ctx, const Record& m, const wstring& state, cons
     setS(L"DisplayVersion", ctx.data->version);
     setS(L"Publisher", L"WrongGPU");
     setS(L"InstallLocation", m.game);
-    setS(L"UninstallString", L"\"" + exe + L"\"");
-    setS(L"QuietUninstallString", L"\"" + exe + L"\" /S");
-    setS(L"ModifyPath", L"\"" + exe + L"\" /COLLECT");  // "Modify" in Apps & features = collect logs for a report
+    const wstring dataArg = DataOverride().empty() ? L"" : L" \"/DATA=" + DataOverride() + L"\"";
+    setS(L"UninstallString", L"\"" + exe + L"\"" + dataArg);
+    setS(L"QuietUninstallString", L"\"" + exe + L"\" /S" + dataArg);
+    setS(L"ModifyPath", L"\"" + exe + L"\" /COLLECT" + dataArg);  // "Modify" in Apps & features = collect logs for a report
     setS(L"DisplayIcon", exe);
     setD(L"NoModify", 0); setD(L"NoRepair", 1);
     setD(L"EstimatedSize", (DWORD)(PayloadBytes(ctx) / 1024));
@@ -276,7 +301,8 @@ std::vector<wstring> RegisteredInstalls() {  // InstallLocation of every WrongGP
         DWORD n = (DWORD)std::size(sub);
         if (RegEnumKeyExW(root, i, sub, &n, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) break;
         if (!StartsWithI(sub, kRegPrefix)) continue;
-        r.push_back(RegString(UninstallHive(), (UninstallRoot() + sub).c_str(), L"InstallLocation"));
+        const wstring path = RegString(UninstallHive(), (UninstallRoot() + sub).c_str(), L"InstallLocation");
+        if (GamePathAllowed(path)) r.push_back(path);
     }
     RegCloseKey(root);
     return r;
@@ -296,15 +322,14 @@ bool DriveUnreachable(const wstring& dir) {
 // the shared data once the drive is back: it counts, though its record cannot be read
 wstring OtherGameWithWrongGPU(const wstring& dir) {
     auto counts = [&dir](const wstring& loc) {
-        return !loc.empty() && (dir.empty() || !IEq(FullPath(loc), FullPath(dir))) && (IsFile(RecordPath(loc)) || DriveUnreachable(loc));
+        return !loc.empty() && GamePathAllowed(loc) && (dir.empty() || !IEq(FullPath(loc), FullPath(dir))) && (IsFile(RecordPath(loc)) || DriveUnreachable(loc));
     };
     for (auto& loc : RegisteredInstalls()) if (counts(loc)) return loc;
     for (auto& loc : ManagedGames()) if (counts(loc)) return loc;
     return L"";
 }
 static wstring PortableListPath() {
-    const wstring base = EnvVar(L"LOCALAPPDATA");
-    return base.empty() ? wstring() : Join(Join(base, L"WrongGPU"), L"portable-launchers.txt");
+    return Join(AppDataPath(), L"portable-launchers.txt");
 }
 static std::vector<wstring> PortableLaunchers() {
     std::vector<wstring> r;
@@ -318,7 +343,7 @@ static std::vector<wstring> PortableLaunchers() {
         wstring l = text.substr(a, e - a);
         a = e + 1;
         while (!l.empty() && (l.back() == L'\r' || l.back() == L' ')) l.pop_back();
-        if (!l.empty() && l[0] != L';') r.push_back(l);
+        if (!l.empty() && l[0] != L';' && GamePathAllowed(l)) r.push_back(l);
     }
     return r;
 }
@@ -343,8 +368,7 @@ bool PortableLauncherUsesSharedData() {
 }
 bool LauncherKeepsSharedData() {
     if (LauncherInstalled()) return true;
-    const wstring base = EnvVar(L"LOCALAPPDATA");
-    if (!base.empty() && IsFile(Join(Join(base, L"WrongGPU"), L"launcher.ini"))) return true;
+    if (IsFile(Join(AppDataPath(), L"launcher.ini"))) return true;
     return PortableLauncherUsesSharedData();
 }
 void UnregisterUninstall(const Record& m) {
@@ -567,9 +591,16 @@ void RestoreStep(const char* name) {
     if (EnvVar(L"WRONGGPU_TEST_STOP_AT") == FromUtf8(name)) ExitProcess(99);  // tests: the process stops here, as if killed
     // tests: the operation fails here (as a failed write would), so its rollback runs
     if (EnvVar(L"WRONGGPU_TEST_FAIL_AT") == FromUtf8(name)) Fail(L"Test failure at " + FromUtf8(name) + L" (WRONGGPU_TEST_FAIL_AT)");
+    if (EnvVar(L"WRONGGPU_TEST_RENAME_AT") == FromUtf8(name)) {
+        const wstring source = EnvVar(L"WRONGGPU_TEST_RENAME_FILE");
+        const wstring elsewhere = source + L".race-test";
+        if (!source.empty() && GamePathAllowed(source) && GamePathAllowed(elsewhere))
+            MoveFileExW(source.c_str(), elsewhere.c_str(), MOVEFILE_WRITE_THROUGH);
+    }
     // tests: a file appears here (another program or the player creating it at this moment), where nothing is
     if (EnvVar(L"WRONGGPU_TEST_CREATE_AT") == FromUtf8(name) && !EnvVar(L"WRONGGPU_TEST_CREATE_FILE").empty()) {
         const wstring f = EnvVar(L"WRONGGPU_TEST_CREATE_FILE");
+        if (!GamePathAllowed(f)) return;
         EnsureDir(Parent(f));
         const HANDLE h = CreateFileW(f.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (h != INVALID_HANDLE_VALUE) {
@@ -604,7 +635,7 @@ Holds WhatIsThere(Context& ctx, const wstring& dir, const Entry& e, const wstrin
     return Holds::Other;
 }
 
-wstring KeptOriginal(const wstring& dir, const wstring& rel, const wstring& source, const wstring& sha) {
+wstring KeptOriginal(const wstring& dir, const wstring& rel, const wstring& source, const wstring& sha, PinnedFile* held) {
     const wstring base = Join(dir, kKeptDirName);
     for (auto& gen : ListDirs(base)) {  // kept already (a second run after a stop): that copy is the one
         const wstring p = Join(gen, rel);
@@ -620,7 +651,7 @@ wstring KeptOriginal(const wstring& dir, const wstring& rel, const wstring& sour
         if (Exists(p)) continue;
         EnsureDir(Parent(p));
         DWORD err = 0;
-        if (!CopyNew(source, p, &err)) {
+        if (!(held ? held->CopyOut(p, nullptr, &err) : CopyNew(source, p, &err))) {
             if (err == ERROR_FILE_EXISTS || err == ERROR_ALREADY_EXISTS) continue;  // another file appeared there a moment ago
             Fail(L"Could not keep the original of " + rel + L" in " + Parent(p) + L": " + ErrText(err) + L" Nothing more was changed.");
         }
@@ -697,6 +728,8 @@ std::unique_ptr<OperationGate> GuardOperation(const wstring& dir, const Record* 
     return gate;
 }
 
+void ReleaseRestoreBinaries() { if (t_gate) t_gate->guard.ReleaseBinaries(); }
+
 bool GateHolds(const wstring& path) { return t_gate && t_gate->guard.Holds(path); }
 
 // A binary written (or replaced) by the operation: through the gate (PutHeld: renamed in complete, then held) when this thread
@@ -707,39 +740,22 @@ static void FailPut(const wstring& path, DWORD e) {
              L"). What was done so far stays recorded; run it again once the game is closed.", EXIT_REFUSED);
     Fail(L"Cannot write " + path + L": " + ErrText(e));
 }
-// A file at the path that the gate does not hold (one the install decided to replace that the record did not list, such as
-// an earlier copy in REFramework's mirror): opened as the gate opens its binaries (a program that has it loaded, or open
-// without sharing writes, stops the operation) and deleted through that handle, so the new file can be renamed in and held.
-static DWORD FreeUnheld(const wstring& path) {
-    if (GateHolds(path) || !Exists(path)) return ERROR_SUCCESS;
-    const HANDLE h = CreateFileW(wgstate::ExtendedPath(path).c_str(), DELETE | GENERIC_READ | FILE_WRITE_DATA, FILE_SHARE_READ, nullptr,
-                                 OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return GetLastError();
-    FILE_DISPOSITION_INFO_EX d{};
-    d.Flags = FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS;
-    const DWORD e = SetFileInformationByHandle(h, FileDispositionInfoEx, &d, sizeof d) ? ERROR_SUCCESS : GetLastError();
-    CloseHandle(h);
-    return e;
-}
-void PutBinary(const wstring& path, const void* data, size_t size) {
-    if (!t_gate) { WriteFileAtomic(path, data, size); return; }
+void PutBinary(const wstring& path, const void* data, size_t size, PinnedFile* held) {
     EnsureDir(Parent(path));
-    if (const DWORD fe = FreeUnheld(path)) FailPut(path, fe);
+    if (held) {
+        if (t_gate) t_gate->guard.HoldVerified(path, held->Release());
+        else {
+            DWORD err = 0;
+            if (!held->OverwriteBytes(data, size, &err)) FailPut(path, err);
+            held->Close();
+            return;
+        }
+    }
     std::wstring oldLeft;
-    const DWORD e = t_gate->guard.PutHeld(path, data, size, &oldLeft);
-    if (e == ERROR_SUCCESS && !oldLeft.empty()) t_gate->oldLeft.push_back(oldLeft);
-    if (e == ERROR_SUCCESS) return;
-    FailPut(path, e);
-}
-void PutBinaryFrom(const wstring& path, const wstring& source) {
-    if (!t_gate) { CopyChecked(source, path); return; }
-    EnsureDir(Parent(path));
-    if (const DWORD fe = FreeUnheld(path)) FailPut(path, fe);
-    std::wstring oldLeft;
-    const DWORD e = t_gate->guard.PutHeldFrom(path, source, &oldLeft);
-    if (e == ERROR_SUCCESS && !oldLeft.empty()) t_gate->oldLeft.push_back(oldLeft);
-    if (e == ERROR_SUCCESS) return;
-    FailPut(path, e);
+    const DWORD e = t_gate ? t_gate->guard.PutHeld(path, data, size, &oldLeft)
+                           : wgstate::OperationGuard::PutNew(path, data, size);
+    if (e != ERROR_SUCCESS) FailPut(path, e);
+    if (!oldLeft.empty()) t_gate->oldLeft.push_back(oldLeft);
 }
 DWORD DeleteHeldBinary(const wstring& path) { return t_gate ? t_gate->guard.DeleteHeld(path) : ERROR_NOT_FOUND; }
 std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool failedInstall, bool keepState, std::map<wstring, wstring>* keptWarnings) {
@@ -862,52 +878,59 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
             // backup for that one: the renamed file is the game's only copy)
             const FfxSlot* sl = SlotOf(e);
             const wstring slot = sl ? Join(dir, sl->name) : wstring();
+            PinnedFile original;
             wstring info;
-            if (sl && Exists(t) && (e.inst.empty() || IEq(Sha256File(t), e.inst))) {
-                // WrongGPU's DLL is held (pinned) while it is recognised and deleted through that handle; the game's file then
-                // takes the name without replacing anything (a file that appears at the name in between stays, and the branch
-                // below keeps the game's file). A name that is empty (a stop between the two steps, or the DLL removed) gets it.
-                PinnedFile held;
-                DWORD err = 0;
-                if (GateHolds(slot)) {  // #219: WrongGPU's DLL in the slot is held by the operation's gate: deleted through it
-                    if (ClassifySlot(*sl, slot, nullptr, info) == FFX_OURS) {
-                        const DWORD de = DeleteHeldBinary(slot);
-                        if (de != ERROR_SUCCESS) Fail(L"Cannot put " + wstring(sl->name) + L" back: " + ErrText(de));
-                        if (MoveFileExW(t.c_str(), slot.c_str(), MOVEFILE_WRITE_THROUGH)) ui.log(L"restored " + wstring(sl->name) + L" from " + e.rel);
-                        else if (GetLastError() != ERROR_ALREADY_EXISTS && GetLastError() != ERROR_FILE_EXISTS)
-                            Fail(L"Cannot put " + wstring(sl->name) + L" back: " + ErrText(GetLastError()));
+            DWORD sourceError = 0;
+            if (sl && original.Open(t, false, &sourceError)) {
+                const wstring sha = original.Sha256();
+                if (!sha.empty() && (e.inst.empty() || IEq(sha, e.inst))) {
+                    auto restoreName = [&]() {
+                        DWORD err = 0;
+                        if (original.RenameNew(slot, &err)) {
+                            ui.log(L"restored " + wstring(sl->name) + L" from " + e.rel);
+                            original.Close();
+                        } else if (err != ERROR_ALREADY_EXISTS && err != ERROR_FILE_EXISTS) {
+                            Fail(L"Cannot put " + wstring(sl->name) + L" back: " + ErrText(err));
+                        }
+                    };
+                    RestoreStep("rename-restore-locked");
+                    PinnedFile loader;
+                    DWORD err = 0;
+                    if (GateHolds(slot)) {
+                        if (ClassifySlot(*sl, slot, nullptr, info) == FFX_OURS) {
+                            const DWORD de = DeleteHeldBinary(slot);
+                            if (de != ERROR_SUCCESS) Fail(L"Cannot put " + wstring(sl->name) + L" back: " + ErrText(de));
+                            restoreName();
+                        }
+                    } else if (loader.Open(slot, false, &err)) {
+                        if (ClassifySlot(*sl, slot, nullptr, info) == FFX_OURS) {
+                            RestoreStep("locked");
+                            if (!loader.Delete(&err)) Fail(L"Cannot put " + wstring(sl->name) + L" back: " + ErrText(err));
+                            restoreName();
+                        }
+                        loader.Close();
+                    } else if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
+                        restoreName();
+                    } else if (err != ERROR_NOT_SUPPORTED) {
+                        Fail(L"Cannot put " + wstring(sl->name) + L" back: another program has it open.");
                     }
-                } else if (held.Open(slot, false, &err)) {
-                    if (ClassifySlot(*sl, slot, nullptr, info) == FFX_OURS) {
-                        RestoreStep("locked");
-                        if (!held.Delete(&err)) Fail(L"Cannot put " + wstring(sl->name) + L" back: " + ErrText(err));
-                        if (MoveFileExW(t.c_str(), slot.c_str(), MOVEFILE_WRITE_THROUGH)) ui.log(L"restored " + wstring(sl->name) + L" from " + e.rel);
-                        else if (GetLastError() != ERROR_ALREADY_EXISTS && GetLastError() != ERROR_FILE_EXISTS)
-                            Fail(L"Cannot put " + wstring(sl->name) + L" back: " + ErrText(GetLastError()));
+                    // A newer game DLL kept its name. Preserve the original through the pin before removing its old name.
+                    if (original.IsOpen() && !e.inst.empty()) {
+                        if (!IEq(Sha256File(slot), sha)) {
+                            const wstring keptAt = KeptOriginal(dir, sl->name, t, sha, &original);
+                            warnings.push_back(kPartlyRestored + wstring(L"The game replaced ") + sl->name +
+                                               L" (probably an update); its new file was kept. The " + sl->name +
+                                               L" from before WrongGPU is kept in " + keptAt);
+                        }
+                        DWORD deleteError = 0;
+                        if (!original.Delete(&deleteError)) Fail(L"Cannot delete " + t + L": " + ErrText(deleteError));
+                        ui.log(L"removed " + e.rel + L" (the game's file is back under its name, or kept)");
                     }
-                } else if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
-                    if (MoveFileExW(t.c_str(), slot.c_str(), MOVEFILE_WRITE_THROUGH)) ui.log(L"restored " + wstring(sl->name) + L" from " + e.rel);
-                } else if (err != ERROR_NOT_SUPPORTED) {
-                    Fail(L"Cannot put " + wstring(sl->name) + L" back: another program has it open.");
                 }
+            } else if (sl && (sourceError == ERROR_SHARING_VIOLATION || sourceError == ERROR_ACCESS_DENIED)) {
+                Fail(L"Cannot secure " + t + L" for restore: " + ErrText(sourceError));
             }
-            // still there: the game's file under WrongGPU's name for it. It goes only when its bytes are safe elsewhere: back
-            // under the game's name, or kept (a game update put another file under that name)
-            if (sl && Exists(t) && !e.inst.empty() && IEq(Sha256File(t), e.inst)) {
-                const wstring at = slot;
-                if (!(IsFile(at) && IEq(Sha256File(at), e.inst))) {
-                    const wstring keptAt = KeptOriginal(dir, sl->name, t, e.inst);
-                    warnings.push_back(kPartlyRestored + wstring(L"The game replaced ") + sl->name + L" (probably an update); its new file was kept. The " +
-                                       sl->name + L" from before WrongGPU is kept in " + keptAt);
-                }
-                DWORD derr = 0;
-                const DeleteIf r = DeleteIfSha(t, {e.inst}, &derr);  // (hashed and deleted through one handle)
-                if (r == DeleteIf::Failed) Fail(L"Cannot delete " + t + L": " + ErrText(derr));
-                if (r == DeleteIf::Changed) {
-                    warnings.push_back(L"Left in place (changed since install): " + e.rel);
-                    LogLine(ctx, warnings.back());
-                } else ui.log(L"removed " + e.rel + L" (the game's file is back under its name, or kept)");
-            }
+            original.Close();
             if (e.existed && !e.orig.empty()) {
                 const wstring origSrc = p.source.empty() ? EntryBackupPath(dir, e) : p.source;
                 if (!failedInstall || Exists(origSrc)) {
@@ -1084,8 +1107,8 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
         else if (LauncherKeepsSharedData()) LogLine(ctx, L"the shared model data stays: the launcher uses it (its own uninstall removes it)");
         else {
             if (IsDir(ModelDir(ctx))) { RemoveTree(ModelDir(ctx)); ui.log(L"removed the model data (no other game uses it)"); }
-            const wstring base = EnvVar(L"LOCALAPPDATA");
-            if (!base.empty()) appData = Join(base, L"WrongGPU");
+            // An explicit root can also contain game folders and other caller-owned files.
+            if (DataOverride().empty()) appData = AppDataPath();
         }
     }
 
@@ -1133,7 +1156,7 @@ bool StateHasSettings(const wstring& dir) {
     for (auto& d : ListDirs(state)) if (SettingsName(BaseName(d), true)) return true;
     return false;
 }
-wstring CopyBackup(Context& ctx, const wstring& dir, Entry& e, const wstring& source, RunJournal* j, std::vector<wstring>* warnings) {
+wstring CopyBackup(Context& ctx, const wstring& dir, Entry& e, const wstring& source, RunJournal* j, std::vector<wstring>* warnings, PinnedFile* held) {
     for (int n = 0; n < 100; ++n) {
         const wstring name = n == 0 ? e.rel : e.rel + L"." + std::to_wstring(n);
         const wstring b = BackupPath(dir, name);
@@ -1142,12 +1165,13 @@ wstring CopyBackup(Context& ctx, const wstring& dir, Entry& e, const wstring& so
         if (j) JournalCreate(*j, b, false);
         EnsureDir(Parent(b));
         DWORD err = 0;
-        if (!CopyNew(source, b, &err)) {
+        wstring copied;
+        if (!(held ? held->CopyOut(b, &copied, &err) : CopyNew(source, b, &err))) {
             if (j && j->created.size() > mark && j->created.back().first == b) j->created.pop_back();  // (not this run's: not created)
             if (err == ERROR_FILE_EXISTS || err == ERROR_ALREADY_EXISTS) continue;  // it appeared a moment ago: the next name
             Fail(L"Cannot copy " + source + L" to " + b + L": " + ErrText(err));
         }
-        if (Sha256File(b) != e.orig) Fail(L"Backup verification failed for " + e.rel);
+        if ((held ? copied : Sha256File(b)) != e.orig) Fail(L"Backup verification failed for " + e.rel);
         e.backup = n == 0 ? wstring() : name;
         if (n) {
             const wstring w = L"Left in place (not this install's; an earlier uninstall kept it): " + Join(Join(kStateDirName, L"backup"), e.rel) +
@@ -1284,8 +1308,7 @@ std::vector<wstring> LegacyRestore(Context& ctx, const wstring& dir, Ui& ui) {
 // The launcher's list of the game folders it manages, in the shared data folder (%LOCALAPPDATA%\WrongGPU): read by
 // every uninstaller, so the model data stays while another launcher-managed game uses it.
 static wstring ManagedListPath() {
-    const wstring base = EnvVar(L"LOCALAPPDATA");
-    return base.empty() ? wstring() : Join(Join(base, L"WrongGPU"), L"managed-games.txt");
+    return Join(AppDataPath(), L"managed-games.txt");
 }
 std::vector<wstring> ManagedGames() {
     std::vector<wstring> r;
@@ -1299,7 +1322,7 @@ std::vector<wstring> ManagedGames() {
         wstring l = text.substr(a, e - a);
         a = e + 1;
         while (!l.empty() && (l.back() == L'\r' || l.back() == L' ')) l.pop_back();
-        if (!l.empty() && l[0] != L';') r.push_back(l);
+        if (!l.empty() && l[0] != L';' && GamePathAllowed(l)) r.push_back(l);
     }
     return r;
 }

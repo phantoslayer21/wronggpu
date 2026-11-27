@@ -74,7 +74,8 @@ std::vector<wchar_t> RrHelperEnvironment(const wstring& log) {
     real = EnvVar(L"WRONGGPU_TEST_REAL_DRIVER_CACHE") == L"1";
 #endif
     PWSTR p = nullptr;
-    if (real && SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DONT_VERIFY, nullptr, &p)) && p) local = p;
+    if (!DataOverride().empty()) local = Join(DataOverride(), L"localappdata");
+    else if (real && SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DONT_VERIFY, nullptr, &p)) && p) local = p;
     if (p) CoTaskMemFree(p);
     std::vector<wchar_t> env;
     LPWCH block = GetEnvironmentStringsW();
@@ -221,7 +222,8 @@ int PrepareRr(Context& ctx, const wstring& dataDir, const wstring& exe, const ws
     si.hStdError = wr;
     si.hStdInput = nullptr;
     PROCESS_INFORMATION pi = {};
-    wstring cmd = L"\"" + helper + L"\" --rr-prepare \"" + runtimeDll + L"\" " + std::to_wstring(passes);
+    wstring cmd = L"\"" + helper + L"\" --rr-prepare \"" + runtimeDll + L"\" " + std::to_wstring(passes) +
+                  (DataOverride().empty() ? L"" : L" \"--data=" + DataOverride() + L"\"");
     std::vector<wchar_t> cl(cmd.begin(), cmd.end());
     cl.push_back(0);
     std::vector<wchar_t> env = RrHelperEnvironment(log);

@@ -289,6 +289,11 @@ public:
     const char* words() const { return GuardWords(result_); }
     // Whether the guard holds `path` (a binary it was given).
     bool Holds(const std::wstring& path) const { return Find(path) >= 0; }
+    void ReleaseBinaries() { CloseAll(); }
+    void HoldVerified(const std::wstring& path, HANDLE h) { held_.push_back({ExtendedPath(path), h}); }
+    static DWORD PutNew(const std::wstring& path, const void* data, size_t size) {
+        return PutComplete(ExtendedPath(path), data, size);
+    }
     // Puts the complete new bytes at `path` with no window in which a process can load a partial file or the guard holds
     // nothing: (1) the held old binary, if any, is renamed away through its own handle to <name>.wronggpu-old (the next free
     // <name>.wronggpu-old-<n> when that name is taken; nothing is deleted by name); (2) the new bytes are written to a temporary

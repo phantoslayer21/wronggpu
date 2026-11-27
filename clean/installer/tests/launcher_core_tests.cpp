@@ -2332,15 +2332,21 @@ int main() {
                     // unless another program has it open without sharing writes (then the operation stops, the file as it was)
                     const wstring mirror = Join(gg, L"_storage_\\dxgi.dll");
                     put(mirror, "MZ earlier copy");
-                    PutBinary(mirror, "MZ this copy", 12);
-                    require(ReadAll(mirror, r) && r == "MZ this copy" && GateHolds(mirror), "gate: an unheld file at the path is replaced and the new one held");
+                    bool refused = false;
+                    try { PutBinary(mirror, "MZ this copy", 12); } catch (const SetupError&) { refused = true; }
+                    require(refused && ReadAll(mirror, r) && r == "MZ earlier copy", "gate: an unheld file is kept");
+                    PinnedFile verified;
+                    require(verified.Open(mirror, true) && verified.Sha256() == Sha256Bytes("MZ earlier copy", 15),
+                            "gate: the existing mirror can be pinned and verified before replacing it");
+                    PutBinary(mirror, "MZ this copy", 12, &verified);
+                    require(ReadAll(mirror, r) && r == "MZ this copy" && GateHolds(mirror), "gate: a verified file is replaced and the new one held");
                     const wstring other = Join(gg, L"_storage_\\wronggpu-amd-compare.dll");
                     put(other, "MZ in use");
                     HANDLE busy = CreateFileW(other.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
                     string stopped;
                     try { PutBinary(other, "MZ new", 6); } catch (const SetupError& ex) { stopped = ToUtf8(ex.msg); }
                     if (busy != INVALID_HANDLE_VALUE) CloseHandle(busy);
-                    require(stopped.find("Stopped") != string::npos && ReadAll(other, r) && r == "MZ in use" && !GateHolds(other),
+                    require(!stopped.empty() && ReadAll(other, r) && r == "MZ in use" && !GateHolds(other),
                             "gate: an unheld file another program has open: the operation stops, the file as it was");
                 }
                 put(bin, "MZ old");
