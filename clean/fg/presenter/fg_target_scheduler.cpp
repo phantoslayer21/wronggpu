@@ -240,6 +240,10 @@ void FgTargetScheduler::SetFirstImageBudget(FgTicks budget) {
     config_.first_image_budget = budget;
 }
 
+void FgTargetScheduler::SetDisplayMinInterval(FgTicks min_interval) {
+    config_.display.min_interval = min_interval > 0 ? min_interval : 1;
+}
+
 void FgTargetScheduler::SetMaxGeneratedCap(std::uint32_t cap) {
     if (cap > config_.max_generated) cap = config_.max_generated;
     max_generated_cap_ = cap;

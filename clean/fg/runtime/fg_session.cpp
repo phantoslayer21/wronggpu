@@ -151,6 +151,13 @@ bool FgSession::SetFirstImageBudget(FgTicks budget) {
     return true;
 }
 
+bool FgSession::SetDisplayMinInterval(FgTicks min_interval) {
+    if (!scheduler_) return false;
+    scheduler_->SetDisplayMinInterval(min_interval);
+    desc_.scheduler.display.min_interval = scheduler_->Config().display.min_interval;
+    return true;
+}
+
 bool FgSession::SetMaxGeneratedCap(uint32_t cap) {
     if (!scheduler_) return false;
     scheduler_->SetMaxGeneratedCap(cap);

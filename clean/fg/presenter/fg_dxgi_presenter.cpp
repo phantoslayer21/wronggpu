@@ -344,6 +344,8 @@ FgStatus FgDxgiPresenter::CompleteResize(bool resize_ok, std::uint64_t new_epoch
     latency_credit_ = false;
     last_present_start_ = 0;
     last_present_done_ = 0;
+    call_pacing_ = {};
+    info_.present_call_p85_smoothed = 0;
     local_.clear();
     return s;
 }
@@ -693,6 +695,10 @@ bool FgDxgiPresenter::PresentHead(HANDLE stop) {
     const FgTicks duration = present_done - present_started;
     info_.present_call_total += duration;
     if (duration > info_.present_call_max) info_.present_call_max = duration;
+    if (tearing && shown) {
+        call_pacing_.Observe(duration);
+        info_.present_call_p85_smoothed = call_pacing_.Estimate();
+    }
     last_present_start_ = present_started;
     last_present_done_ = present_done;
     if (!tearing) {

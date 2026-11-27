@@ -16,6 +16,8 @@
 //
 // Not thread-safe: the back end serialises every call with its own lock. Plain C++17, no platform headers, so the
 // whole state machine is tested on the CPU (tests/test_fg_win_presenters.cpp).
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <mutex>
 #include <vector>
@@ -293,6 +295,31 @@ inline FgTicks FgTearingEarliestIssue(FgTicks started, FgTicks completed, FgTick
     const FgTicks completion_floor = completed + (physical_period > 0 ? physical_period : scheduled_interval);
     const FgTicks issue_floor = started + scheduled_interval;
     return issue_floor > completion_floor ? issue_floor : completion_floor;
+}
+
+// Measure routine call work in fixed batches. A few blocked calls cannot set the scheduling floor.
+class FgPresentCallPacing {
+public:
+    void Observe(FgTicks duration) {
+        if (duration <= 0) return;
+        calls_[count_++] = duration;
+        if (count_ < calls_.size()) return;
+        auto p85 = calls_.begin() + (calls_.size() - 1) * 85 / 100;
+        std::nth_element(calls_.begin(), p85, calls_.end());
+        estimate_ = estimate_ > 0 ? estimate_ + (*p85 - estimate_) / 4 : *p85;
+        count_ = 0;
+    }
+
+    FgTicks Estimate() const { return estimate_; }
+
+private:
+    std::array<FgTicks, 32> calls_{};
+    std::size_t count_ = 0;
+    FgTicks estimate_ = 0;
+};
+
+inline FgTicks FgTearingScheduledMinInterval(FgTicks configured, FgTicks physical_period, FgTicks call_estimate) {
+    return physical_period > 0 && call_estimate > 0 ? std::max(configured, physical_period + call_estimate) : configured;
 }
 
 inline FgTearingPlanDecision FgPlanTearingImage(FgTicks target, bool real, FgTicks now, FgTicks earliest,

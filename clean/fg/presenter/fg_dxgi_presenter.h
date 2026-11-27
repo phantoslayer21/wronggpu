@@ -67,6 +67,7 @@ struct FgDxgiPresenterInfo {
     std::uint64_t presents = 0;          // Present calls that succeeded
     FgTicks present_call_total = 0;     // successful CPU call time, including an outer swap-chain wrapper
     FgTicks present_call_max = 0;
+    FgTicks present_call_p85_smoothed = 0;
     std::uint64_t occlusion_retired_real = 0;
     std::uint64_t latency_timeouts = 0;  // frame-latency waits that timed out
 };
@@ -161,6 +162,7 @@ private:
     bool device_lost_pending_ = false;
     FgTicks last_present_start_ = 0;
     FgTicks last_present_done_ = 0;
+    FgPresentCallPacing call_pacing_;
     bool have_vblank_ = false;
     FgTicks last_vblank_ = 0;
     FgTicks grid_updated_at_ = 0;

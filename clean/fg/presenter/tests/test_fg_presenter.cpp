@@ -1382,6 +1382,37 @@ void TestTearingPhysicalGapAfterSlowCall() {
     }
 }
 
+void TestTearingSchedulerFitsPresenterThroughput() {
+    g_case = "tearing scheduler fits measured presenter throughput";
+    constexpr FgTicks physical = 27778;
+    constexpr FgTicks configured = 28619;
+    FgPresentCallPacing pacing;
+    for (int i = 0; i < 32; ++i) pacing.Observe(i == 3 ? 870000 : 3900);
+    CHECK(pacing.Estimate() == 3900);
+    FgSchedulerConfig sc = DefaultScheduler();
+    sc.adaptive_count = true;
+    sc.display.margin = 0;
+    sc.display.min_interval = configured;
+    Rig r(sc, DefaultFake());
+    FgTicks t = kSecond;
+    r.scheduler.SetDisplayMinInterval(FgTearingScheduledMinInterval(configured, physical, pacing.Estimate()));
+    for (int i = 0; i < 30; ++i) {
+        t += 160000;
+        r.Frame(t, 4);
+    }
+    CHECK(r.plans.back().generated_count == 4);
+    for (int i = 0; i < 32 * 6; ++i) pacing.Observe(i % 32 == 3 ? 570000 : 4500);
+    CHECK(pacing.Estimate() >= 4390 && pacing.Estimate() < 4500);
+    r.scheduler.SetDisplayMinInterval(FgTearingScheduledMinInterval(configured, physical, pacing.Estimate()));
+    for (int i = 0; i < 20; ++i) {
+        t += 160000;
+        r.Frame(t, 4);
+    }
+    r.RunUntil(t + 700000);
+    CHECK(r.plans.back().generated_count == 3);
+    CHECK(AllOk(r));
+}
+
 void TestRc2SchedulerPacing() {
     g_case = "rc2 scheduler pacing";
     {
@@ -1661,6 +1692,7 @@ int main() {
     TestTearingPlanHeadNearCeiling();
     TestTearingAtFiveImagesPerInterval();
     TestTearingPhysicalGapAfterSlowCall();
+    TestTearingSchedulerFitsPresenterThroughput();
     std::printf("test_fg_presenter: %d checks, %d failure(s)\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

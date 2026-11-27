@@ -336,6 +336,7 @@ public:
     // The scheduler's first-image budget while the session runs (FgTargetScheduler::SetFirstImageBudget), kept for a
     // scheduler made again after a resize. false: no session.
     bool SetFirstImageBudget(FgTicks budget);
+    bool SetDisplayMinInterval(FgTicks min_interval);
     bool SetMaxGeneratedCap(uint32_t cap);
     uint64_t PresentEpoch() const { return present_epoch_; }
     bool MenuLatchPending() const { return menu_latch_; }

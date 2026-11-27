@@ -143,6 +143,7 @@ public:
     // images finish after their display time gives the GPU more of it). Clamped to [0, max_lead]. The next commit
     // uses the new lead. Sustained shortfall can re-anchor and excess lead drains through bounded correction.
     void SetFirstImageBudget(FgTicks budget);
+    void SetDisplayMinInterval(FgTicks min_interval);
     // Optional upper cap on scheduled generated count when producer misses persist.
     // 0 clears the override.
     void SetMaxGeneratedCap(std::uint32_t cap);
