@@ -28,7 +28,7 @@ DXGI_COLOR_SPACE_TYPE ColorSpaceFor(DXGI_FORMAT f, bool hdr) {
 }  // namespace
 
 FgWinCompPresenter::FgWinCompPresenter(const FgCompPresenterDesc& desc, const FgEngineConfig& engine)
-    : desc_(desc), device12_(desc.device), engine_(engine, &fences12_) {
+    : desc_(desc), device12_(desc.device), engine_(engine, &fences12_), display_(desc.refresh_period) {
     info_.slot_count = engine.slot_count;
 }
 
@@ -296,6 +296,13 @@ FgCompPresenterInfo FgWinCompPresenter::Info() const {
     return info_;
 }
 
+FgDisplaySummary FgWinCompPresenter::ReadDisplayCadence(bool window) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto result = window ? display_.TakeWindow() : display_.Session();
+    result.pending = submitted_.size();
+    return result;
+}
+
 std::uint32_t FgWinCompPresenter::FreeSlots() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return engine_.FreeSlots();
@@ -440,7 +447,7 @@ FgStatus FgWinCompPresenter::CompleteResize(bool resize_ok, std::uint64_t new_ep
     resize_height_ = 0;
     have_vblank_ = false;
     deferred_.clear();
-    submitted_.clear();
+    ForgetSubmittedLocked();
     return s;
 }
 
@@ -448,7 +455,7 @@ FgStatus FgWinCompPresenter::OnDeviceLost() {
     std::lock_guard<std::mutex> lock(mutex_);
     const FgStatus s = engine_.OnDeviceLost();
     deferred_.clear();
-    submitted_.clear();
+    ForgetSubmittedLocked();
     return s;
 }
 
@@ -471,7 +478,7 @@ FgStatus FgWinCompPresenter::Detach() {
         if (claimed_) FgChainRegistry::Process().Release(chain_, this);
         claimed_ = false;
         deferred_.clear();
-        submitted_.clear();
+        ForgetSubmittedLocked();
     } else {
         worker_.Wake();  // producer leases still held: the caller retries (WaitIdle)
     }
@@ -508,11 +515,11 @@ void FgWinCompPresenter::UpdateGridLocked() {
     if (FgReadCompositorGrid(clock_map_, desc_.refresh_period, &grid)) info_.grid = grid;
 }
 
-bool FgWinCompPresenter::EngineIdForPlatform(std::uint64_t platform_id, std::uint64_t* engine_id, bool erase) {
+bool FgWinCompPresenter::TakePlatformPresent(std::uint64_t platform_id, Submitted* out) {
     for (std::size_t i = 0; i < submitted_.size(); ++i) {
         if (submitted_[i].platform_id != platform_id) continue;
-        *engine_id = submitted_[i].engine_id;
-        if (erase) submitted_.erase(submitted_.begin() + static_cast<std::ptrdiff_t>(i));
+        *out = submitted_[i];
+        submitted_.erase(submitted_.begin() + static_cast<std::ptrdiff_t>(i));
         return true;
     }
     return false;
@@ -521,6 +528,12 @@ bool FgWinCompPresenter::EngineIdForPlatform(std::uint64_t platform_id, std::uin
 void FgWinCompPresenter::LoseLocked() {
     engine_.OnDeviceLost();
     deferred_.clear();
+    ForgetSubmittedLocked();
+}
+
+void FgWinCompPresenter::ForgetSubmittedLocked() {
+    display_.Unresolved(submitted_.size());
+    display_.BreakTiming();
     submitted_.clear();
 }
 
@@ -541,6 +554,7 @@ void FgWinCompPresenter::CancelOnDisplayLocked(std::uint64_t engine_from) {
             submitted_[keep++] = submitted_[i];
         }
     }
+    display_.Unresolved(submitted_.size() - keep);
     submitted_.resize(keep);
     if (first != 0 && manager_) {
         const HRESULT hr = manager_->CancelPresentsFrom(first);
@@ -555,14 +569,16 @@ void FgWinCompPresenter::DrainStatisticsLocked() {
         ComPtr<IPresentStatistics> st;
         if (manager_->GetNextPresentStatistics(&st) != S_OK || !st) break;
         const std::uint64_t pid = st->GetPresentId();
-        std::uint64_t eid = 0;
+        Submitted submitted{};
         switch (st->GetKind()) {
             case PresentStatisticsKind_PresentStatus: {
                 ComPtr<IPresentStatusPresentStatistics> ps;
                 if (FAILED(st.As(&ps))) break;
                 const PresentStatus v = ps->GetPresentStatus();
-                if ((v == PresentStatus_Skipped || v == PresentStatus_Canceled) && EngineIdForPlatform(pid, &eid, true))
-                    engine_.OnPresentSkipped(eid);
+                if ((v == PresentStatus_Skipped || v == PresentStatus_Canceled) && TakePlatformPresent(pid, &submitted)) {
+                    engine_.OnPresentSkipped(submitted.engine_id);
+                    display_.Unseen(submitted.display);
+                }
                 break;
             }
             case PresentStatisticsKind_IndependentFlipFrame: {
@@ -571,8 +587,11 @@ void FgWinCompPresenter::DrainStatisticsLocked() {
                 ++info_.indep_flip_frames;
                 if (pid > last_displayed_platform_) last_displayed_platform_ = pid;
                 const FgTicks timestamp = static_cast<FgTicks>(fs->GetDisplayedTime().value);
-                if (EngineIdForPlatform(pid, &eid, true))
-                    engine_.OnPresentDisplayed(eid, timestamp != 0 ? timestamp : FgInterruptNow(), timestamp != 0);
+                if (TakePlatformPresent(pid, &submitted)) {
+                    engine_.OnPresentDisplayed(submitted.engine_id, timestamp != 0 ? timestamp : FgInterruptNow(),
+                                               timestamp != 0);
+                    display_.Displayed(submitted.display, timestamp);
+                }
                 break;
             }
             case PresentStatisticsKind_CompositionFrame: {
@@ -593,7 +612,10 @@ void FgWinCompPresenter::DrainStatisticsLocked() {
                     }
                 }
                 if (pid > last_displayed_platform_) last_displayed_platform_ = pid;
-                if (EngineIdForPlatform(pid, &eid, true)) engine_.OnPresentDisplayed(eid, displayed_at, measured);
+                if (TakePlatformPresent(pid, &submitted)) {
+                    engine_.OnPresentDisplayed(submitted.engine_id, displayed_at, measured);
+                    display_.Displayed(submitted.display, measured ? displayed_at : 0);
+                }
                 break;
             }
             default: break;
@@ -616,11 +638,12 @@ void FgWinCompPresenter::ReleaseSlotsLocked() {
                 // A2 occlusion watchdog (windowed only; never triggers in headless bind_window==false validation):
                 // if DWM stops emitting statistics while occluded/minimized, retire stale queued presents after 250 ms
                 // so the game's frame-latency credit contract never deadlocks.
-                const bool occluded_timeout = desc_.bind_window && submitted_[i].target > 0 &&
-                                              now > submitted_[i].target + 2500000;
+                const bool occluded_timeout = desc_.bind_window && submitted_[i].vblank > 0 &&
+                                              now > submitted_[i].vblank + 2500000;
                 boolean available = 0;
                 if ((older_available || occluded_timeout) &&
                     SUCCEEDED(buffers_[slot].buffer->IsAvailable(&available)) && available) {
+                    display_.Unseen(submitted_[i].display);
                     submitted_.erase(submitted_.begin() + static_cast<std::ptrdiff_t>(i));
                     engine_.OnPresentSkipped(eid);
                 }
@@ -694,13 +717,18 @@ void FgWinCompPresenter::SubmitOutboxLocked() {
             } else {
                 engine_.MarkFailed();  // a failed present is a hard failure: refuse until Detach, no fallback
                 deferred_.clear();
-                submitted_.clear();
+                ForgetSubmittedLocked();
             }
             return;
         }
-        engine_.OnPresentSubmitted(p.present_id, FgInterruptNow());
-        submitted_.push_back(Submitted{p.present_id, pid, p.slot, vblank, p.real});
-        if (submitted_.size() > kMaxSubmitted) submitted_.erase(submitted_.begin());
+        const FgTicks submitted_at = FgInterruptNow();
+        engine_.OnPresentSubmitted(p.present_id, submitted_at);
+        display_.Submitted();
+        submitted_.push_back(Submitted{p.present_id, pid, vblank, {p.target, submitted_at, p.real, p.gameplay}});
+        if (submitted_.size() > kMaxSubmitted) {
+            display_.Unresolved(1);
+            submitted_.erase(submitted_.begin());
+        }
         have_vblank_ = true;
         last_vblank_ = vblank;
     }

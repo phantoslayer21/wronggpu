@@ -30,6 +30,7 @@
 #include <mutex>
 #include <vector>
 
+#include "fg_display_cadence.h"
 #include "fg_present_engine.h"
 #include "fg_win_common.h"
 
@@ -46,6 +47,7 @@ struct FgDxgiPresenterDesc {
     ID3D12CommandQueue* queue = nullptr;  // the queue the swap chain was created on
     IDXGISwapChain4* swap_chain = nullptr;
     FgDxgiPacing pacing = FgDxgiPacing::Tearing;
+    bool variable_refresh = false;  // VRR vsync can use off-grid targets
     FgTicks refresh_period = 0;   // VSync: the scan-out period (0: from the compositor); tearing: optional
     FgTicks min_interval = 0;    // minimum display interval for tearing pacing
     FgTicks timer_lead = 0;       // wake this much before the present time
@@ -68,6 +70,10 @@ struct FgDxgiPresenterInfo {
     FgTicks present_call_total = 0;     // successful CPU call time, including an outer swap-chain wrapper
     FgTicks present_call_max = 0;
     FgTicks present_call_p85_smoothed = 0;
+    FgTicks call_p50 = 0, call_p95 = 0, call_p99 = 0;
+    FgTicks start_gap_p05 = 0, start_gap_p50 = 0, start_gap_p95 = 0;
+    std::uint64_t start_gap_samples = 0, start_gap_under_refresh = 0;
+    std::uint64_t vrr_queue_drops = 0;
     std::uint64_t tearing_drop_deadline = 0;
     std::uint64_t tearing_drop_collision = 0;
     std::uint64_t tearing_collision_completion_floor = 0;  // subset requiring the actual completion floor
@@ -93,6 +99,7 @@ public:
     bool WaitIdle(DWORD timeout_ms);
     bool HoldsSwapChainBuffers() const;
     FgDxgiPresenterInfo Info() const;
+    FgDisplaySummary ReadDisplayCadence(bool window);
     std::uint32_t FreeSlots() const;
     DWORD WorkerThreadId() const { return worker_.ThreadId(); }
     void SetRealRetireCallback(FgRealRetireFn fn, void* ctx);
@@ -126,6 +133,7 @@ private:
     void StepLocked(FgTicks now);
     bool PlanHeadLocked(FgTicks now, Planned* out);
     bool PresentHead(HANDLE stop);  // false when the worker must stop
+    bool FixedGrid() const { return desc_.pacing == FgDxgiPacing::Vsync && !desc_.variable_refresh; }
     void ReleaseCopiedSlotsLocked();
     void CancelLocalLocked(std::uint64_t engine_from);
     void LoseLocked();
@@ -159,6 +167,7 @@ private:
 
     mutable std::mutex mutex_;
     FgPresentEngine engine_;
+    FgDxgiDisplayCadence display_;
     std::deque<FgEnginePresent> local_;  // queued on the engine, not yet presented (present-id order)
     bool latency_credit_ = false;        // a frame-latency count taken but not yet used by a Present
     bool presenting_ = false;            // true while the worker holds the engine's present lease
@@ -166,6 +175,10 @@ private:
     FgTicks last_present_start_ = 0;
     FgTicks last_present_done_ = 0;
     FgPresentCallPacing call_pacing_;
+    FgDisplayHistogram<100, 0, 10000> call_times_, start_gaps_;
+    FgTicks last_counted_start_ = 0;
+    bool vrr_queue_full_ = false;
+    std::uint32_t vrr_last_submitted_id_ = 0;
     bool have_vblank_ = false;
     FgTicks last_vblank_ = 0;
     FgTicks grid_updated_at_ = 0;

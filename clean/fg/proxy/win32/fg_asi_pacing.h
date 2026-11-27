@@ -47,12 +47,6 @@ constexpr int64_t kFirstImageMissMargin = 5000;
 
 constexpr std::size_t kPresenterAdmissionDepth = 2;  // head and one following interval
 
-inline bool AdvanceTearingSchedulePoll(uint64_t count, uint64_t& last_poll) {
-    if (count - last_poll < 16) return false;
-    last_poll = count;
-    return true;
-}
-
 constexpr bool PresenterAdmissionAtCapacity(std::size_t intervals, std::size_t slots, bool has_consumed_interval) {
     return intervals >= slots || (has_consumed_interval && intervals >= kPresenterAdmissionDepth);
 }
@@ -134,6 +128,47 @@ struct FirstImageProducerWindow {
 
 inline FirstImageProducerWindow ProducerWindow(const wgfg::FgPresentStats& now, const wgfg::FgPresentStats& base) {
     return {now.generated_scheduled - base.generated_scheduled, now.generated_late_pre_queue - base.generated_late_pre_queue};
+}
+
+// Output oversubscription is independent of the producer budget. A presenter miss does
+// not buy more producer lead, and a clean window only earns a higher count with measured slack.
+struct OverflowDelivery {
+    uint32_t cap = 0;
+    uint32_t clean_windows = 0;
+    uint32_t bad_windows = 0;
+    bool ready = false;
+
+    void Observe(uint64_t offered, uint64_t missed, uint32_t active, uint32_t requested, bool overflow,
+                 bool has_headroom, bool full_window) {
+        if (offered == 0 || active == 0) return;
+        if (missed * 100 >= offered) {
+            ready = false;
+            clean_windows = 0;
+            const bool severe = missed >= 3 && missed * 100 >= offered * 8;
+            if (full_window) ++bad_windows;
+            if (overflow && active > 1 && (severe || bad_windows >= 2)) {
+                const uint32_t next = active - 1;
+                if (cap == 0 || next < cap) {
+                    cap = next;
+                    bad_windows = 0;
+                }
+            }
+        } else if (full_window) {
+            bad_windows = 0;
+            if (!has_headroom) {
+                ready = false;
+                clean_windows = 0;
+            } else if (++clean_windows >= 4) {
+                clean_windows = 0;
+                if (cap != 0) cap = cap + 1 >= requested ? 0 : cap + 1;
+                ready = true;
+            }
+        }
+    }
+};
+
+inline bool HasActiveProducerTail(bool consumed, std::size_t samples, int64_t readiness_p95, int64_t budget) {
+    return consumed && samples >= 6 && readiness_p95 + 12500 >= budget;
 }
 
 inline void ResetFirstImageBudgetWindow(FirstImageBudgetLimits& limits, wgfg::FgPresentStats& baseline,

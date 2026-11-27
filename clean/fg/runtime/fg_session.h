@@ -259,6 +259,8 @@ struct FgSessionResult {
     bool menu_detected = false;
     bool menu_copy = false;
     bool history_advanced = false;
+    FgTicks fill_period = 0;
+    FgTicks fill_release_wait = 0;
 };
 
 struct FgSessionCounters {
@@ -325,10 +327,11 @@ public:
     IFgPresenter* Presenter() const { return presenter_.get(); }
     // Sets the arrival timestamp for the next OnPresent / OnGameFrameOnly call (A3: sampled before any host wait so
     // host throttling never perturbs the scheduler's cadence estimate). Consumed once.
-    void SetNextArrival(FgTicks arrival, FgTicks budget_origin = 0) {
+    void SetNextArrival(FgTicks arrival, FgTicks budget_origin = 0, FgTicks previous_release_wait = 0) {
         has_next_arrival_ = true;
         next_arrival_ = arrival;
         next_budget_origin_ = budget_origin;
+        next_release_wait_ = previous_release_wait;
     }
     FgRealOnlyReason LastReductionReason() const {
         return scheduler_ ? scheduler_->LastReductionReason() : FgRealOnlyReason::None;
@@ -336,8 +339,9 @@ public:
     // The scheduler's first-image budget while the session runs (FgTargetScheduler::SetFirstImageBudget), kept for a
     // scheduler made again after a resize. false: no session.
     bool SetFirstImageBudget(FgTicks budget);
-    bool SetDisplayMinInterval(FgTicks min_interval);
     bool SetMaxGeneratedCap(uint32_t cap);
+    void SetOverflowReady(bool ready) { if (scheduler_) scheduler_->SetOverflowReady(ready); }
+    void SetConsumedLeadProtection(bool active) { if (scheduler_) scheduler_->SetConsumedLeadProtection(active); }
     uint64_t PresentEpoch() const { return present_epoch_; }
     bool MenuLatchPending() const { return menu_latch_; }
     const FgCreateDesc& CreateDesc() const { return desc_.create; }
@@ -378,6 +382,7 @@ private:
     bool has_next_arrival_ = false;
     FgTicks next_arrival_ = 0;
     FgTicks next_budget_origin_ = 0;
+    FgTicks next_release_wait_ = 0;
 };
 
 // ---- transport glue ----------------------------------------------------------------------------------------------

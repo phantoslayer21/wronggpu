@@ -189,6 +189,7 @@ FgWinResult FgCreatePresenter(const FgPresenterFactoryDesc& desc, FgCreatedPrese
     dd.swap_chain = desc.swap_chain;
     dd.pacing = out->selection.chosen == FgPresenterChoice::DxgiFlipTearing ? FgDxgiPacing::Tearing
                                                                              : FgDxgiPacing::Vsync;
+    dd.variable_refresh = desc.display.variable_refresh;
     dd.refresh_period = desc.display.refresh_period;
     dd.timer_lead = desc.dxgi_timer_lead;
     dd.late_tolerance = desc.dxgi_late_tolerance;

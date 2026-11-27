@@ -133,6 +133,8 @@ struct FgIntervalPlan {
     std::uint32_t target_count = 0;  // generated_count + 1
     FgFrameTarget targets[kFgMaxTargets] = {};
     FgReanchorReason reanchor_reason = FgReanchorReason::None;
+    FgTicks fill_period = 0;        // chosen overflow period, when this plan schedules the higher count
+    FgTicks fill_release_wait = 0;  // additional game-frame release delay, after submission
 };
 
 // One reserved display slot.
@@ -207,6 +209,8 @@ struct FgPresentStats {
     std::uint64_t generated_submitted = 0;         // generated images handed to the OS present call
     std::uint64_t generated_dropped_pre_queue = 0; // dropped before reaching the outbox (reserve / submit / pump)
     std::uint64_t generated_late_pre_queue = 0;    // pre-queue drops due to lateness
+    std::uint64_t generated_late_ready_pre_queue = 0; // producer fence complete when the worker found it overdue
+    std::uint64_t generated_late_after_stall = 0;    // crossed its deadline or lost its slot to the prior stall
     std::uint64_t generated_dropped_post_queue = 0;// dropped after reaching the outbox (presenter worker)
     std::uint64_t real_submitted = 0;              // real images handed to the OS present call
     bool display_time_measured = false;            // true: compositor/display feedback; false: submit/vblank estimate

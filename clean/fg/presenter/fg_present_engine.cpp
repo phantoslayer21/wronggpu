@@ -253,6 +253,7 @@ void FgPresentEngine::Queue(std::uint32_t slot, bool represent) {
     p.target = s.target;
     p.deadline = s.deadline;
     p.fence = s.fence;
+    p.gameplay = s.gameplay;
     outbox_.push_back(p);
 }
 
@@ -463,6 +464,7 @@ FgStatus FgPresentEngine::PresentRealOnly(const FgIntervalPlan& plan, const FgRe
     r.frame_id = plan.real_frame_id;
     r.index = 1;
     r.real = true;
+    r.gameplay = plan.real_only_reason != FgRealOnlyReason::MenuDisabled;
     r.real_credit_active = true;
     r.target = plan.targets[0].target;
     r.deadline = plan.targets[0].deadline;
@@ -601,6 +603,7 @@ void FgPresentEngine::Pump(FgTicks now) {
             continue;
         }
         if (now > PendingDeadline(s)) {
+            if (ready) ++stats_.generated_late_ready_pre_queue;
             Drop(slot, FgDropReason::Late, true);
             continue;
         }
@@ -632,11 +635,12 @@ bool FgPresentEngine::LeasePresent(std::uint32_t slot, std::uint64_t present_id)
 }
 
 void FgPresentEngine::FinishLeasedPresent(std::uint32_t slot, FgTicks submitted, FgTicks estimate, bool presented,
-                                          FgTicks call_duration) {
+                                          FgTicks call_duration, bool stalled) {
     Slot& s = slots_[slot];
     if (s.state != FgEngineSlotState::Presenting) return;
     s.state = FgEngineSlotState::Retired;
     if (call_duration > 0) EmitTrace(s, kFgTraceInnerPresentDuration, call_duration);
+    if (stalled) EmitTrace(s, kFgTraceStalledPresent, call_duration);
     if (submitted != 0) CountSubmission(s, submitted);
     if (presented) CountDisplay(s, estimate, false);
     // OnSlotReleased retires the slot once the GPU copy has finished.
@@ -685,11 +689,12 @@ bool FgPresentEngine::OnPresentSkipped(std::uint64_t present_id) {
     return true;
 }
 
-bool FgPresentEngine::OnPresentDropped(std::uint64_t present_id, FgDropReason reason) {
+bool FgPresentEngine::OnPresentDropped(std::uint64_t present_id, FgDropReason reason, bool after_stall) {
     const int qi = FindQueued(present_id);
     if (qi < 0) return false;
     const std::uint32_t slot = queued_[static_cast<std::size_t>(qi)];
     if (slots_[slot].real || reason == FgDropReason::None) return false;  // a real image is never dropped
+    if (after_stall && reason == FgDropReason::Late) ++stats_.generated_late_after_stall;
     queued_.erase(queued_.begin() + qi);
     Drop(slot, reason, false);  // never handed to the display: the buffer is free at once
     return true;

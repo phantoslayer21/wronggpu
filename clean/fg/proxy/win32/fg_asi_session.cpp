@@ -260,6 +260,11 @@ struct FgAsiSessionHost::Impl {
     bool session_draining = false;
     bool handled = false;  // the current interval was presented by the session
     uint64_t handled_interval_id = 0;
+    wgfg::FgHighResTimer fill_timer;
+    wgfg::FgTicks previous_fill_wait = 0;
+    wgfg::FgTicks current_fill_wait = 0, current_fill_period = 0;
+    uint64_t fill_cap_intervals = 0, fill_high_intervals = 0, fill_gameplay_intervals = 0;
+    double fill_trim_sum = 0.0;
     uint64_t last_values[2] = {};  // N-B3: aligned to 2-interval executor pipeline bound
     FgAsiSessionStats stats;
     uint32_t probe_failures = 0;   // start-up adapter probes that found no DXGI factory (logged at most 3 times)
@@ -285,11 +290,14 @@ struct FgAsiSessionHost::Impl {
 
     // lateness control (kBudget*): budget kept across sessions of the run
     wgfg::FgTicks budget = kBudgetBase;
-    wgfg::FgTicks tearing_schedule_base = 0;
-    wgfg::FgTicks tearing_physical_period = 0;
     wgfg::FgTicks tearing_schedule_interval = 0;
-    uint64_t last_tearing_schedule_poll = 0;
     uint32_t lateness_count_cap = 0;
+    OverflowDelivery delivery;
+    wgfg::FgPresentStats delivery_base;
+    uint32_t delivery_frames = 0, delivery_requested = 0, delivery_active = 0;
+    uint32_t delivery_overflow_frames = 0, delivery_drain_frames = 0;
+    bool delivery_fill = false, guard_delivery = false;
+    uint64_t delivery_cap_steps = 0;
     uint32_t cap_miss_windows = 0;
     uint32_t window_frames = 0;
     bool window_first = true;
@@ -322,6 +330,8 @@ struct FgAsiSessionHost::Impl {
         wgfg::FgTicks inner_present_duration = 0;
         bool present_interval_measured = false;
         wgfg::FgTicks t_first_gen_ready = 0;
+        wgfg::FgTicks min_gen_headroom = 0;
+        uint32_t ready_generated = 0;
         wgfg::FgTicks t_first_gen_submit = 0;
         wgfg::FgTicks t_real_ready = 0;
         wgfg::FgTicks t_real_submit = 0;
@@ -331,7 +341,15 @@ struct FgAsiSessionHost::Impl {
         uint32_t drops_post = 0;
         uint32_t skips_real = 0, skips_generated = 0;
         bool display_estimate = false;
+        bool menu_disabled = false;
     };
+    enum class StallImage : size_t { Generated, Real, Menu };
+    struct StallCalls {
+        std::array<uint64_t, 3> count{};
+        std::array<wgfg::FgTicks, 3> max{};
+        uint64_t with_admission_wait = 0;
+    };
+    StallCalls stall_calls;  // protected by trace_mu
     IntervalTrace next_trace;
     mutable std::mutex trace_mu;
     IntervalTrace trace_ring[kTraceRingSize] = {};
@@ -340,10 +358,17 @@ struct FgAsiSessionHost::Impl {
     uint32_t trace_since_summary = 0;
     bool trace_csv_enabled = false;
     std::string trace_csv_path;
+    struct DisplayTrace {
+        const char* source = "unavailable";
+        wgfg::FgDisplaySummary samples;
+    };
+    bool logged_display_disjoint = false;
+    bool logged_display_unsupported = false;
     struct TraceJob {
         std::vector<IntervalTrace> rows;
         std::string summary_tag;
         wgfg::FgTicks budget = 0;
+        DisplayTrace display{};
     };
     std::condition_variable trace_cv;
     std::deque<TraceJob> trace_jobs;
@@ -426,7 +451,7 @@ struct FgAsiSessionHost::Impl {
                 trace_jobs.pop_front();
             }
             if (!job.summary_tag.empty()) {
-                LogTraceSummary(job.summary_tag.c_str(), job.budget, job.rows);
+                LogTraceSummary(job.summary_tag.c_str(), job.budget, job.rows, job.display);
                 continue;
             }
             if (!csv) csv = OpenTraceCsv();
@@ -493,6 +518,7 @@ struct FgAsiSessionHost::Impl {
         tr.interval_id = plan.interval_id;
         tr.requested_n = plan.requested_count;
         tr.scheduled_n = plan.generated_count;
+        tr.menu_disabled = plan.real_only_reason == wgfg::FgRealOnlyReason::MenuDisabled;
         tr.reanchor_reason = plan.reanchor_reason;
         tr.in_flight = m.st_in_flight_real.load();
         m.RecordTraceInterval(tr);
@@ -537,7 +563,12 @@ struct FgAsiSessionHost::Impl {
             switch (kind) {
                 case 0:  // fence done / queued to outbox
                     if (real) tr.t_real_ready = now;
-                    else if (index == 1 && tr.t_first_gen_ready == 0) tr.t_first_gen_ready = now;
+                    else {
+                        if (index == 1 && tr.t_first_gen_ready == 0) tr.t_first_gen_ready = now;
+                        const auto headroom = target - now;
+                        tr.min_gen_headroom = tr.ready_generated++ == 0 ? headroom
+                            : std::min(headroom, tr.min_gen_headroom);
+                    }
                     break;
                 case 1:  // submitted to OS present
                     if (real) tr.t_real_submit = now;
@@ -553,13 +584,62 @@ struct FgAsiSessionHost::Impl {
                 case 4: ++tr.drops_post; break;
                 case 5: (real ? tr.skips_real : tr.skips_generated)++; break;
                 case wgfg::kFgTraceInnerPresentDuration: tr.inner_present_duration += ts; break;
+                case wgfg::kFgTraceStalledPresent: {
+                    auto& stalls = m->stall_calls;
+                    const size_t image = static_cast<size_t>(tr.menu_disabled ? StallImage::Menu :
+                                                             real ? StallImage::Real : StallImage::Generated);
+                    ++stalls.count[image];
+                    stalls.max[image] = std::max(stalls.max[image], ts);
+                    if (tr.t_after_wait - tr.t_arrival >= 5000) ++stalls.with_admission_wait;
+                    break;
+                }
                 default: break;
             }
             break;
         }
     }
 
-    void QueueTraceSummary(const char* tag, bool closing) {
+    DisplayTrace ReadDisplayCadence(bool window) {
+        auto* pr = session ? session->Presenter() : nullptr;
+        if (auto* dx = dynamic_cast<wgfg::FgDxgiPresenter*>(pr)) {
+            return {"dxgi-vblank", dx->ReadDisplayCadence(window)};
+        }
+        if (auto* cp = dynamic_cast<wgfg::FgWinCompPresenter*>(pr)) {
+            return {"composition", cp->ReadDisplayCadence(window)};
+        }
+        return {};
+    }
+
+    static std::string FormatDisplay(const DisplayTrace& display) {
+        const auto& t = display.samples;
+        const auto us = [](wgfg::FgTicks ticks) { return std::to_string(ticks / 10); };
+        const auto count = [](uint64_t n) { return std::to_string(n); };
+        char fps[32] = "n/a";
+        if (t.gameplay_time > 0) std::snprintf(fps, sizeof(fps), "%.1f", t.GameplayFps());
+        return std::string("display_source=") + display.source +
+               " display_observed=" + count(t.real + t.generated) +
+               " display_unseen=" + count(t.unseen) + " display_unresolved=" + count(t.unresolved) +
+               " display_pending=" + count(t.pending) + " display_polled_submitted=" + count(t.submitted) +
+               " display_untimed=" + count(t.untimed) + " display_disjoint=" + count(t.disjoint) +
+               " display_unsupported=" + count(t.unsupported) + " display_read_errors=" + count(t.read_errors) +
+               " | display_dt_us p50=" + us(t.interval_p50) + " p95=" + us(t.interval_p95) +
+               " p99=" + us(t.interval_p99) + " max=" + us(t.interval_max) + " n=" + count(t.interval_samples) +
+               " short=" + count(t.short_intervals) + " | display_latency_us p50=" + us(t.latency_p50) +
+               " p95=" + us(t.latency_p95) + " n=" + count(t.real + t.generated - t.untimed) +
+               " | gameplay_display_fps=" + fps +
+               " gameplay_display_real=" + count(t.gameplay_real) +
+               " gameplay_display_generated=" + count(t.gameplay_generated);
+    }
+
+    void QueueTraceSummary(const char* tag, bool closing, const DisplayTrace& display) {
+        if (display.samples.disjoint && !logged_display_disjoint) {
+            Log("fg host: DXGI display statistics disjoint; cadence restarted");
+            logged_display_disjoint = true;
+        }
+        if (display.samples.unsupported && !logged_display_unsupported) {
+            Log("fg host: DXGI display statistics unsupported on the swap chain");
+            logged_display_unsupported = true;
+        }
         std::lock_guard<std::mutex> lock(trace_mu);
         if (trace_count != 0 && trace_worker.joinable()) {
             std::vector<IntervalTrace> snap;
@@ -572,13 +652,16 @@ struct FgAsiSessionHost::Impl {
                 trace_jobs.push_back({std::move(trace_evicted), {}, 0});
                 trace_evicted.clear();
             }
-            trace_jobs.push_back({std::move(snap), tag, budget});
+            trace_jobs.push_back({std::move(snap), tag, budget, display});
             trace_cv.notify_one();
         }
         if (closing) {
             trace_count = 0;
             trace_head = 0;
             trace_since_summary = 0;
+            logged_display_disjoint = false;
+            logged_display_unsupported = false;
+            stall_calls = {};
         }
     }
 
@@ -593,7 +676,8 @@ struct FgAsiSessionHost::Impl {
         return out.empty() ? "none" : out;
     }
 
-    void LogTraceSummary(const char* tag, wgfg::FgTicks summary_budget, const std::vector<IntervalTrace>& snap) {
+    void LogTraceSummary(const char* tag, wgfg::FgTicks summary_budget, const std::vector<IntervalTrace>& snap,
+                         const DisplayTrace& display) {
         std::vector<int64_t> base_dt, wait_us, rec_us, gen_rdy_us, real_rdy_us, slip_us;
         std::vector<int64_t> present_interval_us, queue_depth_wait_us, inner_present_us;
         uint32_t max_in_flight = 0;
@@ -646,7 +730,8 @@ struct FgAsiSessionHost::Impl {
                       static_cast<long long>(Percentile(queue_depth_wait_us, 1.00)),
                       static_cast<long long>(Percentile(inner_present_us, 0.95)),
                       static_cast<long long>(Percentile(inner_present_us, 1.00)), inner_present_us.size());
-        Log(std::string(buf) + " | gen_reanchor_causes=" + FormatReanchorCauses(causes));
+        Log(std::string(buf) + " | gen_reanchor_causes=" + FormatReanchorCauses(causes) + " | " +
+            FormatDisplay(display));
     }
 
     void EnsureLatencySemLocked() {
@@ -666,6 +751,18 @@ struct FgAsiSessionHost::Impl {
     void ReturnFacadeCredit() {
         std::lock_guard<std::mutex> lock(credit_mu);
         RefillWaitableLocked(false);
+    }
+
+    void PaceFacadeRelease() {
+        if (current_fill_wait <= 0) return;
+        const auto start = wgfg::FgInterruptNow();
+        if (!fill_timer.ArmAt(start + current_fill_wait)) return;
+        const auto timeout = static_cast<DWORD>((current_fill_wait + 9999) / 10000 + 1);
+        if (WaitForSingleObject(fill_timer.Handle(), timeout) != WAIT_OBJECT_0) fill_timer.Cancel();
+        previous_fill_wait = wgfg::FgInterruptNow() - start;
+        ++fill_cap_intervals;
+        const auto uncapped = current_fill_period - current_fill_wait;
+        fill_trim_sum += 100.0 * previous_fill_wait / (uncapped + previous_fill_wait);
     }
 
     void EndAdmissionLocked(uint64_t frame_id) {
@@ -1248,7 +1345,24 @@ struct FgAsiSessionHost::Impl {
                           static_cast<unsigned long long>(ps.real_submitted), sust,
                           ps.display_time_measured ? "measured" : "submit-estimate",
                           static_cast<unsigned long long>(FgSwapChain::TotalWorkerReentries()));
-            Log(buf);
+            const DisplayTrace display = ReadDisplayCadence(false);
+            char gameplay[32] = "n/a";
+            if (display.samples.gameplay_real)
+                std::snprintf(gameplay, sizeof(gameplay), "%.2fx", display.samples.GameplayMultiplier());
+            char fill[168];
+            std::snprintf(fill, sizeof(fill), " | fill_cap_intervals=%llu fill_mean_trim_pct=%.2f "
+                          "fill_high_gameplay_pct=%.2f",
+                          static_cast<unsigned long long>(fill_cap_intervals),
+                          fill_cap_intervals ? fill_trim_sum / fill_cap_intervals : 0.0,
+                          fill_gameplay_intervals ? 100.0 * fill_high_intervals / fill_gameplay_intervals : 0.0);
+            const auto producer = ps.generated_late_pre_queue - ps.generated_late_ready_pre_queue;
+            const auto stall = ps.generated_late_after_stall;
+            const auto worker = ps.dropped_late - producer - stall;
+            Log(std::string(buf) + " | gameplay_mult=" + gameplay + fill + " | late_producer=" +
+                std::to_string(producer) + " late_worker=" + std::to_string(worker) +
+                " late_stall=" + std::to_string(stall) +
+                " late_fence_complete_pre_queue=" + std::to_string(ps.generated_late_ready_pre_queue) +
+                " delivery_cap_steps=" + std::to_string(delivery_cap_steps) + " | " + FormatDisplay(display));
             // why intervals were real-only (the scheduler's / presenter's reasons), and the DXGI back end's presents
             std::string reasons = "fg host: real-only intervals:";
             for (uint32_t k = 1; k < wgfg::kFgRealOnlyReasonCount; ++k)
@@ -1257,6 +1371,14 @@ struct FgAsiSessionHost::Impl {
                            std::to_string(ps.real_only_intervals[k]);
             if (const auto* dx = dynamic_cast<const wgfg::FgDxgiPresenter*>(pr)) {
                 const wgfg::FgDxgiPresenterInfo in = dx->Info();
+                StallCalls stalls;
+                {
+                    std::lock_guard<std::mutex> trace_lock(trace_mu);
+                    stalls = stall_calls;
+                }
+                char gap_share[48] = {};
+                std::snprintf(gap_share, sizeof(gap_share), "%.3f",
+                              in.start_gap_samples ? 100.0 * in.start_gap_under_refresh / in.start_gap_samples : 0.0);
                 reasons += "; dxgi presents=" + std::to_string(in.presents) +
                        " latency_timeouts=" + std::to_string(in.latency_timeouts) +
                        " occlusion_retired_real=" + std::to_string(in.occlusion_retired_real) +
@@ -1265,9 +1387,24 @@ struct FgAsiSessionHost::Impl {
                        " present_call_us_max=" + std::to_string(in.present_call_max / 10) +
                        " present_call_p85_smoothed_us=" + std::to_string(in.present_call_p85_smoothed / 10) +
                        " scheduler_tearing_min_us=" + std::to_string(tearing_schedule_interval / 10) +
+                       " present_call_us p50=" + std::to_string(in.call_p50 / 10) +
+                       " p95=" + std::to_string(in.call_p95 / 10) + " p99=" + std::to_string(in.call_p99 / 10) +
+                       " present_start_gap_us p05=" + std::to_string(in.start_gap_p05 / 10) +
+                       " p50=" + std::to_string(in.start_gap_p50 / 10) + " p95=" + std::to_string(in.start_gap_p95 / 10) +
+                       " n=" + std::to_string(in.start_gap_samples) +
+                       " under_refresh=" + std::to_string(in.start_gap_under_refresh) +
+                       " under_refresh_pct=" + gap_share +
+                       " vrr_vsync_queue_drops=" + std::to_string(in.vrr_queue_drops) +
                        " tearing_drop_deadline=" + std::to_string(in.tearing_drop_deadline) +
                        " tearing_drop_collision=" + std::to_string(in.tearing_drop_collision) +
-                       " tearing_collision_completion_floor=" + std::to_string(in.tearing_collision_completion_floor);
+                       " tearing_collision_completion_floor=" + std::to_string(in.tearing_collision_completion_floor) +
+                       " wrapped_stalls_gen=" + std::to_string(stalls.count[0]) +
+                       " wrapped_stalls_real=" + std::to_string(stalls.count[1]) +
+                       " wrapped_stalls_menu=" + std::to_string(stalls.count[2]) +
+                       " wrapped_stall_us_max_gen=" + std::to_string(stalls.max[0] / 10) +
+                       " wrapped_stall_us_max_real=" + std::to_string(stalls.max[1] / 10) +
+                       " wrapped_stall_us_max_menu=" + std::to_string(stalls.max[2] / 10) +
+                       " wrapped_stalls_wait_ge_500us=" + std::to_string(stalls.with_admission_wait);
             }
             uint64_t ret = 0, cw = 0, timeouts = 0, qw = 0;
             size_t queue_peak = 0;
@@ -1292,10 +1429,14 @@ struct FgAsiSessionHost::Impl {
                        " gen_reanchor_causes=" + FormatReanchorCauses(generating_reanchor_causes);
             Log(reasons);
         }
+        const DisplayTrace closing_display = ReadDisplayCadence(true);
         const wgfg::FgSessionResult r = session->Destroy();
         Log(std::string("fg host: session destroyed (") + why + "): " + wgfg::FgSessionErrorName(r.error));
         session.reset();
-        QueueTraceSummary(why, true);
+        QueueTraceSummary(why, true, closing_display);
+        previous_fill_wait = current_fill_wait = current_fill_period = 0;
+        fill_cap_intervals = fill_high_intervals = fill_gameplay_intervals = 0;
+        fill_trim_sum = 0.0;
         exec_source.reset();
         win_source.reset();
         DrainAdmissions();
@@ -1309,6 +1450,12 @@ struct FgAsiSessionHost::Impl {
         quiet_windows = 0;
         cap_miss_windows = 0;
         lateness_count_cap = 0;
+        delivery = {};
+        delivery_base = {};
+        delivery_frames = delivery_requested = delivery_active = 0;
+        delivery_overflow_frames = delivery_drain_frames = 0;
+        delivery_fill = guard_delivery = false;
+        delivery_cap_steps = 0;
         budget_limits = {};
         budget_grace_frames = 0;
         display_sample_at = 0;
@@ -1330,6 +1477,78 @@ struct FgAsiSessionHost::Impl {
     // A4 / smoke-fix: truthful lateness control using generated_scheduled as denominator (zero double counting),
     // measured readiness from trace_ring (t_first_gen_ready / t_real_ready - t_after_wait), a GPU-readiness
     // ceiling [8, 32] ms, and miss-floor holdoff easing to prevent GPU-bound phase-boundary oscillation.
+    void ApplyCountCaps() {
+        if (!session) return;
+        const uint32_t cap = lateness_count_cap && delivery.cap ? std::min(lateness_count_cap, delivery.cap)
+                                                                 : std::max(lateness_count_cap, delivery.cap);
+        session->SetMaxGeneratedCap(cap);
+    }
+
+    void ControlDelivery(uint32_t requested, const wgfg::FgSessionResult& result, bool generating) {
+        if (!session || !guard_delivery) return;
+        if (!generating && delivery_requested == 0) return;
+        const auto* presenter = session->Presenter();
+        if (!presenter) return;
+        if (!generating || requested != delivery_requested || result.plan_real_only == wgfg::FgRealOnlyReason::Reset) {
+            if (delivery_requested || delivery.cap || delivery.ready) {
+                delivery = {};
+                session->SetOverflowReady(false);
+                session->SetConsumedLeadProtection(false);
+                ApplyCountCaps();
+            }
+            delivery_base = presenter->Stats();
+            delivery_requested = generating ? requested : 0;
+            delivery_frames = delivery_active = 0;
+            delivery_overflow_frames = delivery_drain_frames = 0;
+            delivery_fill = false;
+            return;
+        }
+        if (result.scheduled == 0) return;
+        if (delivery_drain_frames != 0) {
+            if (--delivery_drain_frames == 0) delivery_base = presenter->Stats();
+            return;
+        }
+        ++delivery_frames;
+        delivery_active = std::max(delivery_active, result.scheduled);
+        delivery_fill |= result.fill_period > 0;
+        if (session->LastReductionReason() == wgfg::FgRealOnlyReason::OutOfVrrWindow)
+            ++delivery_overflow_frames;
+        const bool full = delivery_frames >= kBudgetWindow;
+        if (!full && delivery_frames % kBudgetFastCheck != 0) return;
+        const auto current = presenter->Stats();
+        const auto offered = current.generated_scheduled - delivery_base.generated_scheduled;
+        const auto missed = current.dropped_late - delivery_base.dropped_late +
+                            current.dropped_pressure - delivery_base.dropped_pressure;
+        if (!full && (missed < 3 || missed * 100 < offered * 8)) return;
+        PacingSamples<kBudgetWindow> margins;
+        {
+            std::lock_guard<std::mutex> lock(trace_mu);
+            const auto n_scan = std::min(trace_count, delivery_frames);
+            for (uint32_t off = 1; off <= n_scan; ++off) {
+                const auto& tr = trace_ring[(trace_head + kTraceRingSize - off) % kTraceRingSize];
+                if (tr.scheduled_n == delivery_active && tr.ready_generated >= tr.scheduled_n)
+                    margins.Append(tr.min_gen_headroom);
+            }
+        }
+        const bool headroom = margins.Size() >= 12 && margins.Percentile(0.10) >= 10000;
+        const auto old_cap = delivery.cap;
+        const auto old_ready = delivery.ready;
+        const bool overflow = delivery_fill || delivery_overflow_frames * 2 > delivery_frames || delivery.cap != 0;
+        delivery.Observe(offered, missed, delivery_active, requested, overflow,
+                         headroom, full);
+        if (old_cap != delivery.cap) {
+            if (delivery.cap != 0 && (old_cap == 0 || delivery.cap < old_cap)) ++delivery_cap_steps;
+            ApplyCountCaps();
+            // Wait for both outstanding intervals to drain before attributing misses to the new count.
+            delivery_drain_frames = 2;
+        }
+        if (old_ready != delivery.ready) session->SetOverflowReady(delivery.ready);
+        delivery_base = current;
+        delivery_frames = delivery_active = 0;
+        delivery_overflow_frames = 0;
+        delivery_fill = false;
+    }
+
     void ControlLateness(bool consumed_admission) {
         if (!session) return;
         const wgfg::IFgPresenter* pr = session->Presenter();
@@ -1399,6 +1618,9 @@ struct FgAsiSessionHost::Impl {
         // before WaitForCreditRoom returned (d_p90 is below the slack threshold) and the newest cadence caught up to the
         // current budget (p_med <= budget + 3.5 ms) so we never stack downward steps across phase lag.
         const wgfg::FgTicks d_orig_p90_pre = d_origins.Percentile(0.90);
+        const wgfg::FgTicks d_orig_p95 = d_origins.Percentile(0.95);
+        session->SetConsumedLeadProtection(HasActiveProducerTail(consumed_admission, d_origins.Size(),
+                                                                 d_orig_p95, budget));
         const wgfg::FgTicks slack_threshold = FirstImageReadinessSlack(budget, consumed_admission, last_generating_count);
         const wgfg::FgTicks p_med_pre = base_dts.Percentile(0.50, 4);
         if (clean_excess_check &&
@@ -1430,7 +1652,7 @@ struct FgAsiSessionHost::Impl {
         const wgfg::FgTicks d_p50 = d_origins.Percentile(0.50, 8);
         const wgfg::FgTicks d_recent_p95 = d_origins.Percentile(0.95, 8);
         const wgfg::FgTicks d_p90 = d_orig_p90_pre;
-        const wgfg::FgTicks d_p95 = d_origins.Percentile(0.95);
+        const wgfg::FgTicks d_p95 = d_orig_p95;
         budget_limits.TrackCleanWindow(evaluated_frames >= kBudgetWindow, missed == 0, kBudgetBase, d_p95);
         // A rate observed after admission blocked is paced by the budget itself. Use producer readiness from
         // intervals with at most 0.5 ms admission/slot wait, and leave the dynamic cap unknown without such data.
@@ -1463,7 +1685,7 @@ struct FgAsiSessionHost::Impl {
                 cap_miss_windows = 0;
                 if (lateness_count_cap == 0 || target_cap < lateness_count_cap) {
                     lateness_count_cap = target_cap;
-                    session->SetMaxGeneratedCap(lateness_count_cap);
+                    ApplyCountCaps();
                     char line[224];
                     std::snprintf(line, sizeof line,
                                   "fg host: budget at %.1f ms (cap %.1f ms) with %llu/%llu missed; stepping "
@@ -1489,7 +1711,7 @@ struct FgAsiSessionHost::Impl {
                     const uint32_t req_n = st_req_count.load();
                     const uint32_t cap_ceil = req_n > 0 ? std::min(route_max, req_n) : route_max;
                     lateness_count_cap = (lateness_count_cap + 1 >= cap_ceil) ? 0u : lateness_count_cap + 1;
-                    session->SetMaxGeneratedCap(lateness_count_cap);
+                    ApplyCountCaps();
                     char line[192];
                     std::snprintf(line, sizeof line,
                                   "fg host: clean pacing window; generated count cap raised to %u (0=uncapped)",
@@ -1565,17 +1787,6 @@ struct FgAsiSessionHost::Impl {
         }
     }
 
-    void UpdateTearingSchedule() {
-        if (tearing_physical_period <= 0 || !AdvanceTearingSchedulePoll(st_presents.load(), last_tearing_schedule_poll))
-            return;
-        const auto* dx = dynamic_cast<const wgfg::FgDxgiPresenter*>(session->Presenter());
-        if (!dx) return;
-        const auto interval = wgfg::FgTearingScheduledMinInterval(tearing_schedule_base, tearing_physical_period,
-                                                                 dx->Info().present_call_p85_smoothed);
-        if (interval != tearing_schedule_interval && session->SetDisplayMinInterval(interval))
-            tearing_schedule_interval = interval;
-    }
-
     void TryCreateSession(FgProxy* c) {
         if (session || stats.gave_up || !c || !c->fg_taken() || facade.empty() || !inner || !device || !queue) return;
         WgFgSessionDesc sd = {};
@@ -1636,8 +1847,9 @@ struct FgAsiSessionHost::Impl {
         // framerates are paced smoothly without fixed-grid BeginInterval refusals; AUTO only enables variable_refresh
         // when the chain itself allows tearing (otherwise FgSelectPresenter would pick DxgiFlipTearing and fail).
         const bool chain_tearing = tearing_supported && (chain_flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0;
+        const bool vsync_mode = sd.presenter_mode == WG_FG_PRESENTER_DXGI_VSYNC;
         base.display.variable_refresh =
-            sd.presenter_mode == WG_FG_PRESENTER_HWFQ ? tearing_supported : chain_tearing;
+            sd.presenter_mode == WG_FG_PRESENTER_HWFQ || vsync_mode ? tearing_supported : chain_tearing;
         base.worker_registration = {
             &FgSwapChain::RegisterWorkerThread, &FgSwapChain::UnregisterWorkerThread,
             [](void* ctx, DWORD tid, bool priority, bool mmcss) {
@@ -1656,11 +1868,11 @@ struct FgAsiSessionHost::Impl {
         d.scheduler.max_lead = 500000;            // 50 ms playout lead cap (fits 50-60 fps 4x/6x with GPU-bound budget)
         const bool tearing_mode = sd.presenter_mode == WG_FG_PRESENTER_DXGI_TEARING ||
                                   (sd.presenter_mode == WG_FG_PRESENTER_AUTO && base.display.variable_refresh);
-        if (tearing_mode) d.scheduler.bridge_and_submit_margin = 2500;  // 0.25 ms submit margin for DXGI tearing
+        if (tearing_mode || (vsync_mode && base.display.variable_refresh))
+            d.scheduler.bridge_and_submit_margin = 2500;
         {
             // O-A4 / M1: query active monitor refresh via EnumDisplaySettingsExW (fallback to compositor grid).
-            // Cap output strictly inside the VRR ceiling (~3% margin: ~349 Hz on a 360 Hz panel) so generated frames
-            // never exceed panel refresh and tear.
+            // The planner and presenter use the same refresh-derived minimum spacing.
             wgfg::FgTicks refresh_period = 0;
             uint32_t refresh_hz = 0;
             bool from_mode = QueryMonitorRefresh(hwnd, &refresh_period, &refresh_hz);
@@ -1679,10 +1891,15 @@ struct FgAsiSessionHost::Impl {
                 d.scheduler.display.max_interval =
                     base.display.variable_refresh ? 208333 : 1000000;  // 48 Hz VRR floor vs 10 Hz fixed
                 d.scheduler.adaptive_count = true;
-                const bool fixed_grid_presenter =
-                    sd.presenter_mode == WG_FG_PRESENTER_DXGI_VSYNC ||
-                    (!base.display.variable_refresh &&
-                     (sd.presenter_mode == WG_FG_PRESENTER_HWFQ || sd.presenter_mode == WG_FG_PRESENTER_AUTO));
+                if (base.display.variable_refresh) {
+                    d.scheduler.display.min_interval = wgfg::FgVrrMinInterval(refresh_period, vsync_mode);
+                    d.scheduler.display.margin = 200;
+                    d.scheduler.display.hysteresis = 400;
+                    d.scheduler.display.exit_intervals = 2;
+                    d.scheduler.display.reenter_intervals = 3;
+                }
+                const bool fixed_grid_presenter = !base.display.variable_refresh &&
+                                                  sd.presenter_mode != WG_FG_PRESENTER_DXGI_TEARING;
                 if (fixed_grid_presenter) {
                     d.scheduler.fixed_refresh_period = refresh_period;
                     d.scheduler.display.min_interval = refresh_period;
@@ -1704,6 +1921,14 @@ struct FgAsiSessionHost::Impl {
             }
         }
         base.min_interval = d.scheduler.display.min_interval;
+        char fill_env[8] = {};
+        const auto fill_length = GetEnvironmentVariableA("WG_FG_FILL", fill_env, sizeof(fill_env));
+        const bool fill_off = fill_length == 3 && std::strcmp(fill_env, "off") == 0;
+        d.scheduler.overflow_fill = base.display.variable_refresh && base.display.refresh_period > 0 &&
+                                    fill_timer.Valid() && !fill_off;
+        d.scheduler.first_present_admission = base.display.variable_refresh && admission_mode == AdmissionMode::Present;
+        d.scheduler.consumed_admission = base.display.variable_refresh && admission_mode == AdmissionMode::Consumed;
+        d.scheduler.guard_overflow_delivery = base.display.variable_refresh;
         win_source.reset(new (std::nothrow) wgfg::FgWinPresenterSource(base));
         if (win_source)
             exec_source.reset(new (std::nothrow) wgfg::FgExecutorPresenterSource(win_source.get(), exec.get()));
@@ -1748,15 +1973,15 @@ struct FgAsiSessionHost::Impl {
         WgFgExecutorV1 h = session->ExecutorHandOff();
         c->set_executor(&h);
         ++stats.sessions_created;
+        guard_delivery = d.scheduler.guard_overflow_delivery;
         const wgfg::FgPresenterChoice chosen = win_source->LastSelection().chosen;
-        if (stats.sessions_created == 1 && chosen == wgfg::FgPresenterChoice::DxgiFlipTearing) {
+        const bool dxgi = chosen == wgfg::FgPresenterChoice::DxgiFlipTearing ||
+                          chosen == wgfg::FgPresenterChoice::DxgiFlipVsync;
+        if (stats.sessions_created == 1 && dxgi) {
             startup_present_base = st_presents.load();
             startup_admission_until = wgfg::FgInterruptNow() + 10000000;  // first second on the first chain
         }
-        tearing_schedule_base = base.min_interval;
-        tearing_physical_period = chosen == wgfg::FgPresenterChoice::DxgiFlipTearing ? base.display.refresh_period : 0;
-        tearing_schedule_interval = tearing_physical_period > 0 ? tearing_schedule_base : 0;
-        last_tearing_schedule_poll = st_presents.load();
+        tearing_schedule_interval = dxgi ? base.min_interval : 0;
         st_presenter.store(static_cast<uint32_t>(chosen));
         Log(std::string("fg host: session created, ") + std::to_string(sd.output_width) + " x " +
             std::to_string(sd.output_height) + ", preset " + std::to_string(sd.preset) + ", N up to " +
@@ -1764,7 +1989,8 @@ struct FgAsiSessionHost::Impl {
             ", generated_fences=" + (exec->PerIndexFences() ? "per-index" : "single-batch-when-eligible") +
             ", presenter " +
             wgfg::FgPresenterChoiceName(chosen) + ", latency_limit=" + std::to_string(st_latency_limit.load()) +
-            ", admission=" + (admission_mode == AdmissionMode::Consumed ? "consumed" : "present"));
+            ", admission=" + (admission_mode == AdmissionMode::Consumed ? "consumed" : "present") +
+            ", fill=" + (d.scheduler.overflow_fill ? "on" : "off"));
     }
 };
 
@@ -2058,6 +2284,7 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
     std::lock_guard<std::recursive_mutex> lock(m.mu);
     m.handled = false;
     m.current_plan_consumed = false;
+    m.current_fill_wait = m.current_fill_period = 0;
     bool admitted = false;
     WgFgPresentResult local = {};
     if (!out) out = &local;
@@ -2092,8 +2319,8 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
         if (fg_enabled) m.WaitForPresenterRoom();
         const wgfg::FgTicks t_after_wait = wgfg::FgInterruptNow();
         if (m.session && !m.session_draining && desc) {
-            m.session->SetNextArrival(t_arrival, t_after_wait);
-            m.UpdateTearingSchedule();
+            m.session->SetNextArrival(t_arrival, t_after_wait, m.previous_fill_wait);
+            m.previous_fill_wait = 0;
             m.next_trace = {};
             m.next_trace.t_arrival = t_arrival;
             m.next_trace.t_after_wait = t_after_wait;
@@ -2174,8 +2401,9 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
                     ResetFirstImageBudgetWindow(m.budget_limits, m.window_base,
                                                 presenter ? presenter->Stats() : wgfg::FgPresentStats{});
                     if (m.session) {
+                        m.ControlDelivery(0, sr, false);
                         m.session->SetFirstImageBudget(m.budget);
-                        m.session->SetMaxGeneratedCap(0);
+                        m.ApplyCountCaps();
                     }
                     m.Log("fg host: preset switched to C (Lite); first-image budget reset to 4.0 ms");
                 }
@@ -2204,7 +2432,9 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
                 m.st_phase.store(active_session ? kFgPhaseGenerating
                                                 : (m.stats.gave_up ? kFgPhaseStopped : kFgPhaseRealOnly));
                 m.ControlLateness(m.current_plan_consumed);
+                m.ControlDelivery(out->requested_count, sr, true);
             } else if (out->status == WG_FG_PRESENT_REAL_ONLY || out->status == WG_FG_PRESENT_REFUSED) {
+                m.ControlDelivery(0, sr, false);
                 m.st_reason.store(out->reason);
                 m.st_real_only.store(out->real_only);
                 m.st_schedule_reason.store(0);
@@ -2231,6 +2461,16 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
                 m.facade_compute_fence[index] = m.exec->LastComputeValue();
                 m.FinishTraceInterval(sr.interval_id, out->requested_count, t_after_record);
                 m.handled_interval_id = sr.interval_id;
+                const bool gameplay = fg_enabled && sr.plan_real_only != wgfg::FgRealOnlyReason::MenuDisabled &&
+                                      !sr.menu_detected && !sr.menu_copy;
+                if (gameplay) {
+                    ++m.fill_gameplay_intervals;
+                    if (sr.fill_period > 0) {
+                        ++m.fill_high_intervals;
+                        m.current_fill_period = sr.fill_period;
+                        m.current_fill_wait = sr.fill_release_wait;
+                    }
+                }
             } else if (admitted) {
                 m.CancelAdmission(desc->frame_token);
             }
@@ -2269,12 +2509,16 @@ HRESULT FgAsiSessionHost::PresentInterval(const FgPresentCall& call, IFgInnerPre
         ++m.stats.session_presents;
         const auto queue_wait = m.BoundQueueDepth();
         const HRESULT advance = m.AdvanceFacade();
-        if (SUCCEEDED(advance)) m.ReturnFacadeCredit();
+        if (SUCCEEDED(advance)) {
+            // The real image and its fences are already submitted. Pace only the game's next release.
+            m.PaceFacadeRelease();
+            m.ReturnFacadeCredit();
+        }
         m.DrainRetiredTags(false);
         m.RecordPresentIntervalTiming(m.handled_interval_id, wgfg::FgInterruptNow() - started, queue_wait);
         if (++m.trace_since_summary >= kTraceSummaryInterval) {
             m.trace_since_summary = 0;
-            m.QueueTraceSummary("periodic", false);
+            m.QueueTraceSummary("periodic", false, m.ReadDisplayCadence(true));
         }
         return advance;
     }

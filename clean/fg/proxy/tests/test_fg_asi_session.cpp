@@ -2559,17 +2559,6 @@ void TestPresenterAdmissionHasAHardSlotBound() {
     CHECK(!PresenterAdmissionAtCapacity(1, 20, true));
 }
 
-void TestTearingSchedulePollSurvivesSkippedCounts() {
-    g_case = "pacing-crossed-tearing-poll";
-    uint64_t last_poll = 1;
-    CHECK(!AdvanceTearingSchedulePoll(15, last_poll));
-    CHECK(AdvanceTearingSchedulePoll(18, last_poll));
-    CHECK(last_poll == 18);
-    CHECK(!AdvanceTearingSchedulePoll(32, last_poll));
-    CHECK(AdvanceTearingSchedulePoll(35, last_poll));
-    CHECK(last_poll == 35);
-}
-
 void TestReadyBudgetCapAfterSpeedup() {
     g_case = "pacing-budget-cap";
     CHECK(FirstImageBudgetCap(250000, 1) == 285000);
@@ -2645,6 +2634,32 @@ void TestBudgetNeedsTwoMissesToRaise() {
     CHECK(!single.ShouldRaiseBudget());
     CHECK((FirstImageProducerWindow{30, 2}.ShouldRaiseBudget()));
     CHECK((!FirstImageProducerWindow{120, 2}.ShouldRaiseBudget()));
+}
+
+void TestOverflowDeliveryRequiresHeadroomAndStepsBackOnMisses() {
+    g_case = "overflow-delivery";
+    OverflowDelivery policy;
+    for (int i = 0; i < 8; ++i) policy.Observe(100, 0, 3, 5, true, false, true);
+    CHECK(!policy.ready && policy.cap == 0);
+    for (int i = 0; i < 3; ++i) policy.Observe(100, 0, 3, 5, true, true, true);
+    CHECK(!policy.ready);
+    policy.Observe(100, 0, 3, 5, true, true, true);
+    CHECK(policy.ready);
+    policy.Observe(26, 3, 4, 5, true, true, false);
+    CHECK(!policy.ready && policy.cap == 3);
+    for (int i = 0; i < 4; ++i) policy.Observe(100, 0, 3, 5, true, true, true);
+    CHECK(policy.ready && policy.cap == 4);
+    policy.Observe(60, 2, 3, 3, false, false, true);
+    CHECK(policy.cap == 4);  // the overflow controller cannot lower a fitting row on that evidence
+    OverflowDelivery moderate;
+    moderate.Observe(90, 2, 3, 5, true, false, true);
+    CHECK(moderate.cap == 0);
+    moderate.Observe(90, 2, 3, 5, true, false, true);
+    CHECK(moderate.cap == 2);
+    CHECK(HasActiveProducerTail(true, 12, 80000, 92000));
+    CHECK(!HasActiveProducerTail(true, 12, 36000, 92000));
+    CHECK(!HasActiveProducerTail(false, 12, 80000, 92000));
+    CHECK(!HasActiveProducerTail(true, 5, 80000, 92000));
 }
 
 void TestMissFloorDecaysAfterCleanWindows() {
@@ -2725,7 +2740,6 @@ int main(int argc, char** argv) {
     TestPacingPercentileKeepsFrameOrder();
     TestPacingSamplesRemainBounded();
     TestPresenterAdmissionHasAHardSlotBound();
-    TestTearingSchedulePollSurvivesSkippedCounts();
     TestReadyBudgetCapAfterSpeedup();
     TestFirstImageBudgetEasingFloor();
     TestBudgetCapNeedsReliableSamplesAndPreservesFloors();
@@ -2735,6 +2749,7 @@ int main(int argc, char** argv) {
     if (only == "admission-alias") TestAdmissionPolicyAliasLogsOnce();
     TestMissFloorDecaysAfterCleanWindows();
     TestBudgetNeedsTwoMissesToRaise();
+    TestOverflowDeliveryRequiresHeadroomAndStepsBackOnMisses();
     TestBudgetCapExpiresAfterMissesAndRaises();
     std::printf("cpu: %d checks, %d failed\n", g_checks, g_failed);
     if (gpu) {

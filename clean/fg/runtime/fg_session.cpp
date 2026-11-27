@@ -151,13 +151,6 @@ bool FgSession::SetFirstImageBudget(FgTicks budget) {
     return true;
 }
 
-bool FgSession::SetDisplayMinInterval(FgTicks min_interval) {
-    if (!scheduler_) return false;
-    scheduler_->SetDisplayMinInterval(min_interval);
-    desc_.scheduler.display.min_interval = scheduler_->Config().display.min_interval;
-    return true;
-}
-
 bool FgSession::SetMaxGeneratedCap(uint32_t cap) {
     if (!scheduler_) return false;
     scheduler_->SetMaxGeneratedCap(cap);
@@ -424,6 +417,8 @@ FgSessionResult FgSession::RunInterval(const FgFramePacket& packet, const FgInge
     const uint32_t n = plan.generated_count;
     r.interval_id = plan.interval_id;
     r.scheduled = n;
+    r.fill_period = plan.fill_period;
+    r.fill_release_wait = plan.fill_release_wait;
     if (desc_.on_plan) desc_.on_plan(desc_.plan_ctx, plan);
     FgIntervalReservation res;
     r.presenter = presenter_->BeginInterval(plan, &res);
@@ -655,6 +650,7 @@ FgSessionResult FgSession::RunInterval(const FgFramePacket& packet, const FgInge
 void FgSession::SetFrameTiming(FgGameFrame* frame) {
     frame->arrival = has_next_arrival_ ? next_arrival_ : Now();
     frame->budget_origin = has_next_arrival_ ? next_budget_origin_ : frame->arrival;
+    frame->previous_release_wait = has_next_arrival_ ? next_release_wait_ : 0;
     has_next_arrival_ = false;
 }
 
