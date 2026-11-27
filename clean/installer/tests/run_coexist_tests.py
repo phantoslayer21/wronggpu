@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Tests of the launcher's coexistence rules (build/launcher-design.md sections 5, 6 and 7, milestone M2).
 
 Written for this project; Python standard library only. Runs WrongGPU.exe (a WRONGGPU_TESTING build, as for

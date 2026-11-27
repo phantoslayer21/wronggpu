@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: Ray Reconstruction's kernels prepared by the launcher (release 0.6.0, owner 2026-11-02: "It HAS to
 // pre compile inside the launcher"). Written for this project.
 //

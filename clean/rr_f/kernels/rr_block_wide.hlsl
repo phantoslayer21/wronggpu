@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Spec 51 window block (51.3) with its stage fronts (51.5) and tails (51.4) for the small, latency-bound levels: the
 // window's work spread over G x 4 waves (one workgroup of 128 G lanes per window) instead of 4. Same arguments, buffer
 // layouts, rounding points, step (rr_step.hlsli, RR_STEP) and Q8 / attention / activation forms as rr_block_fast.hlsl,
@@ -649,7 +649,14 @@ WG_KERNEL(rr_block)
             uint2 mq;
             Q8_TRY mq = q8f(acc, bad);
             Q8_ELSE mq = q8s(acc); Q8_END
+#if RR_Q8_FAST
+            // Convergent wave barrier on mq before branching on cin: prevents LLVM from hoisting
+            // `if (cin)` above the merge WMMAs (RDNA 4 v_wmma under narrow EXEC produces non-finite lanes).
+            const bool mq_ok = !WaveActiveAnyTrue(((mq.x | mq.y) & rr_zero()) != 0u);
+            if (and(mq_ok, cin)) RR_PST64(pMerged, (uint)(Yc * Mx + Xc) * RR_CN + 16u * ot + 8u * rr_hf, mq);
+#else
             if (cin && rr_zero() == 0u) RR_PST64(pMerged, (uint)(Yc * Mx + Xc) * RR_CN + 16u * ot + 8u * rr_hf, mq);
+#endif
         }
     }
 #endif

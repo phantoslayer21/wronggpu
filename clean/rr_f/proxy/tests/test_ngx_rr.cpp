@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Unit tests of the NGX RR provider (src/ngx_rr.*, spec page 66) against a fake runtime and a mock parameter block:
 // create keys -> WgRrCreate, refusals (bad keys, MV at output resolution, runtime not ready, setting off, the other
 // route busy), evaluate keys -> WgRrFrame (routing, origins, states, MV scale as given, jitter unchanged, provider-kept

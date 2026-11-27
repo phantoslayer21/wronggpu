@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Independent slow oracle of spec 52 (input stage): one token at a time, scalar binary32 arithmetic by exact
 rational rounding (fractions.Fraction) and high-precision decimal elementary functions.
 

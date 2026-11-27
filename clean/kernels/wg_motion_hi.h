@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Motion vectors at output resolution (spec 03 draft 4 "Motion at output resolution", spec 06 section 3): the raw
 // motion buffer both stages read. Written for WrongGPU from those two pages.
 //

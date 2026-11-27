@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Build/run native Device contract tests in a private directory; no HIP code objects or HIP runtime are needed.
 
 Run GPU work under the GPU lock (WG_GPU_LOCK, BUILDING.md). --build-only compiles without using the GPU.

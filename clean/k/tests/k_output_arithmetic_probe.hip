@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // GPU-only comparison of the ACTUAL production helpers. Native and candidate
 // results are written by separate kernels before an integer-only comparison.
 #include "../kernels/k_io.hip"

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Swin speed-pass helpers (additive; swin_common.hlsli itself is unchanged, so bneck / dec1_dec0 compile as before).
 // Included after swin_common.hlsli by swin_block.hlsl and swin_gemm.hlsl.
 #pragma once

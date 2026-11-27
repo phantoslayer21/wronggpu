@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Every half normalization input: exact non-NaN result bits and NaN classes.
 
 NaN payload/sign bits are intentionally reported, not required to match. Run

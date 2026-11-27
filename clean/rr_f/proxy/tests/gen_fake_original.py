@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Generate a fake 'original' interposer library for the proxy tests from a binding table.
 
     python gen_fake_original.py <binding.json> <out_dir> [<file name>]

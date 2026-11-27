@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Full original synthetic Model M frame/state comparison: default output vs an output-filter profile
 (--profile quality9 or quality5).
 

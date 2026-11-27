@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model K block normalization reciprocal for the D3D12 ports: the HLSL counterpart of clean/k/kernels/k_norm.h
 // (WrongGPU's own code). Needs k_common.hlsli.
 //

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 headers for the interop. MinGW's widl-generated headers return aggregates (descriptor handles, LUIDs) from
 // COM methods by value, which does not match the Microsoft ABI unless WIDL_EXPLICIT_AGGREGATE_RETURNS is defined.
 #pragma once

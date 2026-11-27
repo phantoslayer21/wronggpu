@@ -13,7 +13,7 @@ extern "C" {
 #endif
 
 #define WG_REGISTRY_SCHEMA "wronggpu.registry.v1"
-#define WG_REGISTRY_HASH 0x9F5E68A9u
+#define WG_REGISTRY_HASH 0xC20DFC10u
 #define WG_API_LEVEL_PREFIX "3.1.0"
 
 /* ---- option slots (shared block index) ---- */
@@ -29,7 +29,10 @@ extern "C" {
 #define WG_OPT_ENTRY_SOURCE 9
 #define WG_OPT_RR_EXACT_ALLOWED 10
 #define WG_OPT_RR_HIT_DISTANCE_FILTER 11
-#define WG_OPT_COUNT 12
+#define WG_OPT_SR_M_MODE 12
+#define WG_OPT_SR_L_MODE 13
+#define WG_OPT_SR_K_MODE 14
+#define WG_OPT_COUNT 15
 
 /* ---- option kinds ---- */
 #define WG_KIND_CHOICE 0
@@ -63,6 +66,18 @@ extern "C" {
 #define WG_ENTRY_SOURCE_FOLDERS 1
 #define WG_ENTRY_SOURCE_COUNT 2
 
+#define WG_SR_M_MODE_FAST 0
+#define WG_SR_M_MODE_EXACT 1
+#define WG_SR_M_MODE_COUNT 2
+
+#define WG_SR_L_MODE_FAST 0
+#define WG_SR_L_MODE_EXACT 1
+#define WG_SR_L_MODE_COUNT 2
+
+#define WG_SR_K_MODE_FAST 0
+#define WG_SR_K_MODE_EXACT 1
+#define WG_SR_K_MODE_COUNT 2
+
 typedef struct WgOptionDef {
   uint32_t id;           /* slot */
   const char* key;       /* ini key, log word */
@@ -83,10 +98,13 @@ typedef struct WgOptionDef {
 static const char* const kWgSrModelNames[WG_SR_MODEL_COUNT] = {"M", "K", "L"};
 static const char* const kWgRrModeNames[WG_RR_MODE_COUNT] = {"exact", "accurate", "fast"};
 static const char* const kWgEntrySourceNames[WG_ENTRY_SOURCE_COUNT] = {"versions", "folders"};
+static const char* const kWgSrMModeNames[WG_SR_M_MODE_COUNT] = {"fast", "exact"};
+static const char* const kWgSrLModeNames[WG_SR_L_MODE_COUNT] = {"fast", "exact"};
+static const char* const kWgSrKModeNames[WG_SR_K_MODE_COUNT] = {"fast", "exact"};
 
 static const WgOptionDef kWgOptions[WG_OPT_COUNT] = {
   {0, "sr_model", WG_KIND_CHOICE, WG_SR_MODEL_M, 0, 2, WG_READER_SR_FRONTEND | WG_READER_SR_RUNTIME, 0, WG_LATCH_SR_CREATE, 0, 0, "wronggpu", "WG_RUNTIME_MODEL", kWgSrModelNames, "super-resolution model"},
-  {1, "rr_mode", WG_KIND_CHOICE, WG_RR_MODE_ACCURATE, 0, 2, WG_READER_RR_PLUGIN | WG_READER_RR_RUNTIME, 1, WG_LATCH_NEXT_FRAME, 0, 0, "wronggpu", "WG_RR_MODE", kWgRrModeNames, "ray-reconstruction mode"},
+  {1, "rr_mode", WG_KIND_CHOICE, WG_RR_MODE_FAST, 0, 2, WG_READER_RR_PLUGIN | WG_READER_RR_RUNTIME, 1, WG_LATCH_NEXT_FRAME, 0, 0, "wronggpu", "WG_RR_MODE", kWgRrModeNames, "ray-reconstruction mode"},
   {2, "rr_enabled", WG_KIND_ONOFF, 1, 0, 1, WG_READER_RR_PLUGIN, 0, WG_LATCH_RR_CREATE, 1, 0, "wronggpu", "", 0, "WrongGPU RR on/off (60.9 key 0)"},
   {3, "rr_specular_motion_from_v", WG_KIND_ONOFF, 0, 0, 1, WG_READER_RR_PLUGIN, 1, WG_LATCH_NEXT_FRAME, 1, 1, "wronggpu", "", 0, "62.4 / 52.7.1 SV = V (opt-in)"},
   {4, "rr_reset_after_failed_evaluate", WG_KIND_ONOFF, 0, 0, 1, WG_READER_RR_PLUGIN, 1, WG_LATCH_NEXT_FRAME, 1, 1, "wronggpu", "", 0, "61.6 / 53.10 deviation (opt-in)"},
@@ -97,6 +115,9 @@ static const WgOptionDef kWgOptions[WG_OPT_COUNT] = {
   {9, "entry_source", WG_KIND_CHOICE, WG_ENTRY_SOURCE_VERSIONS, 0, 1, WG_READER_SR_FRONTEND, 0, WG_LATCH_START, 0, 0, "wronggpu", "", kWgEntrySourceNames, "how the host offers the choices: one version list, or one folder per choice"},
   {10, "rr_exact_allowed", WG_KIND_ONOFF, 0, 0, 1, WG_READER_RR_PLUGIN, 0, WG_LATCH_START, 0, 0, "wronggpu", "", 0, "exact RR mode offered in the menu panel (turned on in the launcher; without it rr_mode=exact runs accurate)"},
   {11, "rr_hit_distance_filter", WG_KIND_ONOFF, 0, 0, 1, WG_READER_RR_PLUGIN, 1, WG_LATCH_NEXT_FRAME, 1, 1, "wronggpu", "", 0, "52.7.2 deviation (opt-in): the specular hit distance is the median of its 1x4 pixel run (lone missed-ray outliers make reflection speckles in motion)"},
+  {12, "sr_m_mode", WG_KIND_CHOICE, WG_SR_M_MODE_FAST, 0, 1, WG_READER_SR_FRONTEND | WG_READER_SR_RUNTIME, 1, WG_LATCH_NEXT_FRAME, 0, 0, "wronggpu", "WG_M_MODE", kWgSrMModeNames, "Model M mode"},
+  {13, "sr_l_mode", WG_KIND_CHOICE, WG_SR_L_MODE_FAST, 0, 1, WG_READER_SR_FRONTEND | WG_READER_SR_RUNTIME, 1, WG_LATCH_NEXT_FRAME, 0, 0, "wronggpu", "WG_L_MODE", kWgSrLModeNames, "Model L mode"},
+  {14, "sr_k_mode", WG_KIND_CHOICE, WG_SR_K_MODE_FAST, 0, 1, WG_READER_SR_FRONTEND | WG_READER_SR_RUNTIME, 1, WG_LATCH_NEXT_FRAME, 0, 0, "wronggpu", "WG_K_MODE", kWgSrKModeNames, "Model K mode"},
 };
 
 /* ---- the plugin's 60.9 contract rows, in contract order (index = today's SettingId) ---- */

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Kernel replay on the native D3D12 Device (issue #89): runs single kernels by their launch names on synthetic inputs
 // given in files, so that a D3D12 port can be compared byte for byte with its HIP kernel on the same inputs (driver:
 // clean/l/runner/l_d3d12_check.py). Uses only the project's Device API (clean/runtime/device.h).
@@ -39,9 +39,16 @@
 //                                              inside, manifest argument kind s<N>:...: the file's bytes with the 8
 //                                              bytes at each byte offset replaced by that buffer's device pointer)
 //   save <id> <file>                           after the run, the buffer's bytes are written to <file>
-//   time <runs>                                after the run (and the saves), the steps run <runs> more times; the mean
+//   time <runs> [each]                         after the run (and the saves), the steps run <runs> more times; the mean
 //                                              wall time per run (submission to completion, synchronised after each
-//                                              run) is printed as "chain <name>: time <ms> ms per run (<runs> runs)"
+//                                              run) is printed as "chain <name>: time <ms> ms per run (<runs> runs)";
+//                                              with "each", every run's time first as "chain <name>: run <i> <ms> ms
+//                                              gpu <ms> ms" (gpu: device timestamps before the run's first launch and
+//                                              after its last one; -1 when the device has none)
+//   time <runs> <first> <last> <label>         (zero or more, after the saves) one warm-up run, then <runs> runs of
+//                                              steps <first>..<last> only (step indices from 0, inclusive), each run
+//                                              synchronised; printed as "chain <name>: range <label> steps <first>..
+//                                              <last> time <ms> ms per run (<runs> runs)"
 #include "../../runtime/device.h"
 #include "../../runtime/device_d3d12.h"
 
@@ -418,6 +425,12 @@ struct ChainStep {
   std::vector<std::string> args;   // "@id" or a decimal value
 };
 
+struct TimeRange {   // "time <runs> <first> <last> <label>": steps first..last (inclusive) only
+  int runs = 0;
+  size_t first = 0, last = 0;
+  std::string label;
+};
+
 struct Chain {
   std::string name;
   std::vector<std::pair<std::string, std::string>> modules;
@@ -425,6 +438,8 @@ struct Chain {
   std::vector<ChainStep> steps;
   std::vector<std::pair<std::string, std::string>> saves;   // (id, file)
   int time_runs = 0;
+  std::vector<TimeRange> ranges;
+  bool time_each = false;   // "time <runs> each": every run's time printed too
   Case dcase;   // direct textures bound around the steps (rs=direct kernels): direct / direct_params / direct_out lines
 };
 
@@ -525,8 +540,8 @@ int run_chain(Device* d, Chain& c, const std::string& base) {
       }
     }
   }
-  auto run_steps = [&]() -> bool {
-    for (size_t i = 0; i < c.steps.size(); ++i) {
+  auto run_steps = [&](size_t first = 0, size_t last = (size_t)-1) -> bool {
+    for (size_t i = first; i < c.steps.size() && i <= last; ++i) {
       if (!d->launch(c.steps[i].kernel, c.steps[i].grid, c.steps[i].block, argv[i].data())) {
         std::printf("%s: step %zu launch %s: %s\n", c.name.c_str(), i, c.steps[i].kernel.c_str(), d->err().c_str());
         return false;
@@ -571,11 +586,42 @@ int run_chain(Device* d, Chain& c, const std::string& base) {
     }
   }
   if (rc == 0 && c.time_runs > 0) {
+    // "each": device timestamps (events 0 / 1) around every timed run's launches as well
+    const bool gpu_events = c.time_each && d->reserve_events(2);
     const auto t0 = std::chrono::steady_clock::now();
-    for (int r = 0; rc == 0 && r < c.time_runs; ++r)
-      if (!run_steps()) rc = 1;
+    for (int r = 0; rc == 0 && r < c.time_runs; ++r) {
+      const auto r0 = std::chrono::steady_clock::now();
+      if (gpu_events && !d->record(0)) rc = 1;
+      for (size_t i = 0; rc == 0 && i < c.steps.size(); ++i)
+        if (!d->launch(c.steps[i].kernel, c.steps[i].grid, c.steps[i].block, argv[i].data())) {
+          std::printf("%s: step %zu launch %s: %s\n", c.name.c_str(), i, c.steps[i].kernel.c_str(), d->err().c_str());
+          rc = 1;
+        }
+      if (rc == 0 && gpu_events && !d->record(1)) rc = 1;
+      if (rc == 0 && !d->sync()) { std::printf("%s: sync: %s\n", c.name.c_str(), d->err().c_str()); rc = 1; }
+      const double wall = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - r0).count();
+      float gms = -1.0f;
+      if (rc == 0 && gpu_events && !d->elapsed_ms(0, 1, &gms)) gms = -1.0f;
+      if (rc == 0 && c.time_each) std::printf("chain %s: run %d %.3f ms gpu %.4f ms\n", c.name.c_str(), r, wall, gms);
+    }
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     if (rc == 0) std::printf("chain %s: time %.3f ms per run (%d runs)\n", c.name.c_str(), ms / c.time_runs, c.time_runs);
+  }
+  for (size_t k = 0; rc == 0 && k < c.ranges.size(); ++k) {
+    const TimeRange& tr = c.ranges[k];
+    if (tr.runs <= 0 || tr.first > tr.last || tr.last >= c.steps.size()) {
+      std::printf("%s: bad time range %s\n", c.name.c_str(), tr.label.c_str());
+      rc = 1;
+      break;
+    }
+    if (!run_steps(tr.first, tr.last)) { rc = 1; break; }   // warm-up
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int r = 0; rc == 0 && r < tr.runs; ++r)
+      if (!run_steps(tr.first, tr.last)) rc = 1;
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    if (rc == 0)
+      std::printf("chain %s: range %s steps %zu..%zu time %.4f ms per run (%d runs)\n", c.name.c_str(),
+                  tr.label.c_str(), tr.first, tr.last, ms / tr.runs, tr.runs);
   }
   for (auto& b : c.bufs)
     if (b.ptr) d->free(b.ptr);
@@ -627,7 +673,26 @@ int main(int argc, char** argv) {
         s >> id >> file;
         ch.saves.emplace_back(id, file);
       } else if (w == "time") {
-        s >> ch.time_runs;
+        int runs = 0;
+        s >> runs;
+        std::string opt;
+        TimeRange tr;
+        if (s >> opt) {
+          if (opt == "each") {
+            ch.time_runs = runs;
+            ch.time_each = true;
+          } else {
+            std::istringstream fs(opt);
+            if ((fs >> tr.first) && (s >> tr.last >> tr.label)) {
+              tr.runs = runs;
+              ch.ranges.push_back(tr);
+            } else {
+              ch.time_runs = runs;
+            }
+          }
+        } else {
+          ch.time_runs = runs;
+        }
       } else if (w == "direct" || w == "direct_params" || w == "direct_out") {
         bool bad = false;
         parse_direct_line(w, s, ch.dcase, &bad);

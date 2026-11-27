@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Decoding the output groups of a version-5 map (spec 57 sections 5.3, 6, 7) and checking their digests (7.3).
 // Written for this project.
 //

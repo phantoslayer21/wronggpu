@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The ignore lists (src/wg_core/convert_ignore.h) on the install path, for run_launcher_tests.py (which calls run() after
 its rc6 cases; this file keeps that suite below the 256 KB source limit). Needs installs, so it runs with the launcher
 suite in the GPU window; the CPU-only cases are tests/run_convert_ignore_tests.py and ctest convert-ignore.

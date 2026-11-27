@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Windows helpers shared by WrongGPU's FidelityFX DLLs (amd_fidelityfx_dx12.dll, ffx_fsr3_x64.dll,
 // ffx_fsr3upscaler_x64.dll): loading AMD's renamed originals, settings, upscaler choice, D3D12 queries.

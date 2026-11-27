@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (#96): the configuration reference (clean/fg/reference/config.py).
 
     python -m unittest clean.fg.tests.test_fg_config

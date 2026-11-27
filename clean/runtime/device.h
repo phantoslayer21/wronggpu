@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Device layer of the runtime: memory, code objects, kernel launches and events on one in-order stream.
 //
 // Four backends:
@@ -116,6 +116,10 @@ class Device {
   // and filled. Other models never call it, so their arena layout is unchanged.
   virtual bool hyb_reserve() { err_ = "this device has no hybrid tables (native D3D12 only)"; return false; }
   virtual bool hyb_tables() const { return false; }
+  // Kernels of the loaded build that the route in use never launches (Model L: the other mode's, runtime option l_mode):
+  // the native D3D12 device's warm_up (a pipeline state for every kernel the code objects allow) leaves them out, so a
+  // context compiles only what its mode can select. Optional: other devices ignore it (they have no warm_up).
+  virtual void warm_up_skip(const std::vector<std::string>& names) { (void)names; }
   virtual bool write_value32(DevPtr ptr, uint32_t value) { (void)ptr, (void)value; return false; }
   // Frame guard (native D3D12; the hybrid Model L bottleneck's bounded wait, hyb_bneck.hlsl). guard_begin(word): from
   // here on, every launch and copy of this recording is skipped on the GPU while the 8 bytes at `word` (8-aligned) are

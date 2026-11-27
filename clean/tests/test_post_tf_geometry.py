@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Geometry of the true-fusion kernels post_tf* (kernels/post.hip, post_tf_body), simulated on the host (no GPU):
 for many output sizes and chunk choices, every D pixel's full history is written by exactly one workgroup and every
 reduced-history code by exactly one lane; every row a vertical pass reads (3p - 2 ... 3p + 4, clamped) was
@@ -172,7 +172,8 @@ class TestTfGeometry(unittest.TestCase):
         hlsl = open(os.path.join(clean, "dx12", "kernels", "post.hlsl"), encoding="utf-8").read()
         decl = re.findall(r"(?m)^// @wg-kernel (\S*post_tf4_dl\S*) .*$", hlsl)
         self.assertEqual(sorted(set(decl)), ["pmo/post_tf4_dl_f32_p12_mo", "pmo/post_tf4_dl_f32_p12_mo_direct",
-                                        "w64/post_tf4_dl_f32_p12_diet_vsit", "w64/post_tf4_dl_f32_p12_diet_vsit_direct"])
+                                        "pmo/post_tf4_dl_f32_p12_mo_pf", "w64/post_tf4_dl_f32_p12_diet_vsit",
+                                        "w64/post_tf4_dl_f32_p12_diet_vsit_direct", "w64/post_tf4_dl_f32_p12_diet_vsit_pf"])
         for line in re.findall(r"(?m)^// @wg-kernel \S*post_tf4_dl\S* .*$", hlsl):
             self.assertIn(" block=256 ", line)
             self.assertIn("WG_TF_NW=4,WG_TF_CAP=%d" % PS.TF4_DL_CAP, line)

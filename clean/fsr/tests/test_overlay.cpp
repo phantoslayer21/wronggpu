@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Overlay test (overlay.h): a D3D12 swap chain on a hidden window per back-buffer format; the overlay is fed statuses
 // directly (wgwin::OverlayStatus) and draws in Present; the presented buffer is read back (flip-sequential keeps it)
 // and checked for the panel (darker than the grey clear colour) and the state colour (green ACTIVE, red OFF), also

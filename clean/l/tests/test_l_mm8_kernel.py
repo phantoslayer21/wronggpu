@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The FP16-form kernels' arithmetic of one FP8 matrix op (clean/l/runner/l_mm8_f32_check.py op_kernel) against the
 oracle's exact model, on adversarial ops: heavy cancellation, wide dynamic range, sums at FP16 ties, a large start whose
 float32 addition lands on an FP16 midpoint, subnormal operands, the overflow boundary and non-finite inputs. The plain

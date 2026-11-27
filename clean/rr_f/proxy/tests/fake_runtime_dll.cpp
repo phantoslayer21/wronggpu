@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Fake WrongGPU RR runtime library for the end-to-end proxy test (exports the adapter entry point).
 #include "fake_runtime.h"
 

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L (issue #89): the FP32-sequential arithmetic of one FP8 matrix op (what the FP16-form kernels compute:
 every product exact in float32, added one at a time in float32 in ascending k with round-to-nearest-even, the FP16
 start value added last in float32, one conversion to FP16) against the oracle's exact model (clean/l/reference/oracle.py

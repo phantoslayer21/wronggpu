@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Page 54b on D3D12, fast resolve (rr_resolve_fast): the extended resolve of rr_resolve.hlsl (rr_resolve_main) with
 // the same bits for every input, at a fraction of the cost. Own implementation; design and proofs:
 // clean/rr_f/gpu/RESOLVE-FAST.md. Also: probes of the hardware operations it relies on and the exhaustive checks of

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 port of d1p12/swin_block_c64_add_dec0_nc (clean/kernels/dec1_dec0.hip built with the decoder's pack12 flags,
 // dec1_dec0__pack12.co: WG_DEC_PACK12=1, defaults otherwise; HIP ISA isa/swin_block_c64_add_dec0_nc.s).
 // The last Swin block of dec1 (C = 64, 2 heads, MLP 256, decoder block: input = expanded map + skip, every inner FP8
@@ -752,10 +752,15 @@ WG_KERNEL(swin_block_c64_add_dec0_nc)
     {
         const uint npix = (uint)(P_rw * P_rh);
         const uint pix = (uint)(wg_med3i(y, 0, P_rh - 1) * P_rw + wg_min_i(x0, P_rw - 1));
-        const uint mo = pix + 1u < npix ? pix : npix - 2u;
-        const uint2 mv = wg_ld64(a_motion, mo * 4u);
-        mv0 = pix == mo ? mv.x : mv.y;
-        mv1 = mv.y;
+        if (npix < 2u) {
+            mv0 = wg_ld32(a_motion, 0u);
+            mv1 = 0u;
+        } else {
+            const uint mo = pix + 1u < npix ? pix : npix - 2u;
+            const uint2 mv = wg_ld64(a_motion, mo * 4u);
+            mv0 = pix == mo ? mv.x : mv.y;
+            mv1 = mv.y;
+        }
     }
     // dec0's B fragments from the block output, exactly the bytes dec1 would store; lane halves swap two 8-byte groups.
     uint2 o[KC];

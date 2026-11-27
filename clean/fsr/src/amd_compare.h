@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // AMD's upscaler for the player's comparison (compare_key): a context of an AMD FidelityFX API DLL, made from the
 // create parameters WrongGPU saved for its own context, with the newest provider that DLL offers on this GPU. The DLL

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L (issue #89): GPU check of the input encoder's value kernel (`lev/input_encoder`: clean/kernels/encoder.hip
 built with WG_ENC_VALUES_OUT=1 as l_enc_values.co) against the oracle, synthetic frames only.
 

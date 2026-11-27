@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The runtime's model selection (clean/runtime/model_select.h, model_from_options of clean/k/runtime/model_k.cpp and
 // clean/runtime/no_model_k.cpp): the model table, and the runtime option model=<name> with the exact messages the
 // runtime gave before the table existed (#89). Built twice by clean/tests/test_model_select.py: with model K

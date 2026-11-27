@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 port of frame generation's net1 upscale on NHWC tensors (issue #96): fg_upscale_hwc_f16 of fg_net1_mma.co
 // (clean/fg/kernels/fg_net1_mma.hip), byte for byte; the arithmetic of fg_upscale.hlsl (align corners, float16 steps,
 // NaN written as 0x7E00), element (y, x, c) at (y * W + x) * C + c. Built only when --only names it.

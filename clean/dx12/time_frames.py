@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Whole-frame GPU time of the synthetic Model M frame, pure HIP against the hybrid D3D12 device (all ports, or one port
 at a time), at 1706x960 -> 2560x1440 (depth inverted, auto-exposure; the compare.py default case, its synthetic model).
 

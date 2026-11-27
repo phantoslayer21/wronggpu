@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """post_traffic_* (timing-only memory-traffic kernels, runner/post_traffic.py) in the host lane emulator: every layout
 runs at a small size, writes its whole history, display and output, and nothing past the end of its buffers.
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model L (issue #89): the FP16 form's arithmetic shared by the q7 kernels (l_q7.hip, l_q7w.hip), in ONE place so
 // that a native packed-FP16 form (S2b) can replace the helpers here without touching the kernels. The
 // D3D12 counterpart is clean/dx12/hlsl/l_q7_common.hlsli (same functions, same bits).

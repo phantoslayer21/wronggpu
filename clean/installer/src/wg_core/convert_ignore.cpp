@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: the ignore lists of the converter's file search (convert_ignore.h). Written for this project.
 #include "convert_ignore.h"
 

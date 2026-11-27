@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // SHA-256 as specified in FIPS 180-4 (written from the standard for this project).
 #pragma once
 

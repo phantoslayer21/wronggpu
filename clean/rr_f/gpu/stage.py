@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Runs the spec 51 D3D12 window-block kernel (clean/rr_f/kernels/rr_block.hlsl) on the reference vectors
 (clean/rr_f/tests/vectors) and compares every output with the stated tolerance (manifest 'tolerance_classes').
 
@@ -419,7 +419,7 @@ def w64_stages(step="E"):
     return tuple(s for s in os.environ.get("WG_RR_W64", W64_DEFAULT).split(",") if s)
 
 
-def kernel_for(name, zmode, isa=False, step="E", ldsw=1, direct=None, fold=None, dflow=0):
+def kernel_for(name, zmode, isa=False, step="E", ldsw=1, direct=None, fold=None, dflow=0, extra=None):
     """direct (E1 only): the input layout the stage call was built with (StageCall.e1_direct); False keeps E1 on
     rr_block.hlsl with the regrouped input whatever the step (e.g. variant X instead of Y / Z / I on failed checks)."""
     r = route(name, ldsw, step)
@@ -434,6 +434,9 @@ def kernel_for(name, zmode, isa=False, step="E", ldsw=1, direct=None, fold=None,
     d.update(route_def(r)[1])
     if name == "E1" and src == "rr_block_fast.hlsl" and direct is not False and e1_direct(ldsw, step):
         d["RR_ADAPT"] = 2
+    if extra:   # clean/rr-f-wave4: A/B kernels (e.g. {"RR_OVL": 0}: the kernel before the LDS overlay of the relaxed body)
+        d.update(extra)
+        tag += "_" + "_".join(f"{k}{v}" for k, v in sorted(extra.items()))
     fm = (infold(step, ldsw) if fold is None else fold) if name == "IN0" and r == "c32" else 0
     if fm:
         d["RR_INFOLD"] = fm
@@ -456,6 +459,96 @@ def kernel_for(name, zmode, isa=False, step="E", ldsw=1, direct=None, fold=None,
             d["RR_DF_K1E"] = 1
             tag += "k"
     return build.compile_kernel(src, "rr_block", d, isa=isa, tag=tag)
+
+
+# clean/rr-f-wave4b R4b.2: the level-1 stages of the relaxed body (E1, D1-F, D1-R: step E with RR_B32 in WG_RR_EDEFS) in wave64,
+# design D of rr_block_c32.hlsl (rr_block_c64_w64.hlsl: one wave64 = two token tiles of the same window, every value
+# computed by the same operation, so the outputs keep their bits). The runtime's WG_RR_W4B mask (bits 1 .. 3) selects them.
+W4B_C64_STAGES = ("D1-R", "D1-F", "E1")
+
+
+def kernel_c64_w64(name, zmode, step="E", ldsw=1, extra=None):
+    assert name in W4B_C64_STAGES and step == "E" and "RR_B32=1" in os.environ.get("WG_RR_EDEFS", "").split(",")
+    d = stage_defines(name, zmode, step, ldsw)
+    d.update({"WG_WAVE": 64})
+    if name == "E1":
+        d["RR_ADAPT"] = 2   # reads IN0's y2 directly, as stagee.E1
+    tag = "rsc64w64_" + name.replace("-", "") + "_z" + zmode + "_" + step + ("_l" if ldsw else "")
+    if extra:
+        d.update(extra)
+        tag += "_" + "_".join(f"{k}{v}" for k, v in sorted(extra.items()))
+    return build.compile_kernel("rr_block_c64_w64.hlsl", "rr_block", d, tag=tag)
+
+
+# clean/rr-f-wave4c W4C.1: the wide stages of the relaxed body (E2, D2-F, D2-R, E3, D3-F, D3-R, D4-F, D4-R: step E with RR_B32 in
+# WG_RR_EDEFS, RR_B32G4 for level 4) in wave64, design D (rr_block_wide_w64.hlsl: wave w = 2 g + tw holds the two token tiles of
+# the wave32 kernel's waves 4 g + 2 tw and 4 g + 2 tw + 1, the weight fragments shared; the same bits as the wave32 kernel). The
+# wave32 kernel's route gives the group count and operand-prefetch mask. E4 / E5 (RR_B32 off at G = 4) keep wave32.
+W4C_WIDE_STAGES = ("E2", "D2-F", "D2-R", "E3", "D3-F", "D3-R", "D4-F", "D4-R")
+W4C_WIDE_L2 = ("E2", "D2-F", "D2-R")
+W4C_WIDE_L3 = ("E3", "D3-F", "D3-R")
+W4C_WIDE_L4 = ("D4-F", "D4-R")
+
+
+def kernel_wide_w64(name, zmode, step="E", ldsw=1, extra=None):
+    assert name in W4C_WIDE_STAGES and step == "E" and "RR_B32=1" in os.environ.get("WG_RR_EDEFS", "").split(",")
+    src, rd = route_def(route(name, ldsw, step))
+    assert src == "rr_block_wide.hlsl", (name, src)
+    d = stage_defines(name, zmode, step, ldsw)
+    d.update(rd)
+    d["WG_WAVE"] = 64
+    for k, v in W4C_WIDE_DEFS.get(name, {}).items():   # tuned operand-prefetch / chunk-count defines of the wave64 form
+        d.setdefault(k, v)
+    tag = "rsw64_" + name.replace("-", "") + "_z" + zmode + "_" + step + ("_l" if ldsw else "")
+    if extra:
+        d.update(extra)
+        tag += "_" + "_".join(f"{k}{v}" for k, v in sorted(extra.items()))
+    return build.compile_kernel("rr_block_wide_w64.hlsl", "rr_block", d, tag=tag)
+
+
+W4C_WIDE_DEFS = {}   # per stage: defines of the wave64 form beyond the wave32 route's (filled below once tuned)
+# clean/rr-f-wave4c W4C.2: extra defines of stagee.IN0.w4c / stagee.D0-F.w4c (rr_block_c32.hlsl wave64): RR_DEFER 1 (deferred Q8),
+# RR_W4C bit 1 (Dd / Wo weight prefetch), bit 2 (IN0's folded front-end MLP interleaved), RR_SMAJOR 2 (act2_4 there)
+# RGA (gfx1201): IN0 with RR_DEFER 92 VGPRs (stagee.IN0 84), D0-F with RR_DEFER 104 / 105 (L01_DEFERFENCE 0) VGPRs, over the 96 tier
+# (stagee.D0-F 90): D0-F takes the prefetch alone (90 VGPRs)
+W4C_C32_DEFS = {"IN0": {"RR_DEFER": 1, "RR_W4C": 6, "RR_SMAJOR": 2}, "D0-F": {"RR_W4C": 2}}
+
+
+# clean/rr-f-wave5b/5c (fast mode only; the runtime's WG_RR_W5 mask): the relaxed body stages keeping the exact f32
+# elementwise/attention chains (RR_B32 1, RR_WIL 1: 0% RMS error for all finite values in [-448, +448]) with branchless clamped Q8
+# (RR_Q8_FAST 1, rr_fast.hlsli: no slow path, no wave votes, no RR_DEFER duplication; convergent merge guard in c64_w64 / wide_w64 /
+# wide keeps narrow-EXEC WMMAs at 0). Bit 4 = level 2 (E2 / D2-F / D2-R wave64), bit 5 = level 0 (IN0 / D0-F wave64),
+# bit 6 = level 1 (E1 / D1-F / D1-R wave64), bit 7 = level 3 (E3 / D3-F / D3-R wave32), bit 8 = level 4/5 (E4 / E5 / D4-F / D4-R
+# wave32 with RR_B32G4 1, RR_PRE 14: zero scratch/LDS spills, 26.6 KB LDS, 153-160 VGPRs).
+W5_Q8 = {"RR_Q8_FAST": 1}
+W5_C32_DEFS = {"IN0": dict(W5_Q8, RR_W4C=6, RR_SMAJOR=2),
+               "D0-F": dict(W5_Q8, RR_W4C=2, RR_OVL=1)}
+W5_C64_DEFS = {"E1": dict(W5_Q8), "D1-F": dict(W5_Q8), "D1-R": dict(W5_Q8)}
+W5_WIDE_DEFS = {"E2": dict(W5_Q8), "D2-F": dict(W5_Q8), "D2-R": dict(W5_Q8)}
+W5_WIDE32_DEFS = {"E3": dict(W5_Q8), "D3-F": dict(W5_Q8), "D3-R": dict(W5_Q8),
+                  "E4": dict(W5_Q8, RR_B32G4=1, RR_PRE=14), "E5": dict(W5_Q8, RR_B32G4=1, RR_PRE=14),
+                  "D4-F": dict(W5_Q8, RR_PRE=14), "D4-R": dict(W5_Q8, RR_PRE=14)}
+# runtime kernel name -> (stage, builder, defines)
+W5_KERNELS = (("stagef.IN0.w64", "IN0", "c32", W5_C32_DEFS), ("stagef.D0-F.w64", "D0-F", "c32", W5_C32_DEFS),
+              ("stagef.E1.w64", "E1", "c64", W5_C64_DEFS), ("stagef.D1-F.w64", "D1-F", "c64", W5_C64_DEFS),
+              ("stagef.D1-R.w64", "D1-R", "c64", W5_C64_DEFS), ("stagef.E2.w64", "E2", "wide", W5_WIDE_DEFS),
+              ("stagef.D2-F.w64", "D2-F", "wide", W5_WIDE_DEFS), ("stagef.D2-R.w64", "D2-R", "wide", W5_WIDE_DEFS),
+              ("stagef.E3", "E3", "wide32", W5_WIDE32_DEFS), ("stagef.D3-F", "D3-F", "wide32", W5_WIDE32_DEFS),
+              ("stagef.D3-R", "D3-R", "wide32", W5_WIDE32_DEFS), ("stagef.E4", "E4", "wide32", W5_WIDE32_DEFS),
+              ("stagef.E5", "E5", "wide32", W5_WIDE32_DEFS), ("stagef.D4-F", "D4-F", "wide32", W5_WIDE32_DEFS),
+              ("stagef.D4-R", "D4-R", "wide32", W5_WIDE32_DEFS))
+
+
+def kernel_w5(name, zmode, step="E", ldsw=1, extra=None):
+    """The dxil of the stagef.<name>[.w64] kernel (clean/rr-f-wave5b/5c); extra: A/B defines on top."""
+    for _, st, kind, defs in W5_KERNELS:
+        if st != name:
+            continue
+        d = dict(defs[name], **(extra or {}))
+        if kind in ("c32", "wide32"):
+            return kernel_for(name, zmode, step=step, ldsw=ldsw, extra=d)
+        return (kernel_c64_w64 if kind == "c64" else kernel_wide_w64)(name, zmode, step=step, ldsw=ldsw, extra=d)
+    raise KeyError(name)
 
 
 def kernel_dxil(name, zmode, step="E", ldsw=1):

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Whole-frame A/B timing of kernel choices (spec 10 section 9 measure: Pipeline.time_frame), interleaved.
 
 Each configuration is a set of kernel choices as for Pipeline(kernels=...): "base" (the defaults) or comma-separated

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Spec 05 reference (clean/reference/decoder.py) vs a slow per-pixel version written separately from the spec text,
 plus 05-T2 (reset) and 05-T3 (reprojection at the borders). Synthetic data only.
 

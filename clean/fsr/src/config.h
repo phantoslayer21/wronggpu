@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Front-end configuration, read from wronggpu.ini next to the DLL (the player's one WrongGPU settings file; spec 30). Plain C++, no Windows headers, so the unit
 // tests can parse configurations on any host.

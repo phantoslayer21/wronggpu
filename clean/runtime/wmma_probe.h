@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The native D3D12 device's driver-channel probe (native_driver_probe, clean/dx12/kernels/native_game_helpers.hlsl):
 // its operands, its buffer layout and its expected result, computed here on the CPU. WrongGPU's own code. Header only,
 // no device: device_d3d12.cpp runs the probe on a borrowed device at create, and tests/test_wmma_probe.cpp checks on

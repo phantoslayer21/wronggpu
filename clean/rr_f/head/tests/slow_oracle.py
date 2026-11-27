@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Slow element-by-element oracle of D0-R (pages 51.3, 51.4, 51.6, 55), written separately from the vectorised
 reference: Python integers for the matrix steps, the integer rounding of exactfp for every f16 / f32 rounding, the
 decimal-module elementary functions, explicit loops for windows, borders and the bilinear read. Only NumPy's integer

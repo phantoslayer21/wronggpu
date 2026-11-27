@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """CPU checks of Model L's post history fast path (clean/dx12/kernels/l_post.hlsl history_cr) and of the inputs of
 its GPU edge check (clean/l/runner/l_post_edge_check.py):
 - the fast path's predicate as written (unsigned tests with the size guard) holds exactly when the 4 x 4 footprint

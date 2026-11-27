@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (#96): the real-file check tool (clean/fg/tools/real_check.py) on made-up converter output and a
 stand-in converter (a small Python script written by the test). No library file is read.
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model data loading and packing (see model.h). Layouts: clean/FORMATS.md.
 #include "model.h"
 #include "embedded.h"
@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <set>
 
 #include "../converter/src/json.h"
 #include "../converter/src/sha256.h"
@@ -201,9 +202,10 @@ bool block_safe(const StageTensors& t, int C, int heads, int mlp) {
   return na <= limit && wqk * na <= limit && wv * na <= limit && nm <= limit && hidden <= limit;
 }
 
-void pack_block(const StageTensors& t, const SwinStageInfo& s, const DRow& d, std::vector<uint8_t>* b) {
+void pack_block(const StageTensors& t, const SwinStageInfo& s, const DRow& d, std::vector<uint8_t>* b,
+                bool kord_chunk = false) {
   const int C = s.C, heads = s.heads, mlp = s.mlp, D = heads * kHeadDim, KC = C / 16, MT = mlp / 16;
-  const Order RL = rows_layout_l(C, d), KL = kord_layout_l(C);
+  const Order RL = rows_layout_l(C, d), KL = kord_chunk ? kord_drow(C, d) : kord_layout_l(C);
   const uint32_t flags[4] = {block_safe(t, C, heads, mlp) ? 1u : 0u, 0u, 0u, 0u};  // FLAGS (kernels/swin.hip)
   put(b, flags, sizeof(flags));
   put(b, T(t, "gamma1").f.data(), 4 * C);
@@ -240,9 +242,10 @@ void put_frags(std::vector<uint8_t>* b, const std::vector<std::vector<uint8_t>>&
   for (auto& x : f) put(b, x.data(), kFrag);
 }
 
-bool pack_swin(const std::string& stage, const StageTensors& t, const DRow& d, std::vector<uint8_t>* b) {
+bool pack_swin(const std::string& stage, const StageTensors& t, const DRow& d, std::vector<uint8_t>* b,
+               bool kord_chunk = false) {
   const SwinStageInfo& s = swin_table().at(stage);
-  pack_block(t, s, d, b);
+  pack_block(t, s, d, b, kord_chunk);
   const BlockLayout lay = block_layout(s.C, s.heads, s.mlp);
   if (b->size() != lay.size) return false;
   pad_to(b, align_up(b->size()));  // every block section is padded to 256 bytes (runner/packing.py pack_stage)
@@ -250,11 +253,13 @@ bool pack_swin(const std::string& stage, const StageTensors& t, const DRow& d, s
   if (s.kind == 'e') {
     const Order RL = rows_layout_l(s.C_out, d);
     put_tile_vector(b, T(t, "bm").f.data(), RL, d);
-    put_frags(b, frags({T(t, "Wm").f.data(), s.C_out, 4 * s.C}, RL, kord_merge(s.C)));
+    put_frags(b, frags({T(t, "Wm").f.data(), s.C_out, 4 * s.C}, RL,
+                       kord_chunk ? kord_drow(4 * s.C, d) : kord_merge(s.C)));
   } else {
     const Order RE = rows_expand(s.C, d);
     put_tile_vector(b, T(t, "be").f.data(), RE, d);
-    put_frags(b, frags({T(t, "We").f.data(), 4 * s.C, s.C_low}, RE, kord_layout_l(s.C_low)));
+    put_frags(b, frags({T(t, "We").f.data(), 4 * s.C, s.C_low}, RE,
+                       kord_chunk ? kord_drow(s.C_low, d) : kord_layout_l(s.C_low)));
   }
   return true;
 }
@@ -560,12 +565,15 @@ bool load_wgcm_stages(const std::string& path, const std::string& map_path, cons
   // Index: stages in map order, each with its digest and tensors.
   Reader ix{d, 88, 88 + (size_t)isize};
   std::map<std::string, StageTensors> got;
+  std::set<std::string> seen_stages;
   for (uint64_t s = 0; s < nstages && ix.ok; ++s) {
     const std::string stage = ix.str();
     wgc::Digest stored;
     ix.bytes(stored.data(), 32);
     const uint64_t nt = ix.le(4);
-    if (!ix.ok || nt > 64) break;
+    if (!ix.ok) break;
+    if (nt > 64) return *err = bad + ": too many tensors in stage " + stage, false;
+    if (!seen_stages.insert(stage).second) return *err = bad + ": duplicate stage " + stage, false;
     StageTensors st;
     wgc::Sha256 h;
     h.update(key.data(), key.size());     // keyed SHA-256 = SHA-256(key || data), spec 08 section 4.1
@@ -613,6 +621,7 @@ bool load_wgcm_stages(const std::string& path, const std::string& map_path, cons
     got[stage] = std::move(st);
   }
   if (!ix.ok) return *err = bad + ": truncated index", false;
+  if (ix.pos != ix.end) return *err = bad + ": trailing bytes in index", false;
 
   // Every stage and tensor the runtime needs, with the shapes of spec 08 section 7.2.
   for (const auto& [stage, stage_tensors] : specs) {
@@ -695,7 +704,7 @@ bool pack_swin_block(const StageTensors& t, const std::string& prefix, int C, in
 }  // namespace pack_parts
 
 bool pack_stage_blob(const std::string& stage, const StageTensors& t, const DRow& drow, std::vector<uint8_t>* out,
-                     std::string* err) {
+                     std::string* err, bool kord_chunk) {
   out->clear();
   if (stage == "enc0") {
     pack_enc0(t, drow, out);
@@ -704,7 +713,7 @@ bool pack_stage_blob(const std::string& stage, const StageTensors& t, const DRow
     pack_dec0(t, drow, out);
     if (out->size() != 10752) return *err = "dec0 blob size mismatch", false;
   } else if (swin_stage_info(stage)) {
-    if (!pack_swin(stage, t, drow, out)) return *err = stage + " block size mismatch", false;
+    if (!pack_swin(stage, t, drow, out, kord_chunk)) return *err = stage + " block size mismatch", false;
   } else {
     *err = "no packer for stage " + stage;
     return false;

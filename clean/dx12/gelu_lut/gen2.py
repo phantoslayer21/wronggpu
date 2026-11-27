@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Generator of the compact exact q8(GELU) lookup v2 (clean/dx12/hlsl/wg_gelu_lds.hlsli, a 2 KB groupshared table).
 
     python clean/dx12/gelu_lut/gen2.py --rle <oracle rle.bin> --out <dir> [--hlsl <header>]

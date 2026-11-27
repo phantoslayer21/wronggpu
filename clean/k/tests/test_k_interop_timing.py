@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """GPU/D3D12 regression: preserve HIP timing events until completed-frame harvest.
 
 Set WG_K_GPU_BUILD and WG_K_INTEROP_EXE; run under the shared GPU lock. Generates

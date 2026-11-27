@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Unit tests of the launcher's coexistence part of wg_core (build/launcher-design.md sections 5 and 7.1, milestone M2):
 // the marker scan and fingerprints on synthetic bytes (never a third-party file), the proxy picker on a generated
 // folder, byte-exact OptiScaler.ini value edits and the inikey journal (revert, outside edits, replay onto a new ini),
@@ -11,6 +11,7 @@
 #include "wg_core/fingerprint.h"
 #include "wg_core/known_releases.h"
 #include "wg_core/logtail.h"
+#include "wg_core/optiedition.h"
 #include "wg_core/optikeys.h"
 #include "wg_core/record.h"
 
@@ -731,6 +732,11 @@ int main() {
         LastRun ok;
         ParseAsiLog("[1] [WrongGPU.asi] WrongGPU.asi loaded\r\n[2] [WrongGPU.asi] hooked: 2 of 2 Selectable call sites patched\r\n", ok);
         require(ok.plugin == L"hooked" && ok.warnings.empty(), "the plugin hooked: no warning");
+        LastRun card;
+        ParseAsiLog("[1] [WrongGPU.asi] WrongGPU.asi loaded\r\n"
+                    "[2] [WrongGPU.asi] not hooked: OptiScaler's DX12 upscaler menu was not recognised in 1 candidate module(s)\r\n"
+                    "[3] [WrongGPU.asi] card: WrongGPU Upscaler card added to OptiScaler's Custom tab\r\n", card);
+        require(card.plugin == L"card" && card.warnings.empty(), "OptiScaler 10 Custom tab card suppresses legacy menu not-hooked warning");
         require(OptiLogMentionsXess("[info] Inputs: XeSS (libxess) init") && !OptiLogMentionsXess("[info] Inputs: DLSS"), "OptiScaler.log naming XeSS");
         const wstring lg = Join(dir, L"logs");
         Put(Join(lg, L"wronggpu-fsr.log"), fsrLog);
@@ -867,6 +873,38 @@ int main() {
                 require(vf && vf->decision == Decision::Inform && !vr.refusal(), "vkd3d-proton next to the game under Wine: a note, not refused");
             else
                 require(vf && vf->decision == Decision::Refuse && vr.refusal() == vf, "vkd3d-proton next to the game on Windows: refused");
+        }
+
+        // ---- prior WrongGPU OptiScaler edition (e.g. v5) in a game folder: upgraded in place, not a foreign mod --------
+        {
+            require(IsPriorEditionHash(L"ff6f06ca2f8e761016f41313e2533fd176623a7a85f9e9169c9fc003b227826d") &&
+                    !IsPriorEditionHash(PinnedEdition().dllSha256),
+                    "prior edition hash: v5 recognised, v6 not");
+#ifdef WRONGGPU_TESTING
+            const wstring pg = Join(dir, L"prior-edition-game");
+            const string v5Bytes = "MZ synthetic OptiScaler WrongGPU edition v5 stand-in";
+            const wstring v5Sha = Sha256Bytes(v5Bytes.data(), v5Bytes.size());
+            Put(Join(pg, L"Game.exe"), "synthetic game exe");
+            Put(Join(pg, L"winmm.dll"), v5Bytes);
+            Put(Join(pg, L"OptiScaler.ini"), "[Upscalers]\r\nDx12Upscaler=auto\r\n");
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_PRIOR_EDITION_DLL", v5Sha.c_str());
+            const Conflicts cf = FindConflicts(pg, pg);
+            require(!cf.modsFound() && cf.mods.empty() && cf.modFiles.empty() &&
+                    Has(cf.priorEditionFiles, L"winmm.dll") && Has(cf.priorEditionFiles, L"OptiScaler.ini"),
+                    "prior edition v5: routed to priorEditionFiles, not mods/modFiles (not a foreign OptiScaler)");
+            Context pctx;
+            const CoexistReport pr = AssessCoexistence(pctx, Join(pg, L"Game.exe"), pg, nullptr);
+            const Finding* pf = nullptr;
+            for (auto& f : pr.findings) if (f.tool == Tool::OptiScaler) pf = &f;
+            require(pf && pf->decision == Decision::Migrate && !pr.needsSwitch() && !pr.refusal() && IEq(pr.proxy.name, L"winmm.dll"),
+                    "prior edition v5: Decision::Migrate (not AskSwitch), proxy reused in place (winmm.dll)");
+            SetEnvironmentVariableW(L"WRONGGPU_TEST_PRIOR_EDITION_DLL", nullptr);
+            // without the prior-edition hash, the same synthetic OptiScaler DLL is still the player's foreign OptiScaler
+            const Conflicts cfForeign = FindConflicts(pg, pg);
+            const CoexistReport prForeign = AssessCoexistence(pctx, Join(pg, L"Game.exe"), pg, nullptr);
+            require(cfForeign.modsFound() && prForeign.needsSwitch(),
+                    "non-edition OptiScaler DLL: still treated as foreign (modsFound + AskSwitch)");
+#endif
         }
 
         RemoveTree(dir);

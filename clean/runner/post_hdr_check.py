@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Original synthetic HDR output-storage regression; no model data or game captures.
 
 Run under the shared GPU lock. --baseline additionally checks unchanged FP32,

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Spec 52 input stage on RDNA 4 / D3D12: the 64 front-end inputs (52.3), their ordered-dither e4m3 codes (52.4),
 // the state-stream seed (52.6), the second vector m2 with the specular-motion reconstruction (52.7.1, 52.7.2) and
 // the three motion surfaces (52.7). One lane per tensor token (row-major [Ht][Wt]).
@@ -362,6 +362,9 @@ Texture2D<float4> rr_in_srv[16] : register(t0, space1);
 #ifndef RR_IN_SRVC
 #define RR_IN_SRVC 0
 #endif
+#ifndef RR_IN_SRV_ONLY
+#define RR_IN_SRV_ONLY 0     // clean/rr-f-wave5c (Fast mode only, VG_OUT): CPU-guarded all attached roles via SRV
+#endif
 struct Tex { uint off, w, h, ch; int ox, oy; uint srv, r; };
 Tex tex(uint r)
 {
@@ -379,6 +382,9 @@ Tex tex(uint r)
 }
 float tx(Tex t, int x, int y, uint c)
 {
+#if RR_IN_SRV && RR_IN_SRV_ONLY
+    return in_ftz(rr_in_srv[t.r].Load(int3(x + t.ox, y + t.oy, 0))[c]);
+#else
 #if RR_IN_SRV
     // clean/release-060 crash-cp2077: always the compile-time role's descriptor (every caller passes a constant role, and
     // the runtime's word 7 is role + 1 whenever nonzero: the same descriptor). The index read from word 7 (the old
@@ -389,6 +395,7 @@ float tx(Tex t, int x, int y, uint c)
 #endif
     const uint idx = ((uint)(y + t.oy) * t.w + (uint)(x + t.ox)) * t.ch + c;
     return in_ftz(asfloat(wg_ld32(t.off, idx * 4u)));
+#endif
 }
 
 // ---- per-frame values (uniform) --------------------------------------------------------------------------------

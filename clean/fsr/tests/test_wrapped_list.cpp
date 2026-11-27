@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Command lists that record into their own vtable (d3d12_hooks.cpp, "Lists that record into their own vtable"), on a
 // fake of the runtime's behaviour seen in 007 First Light: a closed list points at the class table, its Reset switches
 // it to a table inside the list object in which the runtime has written the driver's entry points. Also the tables

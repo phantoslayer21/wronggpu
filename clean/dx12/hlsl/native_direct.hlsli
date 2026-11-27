@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Original direct-texture Model M I/O, 2026-10-15. Include after wg_platform.hlsli, only for WG_DIRECT_TEXTURES.
 // Basis: clean/runtime/interop/convert.cpp's input pass and its own compiled inputs DXBC (motion is mad),
 // clean/dx12/kernels/native_helpers.hlsl's qualified normal-result boundary repairs, and the existing dense layout.

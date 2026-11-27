@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The HIP device compile command carries a fixed compilation-unit id; nothing is executed, the paths are dummies."""
 import os
 import unittest

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // End-to-end test of the hook-mode delivery (src/hook_dll.cpp, WrongGPU-RR.asi / WrongGPU-RR-probe.asi). The test
 // executable IS the fake game: it statically imports the RR path's functions by name from a stand-in interface DLL
 // (the game's interposer file name, the real export names, from tests/gen_fake_original.py), so the loader fills its
@@ -315,6 +315,11 @@ int main(int argc, char** argv) {
   // settings block unavailable; the legacy wronggpu-rr.ini line of an older install)
   bool fast = false, fast_noblock = false, legacy_mode = false;
   bool log_cap = false;  // wronggpu-rr.log already at its size cap when the plugin starts: moved to .log.old
+  // 0.7.0: a game interface of another 2.x version accepted by its exports (--probedver; --no-tff: without
+  // slSetTagForFrame), one refused for a missing core export (--badver --probe-missing), the fault guard of the
+  // game-interface route (--fault: an access violation inside the guarded part; --fault-cpp: a C++ exception), and
+  // --preloaded (delay-load exe where another plugin already loaded the game interface before InitializeASI)
+  bool probedver = false, no_tff = false, probe_missing = false, fault = false, fault_cpp = false, preloaded = false;
   for (int i = 2; i < argc; ++i) {
     if (strcmp(argv[i], "--badver") == 0) badver = true;
     if (strcmp(argv[i], "--exact") == 0) exact = true;              // the launcher allowed exact: three modes
@@ -325,7 +330,17 @@ int main(int argc, char** argv) {
     if (strcmp(argv[i], "--fast-noblock") == 0) fast_noblock = true;  // the same, the shared settings block unavailable
     if (strcmp(argv[i], "--legacy-mode") == 0) legacy_mode = true;    // rr_mode only in the plugin's wronggpu-rr.ini
     if (strcmp(argv[i], "--log-cap") == 0) log_cap = true;            // the log at its 8 MiB cap: one rotation
+    if (strcmp(argv[i], "--probedver") == 0) probedver = true;
+    if (strcmp(argv[i], "--no-tff") == 0) no_tff = true;
+    if (strcmp(argv[i], "--probe-missing") == 0) probe_missing = true;
+    if (strcmp(argv[i], "--fault") == 0) fault = true;
+    if (strcmp(argv[i], "--fault-cpp") == 0) fault = fault_cpp = true;
+    if (strcmp(argv[i], "--preloaded") == 0) preloaded = true;
   }
+  // the fault build's trigger (tools/build.py builds the plugin a second time with WG_TEST_FAULT_HOOKS): the first
+  // slGetNewFrameToken (role 15) that reaches the core faults
+  SetEnvironmentVariableA("WG_TEST_FAULT_ROLE", fault ? "15" : nullptr);
+  SetEnvironmentVariableA("WG_TEST_FAULT_CPP", fault_cpp ? "1" : nullptr);
   std::string stage = argv[1];
   if (stage.back() != '\\' && stage.back() != '/') stage += '\\';
   const std::wstring wstage = widen(stage.c_str());
@@ -382,8 +397,15 @@ int main(int argc, char** argv) {
 
   const std::wstring interposer = widen(kWgInterposerFile);
 #if WG_TEST_DELAYLOAD
-  // Delay-load import: nothing has called through it yet, so the interface is not loaded before the ASI runs.
-  CHECK(GetModuleHandleW(interposer.c_str()) == nullptr);
+  if (preloaded) {
+    // Another plugin (e.g. WrongGPU-FG.asi) loaded the interface before our ASI ran, while the exe's delay-load
+    // IAT slots are still unbound thunks pointing inside the exe.
+    CHECK(LoadLibraryW((wstage + interposer).c_str()) != nullptr);
+    CHECK(GetModuleHandleW(interposer.c_str()) != nullptr);
+  } else {
+    // Delay-load import: nothing has called through it yet, so the interface is not loaded before the ASI runs.
+    CHECK(GetModuleHandleW(interposer.c_str()) == nullptr);
+  }
 #else
   // The interface stand-in is already loaded (the exe's static import); install the OptiScaler init patch on it.
   HMODULE iface = GetModuleHandleW(interposer.c_str());
@@ -485,6 +507,39 @@ int main(int argc, char** argv) {
   }
 #endif
 
+  if (probedver) {  // 0.7.0: an interface of another 2.x version with every core export: hooked, its calls reach the stand-in
+    std::vector<std::string> L = read_lines(log_path);
+    CHECK(count(L, " accepted by its exports (every core function the route hooks is exported; ") == 1);
+    CHECK(count(L, no_tff ? "no slSetTagForFrame: frame-scoped tags off" : "slSetTagForFrame exported: frame-scoped tags on") == 1);
+    CHECK(count(L, " chosen for this game interface") == 1);
+    CHECK(count(L, "does not match this build's binding version") == 0);
+    CHECK(count(L, "hook: patched IAT slot ") >= 1);
+    st->calls = 0;
+    WgFrameToken* tok = nullptr;
+    uint32_t idx = 1;
+    CHECK_EQ(slGetNewFrameToken(&tok, &idx), 0);
+    CHECK(st->last_role != nullptr && strcmp(st->last_role, "new-frame-token") == 0);  // through our handler and the core
+    TEST_SUMMARY(no_tff ? "test_hook_dll (a 2.x interface accepted by its exports, no slSetTagForFrame)"
+                        : "test_hook_dll (a 2.x interface accepted by its exports)");
+  }
+  if (fault) {  // 0.7.0: a fault inside the guarded part: the call fails cleanly, the run passes every call on afterwards
+    WgFrameToken* tok = nullptr;
+    uint32_t idx = 1;
+    CHECK_EQ(slGetNewFrameToken(&tok, &idx), 24);  // WG_E_EXCEPTION_HANDLER, the process lives on
+    std::vector<std::string> L = read_lines(log_path);
+    CHECK(count(L, "hook: a fault inside WrongGPU RR's slGetNewFrameToken on the game-interface route; every game-interface "
+                   "call passes on to the game interface for the rest of the run") == 1);
+    st->last_role = nullptr;
+    CHECK_EQ(slGetNewFrameToken(&tok, &idx), 0);  // passed on to the game interface (the stand-in)
+    CHECK(st->last_role != nullptr && strcmp(st->last_role, "new-frame-token") == 0);
+    st->last_role = nullptr;
+    CHECK_EQ(slShutdown(), 0);  // a non-RR call too
+    CHECK(st->last_role != nullptr && strcmp(st->last_role, "shutdown") == 0);
+    L = read_lines(log_path);
+    CHECK(count(L, "hook: a fault inside WrongGPU RR's ") == 1);  // said once
+    TEST_SUMMARY(fault_cpp ? "test_hook_dll (a C++ exception inside the game-interface route)"
+                           : "test_hook_dll (an access violation inside the game-interface route)");
+  }
   if (badver) {
     // Wrong interface version: nothing patched, the RR roles still reach the stand-in.
     st->calls = 0;
@@ -494,6 +549,7 @@ int main(int argc, char** argv) {
     CHECK(st->last_role != nullptr && strcmp(st->last_role, "new-frame-token") == 0);  // reached the stand-in
     std::vector<std::string> L = read_lines(log_path);
     CHECK(count(L, "does not match this build's binding version") == 1);
+    if (probe_missing) CHECK(count(L, "; export probe: no slFreeResources)") == 1);  // 0.7.0: the export it lacks, named
     // clean/060-rr-plugin-hunt: only the game-interface route is left out; the log does not say "nothing was patched"
     CHECK(count(L, "the game-interface route is not used for this version (no import slot patched)") == 1);
     CHECK(count(L, "nothing was patched") == 0);
@@ -542,7 +598,13 @@ int main(int argc, char** argv) {
     CHECK(count(L, "a second copy of WrongGPU RR is loaded") == 0);
     CHECK(count(L, "took the RR calls after WrongGPU") == 0);
 #if WG_TEST_DELAYLOAD
-    CHECK(count(L, "loaded for the exe's delay-load import") == 1);
+    if (preloaded) {
+      CHECK(count(L, "game interface module found") == 1);
+      CHECK(count(L, "(already loaded; exe links it by delay-load import)") == 1);
+      CHECK(count(L, "patched after the game interface initialised") == 0);
+    } else {
+      CHECK(count(L, "loaded for the exe's delay-load import") == 1);
+    }
     CHECK(count(L, "patched IAT slot") == 0);  // the exe has no plain import of the interface
     CHECK(count(L, "patched delay-load IAT slot slInit") == 1);
     CHECK(count(L, "patched delay-load IAT slot slEvaluateFeature") == 1);
@@ -903,7 +965,11 @@ int main(int argc, char** argv) {
   CHECK(count(L, "diag: summary (shutdown): support queries ") >= 1);
   CHECK(count(L, "RR instances created 1") >= 1);
   CHECK(count(L, "redirected ") == 1 && count(L, "IAT slot(s) across") == 1);
-  TEST_SUMMARY("test_hook_dll (release)");
+  if (preloaded) {
+    CHECK(count(L, "(already loaded; exe links it by delay-load import)") == 1);
+    CHECK(count(L, "init unseen: the game's <init> ran before the hook") == 0);
+  }
+  TEST_SUMMARY(preloaded ? "test_hook_dll (release, delay-load preloaded)" : "test_hook_dll (release)");
 #else
   // ---- probe: a short sequence on WARP; every RR evaluate returns 0 and writes the output
   Host g;

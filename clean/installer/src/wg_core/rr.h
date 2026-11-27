@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: Ray Reconstruction (RR) in the games that use it (build/launcher/ui-options/BE-wide/rr-notes.md).
 // A game "uses Ray Reconstruction" when it ships the DLSS Ray Reconstruction files (the game interface's RR plugin or the
 // RR model file), or is one of the few games known to call it directly. For those games a WrongGPU install also places
@@ -60,6 +60,8 @@ void ForgetRrDetection();
 // The OptiScaler of an install is WrongGPU's edition (optiedition.h: the pinned DLL), read from the install record: the copy
 // entry of OptiScaler's proxy DLL has the edition DLL's hash. A game whose RR is direct needs it (RrUse::direct).
 bool RecordHasEdition(const Record& m);
+// The OptiScaler of an install is an older WrongGPU edition (optiedition.h: e.g. v5) due for upgrade to the pinned edition.
+bool RecordHasPriorEdition(const Record& m);
 // The plain reason, for the log and the result's warnings, why WrongGPU's RR isn't offered in a direct-RR game with an
 // OptiScaler that is not the edition (`game`: the game's name).
 wstring RrDirectNoEditionText(const wstring& game);

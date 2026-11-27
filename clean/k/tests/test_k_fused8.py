@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """network=fused8 (clean/k/kernels/k_block8.h: FP8 forms of e0, e1, d1, d0; opt-in, not bit-exact) in the runtime
 library on the GPU, on the synthetic model K of test_k_runtime_gpu and a short moving sequence:
 

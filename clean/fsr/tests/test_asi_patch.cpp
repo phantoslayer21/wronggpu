@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Original synthetic-memory transaction tests. No foreign images, host API calls, or executable patches.
 #include "../asi/asi_patch.h"
 #include <cstdio>

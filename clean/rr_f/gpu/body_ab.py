@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """A/B of body stage kernels at a game size: the base kernels (a copy of clean/rr_f/kernels at the base commit,
 --base, default <WG_RR_BUILD>/../base_kernels/clean/rr_f/kernels) against the current kernels, on the same inputs,
 in one host call (interleaved timing: every timed run executes base and new back to back per stage), with a raw

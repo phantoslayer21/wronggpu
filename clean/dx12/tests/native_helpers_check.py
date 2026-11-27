@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Original synthetic FP32 helper differential: separate HIP/native processes, byte-fill guards, HIP module audit.
 
 Build only (no GPU): python clean/dx12/tests/native_helpers_check.py --build <HIP build> --out <private out> --build-only

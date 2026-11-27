@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Memory-access and arithmetic helpers of the per-pixel stages (encoder.hip, decoder.hip, exposure.hip).
 //
 // Addressing: every access is `base pointer (uniform, SGPRs) + 32-bit unsigned byte offset (VGPR)`, which the AMDGPU

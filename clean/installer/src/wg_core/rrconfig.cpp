@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: the engine setting Ray Reconstruction needs in Borderlands 4 and Hogwarts Legacy (rrconfig.h).
 // Written for this project.
 #include "rrconfig.h"
@@ -618,12 +618,12 @@ void RevertRrConfig(Context& ctx, const wstring& dir, Record& m, std::vector<wst
             }
         }
         RemoveDirectoryW(Parent(bp).c_str());  // (only when empty)
+        m.rrconfig = RrConfigFix();
     } catch (const SetupError& e) {
         warnings.push_back(L"Engine.ini could not be put back (" + e.msg + L"): take the line " + RrConfigLineW() + L" out of " + file + L" yourself" +
                            (fix.setReadOnly ? L" and clear its read-only attribute" : L""));
         LogLine(ctx, L"rr_config_fix off ERROR: " + e.msg);
     }
-    m.rrconfig = RrConfigFix();
 }
 
 int RrConfigLineState(Context& ctx, const RrConfigGame& g, wstring* file, wstring* readWhy) {

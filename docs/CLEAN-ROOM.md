@@ -4,6 +4,9 @@ WrongGPU is an independent implementation of a temporal super-resolution network
 (Ray Reconstruction) for AMD Radeon RX 9000 GPUs. It was written under a clean-room process with two separate teams.
 This document describes that process and who wrote what. The specification itself is not published.
 
+WrongGPU's own code is licensed under GPL-3.0-only from 0.7.0 onward. See the [project licence](../LICENSE)
+and [contribution guidelines](../CONTRIBUTING.md).
+
 ## The two teams
 
 - **The spec team** worked out how the networks behave and wrote it down as a functional specification: the stages,
@@ -35,8 +38,9 @@ This document describes that process and who wrote what. The specification itsel
    machine-learning and numerical-methods literature;
 4. its own design, measurements and probes on its own hardware;
 5. for the Ray Reconstruction plugin's host interface: the plugin interface of the WrongGPU edition of OptiScaler (the
-   project owner's GPL-licensed fork). `clean/rr_f/proxy/include/wg_host_menu_abi.h` declares the binary interface the
-   plugin needs; no text was copied into it from any third-party file.
+   project owner's GPL-licensed fork). `clean/wgshared/include/wg_host_menu_abi.h` (since 0.7.0 one copy for the RR plugin
+   and WrongGPU.asi; `clean/rr_f/proxy/include/wg_host_menu_abi.h` includes it) declares the binary interface the
+   plugins need; no text was copied into it from any third-party file.
 
 ## Rules the clean team followed
 

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The bias split of the exact step Y (clean/rr_f/gpu/layout.py bias_split and pack_weights' Tb split): the same bytes as
 the runtime's host split (runtime/src/rr_pack.cpp rne_int / split3), so tools/pack_model.py and the runtime pack a model
 identically (runtime/tests/test_model_pack.py). The constructed values cover the cases where numpy's round and the

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (#96): exact float16 chunk accumulation (clean/fg/reference/fp16acc.py) against an exact rational
 reference written here (fractions.Fraction, nearest-even rounding to float16 by comparing neighbours).
 

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Where does each Swin stage wait? Per-phase timing of the block kernels, per wave, at the in-game size.
 
     python clean/runner/build.py --rocm <ROCm> --out build --profile

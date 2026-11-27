@@ -1,14 +1,14 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: WrongGPU's edition of OptiScaler, downloaded by the launcher from its own project's release page.
 // Written for this project.
 //
 // OptiScaler is a separate program (GPL) with its own project. The launcher never ships it (owner 2026-11-02: nothing of
 // the OptiScaler fork goes into WrongGPU's download): it downloads the WrongGPU edition of OptiScaler (OptiScaler with a
-// plugin interface WrongGPU's Ray Reconstruction uses, interface 5) from the fork's published release, over HTTPS with
-// Windows' own WinHTTP, checks it against the size and SHA-256 pinned here, keeps it in the launcher's data folder
-// (optiscaler\) and uses that copy for every install. A download that does not match is deleted and never used. Offline
-// or after a failed download the player can still choose an OptiScaler download themselves (the launcher's "Choose your
-// OptiScaler download"); a game whose RR needs plugin interface 5 (gamerules.h) then gets no RR.
+// plugin interface WrongGPU's Ray Reconstruction and Frame Generation use, interface 6) from the fork's published release,
+// over HTTPS with Windows' own WinHTTP, checks it against the size and SHA-256 pinned here, keeps it in the launcher's data
+// folder (optiscaler\) and uses that copy for every install. A download that does not match is deleted and never used.
+// Offline or after a failed download the player can still choose an OptiScaler download themselves (the launcher's "Choose
+// your OptiScaler download"); a game whose RR needs plugin interface 5 (gamerules.h) then gets no RR.
 #pragma once
 #include "context.h"
 
@@ -23,14 +23,14 @@ struct EditionInfo {
     wstring file;       // the cached file's name
     unsigned long long size = 0;
     wstring sha256;     // of the archive
-    wstring dllSha256;  // of OptiScaler.dll inside it (the edition DLL: plugin interface 5)
-    wstring version;    // in words: "10.0.0-pre1 (WrongGPU edition v5)"
+    wstring dllSha256;  // of OptiScaler.dll inside it (the edition DLL: plugin interface 6)
+    wstring version;    // in words: "10.0.0-pre1 (WrongGPU edition v6)"
 };
-// The pinned release. WRONGGPU_TESTING builds read WRONGGPU_TEST_EDITION ("url|size|sha256|dllsha256"; a test server on
-// 127.0.0.1 may use http://); without it they never download (as if offline), so tests never reach the network unasked.
+// The pinned release. WRONGGPU_TESTING builds read WRONGGPU_TEST_EDITION ("url|size|sha256|dllsha256[|file]"; a test server
+// on 127.0.0.1 may use http://); without it they never download (as if offline), so tests never reach the network unasked.
 EditionInfo PinnedEdition();
 const wchar_t* const kEditionProject = L"https://github.com/phantoslayer21/OptiScaler";
-const wchar_t* const kEditionPage = L"https://github.com/phantoslayer21/OptiScaler/releases/tag/wronggpu-edition-20261102.1";
+const wchar_t* const kEditionPage = L"https://github.com/phantoslayer21/OptiScaler/releases/tag/wronggpu-edition-20261127.1";
 
 struct EditionResult {
     wstring path;          // the verified archive in the cache (empty: not available)
@@ -47,7 +47,11 @@ wstring EditionCacheDir(const wstring& dataDir);
 EditionResult GetEdition(Context& ctx, const wstring& dataDir, const std::function<bool(unsigned long long, unsigned long long)>& progress);
 // The cached copy is there and matches (size and SHA-256), nothing downloaded.
 bool EditionCached(const wstring& dataDir, wstring* path = nullptr);
-// OptiScaler.dll in this package folder is the pinned edition DLL.
+// OptiScaler.dll in this package folder is the pinned edition DLL (v6).
 bool IsEditionDll(const wstring& optiDll);
+// A SHA-256 hash or OptiScaler DLL on disk belongs to an older WrongGPU edition (e.g. v5) that should be upgraded to the
+// pinned edition rather than treated as a foreign OptiScaler.
+bool IsPriorEditionHash(const wstring& sha256);
+bool IsPriorEditionDll(const wstring& optiDll);
 
 }  // namespace wg

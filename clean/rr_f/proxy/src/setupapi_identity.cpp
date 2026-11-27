@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // SetupAPI identity shim: the rules and the call wrappers (setupapi_identity.h). Written for this project.
 #include "setupapi_identity.h"
 
@@ -357,23 +357,56 @@ BOOL Shim::registry_property(HDEVINFO set, PSP_DEVINFO_DATA dev, DWORD property,
 // ---------------------------------------------------------------- import slots
 std::vector<ImportSlot> find_import_slots(HMODULE module, const char* dll, const std::vector<std::string>& names) {
   std::vector<ImportSlot> out;
+  HMODULE held = nullptr;
+  if (!module || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(module), &held) ||
+      held != module) {
+    if (held) FreeLibrary(held);
+    return out;
+  }
+  struct ReleaseMod {
+    HMODULE m;
+    ~ReleaseMod() { FreeLibrary(m); }
+  } guard{held};
+
   uint8_t* base = reinterpret_cast<uint8_t*>(module);
-  if (!base) return out;
   const IMAGE_DOS_HEADER* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-  if (dos->e_magic != IMAGE_DOS_SIGNATURE) return out;
+  if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew < 0 ||
+      static_cast<uint64_t>(dos->e_lfanew) > 0x10000000ull)
+    return out;
   const IMAGE_NT_HEADERS64* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
   if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) return out;
+  const uint64_t img_size = nt->OptionalHeader.SizeOfImage;
+  if (img_size < static_cast<uint64_t>(dos->e_lfanew) + sizeof(IMAGE_NT_HEADERS64)) return out;
+  auto in_img = [img_size](uint64_t rva, uint64_t sz) {
+    return rva < img_size && sz <= img_size - rva;
+  };
+  auto read_str = [base, img_size](uint64_t rva, char* dst, size_t cap) -> bool {
+    if (rva >= img_size || !cap) return false;
+    const uint64_t lim = (img_size - rva) < cap ? (img_size - rva) : cap;
+    for (uint64_t i = 0; i < lim; ++i) {
+      dst[i] = static_cast<char>(base[rva + i]);
+      if (dst[i] == '\0') return true;
+    }
+    return false;
+  };
   auto wanted = [&names](const char* n) {
     for (auto& w : names)
       if (strcmp(w.c_str(), n) == 0) return true;
     return false;
   };
-  auto walk = [&](const IMAGE_THUNK_DATA64* by_name, IMAGE_THUNK_DATA64* iat, bool delay) {
-    for (; by_name->u1.AddressOfData; ++by_name, ++iat) {
+  auto walk = [&](uint64_t name_rva, uint64_t iat_rva, bool delay) {
+    if (!name_rva || !iat_rva) return;
+    for (uint64_t idx = 0; idx < 16384; ++idx) {
+      const uint64_t nr = name_rva + idx * sizeof(IMAGE_THUNK_DATA64);
+      const uint64_t ir = iat_rva + idx * sizeof(IMAGE_THUNK_DATA64);
+      if (!in_img(nr, sizeof(IMAGE_THUNK_DATA64)) || !in_img(ir, sizeof(IMAGE_THUNK_DATA64))) break;
+      const IMAGE_THUNK_DATA64* by_name = reinterpret_cast<const IMAGE_THUNK_DATA64*>(base + nr);
+      IMAGE_THUNK_DATA64* iat = reinterpret_cast<IMAGE_THUNK_DATA64*>(base + ir);
+      if (!by_name->u1.AddressOfData) break;
       if (by_name->u1.Ordinal & IMAGE_ORDINAL_FLAG64) continue;  // by name only
-      const char* n = reinterpret_cast<const char*>(
-          reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(base + by_name->u1.AddressOfData)->Name);
-      if (!wanted(n)) continue;
+      const uint64_t ibn_rva = by_name->u1.AddressOfData + offsetof(IMAGE_IMPORT_BY_NAME, Name);
+      char n[128];
+      if (!read_str(ibn_rva, n, sizeof n) || !wanted(n)) continue;
       ImportSlot s;
       s.slot = reinterpret_cast<void**>(&iat->u1.Function);
       s.name = n;
@@ -383,27 +416,35 @@ std::vector<ImportSlot> find_import_slots(HMODULE module, const char* dll, const
     }
   };
   const IMAGE_DATA_DIRECTORY& imp = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
-  if (imp.VirtualAddress && imp.Size)
-    for (const IMAGE_IMPORT_DESCRIPTOR* e = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(base + imp.VirtualAddress);
-         e->Name; ++e) {
-      if (_stricmp(reinterpret_cast<const char*>(base + e->Name), dll) != 0) continue;
-      walk(reinterpret_cast<const IMAGE_THUNK_DATA64*>(base + (e->OriginalFirstThunk ? e->OriginalFirstThunk : e->FirstThunk)),
-           reinterpret_cast<IMAGE_THUNK_DATA64*>(base + e->FirstThunk), false);
+  if (imp.VirtualAddress && imp.Size && in_img(imp.VirtualAddress, imp.Size)) {
+    const uint64_t n_imp = imp.Size / sizeof(IMAGE_IMPORT_DESCRIPTOR);
+    for (uint64_t k = 0; k < n_imp && k < 4096; ++k) {
+      const IMAGE_IMPORT_DESCRIPTOR* e =
+          reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(base + imp.VirtualAddress + k * sizeof(IMAGE_IMPORT_DESCRIPTOR));
+      if (!e->Name) break;
+      char dname[128];
+      if (!read_str(e->Name, dname, sizeof dname) || _stricmp(dname, dll) != 0) continue;
+      walk(e->OriginalFirstThunk ? e->OriginalFirstThunk : e->FirstThunk, e->FirstThunk, false);
     }
+  }
   const IMAGE_DATA_DIRECTORY& dl = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT];
-  if (dl.VirtualAddress && dl.Size)
-    for (const IMAGE_DELAYLOAD_DESCRIPTOR* e = reinterpret_cast<const IMAGE_DELAYLOAD_DESCRIPTOR*>(base + dl.VirtualAddress);
-         e->DllNameRVA; ++e) {
-      if (!e->Attributes.RvaBased || _stricmp(reinterpret_cast<const char*>(base + e->DllNameRVA), dll) != 0) continue;
-      walk(reinterpret_cast<const IMAGE_THUNK_DATA64*>(base + e->ImportNameTableRVA),
-           reinterpret_cast<IMAGE_THUNK_DATA64*>(base + e->ImportAddressTableRVA), true);
+  if (dl.VirtualAddress && dl.Size && in_img(dl.VirtualAddress, dl.Size)) {
+    const uint64_t n_dl = dl.Size / sizeof(IMAGE_DELAYLOAD_DESCRIPTOR);
+    for (uint64_t k = 0; k < n_dl && k < 4096; ++k) {
+      const IMAGE_DELAYLOAD_DESCRIPTOR* e =
+          reinterpret_cast<const IMAGE_DELAYLOAD_DESCRIPTOR*>(base + dl.VirtualAddress + k * sizeof(IMAGE_DELAYLOAD_DESCRIPTOR));
+      if (!e->DllNameRVA) break;
+      char dname[128];
+      if (!e->Attributes.RvaBased || !read_str(e->DllNameRVA, dname, sizeof dname) || _stricmp(dname, dll) != 0) continue;
+      walk(e->ImportNameTableRVA, e->ImportAddressTableRVA, true);
     }
+  }
   return out;
 }
 
 Shim& process_shim() {
-  static Shim s;
-  return s;
+  static Shim* s = new Shim();  // intentional immortal singleton: SetupAPI IAT hooks stay live through process exit
+  return *s;
 }
 
 BOOL WINAPI hooked_instance_id(HDEVINFO set, PSP_DEVINFO_DATA dev, PWSTR buf, DWORD size, PDWORD required) {

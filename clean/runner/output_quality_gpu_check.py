@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """RX 9070 output-quality9 numerical, write-boundary, phase and resident-filter checks.
 
 Only original synthetic display inputs. This tests the filter, not a learned network or native NVIDIA output.

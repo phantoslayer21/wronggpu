@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Comparison tool of the equivalence tests (clean/EQUIVALENCE-PROTOCOL.md, part "Tools", item 3).
 
 Reads two sets of values (ours, and the original's saved on the spec team's side), computes the verdicts MATCHES /

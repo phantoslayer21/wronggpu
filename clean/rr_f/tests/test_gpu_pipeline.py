@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """CPU structural checks of real body/head -> output arena preparation; no GPU."""
 from contextlib import ExitStack
 import unittest

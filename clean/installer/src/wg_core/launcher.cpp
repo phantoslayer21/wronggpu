@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: data locations, global settings, the game list, the per-game operations, the elevated
 // worker's job file, the launcher's own install, Play and the opt-in update check (launcher.h). Written for this
 // project.
@@ -91,10 +91,13 @@ bool LauncherInstalled(wstring* exe) {
     return true;
 }
 bool UpdateDue(const GameEntry& e, const Context& ctx) {
-    return e.hasRecord && !e.installedVersion.empty() && ctx.data && (VersionLess(e.installedVersion, ctx.data->version) || e.otherBuild);
+    return e.hasRecord && !e.installedVersion.empty() && ctx.data &&
+           (VersionLess(e.installedVersion, ctx.data->version) || e.otherBuild || e.optiEditionOutdated);
 }
 wstring InstalledLabel(const GameEntry& e) {
-    return e.otherBuild ? e.installedVersion + L" (another build)" : e.installedVersion;
+    if (e.otherBuild) return e.installedVersion + L" (another build)";
+    if (e.optiEditionOutdated) return e.installedVersion + L" (older OptiScaler edition)";
+    return e.installedVersion;
 }
 wstring BuildTimeText(uint32_t t) {
     if (!t) return L"unknown";
@@ -305,6 +308,9 @@ GameEntry EntryFor(Context& ctx, const wstring& exeIn, const wstring& name, cons
     g.proxyPlan = t.coexist.proxy;
     for (auto& f : g.coexist) if (f.decision != Decision::Managed) g.found.push_back(f.what);
     if (exists && !quick) { const RrUse ru = DetectRr(exe); g.rrUses = ru.uses; g.rrWhy = ru.why; g.rrDirect = ru.direct; g.rrNotOffered = ru.notOffered; }  // quick: DeepCheck walks the folder
+#if WRONGGPU_FG
+    if (exists && !quick) g.fgUses = GameHasFgLibrary(Parent(exe), g.dir, t.root);  // (fg.h: the game offers DLSS Frame Generation)
+#endif
     if (const GameRule* rule = exists ? GameRuleFor(exe) : nullptr) {  // what the game needs beyond the usual (gamerules.h)
         g.rrPathTracingOnly = rule->rrOnlyPathTracing;
         g.needsGame = rule->name;
@@ -325,6 +331,7 @@ GameEntry EntryFor(Context& ctx, const wstring& exeIn, const wstring& name, cons
         g.hosted = HostedRecord(rec);
         g.proxy = rec.proxy;
         g.optiEdition = RecordHasEdition(rec);
+        g.optiEditionOutdated = !g.optiEdition && RecordHasPriorEdition(rec);
         if (g.proxy.empty())
             for (auto& e : rec.e) for (auto px : kOptiProxies) if (e.action == L"copy" && IEq(e.rel, px)) g.proxy = px;
         g.adoptable = g.recordV1 || !IsFile(ProfilePath(g.dir)) || (g.perGameEntry && LauncherInstalled());
@@ -335,6 +342,13 @@ GameEntry EntryFor(Context& ctx, const wstring& exeIn, const wstring& name, cons
         g.repairSuggested = !g.problems.empty();
         g.hasPrevious = PreviousFits(g.dir, rec, &g.previous);
         g.last = ReadLastRun(g.dir);
+        {
+            const Profile gp = GameProfile(g.dir);
+            g.srModel = gp.get("model").empty() ? string("m") : gp.get("model");
+            const char* modeKey = ModeKeyOf(g.srModel);
+            g.srMode = modeKey ? gp.get(modeKey) : string("fast");
+            g.fgOn = gp.get(kFgKeyEnable) == "on";  // (an empty value in a build without the frame generation choice)
+        }
         if (RecordHasRr(rec)) {
             g.rrInstalled = g.rrUses = true;
             if (g.rrWhy.empty()) g.rrWhy = L"installed";
@@ -342,6 +356,7 @@ GameEntry EntryFor(Context& ctx, const wstring& exeIn, const wstring& name, cons
             g.rrEnabled = rs.enabled;
             g.rrMode = FromUtf8(rs.mode);
         }
+        if (RecordHasFg(rec)) g.fgInstalled = g.fgUses = true;  // frame generation's files (fg.h)
         // rc5 (gamerules.h): a game whose menu has no RR option is never an RR game here, even with an older install's RR
         // files (rrInstalled stays as recorded: a repair or update takes them out); a game whose RR waits for its
         // experimental opt-in holds it off while the setting is off
@@ -428,6 +443,9 @@ static void DeepCheck(GameEntry& g) {
         g.rrWhy = !ru.why.empty() ? ru.why : g.rrInstalled ? wstring(L"installed") : wstring();
         g.rrDirect = ru.direct;
         if (ru.notOffered) { g.rrNotOffered = true; g.rrUses = false; g.rrConfigDue = false; g.rrHeldOff = false; }  // rc6 (rr.cpp)
+#if WRONGGPU_FG
+        g.fgUses = g.fgInstalled || GameHasFgLibrary(Parent(g.exe), g.dir, GameRoot(Parent(g.exe)));
+#endif
     }
     if (!g.hasRecord || !g.exeFound) return;  // a game that is gone has nothing to hash
     Record rec;
@@ -1027,6 +1045,9 @@ std::vector<std::pair<string, string>> FrontEndStateKeys(const Profile& p) {
     std::vector<std::pair<string, string>> r{{"upscaler", p.get("wronggpu") == "off" ? "amd" : "network"}};
     for (size_t i = 0; i < kSettingCount; ++i)
         if (kSettings[i].layer == Layer::Rt) r.push_back({kSettings[i].key, p.get(kSettings[i].key)});  // explicit, defaults too
+    // the SR model modes (0.7.0, Layer::Mode): explicit too, so the front end and WrongGPU.asi's card read the launcher's choice
+    for (size_t i = 0; i < kSettingCount; ++i)
+        if (kSettings[i].layer == Layer::Mode) r.push_back({kSettings[i].key, p.get(kSettings[i].key)});
     return r;
 }
 
@@ -1037,7 +1058,8 @@ string WithFrontEndState(const string& wronggpuIni, const std::vector<std::pair<
         if (kv.first == "upscaler") {
             string cur, sec;
             t = IniGetFrontEnd(t, "upscaler", &cur, &sec) ? IniSet(t, sec, "upscaler", kv.second) : IniSet(t, "fsr", "upscaler", kv.second);
-        } else if (kv.first.rfind("rr_", 0) != 0 && kv.first != "model") {
+        } else if (kv.first.rfind("rr_", 0) != 0 && kv.first != "model" && !IsFgKey(kv.first) &&  // (frame generation's keys: fg.h)
+                   kv.first != "m_mode" && kv.first != "k_mode" && kv.first != "l_mode") {      // (the SR modes: never runtime_options)
             items.push_back(kv);
         }
     }
@@ -1072,7 +1094,61 @@ Profile GameProfile(const wstring& dir) {
         p = ImportProfile(wini, oini);
     }
     FoldRrFromGame(dir, p);  // Ray Reconstruction's mode as the player last chose it in the game (OptiScaler's menu)
+    FoldSrFromGame(dir, p);  // the model and its mode as the player last chose them in the game
+    FoldFgFromGame(dir, p);  // frame generation's settings as they were last changed in the game's state folder
     return p;
+}
+
+bool FoldFgFromGame(const wstring& dir, Profile& p) {
+    bool changed = false;
+#if WRONGGPU_FG
+    const wgstate::Settings s = wgstate::ReadSettings(dir);
+    // fg=off is what the launcher itself writes while frame generation's data is not on this PC (FgStateKeys): then it is not a
+    // choice made outside the launcher, and the profile keeps the player's
+    const bool dataThere = IsFile(Join(Join(ModelBaseDir(), L"FG"), L"model.wgcm"));
+    for (size_t i = 0; i < kSettingCount; ++i) {
+        const SettingDef& d = kSettings[i];
+        if (d.layer != Layer::Fg) continue;
+        const std::string* v = wgstate::Get(s, d.key);
+        string normal;
+        if (!v || !ValidateSetting(d, *v, &normal, nullptr) || normal == p.get(d.key)) continue;  // (an invalid value: never guessed at)
+        if (!strcmp(d.key, kFgKeyEnable) && normal == "off" && !dataThere) continue;
+        p.v[d.key] = normal;
+        changed = true;
+    }
+#else
+    (void)dir; (void)p;
+#endif
+    return changed;
+}
+
+bool FoldSrFromGame(const wstring& dir, Profile& p) {
+    bool changed = false;
+    if (FindSetting("model")) {
+        wgchoice::Record rec;
+        std::string err;
+        const std::filesystem::path recordPath = Join(StateDir(dir), wgchoice::kRecordFile);
+        if (wgchoice::ReadRecordFile(recordPath, &rec, &err) == wgchoice::ReadResult::Ok && rec.source != wgchoice::Source::Launcher) {
+            const string want(1, static_cast<char>(tolower(static_cast<unsigned char>(rec.model))));
+            string normal;
+            if (ValidateSetting(*FindSetting("model"), want, &normal, nullptr) && normal != p.get("model")) {
+                p.v["model"] = normal;
+                changed = true;
+            }
+        }
+    }
+    const wgstate::Settings s = wgstate::ReadSettings(dir);
+    for (size_t i = 0; i < kSettingCount; ++i) {
+        const SettingDef& d = kSettings[i];
+        if (d.layer != Layer::Mode) continue;
+        const std::string* v = wgstate::Get(s, d.key);
+        string normal;
+        if (v && ValidateSetting(d, *v, &normal, nullptr) && normal != p.get(d.key)) {
+            p.v[d.key] = normal;
+            changed = true;
+        }
+    }
+    return changed;
 }
 
 void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vector<wstring>& notes, std::vector<wstring>* warnings,
@@ -1152,7 +1228,29 @@ void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vecto
         string unused;
         wstring why;
         if (!RenderWronggpuIni(q, "", unused, &why)) Fail(L"Settings not applied: " + why, EXIT_USAGE);  // (validates every setting)
-        const int w = WriteStateKeys(ctx, dir, FrontEndStateKeys(q), &why);
+        std::vector<std::pair<string, string>> keys = FrontEndStateKeys(q);
+        // Frame generation (fg.h; a build with its choice): its four keys, in the same write, only once the player opted in
+        // (or the file holds one of them already); fg stays off in the game while its data on this PC is not ready
+        if (FindSetting(kFgKeyEnable)) {
+            bool fgReady = false;
+            if (q.get(kFgKeyEnable) == "on") {
+                wstring fgWhy;
+                fgReady = ModelFileReady(ctx, L'G', &fgWhy);
+                if (!fgReady) {
+                    const wstring w = FgNotReady(fgWhy) + L" Until then frame generation stays off.";
+                    notes.push_back(w);
+                    if (warnings) warnings->push_back(w);
+                }
+            }
+            for (auto& kv : FgStateKeys(q, wgstate::ReadSettings(dir).kv, fgReady)) keys.push_back(kv);
+            // OptiScaler's own frame generation ([FrameGen] in OptiScaler.ini, set in its menu) would take the same frames: the
+            // launcher never changes those keys (they are the player's, OptiScaler's defaults leave it off), but it says so
+            if (q.get(kFgKeyEnable) == "on") {
+                const wstring w = OptiFgConflict(dir);
+                if (!w.empty()) { notes.push_back(w); if (warnings) warnings->push_back(w); }
+            }
+        }
+        const int w = WriteStateKeys(ctx, dir, keys, &why);
         if (w < 0) Fail(L"Settings not applied: " + why, EXIT_REFUSED);
         if (w > 0) {
             notes.push_back(Join(wgstate::kStateFolder, wgstate::kSettingsFile) + L" written");
@@ -1472,6 +1570,8 @@ static void InstallOp(Context& ctx, const OpRequest& r, Ui& ui, OpResult& res) {
     if (!haveProfile) profile = r.hasProfile ? r.profile : DefaultProfile();
     MigrateRrState(ctx, dir);      // #219: an older plugin's or the player's edit of WrongGPU\wronggpu.ini: its mode into the state folder
     FoldRrFromGame(dir, profile);  // a Ray Reconstruction mode chosen in the game stays (the state folder keeps it through the install)
+    FoldSrFromGame(dir, profile);  // so do the model and the SR modes chosen in the game (OptiScaler's list, WrongGPU.asi's card)
+    FoldFgFromGame(dir, profile);  // and frame generation's settings as the state folder has them
     if (target.installed && !target.record.version.empty() && ctx.data && !IEq(target.record.version, ctx.data->version)) SavePrevious(ctx, dir, target.record, ui);
     std::vector<IniKeyChange> oldJournal = target.installed ? target.record.inikeys : !wrongDir.empty() ? wrong.inikeys : std::vector<IniKeyChange>{};
     // a game's opt-in keys follow its setting (ApplyProfile), not the old file
@@ -1649,6 +1749,7 @@ string JobText(const OpRequest& r, const wstring& localAppData, const wstring& l
          "\r\nforce=" + (r.force ? "1" : "0") + "\r\nnoscan=" + (r.noScan ? "1" : "0") + "\r\n";
     if (r.hasProfile)
         for (size_t i = 0; i < kSettingCount; ++i) t += string("profile.") + kSettings[i].key + "=" + r.profile.get(kSettings[i].key) + "\r\n";
+    if (r.modelChosen) t += "modelchosen=1\r\n";
     for (auto& e : r.optiEdits) t += "optikey." + e.first + "=" + e.second + "\r\n";
     if (r.movePlugins) t += "moveplugins=1\r\n";
     // the files the player agreed to move, each with the SHA-256 it had then: "<path>|<sha256>"
@@ -1698,6 +1799,7 @@ bool ParseJob(const string& text, OpRequest& r, wstring& localAppData, wstring& 
         else if (k == "optionly") r.optiOnly = Truthy(kv.second);
         else if (k == "rrconfigonly") r.rrConfigOnly = Truthy(kv.second);
         else if (k == "rrconfigset") r.rrConfigSet = kv.second;
+        else if (k == "modelchosen") r.modelChosen = Truthy(kv.second);
         else if (k.rfind("optikey.", 0) == 0) r.optiEdits.push_back({k.substr(8), kv.second});
         else if (k.rfind("profile.", 0) == 0) {
             if (!r.hasProfile) { r.profile = DefaultProfile(); r.hasProfile = true; }

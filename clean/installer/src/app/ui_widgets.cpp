@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher window: the theme tokens and the widgets (ui_shell.h) in option E, "Quiet": capsule buttons, pills,
 // switches, segmented controls, filter chips, selects, text fields, inset grouped lists with hairlines, covers, the
 // toolbar (the mark, Library | Settings, the status line), menus, dialogs, toasts, the floating capsule's blurred
@@ -1154,6 +1154,9 @@ wstring BusyWhy(const GameEntry& e) {
     switch (v.task) {
         case T_MODEL: return L"Waits until the Model M data is converted.";
         case T_RRDATA: return L"Waits until the Ray Reconstruction data is converted.";
+        case T_MODELK: return L"Waits until the Model K data is converted.";
+        case T_MODELL: return L"Waits until the Model L data is converted.";
+        case T_MODELFG: return L"Waits until the frame generation data is converted.";
         case T_SELFINSTALL: return L"Waits until WrongGPU is installed for this user.";
         case T_FIRSTRUN: return v.first.installOffer && v.first.choice == 1 ? L"Waits until WrongGPU is installed for this user." : L"Waits until WrongGPU is set up.";
         case T_SELFUNINSTALL: return L"Waits until the launcher is uninstalled.";
@@ -1334,6 +1337,7 @@ void RefreshPageMenu() {
     std::vector<MenuItem> now;
     if (v.page == P_GAME && v.menu.owner == ID_G_MORE) now = PageMoreMenu();
     else if (v.page == P_GAME && v.menu.owner == ID_G_FILTER) now = FilterMenu();
+    else if (v.page == P_GAME && v.menu.owner == ID_G_FGPRESENTER) now = FgPresenterMenu();
     bool same = !now.empty() && now.size() == v.menu.items.size();
     for (size_t i = 0; same && i < now.size(); ++i) same = now[i].id == v.menu.items[i].id && now[i].sep == v.menu.items[i].sep;
     if (!same) { v.menu.open = false; return; }

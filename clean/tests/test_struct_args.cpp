@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // CPU test of clean/runtime/struct_args.h: the parser of the manifest's struct argument token s<N>:<fields> and the packer
 // that turns a HIP struct (64-bit device pointers inside) into root constants. Prints "ok" and exits 0, or the first
 // failure and exits 1.

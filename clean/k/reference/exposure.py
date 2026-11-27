@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model K: which exposure value is which (spec 42 draft 3 section 4), the host rule in front of the input stage
 (instage.py) and the output stage (outstage.py), which take E_cur, E_prev, E_aux, e1, e2 as given.
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // RR guard: the coexistence guard of the hook-mode RR plugin (HOOK-MODE.md, "Another Ray Reconstruction
 // plugin"). Generic and read-only: it looks at where the game's RR calls lead (import slots, the first bytes of the
 // interface's RR exports, the host's continuation pointers), never at another plugin's files or internals.
@@ -46,10 +46,11 @@
 namespace wgrr {
 namespace guard {
 
-// The export a module must have to count as a copy of WrongGPU RR (the 60.9 settings contract), and the one of the
-// other WrongGPU plugin (WrongGPU.asi, Model M's menu plugin). Documented in HOOK-MODE.md (the launcher matches them).
+// The export a module must have to count as a copy of WrongGPU RR (the 60.9 settings contract), and those of the
+// other WrongGPU plugins (WrongGPU.asi, WrongGPU-FG.asi). Documented in HOOK-MODE.md (the launcher matches them).
 constexpr const char* kOwnRrExport = "WrongGPU_GetSettingsContract";
 constexpr const char* kWrongGpuAsiExport = "WrongGpuAsiQuery";
+constexpr const char* kWrongGpuFgExport = "WrongGPU_FgQuery";
 // wronggpu-rr.ini: rr_other_plugin = off (default) | take | yield
 constexpr const char* kOverrideKey = "rr_other_plugin";
 constexpr int kMaxHops = 4;  // hook jumps followed from one address (a fifth one is "too many hops": inconclusive)

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Whole-stage timing of the persistent kernels against the launches they replace, with a bit-identity check of every
 persistent-kernel build against its swin.hip reference build (variants.MEGA_REFERENCE: base, or vec16 for bmegahg16).
 Synthetic data (timing does not depend on the values).

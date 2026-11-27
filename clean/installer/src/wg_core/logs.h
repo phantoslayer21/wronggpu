@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: the log collector: one .zip (stored, no compression) with WrongGPU's logs, the Windows events
 // that matter and basic system information (support-manifest.json). Written for this project.
 #pragma once

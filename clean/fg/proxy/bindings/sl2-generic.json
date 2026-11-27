@@ -1,0 +1,50 @@
+{
+ "schema": "wronggpu.fg-proxy.title-binding.v1",
+ "comment": "Frame generation generic binding: any game on game-interface 2.x from 2.4 on (major 2, minor 4 or later) that has no title binding of its own. The interface's export names (roles) and the shared structure GUIDs (viewport, tag, resource, constants, requirements) are the RR binding's for 2.14 (interface_binding): the same names and GUIDs in every 2.x build the RR plugin serves (2.7, 2.8, 2.14); a role an older interface does not export is simply not hooked. The FG options and state are taken from structure version 1 on and read only up to the version the game passes (the codec, win32/fg_sl214_codec.h); the sizes name the codec's full layouts. The game's DXGI factory: through the interface's own factory export when the game imports it, otherwise the exe's imports of the DXGI module's factory creations (dxgi_factory_fallback). Read at configure time by ../CMakeLists.txt (generated header in the build tree; never edited by hand).",
+ "id": "sl2-generic",
+ "title": "game interface 2.x (generic)",
+ "qualified": true,
+ "exe_leaf": "*",
+ "transport": "import-table-or-host-routes",
+ "interface_binding": "../../../rr_f/proxy/binding/rr-f-2.14.json",
+ "interface_file": "../../../rr_f/proxy/binding/interposer.json",
+ "interface_version": [2, 4],
+ "interface_version_minor_max": 99,
+ "functions_file": "fg-functions.json",
+ "fg_feature": 1000,
+ "factory_import": "CreateDXGIFactory2",
+ "dxgi_factory_fallback": true,
+ "abi_max_generated": 5,
+ "ui_max_generated": 5,
+ "presets": ["A", "B", "C"],
+ "options": {
+  "guid": "fac5f1cb-2dfd-4f36-a1e6-3a9e865256c5",
+  "version": 1,
+  "size": 120
+ },
+ "state": {
+  "guid": "cc8ac8e1-a179-44f5-97fa-e74112f9bc61",
+  "version": 1,
+  "size": 88
+ },
+ "constants_min_version": 1,
+ "buffer_types": {
+  "depth": 0,
+  "motion": 1,
+  "hudless": 2,
+  "ui_alpha": 69,
+  "distortion": 50,
+  "no_warp": 54,
+  "backbuffer": 53
+ },
+ "optional_inputs": {
+  "hudless": "may",
+  "ui_alpha": "may",
+  "distortion": "may",
+  "no_warp": "may"
+ },
+ "tag_lifetimes": [0, 1],
+ "min_size": 100,
+ "dynamic_supported": false,
+ "has_mfg_selector": false
+}

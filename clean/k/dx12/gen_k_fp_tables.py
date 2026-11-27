@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Generates k_fp_tables.hlsli: the constants of model K's exact FP32 / FP64 helpers (k_fp.h) as bit
 patterns for the D3D12 port (k_fp.hlsli). WrongGPU's own code.
 

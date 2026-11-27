@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 /* RR settings contract between the proxy and WrongGPU.asi (spec 60.9), contract version 1, x64.
  * Owned by WrongGPU. The proxy exports WG_RR_CONTRACT_EXPORT (C linkage, no arguments); the table it returns
  * stays valid until the proxy unloads. Shared by clean/rr_f/proxy (producer) and the ASI side (consumer,

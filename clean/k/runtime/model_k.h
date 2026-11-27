@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model K layer table of the per-frame runtime (spec 40 draft 4, spec 41, spec 44): stages, sizes, window offsets,
 // buffer plan and weight-blob sizes. C++ mirror of clean/k/reference/layout.py and clean/k/runner/k_pack.py
 // (clean/k/tests/test_k_runtime_table.py checks that both give the same numbers).

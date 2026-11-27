@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Probe of Model K's softmax weight rounding on D3D12 (hlsl/k_smx.hlsli). WrongGPU's own code; D3D12 only (no HIP
 // kernel: it is checked against the exact rounding of its inputs, clean/k/dx12/k_port_check.py family mixprobe, and the
 // native D3D12 runtime runs it at create on the cases of clean/k/runtime/k_mix_probe.h).

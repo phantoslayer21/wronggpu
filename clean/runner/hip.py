@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Thin ctypes wrapper over the HIP runtime C API (amdhip64), written from the public HIP API documentation.
 
 Only the calls the runner needs: device memory, module loading, kernel launch, events.

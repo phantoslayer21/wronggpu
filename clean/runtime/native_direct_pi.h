@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Original pre-exposure division window of the direct-resource kernels, 2026-10-16.
 // Basis: IEEE-754 binary32 arithmetic; clean/dx12/hlsl/native_direct.hlsli native_direct_color_div3 (the GPU side).
 //

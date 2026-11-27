@@ -9,7 +9,7 @@
       [CONTRIBUTING.md](https://github.com/phantoslayer21/wronggpu/blob/main/CONTRIBUTING.md#the-clean-room-statement)
       for this and all my contributions (required once, in my first pull request).
 - [ ] Every commit has a `Signed-off-by:` line (`git commit -s`; Developer Certificate of Origin 1.1).
-- [ ] New source files carry the SPDX licence line for MIT, or are covered in `REUSE.toml`.
+- [ ] New source files carry the SPDX licence line for GPL-3.0-only, or are covered in `REUSE.toml`.
 - [ ] No files of the original upscaler (see CONTRIBUTING.md), no model data, game files, captures, screenshots or
       binaries; no paths, user or machine names of my PC.
 - [ ] Any new third-party component is under a permitted licence and listed in THIRD-PARTY-NOTICES and REUSE.toml.

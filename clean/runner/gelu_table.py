@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """GELU lookup tables of the second Swin design (kernels/swin_v2.hip), written by the clean team.
 
 Correction table (WG_V2_GELU 3, the v2 default): GELU(x) = max(x, 0) - c(|x|) with c(a) = a Phi(-a) (0 <= c <= 0.17,

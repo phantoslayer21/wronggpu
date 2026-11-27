@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Seeded probe generator (clean/equiv/probes.py): the same bytes for the same parameters (pinned digest), --verify,
 and that each probe shows the behaviour it is meant to isolate, at tiny sizes. Synthetic data only.
 

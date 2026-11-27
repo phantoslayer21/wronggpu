@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """A partial apply, for run_launcher_tests.py's RR group, which calls run() in its place with a game that has RR installed
 (this file keeps that suite below the 256 KB source limit, as launcher_state_cases.py does).
 

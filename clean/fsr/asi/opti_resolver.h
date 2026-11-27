@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // WrongGPU OptiScaler ASI plugin: resolve the anchors of OptiScaler's DX12 upscaler menu in a mapped PE image,
 // by content (UI label strings, their RIP-relative references, function bounds from the exception directory),

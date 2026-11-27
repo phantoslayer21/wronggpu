@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // End-to-end test of the probe build (WG_RR_PROBE, wg_rr_proxy_probe.dll) with a fake game host on the software
 // D3D12 adapter (WARP; no GPU, no game): the probe staged under the game's interposer file name next to the renamed
 // fake original; the export table (the release build's names and ordinals); a game-like sequence of calls with

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """All vector cases (D0-R excluded as in stage.main) with several steps, the first one the baseline (e.g. X,I): every run
 against the reference (stage.compare: e4m3 codes, zero codes equal; f16 bits, zero signs equal) and every run's raw
 output bytes against the baseline step's (zero signs included), plus the fixup windows of steps with a fixup dispatch.

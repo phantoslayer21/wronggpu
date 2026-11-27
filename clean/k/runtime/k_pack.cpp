@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model K weight packing for the runtime; see k_pack.h. Port of clean/k/runner/k_pack.py (d_row "gfx12") and
 // clean/k/reference/params.py normalize; layouts in clean/k/FORMATS.md.
 #include "k_pack.h"

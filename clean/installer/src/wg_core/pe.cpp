@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: PE version resource and export reader (Microsoft PE/COFF and VS_VERSIONINFO documentation),
 // moved unchanged from setup.cpp. Written for this project.
 #include "pe.h"

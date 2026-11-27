@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: the player's OptiScaler: its package, the OptiScaler.ini keys for WrongGPU, the proxy name,
 // WrongGPU's OptiScaler plugin (WrongGPU.asi). Written for this project.
 #pragma once
@@ -39,6 +39,7 @@ struct OptiGameKey { const wchar_t* exe; const char* setting; const char* sectio
 inline const OptiGameKey kOptiGameKeys[] = {
     {L"Spider-Man2.exe", "sm2_rr_experimental", "Spoofing", "Dxgi", "true"},
     {L"Spider-Man2.exe", "sm2_rr_experimental", "Spoofing", "SpoofedDeviceId", "0x2684"},
+    {L"Spider-Man2.exe", "sm2_rr_experimental", "Spoofing", "StreamlineSpoofing", "true"},
     {L"Spider-Man2.exe", "sm2_rr_experimental", nullptr, "UseFakenvapi", "false"},
 };
 // The game a setting of kOptiGameKeys belongs to (nullptr: no such setting).

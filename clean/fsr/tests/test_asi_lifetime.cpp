@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Original synthetic lifetime-publication tests: no module loading, host execution or GPU work.
 #include "../asi/asi_lifetime.h"
 #include <cstdio>

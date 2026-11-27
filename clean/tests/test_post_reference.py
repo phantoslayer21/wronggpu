@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Spec 06 reference (reference/post.py) against slow per-pixel loop versions written independently from the spec
 text, plus checks of the stated edge cases. Synthetic data only.
 

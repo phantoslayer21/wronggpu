@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Writes runtime/hyb_tables.h's hyb_fill() bytes to the file given (test_hyb_tables_cpp.py compares them with
 // clean/l/reference/hyb_tables.py). With a second argument "downward" the generation runs with the thread in FE_DOWNWARD
 // (the bytes must not change) and the program fails (exit 3) unless that mode is restored afterwards.

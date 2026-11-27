@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L (issue #89): GPU check of the FP16-form width-32 block kernels (clean/l/kernels/l_q7.hip) against the oracle
 (clean/l/reference/oracle.py swin_block with the decoder / encoder block constants, form "q7", FP8 op model "exact"),
 byte for byte.

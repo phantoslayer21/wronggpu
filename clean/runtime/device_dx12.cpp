@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Hybrid D3D12 device (runtime backend 2; see device.h and clean/dx12/README.md).
 //
 // Memory: one D3D12 committed buffer (default heap, shared, unordered access) imported into HIP, so the same memory has
@@ -133,6 +133,8 @@ class Dx12Device : public Device {
     queue_.reset();
     device_.reset();
     hip_.reset();  // after the imports are released
+    if (d3d12_mod_) FreeLibrary(d3d12_mod_), d3d12_mod_ = nullptr;
+    if (dxgi_mod_) FreeLibrary(dxgi_mod_), dxgi_mod_ = nullptr;
   }
 
   bool init(const std::string& rocm_dir, const std::string& build_dir) {
@@ -161,6 +163,8 @@ class Dx12Device : public Device {
   // ---- memory: sub-allocation of the arena -------------------------------------------------------------------------
   bool alloc(DevPtr* p, size_t bytes) override {
     if (!arena_bytes_) return fwd(hip_->alloc(p, bytes));  // WG_DX12_ARENA_MB=0 (diagnostics): plain HIP memory
+    if (bytes > arena_bytes_ - kAlign)
+      return fail("the D3D12 arena cannot satisfy an allocation of " + std::to_string(bytes) + " bytes");
     const uint64_t need = std::max<uint64_t>(kAlign, (bytes + kAlign - 1) / kAlign * kAlign);
     for (auto it = free_.begin(); it != free_.end(); ++it) {
       if (it->second < need) continue;
@@ -275,7 +279,10 @@ class Dx12Device : public Device {
       list_->ResourceBarrier(1, &b);
     }
     list_->SetPipelineState(k.pso.get());
-    const unsigned groups = grid * k.gscale;  // D3D12 workgroups (split port)
+    const uint64_t groups64 = static_cast<uint64_t>(grid) * k.gscale;  // D3D12 workgroups (split port)
+    if (groups64 > UINT_MAX)
+      return fail("D3D12 kernel " + kernel + ": workgroup count overflows 32 bits");
+    const unsigned groups = static_cast<unsigned>(groups64);
     c[1] = groups;
     for (unsigned base = 0; base < groups; base += kMaxGroups) {
       c[0] = base;
@@ -427,6 +434,7 @@ class Dx12Device : public Device {
   }
   // Executes the open list; returns the fence value the queue signals after it (0: failed).
   uint64_t execute() {
+    on_dx_ = false;
     if (!check(list_->Close(), "ID3D12GraphicsCommandList::Close")) return 0;
     ID3D12CommandList* l = list_.get();
     queue_->ExecuteCommandLists(1, &l);
@@ -437,16 +445,25 @@ class Dx12Device : public Device {
   }
   // Eager submission (WG_DX12_BATCH): the dispatches recorded so far go to the GPU now and a new list is opened; the
   // next dispatch still gets its UAV barrier (need_barrier_), and HIP still waits only at the next to_hip().
-  bool submit() { return execute() && open_list(); }
+  bool submit() {
+    if (!execute() || !open_list()) return false;
+    on_dx_ = true;
+    return true;
+  }
   uint64_t signal_queue() {
     const uint64_t v = ++fence_value_;
     return check(queue_->Signal(fence_.get(), v), "ID3D12CommandQueue::Signal") ? v : 0;
   }
   bool wait_cpu(uint64_t v) {
-    if (!v || fence_->GetCompletedValue() >= v) return true;
+    if (!v) return true;
+    const uint64_t done = fence_->GetCompletedValue();
+    if (done == UINT64_MAX) return check(DXGI_ERROR_DEVICE_REMOVED, "ID3D12Fence::GetCompletedValue");
+    if (done >= v) return true;
     if (!check(fence_->SetEventOnCompletion(v, event_), "ID3D12Fence::SetEventOnCompletion")) return false;
     WaitForSingleObject(event_, INFINITE);
-    return true;
+    const uint64_t after = fence_->GetCompletedValue();
+    if (after == UINT64_MAX) return check(DXGI_ERROR_DEVICE_REMOVED, "ID3D12Fence::GetCompletedValue");
+    return after >= v || fail("ID3D12Fence wait did not reach target value");
   }
   bool open_list() {
     cur_alloc_ = (cur_alloc_ + 1) % kAllocators;
@@ -465,15 +482,16 @@ class Dx12Device : public Device {
   }
 
   bool create_device() {
-    HMODULE dxgi = LoadLibraryW(L"dxgi.dll"), d3d12 = LoadLibraryW(L"d3d12.dll");
-    if (!dxgi || !d3d12) return fail("D3D12 backend: dxgi.dll / d3d12.dll not found");
+    dxgi_mod_ = LoadLibraryW(L"dxgi.dll");
+    d3d12_mod_ = LoadLibraryW(L"d3d12.dll");
+    if (!dxgi_mod_ || !d3d12_mod_) return fail("D3D12 backend: dxgi.dll / d3d12.dll not found");
     typedef HRESULT(WINAPI * PfnFactory)(REFIID, void**);
-    auto make_factory = (PfnFactory)(void*)GetProcAddress(dxgi, "CreateDXGIFactory1");
-    auto create = (PFN_D3D12_CREATE_DEVICE)(void*)GetProcAddress(d3d12, "D3D12CreateDevice");
-    serialize_ = (PFN_D3D12_SERIALIZE_ROOT_SIGNATURE)(void*)GetProcAddress(d3d12, "D3D12SerializeRootSignature");
+    auto make_factory = (PfnFactory)(void*)GetProcAddress(dxgi_mod_, "CreateDXGIFactory1");
+    auto create = (PFN_D3D12_CREATE_DEVICE)(void*)GetProcAddress(d3d12_mod_, "D3D12CreateDevice");
+    serialize_ = (PFN_D3D12_SERIALIZE_ROOT_SIGNATURE)(void*)GetProcAddress(d3d12_mod_, "D3D12SerializeRootSignature");
     if (!make_factory || !create || !serialize_) return fail("D3D12 backend: D3D12 / DXGI entry points missing");
     if (env("WG_DX12_DEBUG") == "1") {
-      auto get_debug = (PFN_D3D12_GET_DEBUG_INTERFACE)(void*)GetProcAddress(d3d12, "D3D12GetDebugInterface");
+      auto get_debug = (PFN_D3D12_GET_DEBUG_INTERFACE)(void*)GetProcAddress(d3d12_mod_, "D3D12GetDebugInterface");
       Com<ID3D12Debug> dbg;
       if (get_debug && SUCCEEDED(get_debug(__uuidof(ID3D12Debug), dbg.pv()))) dbg->EnableDebugLayer();
     }
@@ -579,9 +597,24 @@ class Dx12Device : public Device {
         if (s == "p" || s == "u") {
           x.args.push_back({s[0], 4});
           ++count;
-        } else if (s.size() > 1 && s[0] == 'b' && std::atoi(s.c_str() + 1) > 0 && std::atoi(s.c_str() + 1) % 4 == 0) {
-          x.args.push_back({'b', (unsigned)std::atoi(s.c_str() + 1)});
-          count += x.args.back().size / 4;
+        } else if (s.size() > 1 && s[0] == 'b') {
+          uint64_t bytes = 0;
+          bool ok_num = true;
+          for (size_t i = 1; i < s.size(); ++i) {
+            if (s[i] < '0' || s[i] > '9') {
+              ok_num = false;
+              break;
+            }
+            bytes = bytes * 10 + static_cast<uint64_t>(s[i] - '0');
+            if (bytes > kMaxArgDwords * 4ull) {
+              ok_num = false;
+              break;
+            }
+          }
+          if (!ok_num || bytes == 0 || (bytes % 4) != 0)
+            return fail("D3D12 manifest: kernel " + x.name + ": argument kind '" + s + "'");
+          x.args.push_back({'b', static_cast<unsigned>(bytes)});
+          count += static_cast<unsigned>(bytes / 4);
         } else if (!s.empty() && s[0] == 's') {
           Arg sa{'s', 0};
           unsigned words = 0;
@@ -784,6 +817,7 @@ class Dx12Device : public Device {
   }
 
   std::unique_ptr<Device> hip_;
+  HMODULE dxgi_mod_ = nullptr, d3d12_mod_ = nullptr;
   Com<ID3D12Device> device_;
   Com<ID3D12CommandQueue> queue_;
   Com<ID3D12GraphicsCommandList> list_;

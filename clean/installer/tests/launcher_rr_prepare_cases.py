@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """rr-prepare and rr-recheck (RR's kernels prepared for a game ahead of its start), for run_launcher_tests.py's RR section
 (which calls run() in its place; this file keeps that suite below the 256 KB source limit, as launcher_edition_cases.py
 does). Written for this project.

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Independent slow oracle of page 54b for tiny images: one pixel at a time, exact rationals (Fraction) for
 every rounding, Decimal for exp2 / log2. It shares no arithmetic, read, store or sampling helper with
 clean/rr_f/reference (only the plain dataclasses of the symbols and surfaces are read through attributes).

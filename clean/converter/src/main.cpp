@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // wronggpu-convert: the install-time model converter of spec 08 (command line of section 10; map versions 1 and 4),
 // spec 48 (preset K; map versions 2 and 3) and spec 57 (preset F, Ray Reconstruction; map version 5).
 // Written for this project.

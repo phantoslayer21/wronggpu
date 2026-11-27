@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Physical row for each logical d0 head channel. Unused rows are -1.
 0, 1, -1, 6, 7, 16, 17, 18, -1, 2,
 8, 9, -1, 19, 20, 21, 22, 23, -1, 10,

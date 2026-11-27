@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: game discovery (Steam, Epic, GOG), the game executable and its folders, the FidelityFX DLLs
 // WrongGPU replaces (the game's, ours or another mod's) and the inspection of one game. Written for this project.
 #include "detect.h"
@@ -25,7 +25,14 @@ wstring QuotedAt(const wstring& line, int n) {
         size_t a = line.find(L'"', p);
         if (a == wstring::npos) return L"";
         size_t b = a + 1;
-        while (b < line.size() && !(line[b] == L'"' && line[b - 1] != L'\\')) ++b;
+        while (b < line.size()) {
+            if (line[b] == L'"') {
+                size_t bs = 0;
+                for (size_t j = b; j > a + 1 && line[j - 1] == L'\\'; --j) ++bs;
+                if ((bs & 1) == 0) break;
+            }
+            ++b;
+        }
         if (b >= line.size()) return L"";
         if (k == n) return line.substr(a + 1, b - a - 1);
         p = b + 1;

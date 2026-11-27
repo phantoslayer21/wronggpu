@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Element-wise steps of Model L's / Model M's HYBRID block form (WG_L_FORM=hybrid; the block templates with SW_HYB=1):
 // the original's FP16 forms (PRESET-L-P3-Q7, clean/l/reference/oracle.py norm_q7, softmax_q7, gelu_q7) around FP8
 // matrix chains that accumulate in float32 over the whole chain with ONE FP16 rounding at its end.
@@ -63,16 +63,30 @@ v8f hyb_round16(v8f d) { return hyb_h2f8(wg_to_f16_ags(d)); }
 // An FP8 point of FP16 values r (lever, exact): when no value of the wave exceeds 448 in magnitude, the saturating
 // pack's clamp and NaN keep change nothing, so the driver's plain conversion gives the same bytes (every NaN -> 0xff on
 // both paths; the driver's max drops NaN, a wave of NaNs only takes the clamped path). Wave-uniform branch.
+float hyb_absmax8(float m, v8f r)
+{
+    [unroll] for (uint i = 0; i < 8; ++i) m = max(m, abs(r.v[i]));
+    return m;
+}
 bool hyb_wave_in448(v8f r)
 {
-    float m = 0.0f;
-    [unroll] for (uint i = 0; i < 8; ++i) m = max(m, abs(r.v[i]));
-    return WaveActiveAllTrue(m <= 448.0f);
+    return WaveActiveAllTrue(hyb_absmax8(0.0f, r) <= 448.0f);
 }
 uint2 hyb_q8(v8f r)
 {
     if (hyb_wave_in448(r)) return wg_pack_q8_nc_ags(r);
     return wg_pack_q8_ags(r);
+}
+void hyb_q8_pair(v8f r0, v8f r1, out uint2 q0, out uint2 q1)
+{
+    const float m = hyb_absmax8(hyb_absmax8(0.0f, r0), r1);
+    if (WaveActiveAllTrue(m <= 448.0f)) {
+        q0 = wg_pack_q8_nc_ags(r0);
+        q1 = wg_pack_q8_nc_ags(r1);
+    } else {
+        q0 = wg_pack_q8_ags(r0);
+        q1 = wg_pack_q8_ags(r1);
+    }
 }
 // The chain end before an FP8 point: RN16, then the saturating FP8 pack of the FP16 value (two roundings, by design).
 uint2 hyb_q8_of_chain(v8f acc) { return hyb_q8(hyb_round16(acc)); }
@@ -80,16 +94,23 @@ uint2 hyb_q8_of_chain(v8f acc) { return hyb_q8(hyb_round16(acc)); }
 // GELU16 then the FP8 point, by table: h = the FP16 bits of 8 RN16'd W1 chain ends (hyb_rn16x8). Speed lever 2: the
 // 16-bit-entry copy of the table, one u16 load per value at h << 1 (the byte table needed a dword address, a shift
 // by the byte position and a mask per value); the same bytes (runtime/hyb_tables.h, checked by test_hyb_tables_cpp).
-uint2 hyb_gelu_q8(uint4 h)
+struct HybGeluPre { uint b[8]; };
+HybGeluPre hyb_gelu_pre(uint4 h)
 {
     const uint w[4] = { h.x, h.y, h.z, h.w };
-    uint b[8];
+    HybGeluPre r;
     [unroll] for (uint i = 0; i < 4; ++i) {
-        b[2 * i] = (uint)wg_mem.Load<uint16_t>(WG_HYB_GELU16 + ((w[i] & 0xffffu) << 1));
-        b[2 * i + 1] = (uint)wg_mem.Load<uint16_t>(WG_HYB_GELU16 + ((w[i] >> 16) << 1));
+        r.b[2 * i] = (uint)wg_mem.Load<uint16_t>(WG_HYB_GELU16 + ((w[i] & 0xffffu) << 1));
+        r.b[2 * i + 1] = (uint)wg_mem.Load<uint16_t>(WG_HYB_GELU16 + ((w[i] >> 16) << 1));
     }
-    return uint2(b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24), b[4] | (b[5] << 8) | (b[6] << 16) | (b[7] << 24));
+    return r;
 }
+uint2 hyb_gelu_fin(HybGeluPre p)
+{
+    return uint2(p.b[0] | (p.b[1] << 8) | (p.b[2] << 16) | (p.b[3] << 24),
+                 p.b[4] | (p.b[5] << 8) | (p.b[6] << 16) | (p.b[7] << 24));
+}
+uint2 hyb_gelu_q8(uint4 h) { return hyb_gelu_fin(hyb_gelu_pre(h)); }
 
 // The softmax weight e of 8 FP16 scores s (float32 values of FP16 numbers): u = RN16(s c), clamp to +-c' (a NaN takes
 // the lower clamp, as min / max return the number), t = RN16(fma(u, -u, t0)), p = RN16(fma(u, t, p0)),
@@ -160,3 +181,99 @@ int hyb_mirror_coarse(int p, int n, int nc)
     const int c = p >> 1;   // floor(p / 2) for negative p too (arithmetic shift)
     return min(nc - 1, min(abs(c), 2 * (n >> 1) - 2 - abs(c)));
 }
+
+// ---- SW_Q7_CHUNK helpers: fast per-32-channel FP16-rounded WMMA chunks (oracle mm8="exact") ------------------------
+// In-place 32-wide chunk accumulate into a packed FP16 tile (uint4): RN16(wmma(a1, b1, wmma(a0, b0, acc))).
+// Only 12 VALUs + 2 WMMAs per 32-wide chunk (keeps acc packed in 4 VGPRs/tile for high occupancy).
+uint4 hyb_q7c_step_h(uint2 a0, uint2 b0, uint2 a1, uint2 b1, uint4 acc_h)
+{
+    v8f t = wg_wmma_fp8(a0, b0, hyb_h2f8(acc_h));
+    t = wg_wmma_fp8(a1, b1, t);
+    return hyb_rn16x8(t);
+}
+
+// Guarded exact 16-term FP16xFP16 dot product for P V (matching l_q7w.hlsl two_sum + rn16_pair).
+// Fast path: checks whether RN16(pv - err) == RN16(pv + err) for err = 2^-21 * max_finite|V| across the wave.
+// Cold path: unpacked on the fly from packed uint4 p0/p1/v0/v1 (low VGPRs so c64 keeps 3 wg/CU) and only shuffles V
+// for the specific v slot(s) where WaveActiveAnyTrue(need_v) holds.
+void hyb_q7c_two_sum_pair(uint p_word, uint v_word, inout float s, inout float c)
+{
+    {
+        const float pr = f16tof32(p_word) * f16tof32(v_word);
+        const float u = s + pr;
+        const float bb = u - s;
+        c = c + ((s - (u - bb)) + (pr - bb));
+        s = u;
+    }
+    {
+        const float pr = wg_h2f_hi(p_word) * wg_h2f_hi(v_word);
+        const float u = s + pr;
+        const float bb = u - s;
+        c = c + ((s - (u - bb)) + (pr - bb));
+        s = u;
+    }
+}
+
+// Guarded exact 16-term FP16xFP16 dot product for P V -> FP8 (matching l_q7w.hlsl two_sum + rn16_pair + q8).
+// Because FP8(RN16(x)) is monotone, if qlo = FP8(RN16(pv - err)) == qhi = FP8(RN16(pv + err)) for err = 2^-20 * max|V|,
+// then FP8(RN16(pv_exact)) == qlo is guaranteed! Since FP8 has 128x coarser spacing than FP16 (and never triggers
+// near zero), the cold two_sum path executes on <0.3% of waves while guaranteeing 100% bit-exact FP8 output.
+uint2 hyb_q7c_pv_q8(uint4 vt_dt, uint4 p, uint hh, uint z0, v8f pv)
+{
+    uint m16 = max(max(vt_dt.x & 0x7fffu, (vt_dt.x >> 16) & 0x7fffu), max(vt_dt.y & 0x7fffu, (vt_dt.y >> 16) & 0x7fffu));
+    m16 = max(m16, max(max(vt_dt.z & 0x7fffu, (vt_dt.z >> 16) & 0x7fffu), max(vt_dt.w & 0x7fffu, (vt_dt.w >> 16) & 0x7fffu)));
+    if (m16 > 0x7bffu) m16 = 0x7bffu;
+    const float err = f16tof32(WaveActiveMax(m16)) * asfloat(0x35800000u);   // 2^-20 * max|V| (16x safety margin)
+    v8f pv_lo, pv_hi;
+    [unroll] for (uint i = 0u; i < 8u; ++i) { pv_lo.v[i] = pv.v[i] - err; pv_hi.v[i] = pv.v[i] + err; }
+    uint2 qlo, qhi;
+    hyb_q8_pair(hyb_round16(pv_lo), hyb_round16(pv_hi), qlo, qhi);
+    const uint d0 = qlo.x ^ qhi.x, d1 = qlo.y ^ qhi.y;
+    if (!WaveActiveAnyTrue((d0 | d1) != 0u)) return qlo;
+    const uint4 po = uint4(wg_xor16_u(p.x), wg_xor16_u(p.y), wg_xor16_u(p.z), wg_xor16_u(p.w));
+    const uint4 p0 = (hh == 0u) ? p : po;
+    const uint4 p1 = (hh == 0u) ? po : p;
+    [loop] for (uint v = 0u; v < 8u + z0; ++v) {
+        const uint dw = (v < 4u) ? d0 : d1;
+        const bool need_v = (((dw >> ((v & 3u) * 8u)) & 0xffu) != 0u);
+        if (WaveActiveAnyTrue(need_v)) {
+            const uint cl = hh * 8u + v;
+            const uint4 v0 = uint4(WaveReadLaneAt(vt_dt.x, cl), WaveReadLaneAt(vt_dt.y, cl),
+                                   WaveReadLaneAt(vt_dt.z, cl), WaveReadLaneAt(vt_dt.w, cl));
+            const uint4 v1 = uint4(WaveReadLaneAt(vt_dt.x, cl + 16u), WaveReadLaneAt(vt_dt.y, cl + 16u),
+                                   WaveReadLaneAt(vt_dt.z, cl + 16u), WaveReadLaneAt(vt_dt.w, cl + 16u));
+            if (need_v) {
+                float s = 0.0f, c = 0.0f;
+                hyb_q7c_two_sum_pair(p0.x, v0.x, s, c);
+                hyb_q7c_two_sum_pair(p0.y, v0.y, s, c);
+                hyb_q7c_two_sum_pair(p0.z, v0.z, s, c);
+                hyb_q7c_two_sum_pair(p0.w, v0.w, s, c);
+                hyb_q7c_two_sum_pair(p1.x, v1.x, s, c);
+                hyb_q7c_two_sum_pair(p1.y, v1.y, s, c);
+                hyb_q7c_two_sum_pair(p1.z, v1.z, s, c);
+                hyb_q7c_two_sum_pair(p1.w, v1.w, s, c);
+                const float z = s + c;
+                const float bb2 = z - s;
+                const float tl = (s - (z - bb2)) + (c - bb2);
+                const uint zb = asuint(z), tb = asuint(tl);
+                const bool ok = ((zb & 0x7f800000u) != 0x7f800000u) && ((tb & 0x7fffffffu) != 0u);
+                const uint opp = (zb ^ tb) >> 31;
+                pv.v[v] = asfloat(ok ? ((zb - opp) | 1u) : zb);
+            }
+        }
+    }
+    return hyb_q8_of_chain(pv);
+}
+
+// Reorder N (even) FP8 fragments from Layout L (hh=0: 0..8N-1, hh=1: 8N..16N-1) to ascending kord_drow
+// (dst[g]: hh=0 holds 16g..16g+7, hh=1 holds 16g+8..16g+15) using N/2 lane-xor16 exchanges.
+#define HYB_Q7C_L2D(N, src, dst, hh)                                              \
+    do {                                                                          \
+        const bool _h0 = ((hh) == 0u);                                            \
+        [unroll] for (uint _p = 0u; _p < (N) / 2u; ++_p) {                        \
+            const uint2 _s = _h0 ? (src)[2u * _p + 1u] : (src)[2u * _p];          \
+            const uint2 _r = uint2(wg_xor16_u(_s.x), wg_xor16_u(_s.y));           \
+            (dst)[_p] = _h0 ? (src)[2u * _p] : _r;                                \
+            (dst)[(N) / 2u + _p] = _h0 ? _r : (src)[2u * _p + 1u];                \
+        }                                                                         \
+    } while (0)

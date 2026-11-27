@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The model K activation of spec 40 ("The activation function (exact)"), as a NumPy oracle.
 
     t = min(max(x, -2), 2)

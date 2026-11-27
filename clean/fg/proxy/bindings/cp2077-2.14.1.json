@@ -1,0 +1,48 @@
+{
+ "schema": "wronggpu.fg-proxy.title-binding.v1",
+ "comment": "Frame generation title binding: Cyberpunk 2077 on game-interface build 2.14.1 (exe file version 3.0). Behaviour, layouts and call shapes from the read-only inspection of the installed game and its logs; values only, no text. The interface's export names (roles) and the shared structure GUIDs (viewport, tag, resource, constants, requirements) are the RR binding's for 2.14 (interface_binding), and the interface file name is the RR binding's (interface_file): one source for both features. The game imports the interface by name in its static import table, so the transport is the import-table redirect from WrongGPU-FG.asi; the DXGI factory the game creates through the interface's own factory export (factory_import) is where the swap-chain hook goes. Read at configure time by ../CMakeLists.txt (generated header in the build tree; never edited by hand).",
+ "id": "cp2077-2.14.1",
+ "title": "Cyberpunk 2077",
+ "qualified": true,
+ "exe_leaf": "Cyberpunk2077.exe",
+ "transport": "import-table",
+ "interface_binding": "../../../rr_f/proxy/binding/rr-f-2.14.json",
+ "interface_file": "../../../rr_f/proxy/binding/interposer.json",
+ "interface_version": [2, 14],
+ "functions_file": "fg-functions.json",
+ "fg_feature": 1000,
+ "factory_import": "CreateDXGIFactory2",
+ "abi_max_generated": 5,
+ "ui_max_generated": 5,
+ "presets": ["A", "B", "C"],
+ "options": {
+  "guid": "fac5f1cb-2dfd-4f36-a1e6-3a9e865256c5",
+  "version": 5,
+  "size": 120
+ },
+ "state": {
+  "guid": "cc8ac8e1-a179-44f5-97fa-e74112f9bc61",
+  "version": 4,
+  "size": 88
+ },
+ "constants_min_version": 1,
+ "buffer_types": {
+  "depth": 0,
+  "motion": 1,
+  "hudless": 2,
+  "ui_alpha": 69,
+  "distortion": 50,
+  "no_warp": 54,
+  "backbuffer": 53
+ },
+ "optional_inputs": {
+  "hudless": "may",
+  "ui_alpha": "may",
+  "distortion": "may",
+  "no_warp": "may"
+ },
+ "tag_lifetimes": [0, 1],
+ "min_size": 100,
+ "dynamic_supported": false,
+ "has_mfg_selector": true
+}

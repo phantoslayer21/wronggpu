@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Build the model K code objects (and a model K-only host emulator library for tests).
 
 clean/runner/build.py calls build_device() for every normal build, and adds SOURCES to its emulator library, so

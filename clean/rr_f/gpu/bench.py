@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """GPU time of every spec 51 stage kernel at a render size (default 1440p Quality: render 1706 x 960, level-0 tokens
 1728 x 960 = the render size rounded up to multiples of 32), synthetic weights and inputs, shift (4, 4) (recurrent
 halves (0, 0)). One host call (one GPU lock); best and mean of --reps runs per stage.

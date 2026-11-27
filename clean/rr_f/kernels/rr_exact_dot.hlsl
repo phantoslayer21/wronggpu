@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Original exact spec 51.1 scalar dot baseline, 2026-10-18.
 // Each finite e4m3 is an integer times 2^-9; products are multiples of 2^-18.
 // (32*448^2 + 65504)*2^24 < 2^47, hence every finite partial sum is exact in binary64.

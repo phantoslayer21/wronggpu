@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Generates kernels/rates.hip: one throughput probe per vector instruction (see runner/rates.py).
 
     python3 clean/runner/gen_rates.py > clean/kernels/rates.hip

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: Ray Reconstruction in the games that use it (rr.h). Written for this project.
 #include "rr.h"
 
@@ -116,6 +116,15 @@ bool RecordHasEdition(const Record& m) {
     for (auto& x : m.e)  // a record without its proxy line: OptiScaler's DLL under one of the proxy names
         for (auto px : kOptiProxies)
             if (x.action == L"copy" && IEq(x.rel, px) && IEq(x.inst, e.dllSha256)) return true;
+    return false;
+}
+
+bool RecordHasPriorEdition(const Record& m) {
+    for (auto& x : m.e)
+        if (x.action == L"copy" && !m.proxy.empty() && IEq(x.rel, m.proxy)) return IsPriorEditionHash(x.inst);
+    for (auto& x : m.e)
+        for (auto px : kOptiProxies)
+            if (x.action == L"copy" && IEq(x.rel, px) && IsPriorEditionHash(x.inst)) return true;
     return false;
 }
 

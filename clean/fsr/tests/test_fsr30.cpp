@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Unit tests of the FSR 3.0 component forwarders (fsr30_hook.h) without Windows or D3D12: forwarding and logging of
 // every export, the FSR 3.0 -> network parameter mapping, where the stand-in takes over (upscaler level, ffx_fsr3
 // level, AMD first for frame generation), failure handling and the SDK 1.1 guard. Two Hook objects play the two DLLs.

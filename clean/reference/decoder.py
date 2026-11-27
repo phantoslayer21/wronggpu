@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """NumPy reference of spec/05-coefficient-decoder.md (stage "dec0" of spec/90-test-interface.md): the clean team's
 oracle.
 

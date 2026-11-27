@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Build variants of the per-pixel stages enc0, dec0 and exposure (performance milestone, clean/PERF.md).
 
 Each variant is a code object built from one kernel source with some -D macros; perf_bench.py times them at the

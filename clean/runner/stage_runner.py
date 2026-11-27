@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Test interface of spec/90-test-interface.md: run the gfx1201 stage kernels from Python (NumPy + ctypes).
 
 Stages: the Swin stages of spec 02, and the stages in EXTRA_STAGES: enc0 (input encoder, spec 03, runner/enc0.py),

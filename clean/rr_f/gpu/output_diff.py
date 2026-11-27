@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Differential check of the fast output path (prep / fast / fallback / pool) against rr_output_main + pool.
 
 Both run on the same packed inputs in one arena; every output byte is compared (linear f32, CH, Q, PH1, trace),
@@ -95,7 +95,7 @@ def constant_sets(rng):
     sets = {"sequence-synthetic": SQ.model_synthetic().osym}
     try:
         sets["model-file"] = SQ.model_from_file(SQ.DEFAULT_MODEL, SQ.DEFAULT_MAP).osym
-    except Exception as e:  # noqa: BLE001 - the model file is optional here
+    except (Exception, SystemExit) as e:  # noqa: BLE001 - the model file is optional here (SystemExit: model_from_file refuses)
         print("model file not used:", e)
     base = sets["sequence-synthetic"]
     sets["random-table"] = replace(base, TR=table(rng))

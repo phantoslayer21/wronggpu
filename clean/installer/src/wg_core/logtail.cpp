@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: "Last run" from wronggpu-fsr.log (logtail.h). Written for this project.
 #include "logtail.h"
 
@@ -216,18 +216,29 @@ void ParseAsiLog(const string& text, LastRun& r) {
     size_t start = 0;
     for (size_t p = text.find("WrongGPU.asi loaded"); p != string::npos; p = text.find("WrongGPU.asi loaded", p + 1)) start = p;
     const string s = text.substr(start);
+    string notHookedDetail;
+    bool hooked = false, card = false;
     for (size_t a = 0; a < s.size();) {
         size_t e = s.find('\n', a);
         if (e == string::npos) e = s.size();
         const string b = Body(TrimR(s.substr(a, e - a)));
         a = e + 1;
         if (b.rfind("not hooked:", 0) == 0) {
-            r.plugin = L"not-hooked";
-            r.warnings.push_back({L"plugin-not-hooked", L"WrongGPU's OptiScaler plugin did not hook this OptiScaler build (" + FromUtf8(TrimR(b.substr(11)).substr(0, 160)) +
-                                                        L"): WrongGPU stays in OptiScaler's FSR sub-list instead of its own entry."});
+            notHookedDetail = TrimR(b.substr(11)).substr(0, 160);
         } else if (b.rfind("hooked:", 0) == 0) {
-            r.plugin = L"hooked";
+            hooked = true;
+        } else if (b.rfind("card: WrongGPU Upscaler ", 0) == 0 && b.find("added to OptiScaler") != string::npos) {
+            card = true;
         }
+    }
+    if (hooked) {
+        r.plugin = L"hooked";
+    } else if (card) {
+        r.plugin = L"card";
+    } else if (!notHookedDetail.empty()) {
+        r.plugin = L"not-hooked";
+        r.warnings.push_back({L"plugin-not-hooked", L"WrongGPU's OptiScaler plugin did not hook this OptiScaler build (" + FromUtf8(notHookedDetail) +
+                                                    L"): WrongGPU stays in OptiScaler's FSR sub-list instead of its own entry."});
     }
 }
 void ParseRrLog(const string& text, LastRun& r) {

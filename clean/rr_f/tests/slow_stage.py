@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Slow per-token / per-window implementation of a whole stage call of spec 51 (51.4-51.6), built on the slow
 window block of slow.py. Independent of the vectorised reference's geometry code."""
 from fractions import Fraction

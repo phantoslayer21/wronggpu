@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Prepared-input integration only; missing input construction/resolve are not stubbed as success."""
 import unittest
 import numpy as np

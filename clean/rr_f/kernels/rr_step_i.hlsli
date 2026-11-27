@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Exact 51.1 matrix step "I" (RR_STEP 4, lever L4 of results/2026-10-21-body-levers.md): D = R(C + sum of 32 e4m3
 // products), the sum exact in INTEGER arithmetic on v_wmma_i32_16x16x16_iu8 (driver channel op 0x28, format 0xC: A
 // and B signed int8, int32 accumulator; clean/dx12/hlsl/wg_ags.hlsli), then ONE rounding to binary16, nearest even.

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Offline create + run test of Model L on the D3D12 executor before any game run (issue #89), and the synthetic
 timing harness (test_interop_d3d12.exe hipbench) for Model L and Model M.
 

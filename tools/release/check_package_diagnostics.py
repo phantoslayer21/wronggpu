@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Release step (R1): the FINAL package holds no developer diagnostics (executor=hip, the frame capture).
 
     python tools/release/check_package_diagnostics.py <final zip | package folder | launcher exe | runtime dll> [...]

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The exact input stage's scalar arithmetic and per-fine-position reprojection, shared by the tiled kernels (k_in.hlsl)
 // and the legacy kernels (k_in_legacy.hlsl). WrongGPU's own code. Include after the kernel's argument block,
 // k_fp.hlsli and k_frame.hlsli, and after kf_opq3 is defined.
@@ -11,6 +11,18 @@
 #ifndef KI_SGPR
 #define KI_SGPR 0   // k_in.hlsl defines it for the exact direct tiled form
 #endif
+#ifndef KI_HW16
+#define KI_HW16 1
+#endif
+#if KI_HW16
+#if WG_WAVE != 32
+#include "wg_ags.hlsli"
+#endif
+uint ki_f2h(float x) { return wg_ags_call(0x1cu, 0u, 1u, asuint(x) ^ kf_opq_z_, 0u); }
+#else
+uint ki_f2h(float x) { return kh_round_bits(x); }
+#endif
+
 #if KI_HWMATH
 // CLOSE-APPROXIMATION variant (opt-in, never the default): the transcendental unit instead of the correctly rounded
 // sequences: v_log_f32 / v_exp_f32 (about 1 FP32 ulp), v_rcp_f32 and a product for the divisions. The results meet the
@@ -31,14 +43,61 @@ float ki_div(float a, float b)
 #else
 float ki_log2(float x) { return kf_log2(x); }
 float ki_exp2(float x) { return kf_exp2(x); }
-float ki_rcp(float x) { return kf_div(1.0f, x); }
+// Correctly rounded reciprocal: one Newton step on v_rcp_f32 in [2^-32, 2^32] (exhaustively GPU-checked bit-equal to
+// wg_div(1, x) in k_out.hlsli ko_rcp_refined), else kf_div(1, x).
+float ki_rcp(float x)
+{
+    [branch] if (x >= asfloat(0x2f800000u) && x <= asfloat(0x4f800000u)) {
+        const float r = rcp(x);
+        return mad(mad(-x, r, 1.0f), r, r);
+    }
+    return kf_div(1.0f, x);
+}
 float ki_div(float a, float b) { return kf_div(a, b); }
 #endif
+
+struct KfDivPrep {
+    float b, bs, y;
+    uint eb;
+    bool b_norm;
+};
+KfDivPrep kf_div_prep(float b)
+{
+    KfDivPrep p;
+    p.b = b;
+    const uint ub = asuint(b);
+    p.eb = (ub >> 23) & 255u;
+    p.b_norm = (p.eb - 1u < 254u);
+    p.bs = asfloat((ub & 0x807fffffu) | 0x3f800000u);
+    float y = rcp(p.bs);
+    y = mad(mad(-p.bs, y, 1.0f), y, y);
+    p.y = y;
+    return p;
+}
+float kf_div_prepared(float a, KfDivPrep p)
+{
+#if KI_HWMATH
+    return ki_div(a, p.b);
+#else
+    if (a == 0.0f && p.b_norm && p.b > 0.0f) return a;
+    const uint ua = asuint(a);
+    const uint ea = (ua >> 23) & 255u;
+    const float as = asfloat((ua & 0x807fffffu) | 0x3f800000u);
+    float q = as * p.y;
+    q = mad(mad(-p.bs, q, as), p.y, q);
+    q = mad(mad(-p.bs, q, as), p.y, q);
+    const int d = (int)ea - (int)p.eb;
+    const uint en = ((asuint(q) >> 23) & 255u) + (uint)d;
+    [branch] if (ea - 1u < 254u && p.b_norm && en - 1u < 254u)
+        return asfloat(asuint(q) + ((uint)d << 23));
+    return wg_div(a, p.b);
+#endif
+}
 // spec 42 decode factor D(t)
 float ki_decode(float t)
 {
     if (t < kf_bits(0x3F7FBE88u)) return ki_rcp(1.0f - t);
-    const float e = kf_opq((t + kf_bits(0x3C4FAE29u)) * 9.0f) * kf_bits(0x3FB8AA3Bu);
+    const float e = kf_pm(t + kf_bits(0x3C4FAE29u), 9.0f) * kf_bits(0x3FB8AA3Bu);
     return ki_div(ki_exp2(e) - 1.0f, 9.0f * t);
 }
 #if defined(KI_TILED_PHI_LOG2)
@@ -65,7 +124,7 @@ float ki_S(float z)
 uint ki_tiled_S_bits(float z, uint table)
 {
     const float zp = kf_min(kf_max(z, 0.0f), 1.0f);
-    if (!(zp > kf_bits(0x3B4D2E1Cu))) return kh_round_bits(kf_bits(0x414EB852u) * zp);
+    if (!(zp > kf_bits(0x3B4D2E1Cu))) return ki_f2h(kf_bits(0x414EB852u) * zp);
     const uint u = asuint(zp);
     // Every reachable 4,096-code bucket is flat or makes one +1 transition
     // (clean.k.tests.prove_ki_s_breakpoints). The cut is 4,096 for flat buckets.
@@ -133,7 +192,7 @@ KiFine ki_fine(KInParams P, KiHost k, int fx, int fy)
     const float4 s = kio_bilinear4(P.Hc, W16, H16, wx * k.h_x, wy * k.h_y);
     if ((F.flags & KIO_HDR) != 0) {
         const float f = ki_decode(s.x);
-        r.h = F.rho * kf_opq3(s.xyz * f);
+        r.h = F.rho * kf_pm3(s.xyz, (float3)f);
     } else {
         r.h = s.xyz;
     }
@@ -143,17 +202,17 @@ KiFine ki_fine(KInParams P, KiHost k, int fx, int fy)
 }
 
 // kappa max(RGB, 0), each product rounded (kf_opq: no merging with the 0.25 / 0.5 factors that follow)
-float3 ki_rgb(KFrameIn F, float4 c) { return kf_opq3(F.kappa * max(c.xyz, 0.0f)); }
+float3 ki_rgb(KFrameIn F, float4 c) { return kf_pm3((float3)F.kappa, max(c.xyz, 0.0f)); }
 void ki_store_x0(uint x0, int id, int k, float c0, float c1, float c2, float c3)
 {
     wg_st64(x0, ((uint)id * 16u + 4u * (uint)k) * 2u,
-            uint2(kh_round_bits(c0) | (kh_round_bits(c1) << 16), kh_round_bits(c2) | (kh_round_bits(c3) << 16)));
+            uint2(ki_f2h(c0) | (ki_f2h(c1) << 16), ki_f2h(c2) | (ki_f2h(c3) << 16)));
 }
 
 #if defined(KI_TILED_PACKED_S)
 void ki_store_tiled_x0(uint x0, int id, int k, uint c0, uint c1, float c2, float c3)
 {
     wg_st64(x0, ((uint)id * 16u + 4u * (uint)k) * 2u,
-            uint2(c0 | (c1 << 16), kh_round_bits(c2) | (kh_round_bits(c3) << 16)));
+            uint2(c0 | (c1 << 16), ki_f2h(c2) | (ki_f2h(c3) << 16)));
 }
 #endif

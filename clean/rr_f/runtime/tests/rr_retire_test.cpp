@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // CPU test of the RR runtime's per-list completion and retire list (src/rr_retire.h, issues #63 and #82): an object is
 // released only when EVERY command list that may use it has proved complete through its own marker slot, never because
 // a later list completed; a device switch keeps the old device's objects until its lists complete or it is removed.

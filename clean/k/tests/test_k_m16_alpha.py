@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model K: the interop's raw-buffer motion route (KIO_M16) applies the motion scale and offset as the buffer forms and
 the reference do (issue #26). Host checks (no GPU, no HIP run):
 

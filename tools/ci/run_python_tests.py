@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Run the CPU Python test set (CI, and locally): every clean/**/test_*.py except the modules that need a GPU device.
 
 Each module runs in its own process (package folders with `python -m unittest <module>`, folders without __init__.py

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // The FidelityFX API front end (spec 20, integration point 1): routes the five exported calls. Upscaler contexts
 // are handled by a WrongGPU upscaler (stand-in or network) behind wronggpu_upscaler.h; every other context type and
@@ -34,6 +34,12 @@ struct MenuSettings {
     // shared block and persists it to wronggpu.ini. Only the elected writer writes; returns false (and writes nothing)
     // otherwise. `source` is the log word ("menu", "optiscaler.ini", "folder"). Empty: nothing is written.
     std::function<bool(uint32_t slot, int32_t value, const char* source)> set;
+    // An SR model's mode (registry sr_m_mode / sr_l_mode / sr_k_mode, wg_sr_modes.h: 0 fast, 1 exact). Full resolve
+    // (liveOnly false, at create): the slot as the in-game card of WrongGPU.asi wrote it > the option's environment
+    // variable > the game's state folder (wronggpu-setup\settings.ini m_mode / l_mode / k_mode) > wronggpu.ini > the
+    // registry default (fast). liveOnly (each frame): the card's live write only, else -1. *described: its log text.
+    // Empty: the registry default at create, nothing live.
+    std::function<int32_t(uint32_t slot, bool liveOnly, std::string* described)> srMode;
     // One-folder-per-choice fallback (registry option entry_source = folders): the version-list id from the sidecar
     // wronggpu-entry.ini next to the DLL; 0: the normal version list.
     uint64_t folderEntry = 0;
@@ -252,6 +258,15 @@ private:
     // session. Key: backend name + options. Guarded by mutex_.
     std::string FailureKey(const WgUpscalerBackend* backend, const UpscaleContext& u) const;
     void ResizeForFrame(UpscaleContext& u, WgFrame& frame, const std::string& tag);  // bug hunt H
+    // The SR mode of the model `u` runs (wg_sr_modes.h): appended to u.options at create (m_mode=fast, l_mode=hybrid, ...)
+    // unless runtime_options / WG_RUNTIME_OPTIONS name that model's mode keys (the player's own options decide then).
+    void ApplySrMode(UpscaleContext& u, const std::string& tag);
+    // The player switched the mode in OptiScaler's menu (the card of WrongGPU.asi, live slot): the upscaler is created
+    // again with the other mode for this frame, as ResizeForFrame does (the context stays, the old upscaler is kept until
+    // the context is destroyed; switching back takes the kept one again). At most kMaxModeSwitches creates per context
+    // (one Model M upscaler is about 0.9 GiB at 4K); after that a new mode applies from the next context.
+    void SwitchModeForFrame(UpscaleContext& u, WgFrame& frame, const std::string& tag);
+    static constexpr uint32_t kMaxModeSwitches = 2;
     ffxReturnCode_t BrokenFrame(UpscaleContext& u, WgFrame& frame, const std::string& tag, uint64_t frameIndex);  // bug hunt F1
     void Fail(UpscaleContext& u, const std::string& why, uint64_t call, bool error = true);
     // Platform::status for one upscale dispatch of `u` (frame: the mapped frame when WrongGPU upscaled it, else null).

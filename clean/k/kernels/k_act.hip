@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model K activation (spec 40, task K2): exhaustive check kernels.
 //
 // k_act_table:   out[i] = act(x) for the FP16 value x with bit pattern i, i = 0 .. 65535 (scalar FP16 form).

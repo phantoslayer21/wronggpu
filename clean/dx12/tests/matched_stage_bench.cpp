@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Original Model M diagnostic: capture actual synthetic frame launch arguments,
 // preserve allocation aliases, and replay one stage on HIP and native D3D12.
 // Basis: project's Device/runtime APIs and manifest ABI, 2026-10-15.

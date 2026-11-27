@@ -59,12 +59,30 @@ jobs:
           cmake -S clean/converter -B out/converter -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
           cmake --build out/converter
           ctest --test-dir out/converter --output-on-failure
+      - name: Frame generation game adapter, Win32 transport and title bindings
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          cmake -S clean/fg/proxy -B out/fg-proxy -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+          cmake --build out/fg-proxy
+          ctest --test-dir out/fg-proxy --output-on-failure
       - name: Shared settings
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           cmake -S clean/wgshared -B out/wgshared -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
           cmake --build out/wgshared
           ctest --test-dir out/wgshared --output-on-failure
+      - name: Frame generation presenter, scheduler and Windows back ends (CPU tests)
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          cmake -S clean/fg/presenter -B out/fg-presenter -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+          cmake --build out/fg-presenter
+          ctest --test-dir out/fg-presenter --output-on-failure
+      - name: Frame generation runtime and session
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          cmake -S clean/fg/runtime -B out/fg-runtime -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+          cmake --build out/fg-runtime
+          ctest --test-dir out/fg-runtime --output-on-failure
 
   frontend:
     name: "CPU: FSR front end"
@@ -117,8 +135,8 @@ jobs:
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           cmake -S clean/installer -B out/launcher-tests -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DWRONGGPU_PAYLOAD_DIR="$PWD/out/no-payload" -DWRONGGPU_TESTING=OFF -DWRONGGPU_PRESET_K=OFF -DWRONGGPU_DIRECT_ROUTE=OFF
-          cmake --build out/launcher-tests --target wg-core-tests launcher-core-tests coexist-core-tests convert-ignore-tests model-choice-tests model-choice-k-tests model-choice-k-only-tests
-          ctest --test-dir out/launcher-tests --output-on-failure -R "^(wg-core|launcher-core|coexist-core|convert-ignore|model-choice|model-choice-k|model-choice-k-only|source-size|wording)$"
+          cmake --build out/launcher-tests --target wg-core-tests launcher-core-tests coexist-core-tests convert-ignore-tests model-choice-tests model-choice-k-tests model-choice-k-only-tests fg-choice-tests
+          ctest --test-dir out/launcher-tests --output-on-failure -R "^(wg-core|launcher-core|coexist-core|convert-ignore|model-choice|model-choice-k|model-choice-k-only|fg-choice|source-size|wording)$"
       - name: Test launcher from the test suite's stand-in payload (and a release build refusing it)
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
@@ -177,8 +195,8 @@ jobs:
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           cmake -S clean/installer -B out/launcher-models -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DWRONGGPU_PAYLOAD_DIR="$PWD/out/no-payload" -DWRONGGPU_TESTING=OFF -DWRONGGPU_PRESET_K=ON -DWRONGGPU_MODEL_K=ON -DWRONGGPU_MODEL_L=ON -DWRONGGPU_DIRECT_ROUTE=OFF
-          cmake --build out/launcher-models --target wg-core-tests launcher-core-tests coexist-core-tests convert-ignore-tests model-choice-tests model-choice-k-tests model-choice-k-only-tests
-          ctest --test-dir out/launcher-models --output-on-failure -R "^(wg-core|launcher-core|coexist-core|convert-ignore|model-choice|model-choice-k|model-choice-k-only|source-size|wording)$"
+          cmake --build out/launcher-models --target wg-core-tests launcher-core-tests coexist-core-tests convert-ignore-tests model-choice-tests model-choice-k-tests model-choice-k-only-tests fg-choice-tests
+          ctest --test-dir out/launcher-models --output-on-failure -R "^(wg-core|launcher-core|coexist-core|convert-ignore|model-choice|model-choice-k|model-choice-k-only|fg-choice|source-size|wording)$"
       - name: Payload packager and package check refuse a developer runtime (R1)
         # The packager (clean/installer/tools/make_payload.py) runs clean/tests/check_no_dev_diagnostics.py on every runtime
         # library it embeds and refuses the payload for dev-diagnostics=1 or a missing marker; tools/release runs the same

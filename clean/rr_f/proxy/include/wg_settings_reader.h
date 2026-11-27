@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU shared settings block: the RR side's header-only reader (RR plugin and RR runtime), round i15.
 //
 // Implements the normative rules of clean/wgshared/include/wg_shared_settings.h (the same rules the SR front end's

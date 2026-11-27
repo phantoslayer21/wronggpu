@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model K in the per-frame runtime; see runtime_k.h. Port of clean/k/runner/k_frame.py (KFrame), k_net.py (KNet,
 // variant "fused"), k_launch.py (stage_fused_launch) and k_io.py (frame_in, out_uniforms, input / output launches).
 #include "runtime_k.h"
@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <utility>
 
@@ -365,10 +366,12 @@ KBlkParams block_params(const KStageInfo& st, DevPtr blob, DevPtr x, DevPtr y, D
 // k_stage_<name>; *ng = NG (0: not wide), *w2 = two windows per workgroup.
 std::string stage_kernel_base(const KStageInfo& st, bool f16, bool has_y, int nwin, int* ng, bool* w2) {
   *ng = wide_ng(st.name, f16, nwin);
-  // e0, e1, d1, d0: two windows per workgroup (k_stage2_*, k_launch.py WINDOWS2_STAGES; k_net.py WINDOWS2_VARIANTS;
-  // d1's needs its block output map p.y, which the network always gives it)
+  // e0, e1, d0: two windows per workgroup (k_stage2_*, k_launch.py WINDOWS2_STAGES; k_net.py WINDOWS2_VARIANTS).
+  // d1 runs one window per workgroup (k_stage_d1): at 1440p Quality its 1,025 windows as 513 two-window workgroups
+  // fill the 256 slots of four workgroups per CU for two rounds and one more, measured on D3D12 (RX 9070 XT) -14.6 us
+  // per frame with one window per workgroup, the same bytes (the same per-window maths)
   *w2 = !*ng && (std::strcmp(st.name, "e0") == 0 || std::strcmp(st.name, "e1") == 0 ||
-                 (std::strcmp(st.name, "d1") == 0 && has_y) || std::strcmp(st.name, "d0") == 0);
+                 std::strcmp(st.name, "d0") == 0);
   const std::string h = f16 ? "h" : "";
   return (*ng ? "k_stagew" + std::to_string(*ng) : std::string(*w2 ? "k_stage2" : "k_stage")) + h + "_" + st.name;
 }
@@ -400,6 +403,19 @@ bool option_given(const WgRtConfig& c, const std::string& key) {
     a = b + 1;
   }
   return false;
+}
+// the position (item index) of the last key= item in the runtime options followed by WG_RUNTIME_OPTIONS; -1 when absent
+long option_pos(const WgRtConfig& c, const std::string& key) {
+  const char* env = std::getenv("WG_RUNTIME_OPTIONS");
+  const std::string text = std::string(c.runtime_options ? c.runtime_options : "") + ";" + (env ? env : "");
+  long pos = -1, index = 0;
+  for (size_t a = 0; a <= text.size(); ++index) {
+    size_t b = text.find(';', a);
+    if (b == std::string::npos) b = text.size();
+    if (text.compare(a, key.size() + 1, key + "=") == 0) pos = index;
+    a = b + 1;
+  }
+  return pos;
 }
 // a value for a one-line message: control characters as '?'
 std::string one_line(std::string v) {
@@ -445,16 +461,18 @@ const char* KRuntime::timing_info() {
 bool KRuntime::alloc(DevPtr* p, size_t bytes, bool zero) {
   bytes = std::max<size_t>(bytes, 256);
   if (!alloc_(p, bytes)) return fail("model K: device memory (" + std::to_string(bytes >> 20) + " MiB): " + dev_->err());
-  if (zero && !dev_->memset(*p, 0, bytes)) return dfail();
+  if (zero && !measure_only_ && !dev_->memset(*p, 0, bytes)) return dfail();
   return true;
 }
 
-bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool external_io, bool native_direct) {
+bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool external_io, bool native_direct,
+                      bool measure_only) {
   cfg_ = c;
   dev_ = dev;
   alloc_ = std::move(alloc_fn);
   external_io_ = external_io;
   native_direct_ = native_direct;
+  measure_only_ = measure_only;
   if (native_direct_ && (!external_io_ || c.backend != 3))
     return fail("model K: native direct resources need external I/O on the native D3D12 device (backend 3)");
   build_dir_ = c.build_dir ? c.build_dir : ".";
@@ -504,6 +522,12 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   const std::string kuni = option(c, "k_in_uniforms");
   if (!kuni.empty() && kuni != "0" && kuni != "1") return fail("model K: k_in_uniforms must be 0 or 1");
   input_uniforms_ = kuni != "0";
+  // k_color_fuse (1, the default: on the native D3D12 device the exact tiled input kernel also writes the output colour
+  // taps, kx/k_in_tiled_color[_uniform|_direct], and the separate k_out_color launch is skipped; 0: the separate
+  // k_out_color as before. The same taps either way: a timing switch)
+  const std::string kcf = option(c, "k_color_fuse");
+  if (!kcf.empty() && kcf != "0" && kcf != "1") return fail("model K: k_color_fuse must be 0 or 1");
+  color_fuse_ = kcf != "0";
   const std::string diag = option(c, "k_diag");
   if (!diag.empty() && diag != "input2" && diag != "copyin" && diag != "input2+copyin" && diag != "copyin+input2")
     return fail("model K: unknown k_diag " + diag + " (input2, copyin, input2+copyin)");
@@ -535,7 +559,37 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   // Newton step (kernels k_out_color*__a2, k_out_pixel_c*__a2; clean/k/dx12/hlsl/k_out.hlsli KO_APPROX). A comma list
   // selects several. The native D3D12 device only (HIP and the hybrid device refuse); taking one adds a note of create
   // (not bit-exact).
-  if (option_given(c, "k_approx")) {
+  // k_mode (0.7.0; the SR front end passes the player's Fast / Exact choice, clean/wgshared/include/wg_sr_modes.h):
+  // "fast" takes the k_approx forms this create supports (a1 with the exact input stage, a2 without k_fast=1 and with the
+  // compact head, both on the native D3D12 device only); what it cannot take runs the standard path, said in a note, never
+  // a refusal. "exact": the standard path. A k_approx item after the k_mode item (later in runtime_options, or in
+  // WG_RUNTIME_OPTIONS, which comes after them) decides instead. Neither given: the standard path, as before.
+  const long kmode_at = option_pos(c, "k_mode"), kapprox_at = option_pos(c, "k_approx");
+  if (kmode_at >= 0 && kmode_at > kapprox_at) {
+    const std::string kmode = option(c, "k_mode");
+    if (kmode == "fast") {
+      std::string left;
+      if (c.backend == 3) {
+        approx_a1_ = in_exact_;
+        approx_a2_ = !fast_ && compact_head_;
+        if (!approx_a1_) left += "; a1 not taken (the fast input stage was chosen)";
+        if (!approx_a2_) left += fast_ ? "; a2 not taken (k_fast=1)" : "; a2 not taken (k_head=full)";
+      } else {
+        left = "; the standard path runs (its faster forms need the native D3D12 device)";
+      }
+      approx_note_ = std::string("model K: k_mode=fast") + (approx_a1_ || approx_a2_ ? approx_tag() : std::string()) +
+                     (approx_a1_ || approx_a2_ ? " (the faster mode; Exact is the standard path)" : "") + left +
+                     (approx_a1_ ? std::string("; a1 applies to the tiled input stage, frames on the legacy input path "
+                                               "run the standard input stage")
+                                 : std::string());
+    } else if (kmode == "exact") {
+      approx_note_ = "model K: k_mode=exact (the standard path)";
+    } else {
+      return fail("model K: unknown k_mode " + one_line(kmode) + " (fast or exact)");
+    }
+  } else if (kapprox_at >= 0 && (option(c, "k_approx") == "off" || option(c, "k_approx") == "none")) {
+    approx_note_ = "model K: k_approx=" + option(c, "k_approx") + " (the standard path)";
+  } else if (kapprox_at >= 0) {
     const std::string kapprox = option(c, "k_approx");
     if (kapprox.empty()) return fail("model K: k_approx is empty (a1, a2 or a1,a2)");
     size_t at = 0;
@@ -692,33 +746,37 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   // buffers
   for (auto& kv : blobs_) {
     DevPtr p;
-    if (!alloc(&p, kv.second.size()) || !dev_->upload(p, kv.second.data(), kv.second.size())) return false;
+    if (!alloc(&p, kv.second.size()) || (!measure_only_ && !dev_->upload(p, kv.second.data(), kv.second.size())))
+      return false;
     wdev_[kv.first] = p;
   }
   if (!f16_ && (c.backend == 2 || c.backend == 3)) {
-    for (const char* name : {"e0", "e1", "d1", "d0"}) {
+    // the FP32 bias planes of the narrow stages whose D3D12 kernels take one (KB_BIAS32): the two-window e0 / e1 / d0 and
+    // the one-window e2 / d2 / d1 (network() launches them so, stage_kernel_base)
+    for (const char* name : {"e0", "e1", "d1", "d0", "e2", "d2"}) {
       const KStageInfo& st = *k_stage(name);
       if (f8data_.count(name) || (st.head && !compact_head_)) continue;
-      const std::string kernel = std::string("k_stage2_") + name + (st.head ? "_hp" : "");
+      const bool one = std::strcmp(name, "e0") != 0 && std::strcmp(name, "e1") != 0 && !st.head;
+      const std::string kernel = std::string(one ? "k_stage_" : "k_stage2_") + name + (st.head ? "_hp" : "");
       if (!dev_->require_d3d12_port(kernel, st.head ? "s184:p19.b32,p,p,p" : "s184:p19.b32,p")) return dfail();
-      if (c.backend == 3 && std::strcmp(name, "d1") == 0 &&
-          !dev_->require_d3d12_port(kernel + "__rodd", "s184:p19.b32,p")) return dfail();
+      if (c.backend == 3 && one && !dev_->require_d3d12_port(kernel + "__rodd", "s184:p19.b32,p")) return dfail();
       const auto& weight = blobs_.at(name);
       std::vector<uint8_t> compact;
       if (st.head) {
         compact = k_pack_compact_head(weight.data() + stage_sections(st).head, st.C);
         if (!alloc(&d0_compact_head_, compact.size()) ||
-            !dev_->upload(d0_compact_head_, compact.data(), compact.size())) return false;
+            (!measure_only_ && !dev_->upload(d0_compact_head_, compact.data(), compact.size()))) return false;
       }
       const auto bias = k_narrow_bias32(st, weight.data(), compact.data());
       const size_t bytes = bias.size() * sizeof(bias[0]);
       DevPtr& plane = narrow_bias_[name];
-      if (!alloc(&plane, bytes) || !dev_->upload(plane, bias.data(), bytes)) return false;
+      if (!alloc(&plane, bytes) || (!measure_only_ && !dev_->upload(plane, bias.data(), bytes))) return false;
     }
   }
   for (auto& kv : f8data_) {  // network=fused8: the FP8 weights and FP32 biases; device pointers into KF8Params
     DevPtr p;
-    if (!alloc(&p, kv.second.bytes.size()) || !dev_->upload(p, kv.second.bytes.data(), kv.second.bytes.size()))
+    if (!alloc(&p, kv.second.bytes.size()) ||
+        (!measure_only_ && !dev_->upload(p, kv.second.bytes.data(), kv.second.bytes.size())))
       return false;
     KF8Params& q = kv.second.q;
     for (DevPtr* a : {&q.wqkv, &q.mix, &q.wo, &q.w1, &q.w2, &q.bo, &q.b1, &q.b2}) *a += p;
@@ -755,7 +813,7 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
   // the own output buffer (tests): dense RGB f32, dense RGBA f32 (FrameIo.out_rgba32f) or RGBA16F rows that fit
   if (!external_io_ && !alloc(&out_, (size_t)W_ * H_ * 16, true)) return false;
   if (split_m_ && !split_alloc()) return false;  // k_split's scratch (filled with the rest by k_fill, below)
-  if (fill_ >= 0) {  // k_fill (test hook): the sentinel in everything a frame writes, before the first frame
+  if (!measure_only_ && fill_ >= 0) {  // k_fill (test hook): the sentinel in everything a frame writes, before the first frame
     auto fillb = [&](DevPtr p, size_t bytes) { return !p || dev_->memset(p, fill_, std::max<size_t>(bytes, 256)); };
     bool ok = true;
     for (const auto& kv : net_) ok = ok && fillb(kv.second, net_bytes_[kv.first]);
@@ -770,14 +828,19 @@ bool KRuntime::create(const WgRtConfig& c, Device* dev, AllocFn alloc_fn, bool e
     if (!ok) return dfail();
   }
   // the filter-shape table (spec 43 section 7) of every level, computed once; a frame reads its level's set
-  std::vector<uint16_t> tab((size_t)8 * kFilterEntries * kFilterValues);
-  for (int l = 0; l < 8; ++l) k_filter_table(l, 1, tab.data() + (size_t)l * kFilterEntries * kFilterValues);
-  if (!dev_->upload(tables_, tab.data(), tab.size() * 2)) return dfail();
+  if (!measure_only_) {
+    std::vector<uint16_t> tab((size_t)8 * kFilterEntries * kFilterValues);
+    for (int l = 0; l < 8; ++l) k_filter_table(l, 1, tab.data() + (size_t)l * kFilterEntries * kFilterValues);
+    if (!dev_->upload(tables_, tab.data(), tab.size() * 2)) return dfail();
+  }
   if (s_table) {
     if (!alloc(&s_breakpoints_, sizeof *s_table) ||
-        !dev_->upload(s_breakpoints_, s_table->data(), sizeof *s_table))
+        (!measure_only_ && !dev_->upload(s_breakpoints_, s_table->data(), sizeof *s_table)))
       return dfail();
   }
+  // Pass 1 arena measurement (executor_d3d12.cpp): reserve the exact temporary peak of smx_check so arena_high_water()
+  // matches Pass 2 without compiling every PSO, uploading weights, or running the GPU self-check twice.
+  if (measure_only_) return c.backend == 3 ? smx_measure_alloc() : true;
   if (!dev_->sync()) return dfail();
   // the native device prepares (loads, verifies and compiles) every kernel this context can select now: a missing or
   // corrupt shader fails create here, not at the first frame
@@ -840,7 +903,7 @@ struct SmxCase {
   int wb, hb;  // base map size
   int sets;    // independent synthetic data sets, the outputs of all hashed together
 };
-// e2, e3, d3, d2, d1 (k_stage_e2, k_stagew2_e3, k_stagew2_d3, k_stage_d2, k_stage2_d1) and e4 / d4 with NG = 4 (at most 24
+// e2, e3, d3, d2, d1 (k_stage_e2, k_stagew2_e3, k_stagew2_d3, k_stage_d2, k_stage_d1) and e4 / d4 with NG = 4 (at most 24
 // windows: 20 at 512 x 384; on 8 data sets) at a 512 x 384 base map; e4 / d4 with NG = 2 (above 24 windows) and m
 // (k_stagew4_m, 42 or more windows) at 1536 x 1280. Sized so that a one-stage wrong-rounding mutant of either form
 // changes its case's outputs (the mutant runs in the #254 evidence).
@@ -908,6 +971,12 @@ std::string KRuntime::smx_case_name(int i, int ox, int oy, bool rodd) const {
          (c.sets > 1 ? "*" + std::to_string(c.sets) : std::string()) + "/o" + std::to_string(ox) + "," + std::to_string(oy);
 }
 
+// the narrow stage kernels (D3D12) that take the FP32 bias plane narrow_bias_[stage] as their second argument (KB_BIAS32)
+bool narrow_bias32_kernel(const std::string& k) {
+  const std::string b = k.size() > 6 && k.compare(k.size() - 6, 6, "__rodd") == 0 ? k.substr(0, k.size() - 6) : k;
+  return b == "k_stage2_e0" || b == "k_stage2_e1" || b == "k_stage_d1" || b == "k_stage_e2" || b == "k_stage_d2";
+}
+
 // One form of every case at its offsets (this model's: all = false; every possible one: all = true): (case name of the
 // mix form, the outputs' SHA-256, first 8 bytes big-endian) into *out.
 bool KRuntime::smx_check(bool rodd, bool all, std::vector<std::pair<std::string, uint64_t>>* out) {
@@ -955,7 +1024,7 @@ bool KRuntime::smx_check(bool rodd, bool all, std::vector<std::pair<std::string,
       int ng = 0;
       bool w2 = false;
       const std::string k = stage_kernel_base(st, false, true, p.nwx * p.nwy, &ng, &w2) + (rodd ? "__rodd" : "");
-      const bool use_bias = db && (k == "k_stage2_d1" || k == "k_stage2_d1__rodd");
+      const bool use_bias = db && narrow_bias32_kernel(k);
       wgc::Sha256 sha;
       for (int set = 0; ok && set < c.sets; ++set) {
         ok = load(set);
@@ -982,6 +1051,30 @@ bool KRuntime::smx_check(bool rodd, bool all, std::vector<std::pair<std::string,
 }
 
 // SMX-SELFCHECK-SOURCE END
+
+// Arena peak reservation of smx_check() for Pass 1 measurement (executor_d3d12.cpp): exact same allocations, zero GPU work.
+bool KRuntime::smx_measure_alloc() {
+  size_t in_bytes = 0, y_bytes = 0, m_bytes = 0, w_bytes = 0;
+  for (const SmxCase& c : kSmxCases) {
+    const KStageInfo& st = stage_info(c.stage);
+    const size_t own = level_tokens(c.wb, c.hb, st.level) * st.C * 2;
+    in_bytes = std::max({in_bytes, own, st.kind == 'd' ? level_tokens(c.wb, c.hb, st.level + 1) * st.C_prev * 2 : 0});
+    y_bytes = std::max(y_bytes, own);
+    if (st.kind == 'e') m_bytes = std::max(m_bytes, level_tokens(c.wb, c.hb, st.level + 1) * st.C_next * 2);
+    w_bytes = std::max(w_bytes, blobs_.at(c.stage).size());
+  }
+  DevPtr din = 0, dw = 0, dy = 0, dm = 0, db = 0;
+  bool ok = dev_->alloc(&din, in_bytes) && dev_->alloc(&dw, w_bytes) && dev_->alloc(&dy, y_bytes) &&
+            dev_->alloc(&dm, std::max<size_t>(m_bytes, 256));
+  if (ok && narrow_bias_.count("d1")) {
+    const auto& d1 = *k_stage("d1");
+    const size_t words = 10u * d1.C + (size_t)d1.heads * 64 * 64;
+    ok = dev_->alloc(&db, words * sizeof(uint32_t));
+  }
+  for (DevPtr p : {din, dw, dy, dm, db})
+    if (p) dev_->free(p);
+  return ok || dfail();
+}
 
 // The mix / round-to-odd probe: the number of results that differ from the exact ones.
 bool KRuntime::smx_probe(bool rodd, int* bad) {
@@ -1035,30 +1128,70 @@ bool KRuntime::smx_select(int backend, const std::string& hook) {
     add_note("model K: test hook: the round-to-odd softmax ports without the create-time check");
     return true;
   }
+  // Process-local verified cache for normal runs (no test hook): switching k_mode=fast <-> exact on the same device,
+  // shader build and window table reuses the already-verified softmax rounding result instead of repeating ~85-170
+  // synchronous GPU downloads on the game's render thread (every shader is still integrity-checked by dev_->prepare()).
+  struct SmxCached {
+    bool rodd = false;
+    std::string smx_note;
+    std::string create_note;
+  };
+  static std::mutex s_cache_mu;
+  static std::map<std::string, SmxCached> s_cache;
+  std::string cache_key;
+  bool can_cache = false;
+  if (hook.empty()) {
+    uint8_t luid[8] = {};
+    std::vector<char> manifest_bytes;
+    if (dev_->adapter_luid(luid) && wg_read_file(join(build_dir_, "dx12/manifest.json"), &manifest_bytes) &&
+        !manifest_bytes.empty()) {
+      char luid_hex[17] = {};
+      for (int i = 0; i < 8; ++i) std::snprintf(luid_hex + 2 * i, 3, "%02x", (unsigned)luid[i]);
+      const wgc::Digest md = wgc::Sha256::hash(manifest_bytes.data(), manifest_bytes.size());
+      cache_key = std::string(luid_hex) + "|" + wgc::to_hex(md) + "|" + build_dir_ + "|" + (split_m_ ? "1" : "0") +
+                  "|" + (narrow_bias_.count("d1") ? "1" : "0");
+      for (int i = 0; i < 8; ++i)
+        cache_key += "|" + std::to_string(offsets_table_[i][0]) + "," + std::to_string(offsets_table_[i][1]);
+      can_cache = true;
+      std::lock_guard<std::mutex> lock(s_cache_mu);
+      auto it = s_cache.find(cache_key);
+      if (it != s_cache.end()) {
+        smx_rodd_ = it->second.rodd;
+        smx_note_ = it->second.smx_note;
+        if (!it->second.create_note.empty()) add_note(it->second.create_note);
+        return true;
+      }
+    }
+  }
   int bad[2] = {0, 0};
   std::vector<std::pair<std::string, uint64_t>> h[2];
   const bool all = hook == "report";
-  if (!smx_probe(false, &bad[0]) || !smx_probe(true, &bad[1]) || !smx_check(false, all, &h[0]) ||
-      !smx_check(true, all, &h[1]))
-    return false;
-  // the first check that differs, per form ("" = none); a case without a reference refuses create
-  std::string first[2];
-  for (int f = 0; f < 2; ++f) {
-    if (bad[f]) first[f] = std::string(f ? "k_mix_probe__rodd" : "k_mix_probe") + " " + std::to_string(bad[f]) + " of " +
-                           std::to_string(k_mix_probe::kLanes * 8);
+  auto verify_form = [&](int f, std::string* first_out) -> bool {
+    if (bad[f]) *first_out = std::string(f ? "k_mix_probe__rodd" : "k_mix_probe") + " " + std::to_string(bad[f]) + " of " +
+                             std::to_string(k_mix_probe::kLanes * 8);
     for (const auto& e : h[f]) {
       int at = -1;
       for (int j = 0; j < k_smx_selfcheck::kCount && at < 0; ++j)
         if (e.first == k_smx_selfcheck::kNames[j]) at = j;
       if (at < 0) return fail("model K: k_smx_selfcheck.h has no reference for " + e.first + " (regenerate it)");
-      if (first[f].empty() && e.second != k_smx_selfcheck::kExpected[at]) {
+      if (first_out->empty() && e.second != k_smx_selfcheck::kExpected[at]) {
         const size_t a = e.first.find('@');
-        first[f] = f ? e.first.substr(0, a) + "__rodd" + e.first.substr(a) : e.first;
+        *first_out = f ? e.first.substr(0, a) + "__rodd" + e.first.substr(a) : e.first;
       }
     }
-  }
+    return true;
+  };
+  std::string first[2];
+  if (!smx_probe(false, &bad[0]) || !smx_check(false, all, &h[0])) return false;
+  if (!verify_form(0, &first[0])) return false;
   if (hook == "mix_fail" || hook == "both_fail") first[0] = "test hook";
-  if (hook == "both_fail") first[1] = "test hook";
+  // Normal runs skip the redundant __rodd GPU sweep once the primary mix form passes every probe and case.
+  const bool need_rodd = !hook.empty() || !first[0].empty();
+  if (need_rodd) {
+    if (!smx_probe(true, &bad[1]) || !smx_check(true, all, &h[1])) return false;
+    if (!verify_form(1, &first[1])) return false;
+    if (hook == "both_fail") first[1] = "test hook";
+  }
   if (hook == "report") {
     add_note(report("mix", h[0], bad[0]));
     add_note(report("rodd", h[1], bad[1]));
@@ -1066,17 +1199,30 @@ bool KRuntime::smx_select(int backend, const std::string& hook) {
   if (first[0].empty()) {
     smx_rodd_ = false;
     smx_note_ = " smx=mix";
-    if (!first[1].empty())
-      add_note("model K: the round-to-odd softmax ports failed the create-time check on this driver (" + first[1] +
-               "); the mix form passed it and is used");
+    std::string note_line;
+    if (need_rodd && !first[1].empty()) {
+      note_line = "model K: the round-to-odd softmax ports failed the create-time check on this driver (" + first[1] +
+                  "); the mix form passed it and is used";
+      add_note(note_line);
+    }
+    if (can_cache) {
+      std::lock_guard<std::mutex> lock(s_cache_mu);
+      s_cache[cache_key] = {false, smx_note_, note_line};
+    }
     return true;
   }
   if (first[1].empty()) {
     smx_rodd_ = true;
     std::string token = first[0] == "test hook" ? std::string("hook") : first[0].substr(0, first[0].find(' '));
     smx_note_ = " smx=rodd(" + token + ")";
-    add_note("model K: softmax weight rounding takes the round-to-odd ports (the mix form failed the create-time check: " +
-             first[0] + "); they passed it, output unchanged");
+    const std::string note_line =
+        "model K: softmax weight rounding takes the round-to-odd ports (the mix form failed the create-time check: " +
+        first[0] + "); they passed it, output unchanged";
+    add_note(note_line);
+    if (can_cache) {
+      std::lock_guard<std::mutex> lock(s_cache_mu);
+      s_cache[cache_key] = {true, smx_note_, note_line};
+    }
     return true;
   }
   return fail("model K: the D3D12 softmax stages are not exact on this driver (create-time check: mix form " + first[0] +
@@ -1214,7 +1360,7 @@ bool KRuntime::network(int f, const std::function<bool(const char*)>& after) {
     } else {
       const std::string kernel = stage_kernel(k, st.name);
       const auto bias_plane = narrow_bias_.find(st.name);
-      const bool use_bias = k == "k_stage2_e0" || k == "k_stage2_e1" || k == "k_stage2_d1";
+      const bool use_bias = narrow_bias32_kernel(k);
       void* bias = use_bias && bias_plane != narrow_bias_.end() ? &bias_plane->second : nullptr;
       if (!launch(kernel.c_str(), grid, (unsigned)(kThreads * (ng ? ng : 1)), &p, bias)) return false;
     }
@@ -1444,8 +1590,13 @@ bool KRuntime::frame(const WgRtFrame& fr, const FrameIo* io) {
     a1_legacy_noted_ = true;
     frame_note_ = "model K: k_approx=a1 applies to the tiled input stage only; this context's frames on the legacy input path (a render size above 0.68 x the output, a jitter outside [-0.5, 0.5], or input_tiled=0) run the standard input stage (this line once per context)";
   }
-  // k_in_exact: the output colour taps by k_out_color (KFrame's exact plan), not by the tiled input kernel
-  const bool use_tiled_color = use_tiled && !in_exact_ && !reset && 4LL * Bw_ >= W_ && 4LL * Bh_ >= H_;
+  // The output colour taps by the tiled input kernel (HIP k_in_tiled_color[_uniform]) instead of a separate k_out_color:
+  // the fast input stage on every backend; the exact input stage and k_approx=a1 (including k_mode=fast = a1,a2) on the
+  // native D3D12 device (backend 3), whose kx/k_in_tiled_color[_uniform|_direct][__a1] compute the taps of k_out_color
+  // from the colour texels the tile stage loads anyway. Standalone k_approx=a2 without a1 keeps k_out_color__a2; the
+  // pre-breakpoint S fallback (kxs/) has no fused form; k_color_fuse=0 turns it off.
+  const bool exact_color_fuse = color_fuse_ && in_exact_ && cfg_.backend == 3 && (!approx_a2_ || approx_a1_) && !s_breakpoints_fallback_;
+  const bool use_tiled_color = use_tiled && (!in_exact_ || exact_color_fuse) && !reset && 4LL * Bw_ >= W_ && 4LL * Bh_ >= H_;
   KiHost input_host = {};
   const bool use_uniforms = use_tiled && !native_direct_ && input_uniforms_ && input_uniforms_safe(fin, &input_host);
   auto input_stage = [&]() {
@@ -1618,6 +1769,10 @@ std::vector<std::string> KRuntime::d3d12_kernels() const {
     const std::string suffix = approx_a1_ ? "__a1" : "";
     if (!native_direct_ && input_uniforms_) v.push_back(tag + "k_in_tiled_uniform" + suffix);
     v.push_back(tag + "k_in_tiled" + d + suffix);  // input_uniforms_safe refusing the host uniforms
+    if (cfg_.backend == 3 && color_fuse_ && (!approx_a2_ || approx_a1_) && !s_breakpoints_fallback_) {  // the fused forms with the output colour taps (use_tiled_color)
+      if (!native_direct_ && input_uniforms_) v.push_back(tag + "k_in_tiled_color_uniform" + suffix);
+      v.push_back(tag + "k_in_tiled_color" + d + suffix);
+    }
   }
   if (approx_a2_) {  // k_approx=a2 (opt-in)
     v.push_back("k_out_color" + d + "__a2");
@@ -1639,7 +1794,7 @@ std::vector<std::string> KRuntime::d3d12_kernels() const {
       std::string k;
       if (st.head) k = compact_head_ ? "k_stage2_d0_hp" : "k_stage2_d0_hidden";
       else if (ng) k = "k_stagew" + std::to_string(ng) + "_" + n;
-      else k = (n == "e0" || n == "e1" || n == "d1" ? "k_stage2_" : "k_stage_") + n;
+      else k = (n == "e0" || n == "e1" ? "k_stage2_" : "k_stage_") + n;   // d1: k_stage_d1 (stage_kernel_base)
       if (std::find(v.begin(), v.end(), k) == v.end()) v.push_back(k);
       // the round-to-odd form the create-time self-check can select (KRuntime::smx_select)
       if (!st.head && n != "e0" && n != "e1" && std::find(v.begin(), v.end(), k + "__rodd") == v.end())

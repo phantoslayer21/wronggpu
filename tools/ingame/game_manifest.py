@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Manifest of a game folder for an in-game run, and its verification afterwards.
 
     python game_manifest.py make   <game folder> <manifest.json>

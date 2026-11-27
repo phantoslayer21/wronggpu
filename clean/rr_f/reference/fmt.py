@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Number formats and primitive operations of spec 51.1 (RR preset F window block).
 
 Representation used throughout the reference:

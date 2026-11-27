@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Auto-exposure of spec/07-auto-exposure.md (stage "exposure") for gfx1201 (RDNA4).
 //
 // exposure_partial: each 256-lane workgroup takes kRowsPerGroup rows of the n_x x n_y sample grid; lanes stride over

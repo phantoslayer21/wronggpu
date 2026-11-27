@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Stage "exposure" (spec 07 auto-exposure) for the spec 90 runner: input conversion and launch plan (no weights).
 
 Layouts: clean/FORMATS.md, "Auto-exposure (exposure)". Kernels: clean/kernels/exposure.hip.

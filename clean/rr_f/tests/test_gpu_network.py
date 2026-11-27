@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """CPU inspection of the real body arena and dispatch graph; no GPU or compiler runs."""
 from contextlib import ExitStack
 import unittest

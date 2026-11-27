@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model K reference self-checks (no GPU, no compiler): activation (K2), layout and windows (K3), packing.
 
 Run: python -m unittest discover -s clean/k/tests -t .

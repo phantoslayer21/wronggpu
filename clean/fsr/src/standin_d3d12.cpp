@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Stand-in upscaler: one compute dispatch per frame recorded into the game's command list (spec 20).
 #include "standin_d3d12.h"
 
@@ -460,6 +460,11 @@ public:
         if (!UavStoreSupported(outputUav)) {
             Log(WG_LOG_ERROR, "the GPU cannot store to output format %u through a UAV", unsigned(outputUav));
             return WG_ERROR_UNSUPPORTED;
+        }
+
+        if (output == color || (needsDepth && output == depth) || (needsMotion && output == motion)) {
+            Log(WG_LOG_ERROR, "output aliases an active input resource");
+            return WG_ERROR_PARAMETER;
         }
 
         // Descriptors for this frame.

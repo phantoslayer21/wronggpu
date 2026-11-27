@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Spec 51.5: regroup the four level-0 children for the E1 adapter, preserving every code bit.
 #include "wg_platform.hlsli"
 WG_ARGS_BEGIN

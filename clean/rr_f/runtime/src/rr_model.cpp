@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Loader of the runtime's model (rr_model.h): the converter's model.wgcm (checked and packed by rr_pack.cpp) or the
 // runtime's own container WGRRMOD1 (layout: clean/rr_f/runtime/tools/pack_model.py). Checks of WGRRMOD1: magic,
 // version, table bounds, the whole-file SHA-256.
@@ -163,8 +163,8 @@ bool read_wgcm(const std::vector<uint8_t>& d, std::vector<WgcmGroup>* groups, st
   const uint32_t ngroups = u32(12);
   const uint8_t* key = d.data() + 16;
   const uint64_t index_size = u64(80);
+  if (index_size > body - 88) return *err = "model.wgcm damaged: index runs past the data", false;
   const uint64_t end = 88 + index_size;
-  if (end > body) return *err = "model.wgcm damaged: index runs past the data", false;
   uint64_t pos = 88;
   auto need = [&](uint64_t n) { return pos + n <= end; };
   auto name_at = [&](std::string* s) {

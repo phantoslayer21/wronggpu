@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // The front end's side of WrongGPU's shared settings (clean/wgshared): where the data folder and wronggpu.ini are, the
 // shared settings block (opened or created at start, claimed as the single writer when OptiScaler hosts this DLL), the
@@ -42,6 +42,10 @@ wgfsr::MenuSettings Menu();
 
 // A registry option's value for this module (block > environment > ini > default) and its log text.
 int32_t Setting(uint32_t slot, std::string* described = nullptr, bool* isDefault = nullptr);
+
+// An SR model's mode (wg_sr_modes.h; MenuSettings::srMode): the card's live slot > environment > the game's state folder
+// (settings.ini m_mode / l_mode / k_mode) > wronggpu.ini > fast. liveOnly: the live slot only, else -1.
+int32_t SrMode(uint32_t slot, bool liveOnly, std::string* described = nullptr);
 
 // The OptiScaler.ini [<folder>] UpscalerIndex poll (mtime at most once per second); applies a changed index as if it
 // had been chosen in the menu (writer only). True while there is something to poll (custom slot and writer).

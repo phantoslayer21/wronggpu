@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """How far is the MLP tile loop from the sum of its parts? (synthetic data only)
 
     python clean/runner/build.py --rocm <ROCm> --out build            # builds mlpbench.co with the other code objects

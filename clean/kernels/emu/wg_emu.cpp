@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Host-side lane emulator runtime (test-only; never shipped). See wg_emu.h.
 //
 // The WMMA model below encodes the register layout assumed for gfx12 wave32 WMMA:

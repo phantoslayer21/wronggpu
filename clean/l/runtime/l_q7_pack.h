@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model L (issue #89): the weight blobs and lookup tables of the FP16-form (q7) kernels, header-only, byte for byte
 // the Python packer's (clean/l/runner/l_pack.py pack_q7_block, pack_q7_linear, q7_tables).
 //   block blob:  FP16 g1' g2' bp b1 b2 B, then FP8 codes Wqk Wv Wp W1 W2 row-major (g' = RN16(float32(gamma) x

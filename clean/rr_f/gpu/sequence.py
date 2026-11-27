@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """A connected preset-F frame sequence on one resident D3D12 arena: every page of the frame, temporal state across
 frames, resets and a render-size change, with the weights and symbols of a converted model file.
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Original full-support Lanczos-3 output-filter profile, D/O=1.5, phase +1/4.
 // Derived from spec 06's mathematical definition, normalized over k=-4..4, then minimally corrected so
 // sum(w)=1 and sum(k*w)=1/4. See clean/reference/output_quality.py. No learned parameters or vendor code.

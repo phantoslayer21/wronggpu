@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model K layout: stage table (spec 40 draft 4), window offsets and base size (spec 44), level pyramid, buffer plan
 and the 8x8 window partition (spec 41 "Windows", task K3).
 

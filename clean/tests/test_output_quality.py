@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model M output-filter profiles (clean/reference/output_quality.py): weights and the generated kernel header."""
 import os
 import unittest

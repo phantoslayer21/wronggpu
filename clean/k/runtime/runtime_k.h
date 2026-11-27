@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model K in the per-frame runtime (wronggpu_runtime.dll): one whole frame of spec 40 on the runtime's HIP stream,
 // the C++ port of clean/k/runner/k_frame.py KFrame with the default network variant "fused"
 // (clean/k/runner/k_net.py, k_launch.py) and the default fast input stage (k_io.co).
@@ -60,7 +60,8 @@ class KRuntime {
   // On backend 3 create first checks that <build>/dx12/manifest.json has a port of every kernel the context can
   // launch (d3d12_missing): a context with a missing port is refused before the model is loaded, so the D3D12
   // executor refuses it and the HIP executor runs it (executor_select.h).
-  bool create(const WgRtConfig& cfg, Device* dev, AllocFn alloc, bool external_io, bool native_direct = false);
+  bool create(const WgRtConfig& cfg, Device* dev, AllocFn alloc, bool external_io, bool native_direct = false,
+              bool measure_only = false);
   // Enqueues one frame (does not wait).
   bool frame(const WgRtFrame& fr, const FrameIo* io);
   // native_direct: whether frame() would take this frame (nothing enqueued); false with err() saying why. The D3D12
@@ -120,6 +121,7 @@ class KRuntime {
   // smx_case_name names a self-check case
   bool smx_select(int backend, const std::string& hook);
   bool smx_check(bool rodd, bool all, std::vector<std::pair<std::string, uint64_t>>* out);
+  bool smx_measure_alloc();
   bool smx_probe(bool rodd, int* bad);
   std::string smx_case_name(int i, int ox, int oy, bool rodd) const;
   // the stage kernel network() launches: the __rodd form of a softmax stage after a failed probe
@@ -137,6 +139,7 @@ class KRuntime {
   AllocFn alloc_;
   bool external_io_ = false;
   bool native_direct_ = false;  // create's native_direct: the "_direct" kernels on the caller's bound textures
+  bool measure_only_ = false;   // Pass 1 arena sizing: allocate buffers, skip GPU uploads/memsets/sync
   std::string err_, build_dir_, model_path_, map_path_, kernels_text_;
   int W_ = 0, H_ = 0, W16_ = 0, H16_ = 0, Bw_ = 0, Bh_ = 0, max_rw_ = 0, max_rh_ = 0;
   bool hdr_ = false, depth_inverted_ = false, f16_ = false;  // f16_: runtime option network=fused16 (or fused8)
@@ -151,6 +154,7 @@ class KRuntime {
   uint64_t tiled_launches_ = 0, tiled_color_launches_ = 0, input_uniform_launches_ = 0;
   uint64_t legacy_color_launches_ = 0, legacy_base_launches_ = 0;
   bool input_uniforms_ = true;  // runtime option k_in_uniforms (0: always k_in_tiled, a port-check diagnostic)
+  bool color_fuse_ = true;      // runtime option k_color_fuse (0: native exact path keeps the separate k_out_color)
   bool diag_input2_ = false, diag_copyin_ = false;  // runtime option k_diag (timing diagnostics)
   // d0 hands the head to k_out_pixel_c as the compact pixel head (k_stage2*_d0_hp; default). Runtime option
   // k_head=full: the 40-channel head map and k_out_pixel as before (same output bits; buffer "k.N" needs it)

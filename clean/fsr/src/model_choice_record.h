@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // The model choice record (0.6.5): ONE small file per game, model-choice.ini in the game's WrongGPU state folder
 // (clean/wgshared/include/wg_state.h: <game folder>\wronggpu-setup, beside settings.ini; always WrongGPU's: an uninstall

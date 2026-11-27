@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Fast page-54b resolve (kernels/rr_resolve_fast.hlsl): hardware probes, exhaustive checks of its exact
 elementary functions, differential qualification against the verified kernel (kernels/rr_resolve.hlsl) and timing.
 

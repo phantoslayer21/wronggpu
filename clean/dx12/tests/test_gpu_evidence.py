@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """CPU-only negative gates for GPU evidence; no device, model or GPU work."""
 import copy
 import json

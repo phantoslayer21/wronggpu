@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Game-setup GPU timing of the RR runtime, warmed up (clean/rr-f-speed5).
 
     python -m clean.rr_f.runtime.tools.game_bench --runtime-dir <dir with wronggpu_rr_runtime.dll + rr_test_host.exe>

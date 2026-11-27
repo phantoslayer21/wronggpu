@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model L's two input linears for one pixel per lane (issue #89; clean/l/kernels/l_ops.hip linear_32_32<RELU = true>,
 // then <RELU = false>), D3D12 only, shared by l_linear_32_32_fused (kernels/l_ops_linear.hlsl) and the encoder block
 // with the linears as its prologue (kernels/swin_block.hlsl, SW_SRC 3). Lane (t, h) of a 16-pixel tile: its pixel's q

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Spec 60.8 / 61.5 answers shared by the release and the probe build.
 #include "answers.h"
 

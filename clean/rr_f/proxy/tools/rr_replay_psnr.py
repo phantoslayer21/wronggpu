@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Image difference of two capture replays (rr_capture_replay.py output folders, same capture, --passes 1): per frame
 PSNR in dB of the tonemapped output (the replay's tonemap without the 8-bit rounding: x * exposure, Reinhard, sRGB;
 peak 1), the max abs error of the tonemapped values and of the linear output, and the count of differing values.

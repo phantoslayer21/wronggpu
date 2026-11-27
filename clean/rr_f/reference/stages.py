@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Stages of spec 51 (51.2, 51.4, 51.5, 51.6): IN0 (block and hidden state; the front end of page 52 is an input),
 E1 (adapter 128 -> 64) .. E5, decoder fusion halves D4-F .. D0-F and recurrent halves D4-R .. D1-R.
 

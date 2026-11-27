@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Probe log -> compact machine-readable game profile (the game's RR traffic as the probe build saw it).
 
     python clean/rr_f/proxy/tools/probe_log_to_profile.py <probe.log> [--summary <benchmark-summary.json>]

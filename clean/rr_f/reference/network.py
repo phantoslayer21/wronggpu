@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Preset-F network-body wiring from specs 50.2/50.6, 51 and 55.
 
 Inputs are the IN0 block's already prepared tokens and current-frame state stream.

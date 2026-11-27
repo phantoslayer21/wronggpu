@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Original regression for cloned COM vtables inheriting WrongGPU's installed hooks.
 // Exercises the production patcher without creating a GPU device.
 #include "../src/d3d12_hooks.cpp"

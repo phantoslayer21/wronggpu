@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // See pe_version.h. The VS_VERSIONINFO structure starts with three 16-bit fields (wLength,
 // wValueLength, wType), then the UTF-16LE key L"VS_VERSION_INFO" with its terminator, padding to a
 // 32-bit boundary, then VS_FIXEDFILEINFO, whose first field is the signature 0xFEEF04BD and whose

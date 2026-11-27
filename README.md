@@ -173,10 +173,10 @@ Every pull request needs the clean-room statement and a `Signed-off-by` line on 
 maintainer then performs a clean-room scan and review. Changes to kernels, the runtime, the front end or the Ray
 Reconstruction plugin also need a test on a Radeon RX 9000-series card before the owner merges.
 
-## Licence
+## License
 
-From this source onward, WrongGPU's source code and the official WrongGPU builds made from it are under the MIT licence
-([LICENSE](LICENSE)); this statement covers builds of this source and later, not packages published before it.
+0.7.0 and later: GPL-3.0-only. Releases up to 0.6.5 and earlier commits remain available under MIT.
+See [LICENSE](LICENSE) for the GNU General Public License version 3.
 Third-party components and their licences: [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES). OptiScaler, which the launcher
 downloads, is a separate project under its own licence (GPL-3.0).
 

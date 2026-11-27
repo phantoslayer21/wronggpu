@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Exact scalar arithmetic for the spec-55 reference (D0-R head), written from the spec text only.
 
 * `rnd16(num, den)`, `rnd32(num, den)`: the exact rational num/den rounded to binary16 / binary32 (round to nearest

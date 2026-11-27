@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Exhaustive proof of the direct encoder's colour table (clean/dx12/hlsl/wg_f16lut_in.hlsli).
 
     python clean/dx12/f16lut/run_in.py --work build/lev-f16lut/proof-in

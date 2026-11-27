@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: what a few games need beyond the usual install (build/launcher/QUIET-R1.md "RE9"): REFramework,
 // without which RE Requiem stops any OptiScaler (its own integrity check; WrongGPU never works around it and never
 // installs, downloads or ships REFramework), WrongGPU's OptiScaler edition where the game's Ray Reconstruction needs the

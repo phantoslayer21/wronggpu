@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Test driver of rr_input_host.h (tests/test_input_host.py): reads frames as whitespace-separated fields, prints
 // words 0..99 of the constant block per frame. Floats travel as their bit patterns (hex) so nothing is rounded.
 // Fields per frame: Wr Hr Wo Ho jx jy pjx pjy rawx rawy mvjit E Ep X3 reset par fc hwdepth inverted nrmdec rghpacked

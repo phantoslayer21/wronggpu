@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Offline anchor-scan test for the WrongGPU ASI plugin. Loads an OptiScaler DLL as a data file (never executes it),
 // maps its sections at their RVAs into a buffer the way the Windows loader would, and runs the plugin's resolver
 // (clean/fsr/asi/opti_resolver.h) over it. It prints only addresses and yes/no facts and checks that every anchor

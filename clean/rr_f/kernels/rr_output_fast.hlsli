@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Fast path of the spec-54 output stage (included at the end of rr_output.hlsl; same argument block and helpers).
 // Packed head inputs only (packed_head bit 0). Three dispatches replace rr_output_main + rr_output_pool:
 //
@@ -49,14 +49,26 @@
 #ifndef OFX_QST
 #define OFX_QST 0   // D17: Q texels of two neighbour lanes as one 12-byte store (even history width)
 #endif
+#ifndef OFX_W5_ALU
+#define OFX_W5_ALU 0   // clean/rr-f-wave5b (Fast mode only, VG_OUT): bounded ALU fast path (no fences, no AGS 0x1c, 3-way max for OF_REPROJ_MAX=1, no rare/fallback)
+#endif
+#ifndef OFX_W5C
+#define OFX_W5C 0      // clean/rr-f-wave5c (Fast mode only, VG_OUT): live-range reduction (<= 64 VGPR target) in of_reproj + 16-tap loop
+#endif
 #define OF_TX 32
 #define OF_TY 8
 #define OF_LW 30
 #define OF_LH 12
 groupshared uint4 of_ra[OF_LW * OF_LH];
 groupshared uint of_rb[OF_LW * OF_LH];
+// clean/rr-f-wave4c W4C.3: the PH1 tile copy (of_lin, of_rowrare: 3,104 bytes) is only read by the groupshared PH1 below; with
+// OFX_PH1W on wave64 it is declared nowhere, so the kernel's LDS is of_ra + of_rb alone (7,200 bytes)
+#if !(OFX_PH1W && WG_WAVE == 64)
 groupshared float3 of_lin[OF_TX * OF_TY];
+#if !OFX_W5_ALU
 groupshared uint of_rowrare[OF_TY];
+#endif
+#endif
 
 // scratch (bytes from the scratch argument): word 0 the fallback count (cleared by prep), word 1 the prep flags (bit 0:
 // every quad falls back, bit 1: the TR table has nonzero entries below 2^-26; cleared by the fallback kernel), words
@@ -72,6 +84,18 @@ uint of_zb() { return 0u - (wg_grid_ >> 31); }
 #if WG_WAVE == 64
 #include "wg_ags.hlsli"
 #endif
+#if OFX_W5_ALU
+uint of_cvt(float x) { return (uint)asuint16((half)x); }
+half of_hh(uint b) { return asfloat16((uint16_t)(b & 0xffffu)); }
+uint4 of_to_f16(v8f d)
+{
+    return uint4(of_cvt(d.v[0]) | (of_cvt(d.v[1]) << 16), of_cvt(d.v[2]) | (of_cvt(d.v[3]) << 16),
+                 of_cvt(d.v[4]) | (of_cvt(d.v[5]) << 16), of_cvt(d.v[6]) | (of_cvt(d.v[7]) << 16));
+}
+half of_fh(half x) { return x; }
+half2 of_fh2(half2 x) { return x; }
+float of_f(half x) { return (float)x; }
+#else
 uint of_cvt(float x) { return wg_ags_call(0x1cu, 0u, 1u, asuint(x), 0u); }      // v_cvt_f16_f32 (RNE) = H's bits
 // OF_FAST_WAVE=64 (exact, same bits; host define, gpu/output.py): rr_output_fast as wave64. The VALU-bound kernel
 // then issues its FP32 operations two halves per wave instruction; the driver's matrix conversion (wave32 only) is
@@ -90,6 +114,7 @@ uint4 of_to_f16(v8f d) { return wg_to_f16_ags(d); }
 half of_fh(half x) { return asfloat16((uint16_t)(asuint16(x) ^ (uint16_t)of_zb())); }
 half2 of_fh2(half2 x) { return wg_as_h2(wg_h2_bits(x) ^ of_zb()); }   // keeps the last fma f16 (else v_fma_mix_f32)
 float of_f(half x) { return f16tof32((uint)asuint16(x)); }
+#endif
 // wg_div((float)b, 255) for every byte b (clean/rr-f-r6-tail): q = b * RN(1/255), one fma correction step; checked with
 // exact rationals for all 256 inputs (results 0 or >= 1/255: no denormal, no special operand), and on the GPU.
 float of_d255(uint b)
@@ -108,6 +133,13 @@ float of_d255(uint b)
 #endif
 #define OF_NO_FALLBACK 0   // negative control only: never list a quad
 #endif
+#if OFX_W5_ALU
+float fence2(float x) { return x; }
+float Mn(float a, float b) { return a * b; }
+float Mf(float a, float b) { return a * b; }
+float An(float a, float b) { return a + b; }
+float Fn(float a, float b, float c) { return mad(a, b, c); }
+#else
 // A second opaque zero: the driver splits a fused mad(a, b, c) into a * b + c when it can share the product a * b with
 // another use (seen in of_blend), so products of the same operands get distinct fences (fence / fence2).
 float fence2(float x) { return asfloat(asuint(x) ^ (0u - (wg_group_base_ >> 31))); }
@@ -122,6 +154,7 @@ float Mf(float a, float b) { return fence(a * b); }
 #endif
 float An(float a, float b) { return a + b; }
 float Fn(float a, float b, float c) { return mad(a, b, c); }
+#endif
 // A zero result is checked when the exact result, scaled by 2^64 (exact for every operand set whose exact result is
 // below 2^-126), lies in [2^-62 (1 - 2^-20), 2^-62]: a superset of the band; exact cancellations and products far below
 // it (which M / F also flush) are not listed.
@@ -134,7 +167,10 @@ bool of_win(float s2) { return and(abs(s2) >= asfloat(0x207ffff0u), abs(s2) <= a
 #ifndef OFX_NOCHK
 #define OFX_NOCHK 0        // D31, FAST MODE ONLY (not exact): no band check (results in the band flush like the hardware)
 #endif
-#if OFX_NOCHK
+#if OFX_W5_ALU
+float Mq(float a, float b, inout bool rare) { return a * b; }
+float Fq(float a, float b, float c, inout bool rare) { return mad(a, b, c); }
+#elif OFX_NOCHK
 float Mq(float a, float b, inout bool rare) { return Mf(a, b); }
 float Fq(float a, float b, float c, inout bool rare) { return fence(mad(a, b, c)); }
 #elif OFX_MQB
@@ -229,6 +265,12 @@ bool of_insane(float E, float Ep, float invE)
     return of_small(K12, lo) || of_small(invE, lo) || of_small(Ep, lo) || abs(Ep) > asfloat(0x4e800000u) ||
            of_small(E, lo) || of_small(K7, lo) || of_small(K11, asfloat(0x21800000u)) || K13 > asfloat(0x4e800000u);
 }
+#if OFX_W5_ALU
+float Cf(float x) { return log2(max(mad(x, K4, 1.0f), K5)) * (asfloat(0x3e9a209bu) * K7); }
+float of_dt(float x) { return min(max(x, K5), K10); }
+float of_dtail(float r) { return exp2(r) - 1.0f; }
+float Df(float x, inout bool rare) { return exp2(min(max(x, K5), K10) * (K8 * asfloat(0x40549a78u))) - 1.0f; }
+#else
 // C: F(x, K4, 1) cannot be a nonzero value below 2^-126 (x K4 + 1 is 0, or >= 2^-48, or near 1); |log2| >= 2^-30, so
 // with |K7| >= 2^-30 both products stay >= 2^-62 (or 0).
 float Cf(float x) { return Mf(Mf(log2(max(Fn(x, K4, 1), K5)), asfloat(0x3e9a209bu)), K7); }
@@ -240,24 +282,56 @@ float Df(float x, inout bool rare)
     // M(M(t, K8), K9): K9 > 1 cannot make a normal (or zero) first product small
     return An(exp2(Mn(Mq(t, K8, rare), asfloat(0x40549a78u))), -1);
 }
+#endif
 
 // sample4 of rr_output.hlsl, one axis. p (a position) is 0 or >= 2^-25 in magnitude (a half-integer plus a value) and
 // R >= 2^-16, so s = M(p, R) and M(s, n) need no check; a is then a multiple of 2^-25 (or large), so f and 1 - f are
 // 0 or multiples of 2^-25 and the bilinear weights multiples of 2^-50: their products with binary16 values (multiples
 // of 2^-24) never reach the band. The same holds for the candidate taps (s = M(u, 1 / wr), u a multiple of 2^-41).
-struct OfAxis { float f, g; int c0, c1; uint o0, o1; };   // o0 / o1: byte offsets c0 / c1 * stride (+ base)
 // clean/rr-f-s10-tail: 24-bit products (v_mul_u32_u24 / v_mad_u32_u24, full rate, instead of the quarter-rate
 // v_mul_lo_u32) for index arithmetic whose operands are below 2^24 (coordinates and pitches of images whose sides are
 // below 2^21): the low 32 bits of the product are the same, so every address is the same.
+#if OFX_W5_ALU && OFX_SPEC
+uint of_m24(uint a, uint b) { return (a & 0xffffffu) * (b & 0xffffffu); }
+struct OfAxis { float f; uint o0, o1; };
+OfAxis of_axis_s(float s, uint n, uint stride = 0u, uint base = 0u, bool m24 = false)
+{
+    OfAxis r;
+    s = isnan(s) ? 0 : s;
+    const float a = mad(s, (float)n, -0.5f), i = floor(a);
+    r.f = a - i;
+    const uint c0 = (uint)clamp(i, 0.0f, (float)(n - 1)), c1 = (uint)clamp(i + 1.0f, 0.0f, (float)(n - 1));
+    r.o0 = (m24 ? of_m24(c0, stride) : c0 * stride) + base;
+    r.o1 = (m24 ? of_m24(c1, stride) : c1 * stride) + base;
+    return r;
+}
+OfAxis of_axis(float p, float R, uint n, uint stride, uint base, bool m24 = false) { return of_axis_s(p * R, n, stride, base, m24); }
+struct OfTaps { uint ox0, ox1, oy0, oy1; float wa[4]; };
+OfTaps of_taps(OfAxis ax, OfAxis ay)
+{
+    OfTaps r;
+    const float ag = 1.0f - ax.f, bg = 1.0f - ay.f;
+    r.ox0 = ax.o0; r.ox1 = ax.o1; r.oy0 = ay.o0; r.oy1 = ay.o1;
+    r.wa[0] = ag * bg; r.wa[1] = ax.f * bg; r.wa[2] = ag * ay.f; r.wa[3] = ax.f * ay.f;
+    return r;
+}
+#else
+struct OfAxis { float f, g; int c0, c1; uint o0, o1; };   // o0 / o1: byte offsets c0 / c1 * stride (+ base)
 uint of_m24(uint a, uint b) { return (a & 0xffffffu) * (b & 0xffffffu); }
 OfAxis of_axis_s(float s, uint n, uint stride = 0u, uint base = 0u, bool m24 = false)
 {
     OfAxis r;
     s = isnan(s) ? 0 : s;
+#if OFX_W5_ALU
+    const float a = mad(s, (float)n, -0.5f), i = floor(a);
+    r.f = a - i; r.g = 1.0f - r.f;
+    r.c0 = (int)clamp(i, 0.0f, (float)(n - 1)); r.c1 = (int)clamp(i + 1.0f, 0.0f, (float)(n - 1));
+#else
     const float a = An(Mn(s, n), -.5f), i = floor(a);
     // fenced: the driver turns a - floor(a) into v_fract_f32, which differs when a + 1 rounds up to 1 (a = -2^-26)
     r.f = An(a, -fence(i)); r.g = An(1, -r.f);
     r.c0 = (int)clamp(i, 0.0f, (float)(n - 1)); r.c1 = (int)clamp(An(i, 1), 0.0f, (float)(n - 1));
+#endif
     r.o0 = (m24 ? of_m24((uint)r.c0, stride) : (uint)r.c0 * stride) + base;
     r.o1 = (m24 ? of_m24((uint)r.c1, stride) : (uint)r.c1 * stride) + base;
     return r;
@@ -271,6 +345,7 @@ OfTaps of_taps(OfAxis ax, OfAxis ay)
     r.wa[0] = Mn(ax.g, ay.g); r.wa[1] = Mn(ax.f, ay.g); r.wa[2] = Mn(ax.g, ay.f); r.wa[3] = Mn(ax.f, ay.f);
     return r;
 }
+#endif
 float of_bil(OfTaps q, float v0, float v1, float v2, float v3)
 {
     return An(An(An(Mn(q.wa[0], v0), Mn(q.wa[1], v1)), Mn(q.wa[2], v2)), Mn(q.wa[3], v3));
@@ -285,6 +360,13 @@ bool of_hhalf() { return true; }
 bool of_half() { return (packed_head & 4u) != 0u; }
 bool of_hhalf() { return (packed_head & 32u) != 0u; }
 #endif
+#if OFX_W5_ALU
+float of_mhf(float w, half h) { return w * (float)h; }
+float of_bilf(OfTaps q, half h0, half h1, half h2, half h3)
+{
+    return mad(q.wa[3], (float)h3, mad(q.wa[2], (float)h2, mad(q.wa[1], (float)h1, q.wa[0] * (float)h0)));
+}
+#else
 // M(w, h) of a binary16 value h as fma(w, h, -0): the same rounding, and the driver reads h as f16 (v_fma_mix_f32).
 // The addend is an opaque -0: with a literal -0 the driver dropped it and fused the product into the next addition.
 float of_mhf(float w, half h) { return mad(w, (float)h, asfloat(0x80000000u ^ of_zb())); }
@@ -292,6 +374,7 @@ float of_bilf(OfTaps q, half h0, half h1, half h2, half h3)
 {
     return An(An(An(of_mhf(q.wa[0], h0), of_mhf(q.wa[1], h1)), of_mhf(q.wa[2], h2)), of_mhf(q.wa[3], h3));
 }
+#endif
 float3 of_hist(OfTaps q)
 {
     if (of_hhalf()) {   // binary16 rgba texels (8 bytes)
@@ -315,10 +398,15 @@ float3 of_hist(OfTaps q)
         return float3(of_bilf(q, a0.x, a1.x, b0.x, b1.x), of_bilf(q, a0.y, a1.y, b0.y, b1.y), of_bilf(q, a0.z, a1.z, b0.z, b1.z));
 #endif
     }
+#if OFX_W5_ALU && OFX_SPEC
+    const uint r0 = 0u, r1 = 0u;
+    return float3(0, 0, 0);
+#else
     const uint r0 = of_m24((uint)q.y0, wh), r1 = of_m24((uint)q.y1, wh);
     const float3 v0 = asfloat(wg_mem.Load3(hprev + (r0 + (uint)q.x0) * 16u)), v1 = asfloat(wg_mem.Load3(hprev + (r0 + (uint)q.x1) * 16u));
     const float3 v2 = asfloat(wg_mem.Load3(hprev + (r1 + (uint)q.x0) * 16u)), v3 = asfloat(wg_mem.Load3(hprev + (r1 + (uint)q.x1) * 16u));
     return float3(of_bil(q, v0.x, v1.x, v2.x, v3.x), of_bil(q, v0.y, v1.y, v2.y, v3.y), of_bil(q, v0.z, v1.z, v2.z, v3.z));
+#endif
 }
 
 // reproj of rr_output.hlsl. With TR entries 0 or >= 2^-26 in magnitude (prep flag bit 1 clear) the weights are 0 or
@@ -326,9 +414,14 @@ float3 of_hist(OfTaps q)
 // none lies in the band. Otherwise (fine table) its products / fmas are checked.
 float3 of_fallback(float3 current, float Ep, float invE)
 {
+#if OFX_W5_ALU
+    const float fbs = (Ep * invE) * K12;
+    return float3(Cf(current.x * fbs), Cf(current.y * fbs), Cf(current.z * fbs));
+#else
     float3 f;
     [unroll] for (uint c = 0; c < 3; c++) f[c] = Cf(Mf(Ep, Mf(invE, Mf(fence(current[c]), K12))));   // >= 2^-114 (of_insane)
     return f;
+#endif
 }
 // (clean/rr-f-r6-tail) the fallback colour is computed only for a candidate that falls (waves without such a lane skip it)
 float3 of_reproj(uint x, uint y, float2 mv, float3 current, float Ep, float invE, out uint fell, float Rwh, float Rhh, bool fine, inout bool rare)
@@ -347,6 +440,22 @@ float3 of_reproj(uint x, uint y, float2 mv, float3 current, float Ep, float invE
         // the five positions use three distinct x and three distinct y coordinates
         // byte offsets of the binary16 texels: column * 8, row * wh * 8 + hprev
         const uint ys = wh * 8u;
+#if OFX_W5C && OFX_W5_ALU
+        const OfAxis X0 = of_axis(An(kx, tx.w), Rwh, wh, 8u, 0u);
+        const OfAxis Y1 = of_axis(An(ky, ty.w), Rhh, hh, ys, hprev, true);
+        // Rolled 5-tap loop (opaque upper bound prevents LLVM hoisting all 20 b64 loads into one 40-VGPR batch: 74 -> 55 VGPR)
+        const uint k_end = 5u + (wg_grid_ >> 31);
+        [loop] for (uint k = 0; k < k_end; ++k) {
+            OfAxis qx = X0, qy = Y1;
+            if (k == 1u) qx = of_axis(An(kx, -1), Rwh, wh, 8u, 0u);
+            else if (k == 4u) qx = of_axis(An(kx, 2), Rwh, wh, 8u, 0u);
+            if (k == 0u) qy = of_axis(An(ky, -1), Rhh, hh, ys, hprev, true);
+            else if (k == 3u) qy = of_axis(An(ky, 2), Rhh, hh, ys, hprev, true);
+            const float3 tap = of_hist(of_taps(qx, qy));
+            const float wk = weights[k];
+            [unroll] for (uint c = 0; c < 3; c++) acc[c] = k == 0u ? tap[c] * wk : mad(tap[c], wk, acc[c]);
+        }
+#else
         const OfAxis X0 = of_axis(An(kx, tx.w), Rwh, wh, 8u, 0u), X1 = of_axis(An(kx, -1), Rwh, wh, 8u, 0u), X2 = of_axis(An(kx, 2), Rwh, wh, 8u, 0u);
         const OfAxis Y0 = of_axis(An(ky, -1), Rhh, hh, ys, hprev, true), Y1 = of_axis(An(ky, ty.w), Rhh, hh, ys, hprev, true),
                      Y2 = of_axis(An(ky, 2), Rhh, hh, ys, hprev, true);
@@ -358,15 +467,22 @@ float3 of_reproj(uint x, uint y, float2 mv, float3 current, float Ep, float invE
             if (k == 3) qy = Y2;
             const OfTaps q = of_taps(qx, qy);
             const float3 tap = of_hist(q);
+#if OFX_W5_ALU
+            [unroll] for (uint c = 0; c < 3; c++) acc[c] = k == 0 ? tap[c] * weights[k] : mad(tap[c], weights[k], acc[c]);
+#else
             if (fine) {
                 [unroll] for (uint c = 0; c < 3; c++) acc[c] = k == 0 ? Mq(tap[c], weights[k], rare) : Fq(tap[c], weights[k], acc[c], rare);
             } else {
                 [unroll] for (uint c = 0; c < 3; c++) acc[c] = k == 0 ? Mn(tap[c], weights[k]) : Fn(tap[c], weights[k], acc[c]);
             }
+#endif
         }
+#endif
         float total = An(weights[4], An(weights[3], An(weights[2], An(weights[1], weights[0]))));
         float Rt = Rf(total);
-#if OF_GZ
+#if OFX_W5_ALU
+        acc = acc * Rt;
+#elif OF_GZ
         float3 r3;
         [unroll] for (uint c = 0; c < 3; c++) r3[c] = Mf(acc[c], Rt);
         [branch] if (of_z3(r3.x, r3.y, r3.z) == 0)
@@ -404,10 +520,14 @@ float3 of_blend(float3 current, float3 hist, float alpha, out uint guarded, inou
 // (s >= 2^-11 when p >= .5, so e is a multiple of 2^-34, never flushed).
 uint of_code10(float x)
 {
+#if OFX_W5_ALU
+    return min(1023u, (uint)round(saturate(x) * 1023.0f) + BAD_CODE);
+#else
     const float s = min(max(x, 0.0f), 1.0f), p = s * 1023.0f, e = mad(fence(s), 1023.0f, -p), fl = floor(p);   // fence: see fence2
     float a = round(p);
     a = p - fl == .5f ? (e > 0 ? fl + 1 : (e < 0 ? fl : a)) : a;
     return min(1023u, (uint)a + BAD_CODE);
+#endif
 }
 
 // ---- prep: one lane per render pixel ------------------------------------------------------------------------------
@@ -520,9 +640,14 @@ WG_KERNEL(rr_output_fast)
     const int rx0 = of_cx(tx0, sx) - 1, ry0 = of_cya(ty0, sy) - 1;
     const int W = of_cx(xl, sx) + 2 - rx0 + 1, Hn = of_cya(yl, sy) + 2 - ry0 + 1;
     const bool fits = W <= OF_LW && Hn <= OF_LH;
+#if OFX_W5_ALU
+    const bool fine = false;
+    bool rare = false;
+#else
     const uint pflags = of_u1(wg_ld32(scratch, 4u));
     const bool fine = (pflags & 2u) != 0u;
     bool rare = !fits || (pflags & 1u) != 0u || insane;
+#endif
     if (fits) {
         const uint ra = of_rec_a(), rb = of_rec_b();
         const uint cc = lane & 31u;   // W <= 30: one lane per record column, WG_BLOCK / 32 rows per step
@@ -545,9 +670,43 @@ WG_KERNEL(rr_output_fast)
     // u = F(x + .5, sx, jx): (x + .5) sx is a multiple of 2^-40 and jx of 2^-41 where they can cancel: never small
     const float u = Fn(x + .5f, sx, jx), v = Fn(y + .5f, sy, jy), va = Fn((y / 2) * 2 + .5f, sy, jy);
     const int cx = (int)floor(An(u, -.5f)), cy = (int)floor(An(v, -.5f)), cya = (int)floor(An(va, -.5f));
+#if OFX_W5_ALU
+    const half hx = (half)((float)cx + 0.5f - u), hy0 = (half)((float)cy + 0.5f - v);
+    const half hy = cy != cya ? (hy0 - (half)1.0) : hy0;
+#else
     const uint hxy = of_cvt(fence(An(cx + .5f, -u))) | (of_cvt(fence(An(cy + .5f, -v))) << 16);
     const half hx = of_hh(hxy), hy0 = of_hh(hxy >> 16);
     const half hy = cy != cya ? of_fh(hy0 + (half)-1.0) : hy0;
+#endif
+#if OFX_W5C && OFX_W5_ALU && OFX_FUSE
+    half oy[4], oyy[4];
+    [unroll] for (int m0 = 0; m0 < 4; m0++) {
+        oy[m0] = hy + (half)(m0 - 1);
+        oyy[m0] = oy[m0] * oy[m0];
+    }
+    const int Wl = fits ? W : 0, lbase = fits ? (cya - 1 - ry0) * W + (cx - 1 - rx0) : 0;
+    float total = 0;
+    half2 s0 = half2(0, 0), s1 = half2(0, 0), s2 = half2(0, 0);
+    [unroll] for (int k = 0; k < 4; k++) {
+        const half oxk = hx + (half)(k - 1);
+        const half oxxk = oxk * oxk;
+        [unroll] for (int m = 0; m < 4; m++) {
+            const int li = lbase + m * Wl + k;
+            const uint4 ra = of_ra[li];
+            const uint pb = of_rb[li];
+            const half ax = of_hh(ra.w), ay = of_hh(ra.w >> 16), axy = of_hh(pb);
+            const half t1 = oxxk * ax;
+            const half t2 = mad(oyy[m], ay, t1);
+            const half oxy = oxk * oy[m];
+            const half e = mad(oxy, axy, t2);
+            const half w = exp2(e);
+            total += (float)w;
+            const half2 ww = half2(w, w);
+            s0 = mad(ww, wg_as_h2(ra.x), s0); s1 = mad(ww, wg_as_h2(ra.y), s1); s2 = mad(ww, wg_as_h2(ra.z), s2);
+        }
+    }
+    OF_CLK(2);
+#else
     half ox[4], oy[4], oxx[4], oyy[4];
     [unroll] for (int k = 0; k < 4; k++) {
         // (a folded hx + 0 could only change the sign of a zero offset, which no product below can show)
@@ -558,7 +717,27 @@ WG_KERNEL(rr_output_fast)
 #ifndef OFX_FUSE
 #define OFX_FUSE 0   // clean/rr-f-a14-tail D4: 1 = phases 1 and 2 in one k-outer m-inner loop (the same operations and order;
 #endif               // each weight converted by 0x1c = H on its own, one b128 + one b32 LDS read per tap)
-#if OFX_FUSE
+#if OFX_W5_ALU && OFX_FUSE
+    float total = 0;
+    half2 s0 = half2(0, 0), s1 = half2(0, 0), s2 = half2(0, 0);
+    [unroll] for (int k = 0; k < 4; k++) {
+        [unroll] for (int m = 0; m < 4; m++) {
+            const int li = lbase + m * Wl + k;
+            const uint4 ra = of_ra[li];
+            const uint pb = of_rb[li];
+            const half ax = of_hh(ra.w), ay = of_hh(ra.w >> 16), axy = of_hh(pb);
+            const half t1 = oxx[k] * ax;
+            const half t2 = mad(oyy[m], ay, t1);
+            const half oxy = ox[k] * oy[m];
+            const half e = mad(oxy, axy, t2);
+            const half w = exp2(e);
+            total += (float)w;
+            const half2 ww = half2(w, w);
+            s0 = mad(ww, wg_as_h2(ra.x), s0); s1 = mad(ww, wg_as_h2(ra.y), s1); s2 = mad(ww, wg_as_h2(ra.z), s2);
+        }
+    }
+    OF_CLK(2);
+#elif OFX_FUSE
     float total = 0;
     half2 s0 = half2(0, 0), s1 = half2(0, 0), s2 = half2(0, 0);
     [unroll] for (int k = 0; k < 4; k++) {
@@ -610,6 +789,7 @@ WG_KERNEL(rr_output_fast)
         s0 = mad(ww, wg_as_h2(r.x), s0); s1 = mad(ww, wg_as_h2(r.y), s1); s2 = mad(ww, wg_as_h2(r.z), s2);
     }
 #endif
+#endif
     // A NaN payload of these sums (the only possible difference to HF) never reaches an output: sums 0-2 enter D (a
     // NaN gives D's own NaN constant), sum 3 and the total enter S / max (a NaN gives 0 / K13), sums 4-5 make alpha
     // NaN and the blend's NaN guard then replaces the value by M(current, K12).
@@ -617,10 +797,16 @@ WG_KERNEL(rr_output_fast)
     const float accum[6] = {of_f(s0.x), of_f(s0.y), of_f(s1.x), of_f(s1.y), of_f(s2.x), of_f(s2.y)};
     // norm = accum / max(total, K13): accum is 0 or >= 2^-24, so only a reciprocal below 2^-102 can reach the band
     const float Rn = Rf(max(total, K13));
+#if !OFX_W5_ALU
     rare = or(rare, of_small(Rn, asfloat(0x0d800000u)));
+#endif
     float norm[6];
     [unroll] for (uint c = 0; c < 6; c++) norm[c] = Mn(accum[c], Rn);
-#if OF_GZ
+#if OFX_W5_ALU
+    const float coverage = saturate(norm[3] * (total * K1));
+    const float ah = mad(coverage, 1.0f - norm[4], norm[4]), ao = mad(coverage, 1.0f - norm[5], norm[5]);
+    const float3 current = float3(Df(norm[0], rare), Df(norm[1], rare), Df(norm[2], rare));
+#elif OF_GZ
     // shipped site set: Mq(total, K1) unchecked (lost to the inout copy-out in the per-site form)
     const float cm1 = Mf(total, K1), cm2 = Mf(norm[3], cm1);
     const float coverage = min(max(cm2, 0.0f), 1.0f);
@@ -640,6 +826,15 @@ WG_KERNEL(rr_output_fast)
 #endif
     const float s = Mf(u, Rwr), t = Mf(v, Rhr);
     // candidate weights: bilinear of the decoded binary16 W4 records
+#if OFX_W5_ALU && OFX_SPEC
+    const OfTaps qc = of_taps(of_axis_s(s, wr, 8u, 0u), of_axis_s(t, hr, wr * 8u, 0u, true));
+    const uint rw = of_rec_w();
+    const uint2 c0 = wg_mem.Load2(rw + qc.oy0 + qc.ox0), c1 = wg_mem.Load2(rw + qc.oy0 + qc.ox1),
+                c2 = wg_mem.Load2(rw + qc.oy1 + qc.ox0), c3 = wg_mem.Load2(rw + qc.oy1 + qc.ox1);
+    float4 weights;
+    [unroll] for (uint c = 0; c < 4; c++) { const uint sh = (c & 1u) * 16u;
+        weights[c] = of_bilf(qc, of_hh((c < 2 ? c0.x : c0.y) >> sh), of_hh((c < 2 ? c1.x : c1.y) >> sh), of_hh((c < 2 ? c2.x : c2.y) >> sh), of_hh((c < 2 ? c3.x : c3.y) >> sh)); }
+#else
     const OfTaps qc = of_taps(of_axis_s(s, wr), of_axis_s(t, hr));
     const uint rw = of_rec_w();
     // (byte pitches in the 24-bit products: the compiler distributes a byte scale over the index sum)
@@ -655,6 +850,7 @@ WG_KERNEL(rr_output_fast)
                 c2 = wg_mem.Load<half4>(rw + qr1 + qc.x0 * 8), c3 = wg_mem.Load<half4>(rw + qr1 + qc.x1 * 8);
     float4 weights;
     [unroll] for (uint c = 0; c < 4; c++) weights[c] = of_bilf(qc, c0[c], c1[c], c2[c], c3[c]);
+#endif
 #endif
     const int fu = (int)floor(u), fv = (int)floor(v);
     const bool inr = and(and(fu >= 0, fv >= 0), and(fu < (int)wr, fv < (int)hr));
@@ -674,6 +870,14 @@ WG_KERNEL(rr_output_fast)
         pair = inr ? float4(pm) : float4(0, 0, 0, 0);
         ero = inr ? float2(pe) : float2(0, 0);
 #endif
+#if OFX_W5_ALU && OFX_SPEC
+        const uint n0 = wg_mem.Load(motion_non + (qc.oy0 + qc.ox0) / 2u), n1 = wg_mem.Load(motion_non + (qc.oy0 + qc.ox1) / 2u),
+                   n2 = wg_mem.Load(motion_non + (qc.oy1 + qc.ox0) / 2u), n3 = wg_mem.Load(motion_non + (qc.oy1 + qc.ox1) / 2u);
+        non = float2(of_bilf(qc, of_hh(n0), of_hh(n1), of_hh(n2), of_hh(n3)), of_bilf(qc, of_hh(n0 >> 16), of_hh(n1 >> 16), of_hh(n2 >> 16), of_hh(n3 >> 16)));
+    } else {
+        pair = float4(0, 0, 0, 0); ero = float2(0, 0); non = float2(0, 0);
+    }
+#else
         const uint qh0 = qr0 / 2u, qh1 = qr1 / 2u;
 #if OFX_LD2
         const uint n0 = wg_mem.Load(motion_non + qh0 + qc.x0 * 4), n1 = wg_mem.Load(motion_non + qh0 + qc.x1 * 4),
@@ -691,6 +895,36 @@ WG_KERNEL(rr_output_fast)
                      n2 = asfloat(wg_ld64(motion_non, qr1 + qc.x0 * 8)), n3 = asfloat(wg_ld64(motion_non, qr1 + qc.x1 * 8));
         non = float2(of_bil(qc, n0.x, n1.x, n2.x, n3.x), of_bil(qc, n0.y, n1.y, n2.y, n3.y));
     }
+#endif
+#if OFX_W5_ALU && OF_REPROJ_MAX == 1
+    // 3-comparison max preserving exact !(wa < wb) tie/NaN winner of the 5-CAS network; single reprojection, explicit zero-weight guard
+    float w0 = weights.x, w1 = weights.y, w2 = weights.z, w3 = weights.w;
+    float2 m0 = pair.xy, m1 = non, m2 = ero, m3 = pair.zw;
+    if (w0 < w1) { w0 = w1; m0 = m1; }
+    if (w2 < w3) { w2 = w3; m2 = m3; }
+    if (w0 < w2) { w0 = w2; m0 = m2; }
+    uint fell;
+    const float3 tap = of_reproj(x, y, m0, current, Ep, invE, fell, Rwh, Rhh, false, rare);
+    const float hist_scale = (E * K12) * REp;
+    const float d_scale = K8 * asfloat(0x40549a78u);
+    const float3 hist = float3(
+        (exp2(min(max(tap.x, K5), K10) * d_scale) - 1.0f) * hist_scale,
+        (exp2(min(max(tap.y, K5), K10) * d_scale) - 1.0f) * hist_scale,
+        (exp2(min(max(tap.z, K5), K10) * d_scale) - 1.0f) * hist_scale);
+    const float3 curK12 = current * K12;
+    const bool valid_w = (w0 > 0.0f);
+    float3 bh = mad(ah, curK12 - hist, hist);
+    float3 bo = mad(ao, curK12 - hist, hist);
+    if (!valid_w || isnan(bh.x + bh.y + bh.z)) bh = curK12;
+    if (!valid_w || isnan(bo.x + bo.y + bo.z)) bo = curK12;
+    const uint4 hq = uint4(
+        of_cvt(Cf(bh.x)) | (of_cvt(Cf(bh.y)) << 16),
+        of_cvt(Cf(bh.z)) | (of_cvt(Cf(bo.x)) << 16),
+        of_cvt(Cf(bo.y)) | (of_cvt(Cf(bo.z)) << 16),
+        0u);
+    const uint4 ord = uint4(0u, 1u, 2u, 3u);
+    const uint fallmask = fell, usedmask = 1u, gh = 0u, go = 0u;
+#else
     // order() of rr_output.hlsl on (weight, index, motion) triples: cmp keeps (a, b) iff w[a] >= w[b] or either is NaN,
     // i.e. iff !(w[a] < w[b]); the five compare-exchanges carry the values instead of indexing them
     float w0 = weights.x, w1 = weights.y, w2 = weights.z, w3 = weights.w;
@@ -787,6 +1021,7 @@ WG_KERNEL(rr_output_fast)
     [unroll] for (uint c = 0; c < 3; c++) { cq.v[c] = Cf(bh[c]); cq.v[3 + c] = Cf(bo[c]); }
     cq.v[6] = 0; cq.v[7] = 0;
     const uint4 hq = of_to_f16(cq);
+#endif
     // packed_head bit 3: no diagnostic outputs (linear f32 and trace; the fallback still writes them for its quads)
     const bool diag = !OFX_SPEC && (packed_head & 8u) == 0u;
     if (valid) {
@@ -816,7 +1051,45 @@ WG_KERNEL(rr_output_fast)
 #endif
     OF_CLK(6);
     // ---- PH1: the tile's 16 x 4 quads (pixels outside the image count as 0, as rr_output_pool's fetch)
+#if OFX_W5_ALU
 #if OFX_PH1W && WG_WAVE == 64
+    {
+        const float3 vt = valid ? bh : float3(0, 0, 0);
+        const uint wl = lane & 63u, wx = wl ^ 32u;
+        const float3 vb = float3(WaveReadLaneAt(vt.x, wx), WaveReadLaneAt(vt.y, wx), WaveReadLaneAt(vt.z, wx));
+        const float3 vtr = float3(QuadReadAcrossX(vt.x), QuadReadAcrossX(vt.y), QuadReadAcrossX(vt.z));
+        const float3 vbr = float3(QuadReadAcrossX(vb.x), QuadReadAcrossX(vb.y), QuadReadAcrossX(vb.z));
+        if (wl < 32u && (lx & 1u) == 0u) {
+            const uint gx = tx0 + lx, gy = ty0 + ly;
+            const uint count = min(2u, wh - min(gx, wh)) * min(2u, hh - min(gy, hh));
+            const float Rc = rcp((float)count);
+            uint code[3];
+            [unroll] for (uint c = 0; c < 3; c++) code[c] = of_code10(Cf(((vt[c] + vb[c]) + (vtr[c] + vbr[c])) * Rc) * K11);
+            if (gx < wh && gy < hh) {
+                const uint pidx = of_m24(gy / 2u, of_pw()) + gx / 2u;
+                wg_st64(ph, pidx * 8u, uint2(code[0] | (code[1] << 16), code[2] | (3u << 16)));
+            }
+        }
+    }
+#else
+    of_lin[lane] = valid ? bh : float3(0, 0, 0);
+    GroupMemoryBarrierWithGroupSync();
+    if (lane < 64u) {
+        const uint qx = lane & 15u, qy = lane >> 4, gx = tx0 + 2u * qx, gy = ty0 + 2u * qy;
+        const uint l0 = (2u * qy) * OF_TX + 2u * qx;
+        const uint count = of_m24(min(2u, wh - min(gx, wh)), min(2u, hh - min(gy, hh)));
+        const float Rc = rcp((float)count);
+        const float3 tl = of_lin[l0], tr = of_lin[l0 + 1u], bl = of_lin[l0 + OF_TX], br = of_lin[l0 + OF_TX + 1u];
+        uint code[3];
+        [unroll] for (uint c = 0; c < 3; c++) code[c] = of_code10(Cf(((tl[c] + bl[c]) + (tr[c] + br[c])) * Rc) * K11);
+        if (gx < wh && gy < hh) {
+            const uint pidx = of_m24(gy / 2u, of_pw()) + gx / 2u;
+            wg_st64(ph, pidx * 8u, uint2(code[0] | (code[1] << 16), code[2] | (3u << 16)));
+        }
+    }
+#endif
+    if (gid == 0u && lane == 0u) wg_st32(scratch, 4u, 0u);
+#elif OFX_PH1W && WG_WAVE == 64
     // clean/rr-f-a14-tail D7 (same bits): a quad's 4 pixels are lanes l, l + 1, l + 32, l + 33 of one wave64 (rows ly,
     // ly + 1): each wave pools its own 16 quads from lane reads (the same An(An(tl, bl), An(tr, br)) order), no
     // groupshared copy, no barrier

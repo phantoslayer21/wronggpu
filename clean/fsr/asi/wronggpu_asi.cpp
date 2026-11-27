@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU.asi: an OptiScaler plugin (its own DLL, our own code only) that makes WrongGPU appear as its own entry
 // ("WrongGPU"; with Model K and/or L: "WrongGPU Model M", "WrongGPU Model K", "WrongGPU Model L") in OptiScaler's MAIN
 // DX12 upscaler dropdown, leaving OptiScaler's "FSR 3.X(/4)" entry to mean AMD's upscaler again. WrongGPU is the default
@@ -20,6 +20,7 @@
 #endif
 #include <windows.h>
 
+#include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -34,6 +35,7 @@
 #include "model_choice_record.h"
 #include "opti_module.h"
 #include "opti_resolver.h"
+#include "sr_card.h"
 
 #if defined(_MSC_VER)
 #include <intrin.h>
@@ -84,29 +86,81 @@ char LoadSelection() {
     return wgasi::ParseSelection(text);
 }
 
-// The plugin's own file, replaced atomically (a temporary file next to it, flushed, moved over it).
+// The plugin's own file, replaced atomically (a unique temporary file next to it, flushed, moved over it).
 void SaveSelection(char model) {
+    static std::mutex s_saveMutex;
+    static std::atomic<uint64_t> s_seq{0};
+    std::lock_guard lock(s_saveMutex);
     const std::string text = wgasi::FormatSelection(model);
-    const std::wstring path = SelectionPath(), tmp = path + L"." + std::to_wstring(GetCurrentProcessId()) + L".tmp";
-    HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    const std::wstring path = SelectionPath();
+    const std::wstring tmp = path + L"." + std::to_wstring(GetCurrentProcessId()) + L"." +
+                             std::to_wstring(GetCurrentThreadId()) + L"." +
+                             std::to_wstring(s_seq.fetch_add(1, std::memory_order_relaxed)) + L".tmp";
+    HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
     bool ok = false;
+    DWORD lastErr = GetLastError();
     if (h != INVALID_HANDLE_VALUE) {
         DWORD written = 0;
         ok = WriteFile(h, text.data(), DWORD(text.size()), &written, nullptr) && written == text.size() && FlushFileBuffers(h);
+        lastErr = ok ? 0 : GetLastError();
         CloseHandle(h);
-        ok = ok && MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+        if (ok) {
+            ok = false;
+            for (int attempt = 0; attempt < 16; ++attempt) {
+                if (MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+                    ok = true;
+                    break;
+                }
+                lastErr = GetLastError();
+                if (lastErr != ERROR_ACCESS_DENIED && lastErr != ERROR_SHARING_VIOLATION) break;
+                Sleep(2);
+            }
+        }
         if (!ok) DeleteFileW(tmp.c_str());
     }
-    if (!ok) AsiLog::Get().Write("wronggpu-asi.ini could not be written (Windows error " + std::to_string(GetLastError()) + ")");
+    if (!ok) AsiLog::Get().Write("wronggpu-asi.ini could not be written (Windows error " + std::to_string(lastErr) + ")");
 }
 
 // The game's model choice record (model_choice_record.h): where the front end said it is (WrongGpuAsiSetChoiceRecordV1),
 // else wronggpu-setup\model-choice.ini in PluginDataDir() (the game folder in the launcher's layouts).
 std::mutex g_recordMutex;
 std::wstring g_recordPath;
+std::wstring DefaultRecordPath() {
+    const std::wstring pluginDir = wgasi::PluginDataDir();
+    const std::wstring pluginRec = wgchoice::RecordPathIn(pluginDir).wstring();
+    if (GetFileAttributesW(wgchoice::GameDirOf(pluginRec).wstring().c_str()) != INVALID_FILE_ATTRIBUTES) {
+        const std::wstring setup = pluginDir + L"wronggpu-setup";
+        const DWORD a = GetFileAttributesW(setup.c_str());
+        if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) != 0) return pluginRec;
+    }
+    // Custom-slot installs keep wronggpu-setup under WG_DATA_DIR or <exe_dir>\WrongGPU while the ASI sits in plugins\.
+    wchar_t envBuf[1024]{};
+    const DWORD en = GetEnvironmentVariableW(L"WG_DATA_DIR", envBuf, 1024);
+    if (en > 0 && en < 1024) {
+        std::wstring d(envBuf, en);
+        while (!d.empty() && (d.back() == L'\\' || d.back() == L'/')) d.pop_back();
+        const DWORD a = GetFileAttributesW((d + L"\\wronggpu-setup").c_str());
+        if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) != 0)
+            return wgchoice::RecordPathIn(d + L"\\").wstring();
+    }
+    wchar_t exeBuf[1024]{};
+    const DWORD xn = GetModuleFileNameW(nullptr, exeBuf, 1024);
+    if (xn > 0 && xn < 1024) {
+        std::wstring exe(exeBuf, xn);
+        const size_t sl = exe.find_last_of(L"\\/");
+        if (sl != std::wstring::npos) {
+            const std::wstring wg = exe.substr(0, sl + 1) + L"WrongGPU";
+            const DWORD a = GetFileAttributesW((wg + L"\\wronggpu-setup").c_str());
+            if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) != 0)
+                return wgchoice::RecordPathIn(wg + L"\\").wstring();
+        }
+    }
+    return pluginRec;
+}
+
 std::wstring RecordPath() {
     std::lock_guard lock(g_recordMutex);
-    return g_recordPath.empty() ? wgchoice::RecordPathIn(wgasi::PluginDataDir()).wstring() : g_recordPath;
+    return g_recordPath.empty() ? DefaultRecordPath() : g_recordPath;
 }
 
 // A click on one of the plugin's model entries: the record gets this model with the next seq (source=plugin), under the
@@ -316,6 +370,16 @@ void Hook(const void* caller) {
                g_state.model.load() == wgasi::kModelAmd ? "AMD (FSR 3.X)" : wgasi::LabelOf(g_state.model.load()));
 }
 
+bool CustomSlotInstalled() {
+    const std::wstring base = wgasi::PluginDataDir();
+    const std::wstring candidates[2] = {base + L"OptiScaler\\custom\\WrongGPU", base + L"custom\\WrongGPU"};
+    for (const std::wstring& dir : candidates) {
+        const DWORD attr = GetFileAttributesW(dir.c_str());
+        if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) != 0) return true;
+    }
+    return false;
+}
+
 }  // namespace
 
 // The return address is taken here, in InitializeASI's own frame (not inside the call_once lambda, whose return
@@ -325,7 +389,14 @@ extern "C" __declspec(dllexport) __declspec(noinline) void InitializeASI() {
     std::call_once(g_initOnce, [caller] {
         g_diagnostics.Begin();
         AsiLog::Get().Write("InitializeASI");
-        Hook(caller);
+        if (CustomSlotInstalled()) {
+            g_state.model.store(LoadSelection());
+            g_diagnostics.Outcome(WG_ASI_MENU_UNAVAILABLE, WG_ASI_REASON_HOST_NOT_RECOGNIZED);
+            AsiLog::Get().Write("custom slot installed (OptiScaler\\custom\\WrongGPU): legacy DX12 menu patch not "
+                                "needed; card registers via OptiPluginInit");
+        } else {
+            Hook(caller);
+        }
         g_diagnostics.Complete();
     });
 }
@@ -353,6 +424,40 @@ extern "C" __declspec(dllexport) void WrongGpuAsiShowModelV1(char model) {
 
 extern "C" __declspec(dllexport) int WrongGpuAsiQueryStatusV1(WrongGpuAsiStatusV1* status, uint32_t caller_size) {
     return g_diagnostics.Query(status, caller_size, g_state.hooked.load(), g_state.model.load());
+}
+
+// The model the card names (sr_card.h): the one the front end reports it runs, else the game's model choice record (read at
+// most once a second), else the plugin's saved entry; 0 while AMD's FSR is selected in the plugin's menu.
+namespace {
+char ActiveModel() {
+    const char shown = g_state.shown.load();
+    if (wgchoice::IsModel(shown)) return shown;
+    if (shown == wgasi::kModelAmd) return 0;
+    static std::mutex m;
+    static uint64_t at = 0;
+    static char cached = 0;
+    std::lock_guard lock(m);
+    const uint64_t now = GetTickCount64();
+    if (at == 0 || now - at >= 1000) {
+        at = now ? now : 1;
+        wgchoice::Record r;
+        std::string why;
+        cached = wgchoice::ReadRecordFile(RecordPath(), &r, &why) == wgchoice::ReadResult::Ok ? r.model : 0;
+    }
+    if (cached) return cached;
+    const char saved = g_state.model.load();
+    return saved == wgasi::kModelAmd ? 0 : saved;
+}
+}  // namespace
+
+// The host's plugin interface (the WrongGPU edition of OptiScaler; clean/wgshared/include/wg_host_menu_abi.h, the same
+// export and table as the RR plugin's): the "WrongGPU Upscaler" card with the SR model's Fast / Exact mode (sr_card.h).
+extern "C" __declspec(dllexport) bool OptiPluginInit(const WgHostMenuApi* api, WgHostMenuPlugin* plugin) {
+    wgasi::card::Hooks hooks;
+    hooks.gameDir = [] { return wgchoice::GameDirOf(RecordPath()).wstring(); };
+    hooks.activeModel = [] { return ActiveModel(); };
+    hooks.log = [](const std::string& line) { AsiLog::Get().Write(line); };
+    return wgasi::card::Init(api, plugin, std::move(hooks));
 }
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU-Restore.exe: the small per-game restorer (build/launcher-design.md section 2). The launcher writes it into
 // every game it installs as <install folder>\wronggpu-setup\uninstall.exe. It is wg_core without the payload, the
 // converter data or the UI: it reads the install record (v1 of the 0.5.x setup and v2 of the launcher), puts the
@@ -108,8 +108,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     if (!exeArg.empty()) {
         dir = Parent(FullPath(exeArg));
         if (!Exists(RecordPath(dir))) { const wstring d = FindInstallDir(FullPath(exeArg)); if (Exists(RecordPath(d))) dir = d; }
-    } else if (!dirArg.empty()) dir = FullPath(dirArg);
-    else if (fromState) dir = Parent(Parent(self));
+    } else if (!dirArg.empty()) {
+        dir = FullPath(dirArg);
+        while (dir.size() > 3 && (dir.back() == L'\\' || dir.back() == L'/')) dir.pop_back();
+    } else if (fromState) dir = Parent(Parent(self));
     SystemInfo sys;
     Ui ui;
     ui.step = [](int, int, const wstring&) {};

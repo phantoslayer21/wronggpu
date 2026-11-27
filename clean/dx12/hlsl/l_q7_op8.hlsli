@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // One FP8 matrix op of the q7 D3D12 ports, exact (l_q7_op8.h), and the 32-value FP8 row loader it is fed with:
 // apart from the FP16 helpers (l_q7_common.hlsli) so that the FP8 op (S2a) and the FP16 steps (S2b)
 // change in separate files. Include after l_q7_common.hlsli.

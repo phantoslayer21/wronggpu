@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: leftover WrongGPU files without an install record (leftovers.h). Written for this project.
 #include "leftovers.h"
 
@@ -29,6 +29,7 @@ KnownSet KnownFiles(Context& ctx) {
     if (ctx.data) {
         for (auto& f : *ctx.data) add(f);
         for (size_t i = 0; i < ctx.data->rrCount; ++i) add(ctx.data->rrFiles[i]);  // 0.6.1: the RR plugin builds too (WrongGPU-RR.asi)
+        for (size_t i = 0; i < ctx.data->fgCount; ++i) add(ctx.data->fgFiles[i]);  // 0.7.0: the frame generation plugin (WrongGPU-FG.asi)
     }
     return k;
 }

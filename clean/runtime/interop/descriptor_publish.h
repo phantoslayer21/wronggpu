@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Publishing descriptors that the CPU wrote into a shader-visible heap during a frame (clean/release-060 crash-cp2077).
 //
 // A shader-visible heap is write-combined memory. Descriptors written while recording a game's command list are read

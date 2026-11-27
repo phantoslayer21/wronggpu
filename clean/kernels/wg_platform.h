@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Platform layer: the few GPU primitives the kernels use.
 //
 // Device build (clang -x hip --offload-arch=gfx1201 -nogpuinc): maps to clang's AMDGPU builtins. No HIP or C/C++

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Slow, element-by-element oracles of spec 51, written independently of the vectorised reference (no NumPy in the
 arithmetic): a small soft-float on Fractions with IEEE signs and specials, integer-exact matrix steps, and per-token /
 per-window loops for the stage geometry. Used only by the tests."""

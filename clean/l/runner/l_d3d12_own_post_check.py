@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L (issue #89): the native D3D12 frame with Model L's own reconstruction (runtime option l_post=own:
 l_post_recon_p12, then the analytic filter w64/post_filter_c1_s4) against the HIP frame and the CPU reference, on the
 frames, models and build of clean/l/runner/l_frame_check.py.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // A fake WrongGPU RR runtime behind the adapter of include/wg_rr_adapter.h: records every call, does no GPU work.
 #pragma once
 #include <stdint.h>

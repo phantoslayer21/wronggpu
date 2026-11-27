@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // End-to-end test of the built proxy library with the real export table of its Streamline version (annex A9.3):
 // export table (every name at its ordinal, the own export above), every name a supported game imports (A9.2), the
 // renamed original found from the proxy's own file name, forwarding of every export the proxy does not implement

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Motion vectors at output resolution (spec 03 draft 4, spec 06 section 3): GPU checks of the kernels of
 kernels/post_mo.hip and kernels/encoder_mo.hip against clean/reference, and timing against the default kernels.
 Synthetic data and the spec team's vectors only. Run every command under the GPU lock.

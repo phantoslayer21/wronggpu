@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Root-cause tracer for the step-E head (track r3-head): runs the D0-R window block of block.py twice on the same
 inputs, once with the exact 51.1 step (exact sum, one f16 rounding) and once with an emulation of variant E (two
 16-input partial sums, each added to an f32 accumulator with one round-to-nearest f32, then the f16 rounding; the

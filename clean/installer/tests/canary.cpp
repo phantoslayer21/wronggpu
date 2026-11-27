@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The launcher suite's negative control (tests/launcher_build_facts.py self_checks): a program that is not a WRONGGPU_TESTING
 // build. When it starts it writes <its own path>.started, so the suite can prove its preflight never let it run.
 // WG_CANARY_HOOK_STRINGS: it also carries the test hooks' strings, as a program that only looks like a testing build would.

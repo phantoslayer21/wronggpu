@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: the OptiScaler tab of a game's page (build/launcher-design.md sections 3 and 4, milestone
 // M2): which OptiScaler.ini keys WrongGPU manages (locked: shown, never edited by the player through the launcher),
 // which the player may edit (only keys that already exist in that OptiScaler build's ini), byte-exact edits of single

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Spec 51 window block (51.3) with its stage fronts (51.5) and tails (51.4) on RDNA 4 / D3D12 (DESIGN-51.md).
 // One workgroup = one 8 x 8 window, 4 waves of 32 lanes; wave wv owns tokens 16 wv .. 16 wv + 15 (window rows 2 wv,
 // 2 wv + 1); lane l = 16 hf + n: token n of the wave's tile, half hf of every 16-channel fragment.

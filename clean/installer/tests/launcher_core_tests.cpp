@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Unit tests of the launcher's part of wg_core (build/launcher-design.md section 7.1) that need no game, no payload and
 // no GPU: settings validation and rendering (runtime_options as one line without spaces, enum rejection, the last value
 // wins, runtime keys on lines of their own), ini round trips that keep comments, order and unknown keys, outside-edit
@@ -31,6 +31,8 @@
 
 #include <shlobj.h>
 #include "wg_core/settings.h"
+#include "../../fsr/src/model_choice_record.h"  // the game's model choice record (FoldSrFromGame)
+#include "../../wgshared/include/wg_state.h"
 
 using namespace wg;
 
@@ -67,9 +69,10 @@ string VNode(const wstring& key, const string& value, bool text, std::vector<str
     Le(out, body.size(), 2); Le(out, text ? value.size() / 2 : value.size(), 2);
     return out + body.substr(4);
 }
-string MockDll(const std::vector<std::pair<wstring, wstring>>& strings, const string& extra) {
+// verMs / verLs: the fixed file version (major << 16 | minor, build << 16 | revision); 1.0.0.0 by default.
+string MockDll(const std::vector<std::pair<wstring, wstring>>& strings, const string& extra, uint32_t verMs = 0x00010000u, uint32_t verLs = 0u) {
     string fixed;
-    for (uint32_t v : {0xFEEF04BDu, 0x00010000u, 0x00010000u, 0u, 0x00010000u, 0u, 0x3Fu, 0u, 0x40004u, 2u, 0u, 0u, 0u}) Le(fixed, v, 4);
+    for (uint32_t v : {0xFEEF04BDu, 0x00010000u, verMs, verLs, 0x00010000u, 0u, 0x3Fu, 0u, 0x40004u, 2u, 0u, 0u, 0u}) Le(fixed, v, 4);
     std::vector<string> entries;
     for (auto& s : strings) entries.push_back(VNode(s.first, U16z(s.second), true));
     string tr; Le(tr, 0x409, 2); Le(tr, 1200, 2);
@@ -174,6 +177,96 @@ int main() {
             require(lout == slotIni, "no Model L choice: OptiScaler's UpscalerIndex is left as it is");
         }
 #endif
+#if !WRONGGPU_FG
+        // ---- a build without the frame generation choice (the default): no FG setting anywhere; the keys refused by name -------
+        {
+            Profile fp = DefaultProfile();
+            const string before = ProfileText(fp);
+            wstring fwhy;
+            for (const char* k : kFgKeys) require(!FindSetting(k), "no frame generation choice: no FG setting in the schema");
+            require(!SetSetting(fp, "fg", "on", &fwhy) && fwhy == kNoFgChoice && !SetSetting(fp, "fg_preset", "B", &fwhy) && fwhy == kNoFgChoice &&
+                        !SetSetting(fp, "fg_multiplier", "3", &fwhy) && fwhy == kNoFgChoice && !SetSetting(fp, "fg_presenter", "hwfq", &fwhy) && fwhy == kNoFgChoice,
+                    "no frame generation choice: set fg / fg_preset / fg_multiplier / fg_presenter refused by name");
+            require(ProfileText(fp) == before && before.find("fg") == string::npos && fp.v.count("fg") == 0, "no frame generation choice: profile.ini unchanged, no fg line");
+            for (auto& kv : FrontEndStateKeys(fp)) require(!IsFgKey(kv.first), "no frame generation choice: the state keys hold no FG key");
+            static const EmbeddedData noFgMap{nullptr, 0, 900, L"00", 0, L"", 0, L"0.7.0"};
+            Context nfc;
+            nfc.data = &noFgMap;
+            require(!SelectPreset(nfc, L"FG", fwhy) && !nfc.presetFG, "no frame generation choice: its converter data is not in the build (model convert --preset=FG refused)");
+        }
+#endif
+        // ---- frame generation (fg.h): the library by its version (synthetic PE files), settings.ini beside the other keys ----
+        {
+            const wstring fgRoot = TempFolder() + L"-fg";
+            RemoveTree(fgRoot);
+            EnsureDir(fgRoot);
+            const wstring oldGame = Join(fgRoot, L"OldGame"), newGame = Join(fgRoot, L"NewGame"), mixed = Join(fgRoot, L"Mixed"), none = Join(fgRoot, L"NoFg");
+            for (const wstring& d : {oldGame, newGame, Join(mixed, L"a"), Join(mixed, L"b"), none}) EnsureDir(d);
+            auto putDll = [](const wstring& path, uint32_t ms, uint32_t ls) {
+                const string b = MockDll({{L"ProductName", L"Synthetic FG test library"}, {L"FileVersion", L"synthetic"}}, string(64, 'x'), ms, ls);
+                WriteFileAtomic(path, b.data(), b.size());
+            };
+            putDll(Join(oldGame, L"nvngx_dlssg.dll"), (3u << 16) | 7u, (10u << 16) | 0u);        // 3.7.10.0
+            putDll(Join(newGame, L"nvngx_dlssg.dll"), (310u << 16) | 2u, (1u << 16) | 0u);       // 310.2.1.0
+            putDll(Join(mixed, L"a\\nvngx_dlssg.dll"), (3u << 16) | 7u, 0u);                    // 3.7.0.0
+            putDll(Join(mixed, L"b\\nvngx_dlssg.dll"), (310u << 16) | 1u, 0u);                  // 310.1.0.0
+            putDll(Join(none, L"nvngx_dlss.dll"), (310u << 16) | 5u, 0u);                       // the upscaler's file, not frame generation's
+            const FgLibrary ol = CheckFgLibrary(Join(oldGame, L"nvngx_dlssg.dll"));
+            require(ol.verdict == FgLibrary::TOO_OLD && ol.version == L"3.7.10.0" && ol.why == L"version 3.7.10.0 has no frame-generation model (version 310.1 or newer is needed)",
+                    "fg library: a 3.7 library is refused by its version (read from its version resource)");
+            const FgLibrary nl = CheckFgLibrary(Join(newGame, L"nvngx_dlssg.dll"));
+            require(nl.usable() && nl.version == L"310.2.1.0", "fg library: a 310.2 library is a candidate");
+            wstring lib, why;
+            require(CheckFgEnable(oldGame, false, &lib, &why) == FgEnable::TOO_OLD && lib.empty() && why.find(L"is version 3.7.10.0") != wstring::npos &&
+                        why.find(L"310.1 or newer") != wstring::npos && why.find(L"stays off") != wstring::npos && why.find(L"--preset=FG") != wstring::npos,
+                    "fg enable: only a 3.7 library and no data: refused, the version and the way out named");
+            require(CheckFgEnable(oldGame, true, &lib, &why) == FgEnable::READY, "fg enable: the data ready (from another game): a game with a library may turn it on");
+            require(CheckFgEnable(newGame, false, &lib, &why) == FgEnable::CONVERT && IEq(lib, Join(newGame, L"nvngx_dlssg.dll")), "fg enable: a 310.2 library converts");
+            const std::vector<FgLibrary> ml = GameFgLibraries(mixed);
+            require(ml.size() == 2 && ml[0].usable() && ml[0].version == L"310.1.0.0" && ml[1].verdict == FgLibrary::TOO_OLD &&
+                        CheckFgEnable(mixed, false, &lib, &why) == FgEnable::CONVERT && IEq(lib, Join(mixed, L"b\\nvngx_dlssg.dll")),
+                    "fg enable: a game with an old and a new library converts from the new one");
+            require(CheckFgEnable(none, false, &lib, &why) == FgEnable::NO_LIBRARY && CheckFgEnable(none, true, &lib, &why) == FgEnable::NO_LIBRARY,
+                    "fg enable: nvngx_dlss.dll alone is no frame generation library");
+
+            // settings.ini: the FG keys written beside the front end's and RR's keys, read back; the others untouched
+            const wstring sg = Join(fgRoot, L"Installed");
+            EnsureDir(Join(sg, wgstate::kStateFolder));
+            Context sctx;
+            require(WriteStateKeys(sctx, sg, {{"upscaler", "network"}, {"pre_exposure", "original"}, {"rr_mode", "accurate"}, {"rr_enabled", "1"}}) == 1,
+                    "fg settings.ini: the other keys written first");
+            Profile fp;
+            fp.v = {{"fg", "on"}, {"fg_preset", "C"}, {"fg_multiplier", "6"}, {"fg_presenter", "dxgi_tearing"}};
+            require(WriteStateKeys(sctx, sg, FgStateKeys(fp, wgstate::ReadSettings(sg).kv, true)) == 1, "fg settings.ini: the four keys written");
+            wgstate::Settings st = wgstate::ReadSettings(sg);
+            FgState fs = FgStateOf(st.kv);
+            require(fs.present && fs.issues.empty() && fs.v["fg"] == "on" && fs.v["fg_preset"] == "C" && fs.v["fg_multiplier"] == "6" && fs.v["fg_presenter"] == "dxgi_tearing",
+                    "fg settings.ini: round trip of the four keys");
+            require(*wgstate::Get(st, "upscaler") == "network" && *wgstate::Get(st, "pre_exposure") == "original" && *wgstate::Get(st, "rr_mode") == "accurate" &&
+                        *wgstate::Get(st, "rr_enabled") == "1" && ReadRrSettings(sg).mode == "accurate",
+                    "fg settings.ini: the upscaler and RR keys stay as they were");
+            require(WriteStateKeys(sctx, sg, FgStateKeys(fp, st.kv, true)) == 0, "fg settings.ini: the same values again: nothing written");
+            fp.v = {{"fg", "off"}};
+            require(WriteStateKeys(sctx, sg, FgStateKeys(fp, wgstate::ReadSettings(sg).kv, true)) == 1 && FgStateOf(wgstate::ReadSettings(sg).kv).v["fg"] == "off" &&
+                        FgStateOf(wgstate::ReadSettings(sg).kv).v["fg_preset"] == "A",
+                    "fg settings.ini: turned off again: off (and the defaults) written down");
+            // the effective wronggpu.ini (get, status, a profile's import) never takes an FG key for a runtime option
+            const string eff = WithFrontEndState("[fsr]\r\nruntime_options = timing_log=1\r\n", wgstate::ReadSettings(sg).kv);
+            require(eff.find("fg") == string::npos && OptionsOf(eff).find("pre_exposure=original") != string::npos,
+                    "fg settings.ini: the FG keys stay out of the effective runtime_options; the runtime keys go in");
+            // a game never opted in: nothing about frame generation is written
+            const wstring plain = Join(fgRoot, L"Plain");
+            EnsureDir(Join(plain, wgstate::kStateFolder));
+            require(WriteStateKeys(sctx, plain, {{"upscaler", "network"}}) == 1, "fg: a plain game's state");
+            string plainBefore, plainAfter;
+            ReadAll(wgstate::SettingsPathOf(plain), plainBefore);
+            const Profile dp = DefaultProfile();
+            const std::vector<std::pair<string, string>> none2 = FgStateKeys(dp, wgstate::ReadSettings(plain).kv, true);
+            require(none2.empty() && WriteStateKeys(sctx, plain, {{"upscaler", "network"}}) == 0, "fg: a game never opted in: no FG key to write");
+            ReadAll(wgstate::SettingsPathOf(plain), plainAfter);
+            require(plainAfter == plainBefore && plainAfter.find("fg") == string::npos, "fg: a game never opted in: settings.ini byte for byte as before");
+            RemoveTree(fgRoot);
+        }
         // ---- validation -----------------------------------------------------------------------------------------
         string n; wstring why;
         const SettingDef* exec = FindSetting("executor");
@@ -2307,16 +2400,43 @@ int main() {
                         "Cyberpunk 2077: never direct; RR only by its files (its row adds no use)");
             }
             {   // the install's OptiScaler from its record: the proxy's copy entry has the edition DLL's hash
-                const wstring ed = PinnedEdition().dllSha256;
+                const EditionInfo pin = PinnedEdition();
+                require(wstring(kEditionPage).find(L"wronggpu-edition-20261127.1") != wstring::npos &&
+                        pin.file == L"OptiScaler_v10.0.0-pre1_20261127_WrongGPU-edition-v6.zip" &&
+                        pin.size == 185383587ull &&
+                        IEq(pin.sha256, L"1876b742ac5b20b35eee161df223ec02c9cdb71274c7a1e3a7028a9bfcf7fca4") &&
+                        IEq(pin.dllSha256, L"d377dfb47a4d635c8fa7adc71845cee5018d0507f054cd12a74e1039709727ab") &&
+                        pin.version.find(L"v6") != wstring::npos,
+                        "PinnedEdition pins WrongGPU edition v6 (tag, file, size, archive sha256, DLL sha256, version)");
+                const wstring ed = pin.dllSha256;
+                const wstring v5 = L"ff6f06ca2f8e761016f41313e2533fd176623a7a85f9e9169c9fc003b227826d";
+                require(IsPriorEditionHash(v5) && !IsPriorEditionHash(ed) &&
+                        !IsPriorEditionHash(L"0000000000000000000000000000000000000000000000000000000000000000"),
+                        "IsPriorEditionHash: v5 recognised as prior edition; v6 and foreign hashes are not");
                 Record er; er.proxy = L"dxgi.dll";
                 er.e.push_back({L"copy", L"dxgi.dll", false, L"-", ed, L"wg-optibundle"});
-                require(!ed.empty() && RecordHasEdition(er), "a record whose OptiScaler DLL has the edition's hash: the edition");
+                require(!ed.empty() && RecordHasEdition(er) && !RecordHasPriorEdition(er),
+                        "a record whose OptiScaler DLL has the v6 edition's hash: the edition, not outdated");
+                er.e.back().inst = v5;
+                require(!RecordHasEdition(er) && RecordHasPriorEdition(er),
+                        "a record whose OptiScaler DLL has the v5 edition's hash: prior edition due for upgrade");
                 er.e.back().inst = L"0000000000000000000000000000000000000000000000000000000000000000";
-                require(!RecordHasEdition(er), "another OptiScaler DLL: not the edition");
+                require(!RecordHasEdition(er) && !RecordHasPriorEdition(er), "another OptiScaler DLL: neither current nor prior edition");
                 Record nr; nr.e.push_back({L"copy", L"winmm.dll", false, L"-", ed, L"wg-optibundle"});
                 require(RecordHasEdition(nr), "no proxy line: OptiScaler's DLL under a proxy name with the edition's hash");
                 Record pr; pr.proxy = L"dxgi.dll"; pr.e.push_back({L"copy", L"plugins\\WrongGPU.asi", false, L"-", ed, L"wg"});
                 require(!RecordHasEdition(pr), "the hash on another file than the proxy: not the edition");
+                // UpdateDue / InstalledLabel: an install with an older edition (v5) is marked for update even at the same WrongGPU version
+                {
+                    EmbeddedData pm{}; pm.version = L"0.7.0";
+                    Context uctx; uctx.data = &pm;
+                    GameEntry ge; ge.hasRecord = true; ge.installedVersion = L"0.7.0"; ge.optiEdition = false; ge.optiEditionOutdated = true;
+                    require(UpdateDue(ge, uctx) && InstalledLabel(ge).find(L"older OptiScaler edition") != wstring::npos,
+                            "UpdateDue / InstalledLabel: an install on v5 is due for update with the older-edition label");
+                    ge.optiEdition = true; ge.optiEditionOutdated = false;
+                    require(!UpdateDue(ge, uctx) && InstalledLabel(ge) == L"0.7.0",
+                            "UpdateDue / InstalledLabel: an install on v6 at the current version is kept");
+                }
                 require(RrDirectNoEditionText(L"Some Game").find(L"no OptiScaler edition") != wstring::npos &&
                         RrDirectNoEditionText(L"Some Game").find(L"isn't offered in Some Game, and the game") != wstring::npos,
                         "the warning carries the words the window turns into the player's sentence (ui_words.cpp)");
@@ -2710,6 +2830,88 @@ int main() {
 #endif
             SetEnvironmentVariableW(L"LOCALAPPDATA", had ? saved : nullptr);
             SetEnvironmentVariableW(L"WRONGGPU_TEST_REAL_DRIVER_CACHE", hadReal ? savedReal : nullptr);
+        }
+
+        // 0.7.0: each SR model's mode (Layer::Mode: m_mode, and k_mode / l_mode with those models), Fast by default: validated,
+        // persisted in the game's state folder (settings.ini, never wronggpu.ini, no outside edit), and the choices made in the
+        // game (WrongGPU.asi's card: settings.ini; OptiScaler's list / the plugin: the model choice record) folded back into the
+        // game's profile (FoldSrFromGame, GameProfile)
+        {
+            const SettingDef* mm = FindSetting("m_mode");
+            require(mm && mm->layer == Layer::Mode && mm->tier == Tier::Basic && string(mm->def) == "fast" && string(mm->values) == "fast|exact",
+                    "m_mode: a Basic setting of its own layer, fast by default, fast or exact");
+            require((FindSetting("k_mode") != nullptr) == (WRONGGPU_MODEL_K != 0) && (FindSetting("l_mode") != nullptr) == (WRONGGPU_MODEL_L != 0),
+                    "k_mode / l_mode only in builds with Model K / Model L");
+            Profile mp = DefaultProfile();
+            wstring why;
+            require(mp.get("m_mode") == "fast" && mp.isDefault("m_mode"), "the default profile: Model M Fast");
+            require(SetSetting(mp, "m_mode", " EXACT ", &why) && mp.get("m_mode") == "exact", "m_mode=exact (case and spaces folded)");
+            require(!SetSetting(mp, "m_mode", "hybrid", &why) && why.find(L"allowed: fast, exact") != wstring::npos && mp.get("m_mode") == "exact",
+                    "m_mode refuses anything but fast / exact, and says what is allowed");
+            require(ModeKeyOf("m") == string("m_mode") && ModeKeyOf("") == string("m_mode") && ModeKeyOf("x") == nullptr,
+                    "ModeKeyOf: Model M's mode key (also for an empty model)");
+            if (FindSetting("k_mode")) require(ModeKeyOf("k") == string("k_mode") && SetSetting(mp, "k_mode", "exact", &why), "k_mode=exact");
+            if (FindSetting("l_mode")) require(ModeKeyOf("l") == string("l_mode") && SetSetting(mp, "l_mode", "exact", &why), "l_mode=exact");
+            // profile.ini: a non-default mode is written and read back; Fast (the default) leaves profile.ini as before the modes
+            const string mtext = ProfileText(mp);
+            require(mtext.find("m_mode=exact\r\n") != string::npos && ProfileText(DefaultProfile()).find("m_mode=") == string::npos,
+                    "profile.ini: m_mode=exact written; the default Fast not written");
+            const wstring mpath = Join(dir, L"modes-profile.ini");
+            WriteFileAtomic(mpath, mtext.data(), mtext.size());
+            Profile mback;
+            require(LoadProfile(mpath, mback) && mback.get("m_mode") == "exact", "profile.ini round trip keeps m_mode=exact");
+            // the state keys: the modes go to settings.ini explicitly (defaults too); wronggpu.ini never holds them
+            const auto keys = FrontEndStateKeys(mp);
+            auto stateValue = [&](const char* k) { for (auto& kv : keys) if (kv.first == k) return kv.second; return string("<none>"); };
+            require(stateValue("m_mode") == "exact" && FrontEndStateKeys(DefaultProfile()).size() == keys.size(),
+                    "FrontEndStateKeys: m_mode (explicit, also when it is the default)");
+            if (FindSetting("k_mode")) require(stateValue("k_mode") == "exact", "FrontEndStateKeys: k_mode");
+            if (FindSetting("l_mode")) require(stateValue("l_mode") == "exact", "FrontEndStateKeys: l_mode");
+            string rendered;
+            require(RenderWronggpuIni(mp, "[fsr]\r\nupscaler = network\r\n", rendered, &why) && rendered.find("m_mode") == string::npos &&
+                        rendered.find("k_mode") == string::npos && rendered.find("l_mode") == string::npos,
+                    "wronggpu.ini never gets a mode (runtime_options untouched)");
+            const string withState = WithFrontEndState("[fsr]\r\nruntime_options = model=M\r\n", keys);
+            require(withState.find("m_mode") == string::npos && OptionsOf(withState).find("model=M") != string::npos,
+                    "the effective wronggpu.ini (state folder over the file) holds no mode item");
+            require(OutsideEdits(mp, withState, "").empty() && IgnoredImportKeys(withState).empty(),
+                    "the modes in settings.ini are no outside edit and no ignored developer key");
+            require(ImportProfile(withState, "").get("m_mode") == "fast", "an import of wronggpu.ini never invents a mode");
+
+            // a game whose settings.ini (WrongGPU.asi's card wrote it) and model choice record say what the player chose in the game
+            const wstring sg = Join(dir, L"srgame");
+            EnsureDir(StateDir(sg));
+            Profile fold = DefaultProfile();
+            require(!FoldSrFromGame(sg, fold), "nothing in the state folder: nothing to fold");
+            require(wgstate::SetSettings(sg, {{"m_mode", "exact"}}).ok(), "(the card saved m_mode=exact)");
+            require(FoldSrFromGame(sg, fold) && fold.get("m_mode") == "exact" && !FoldSrFromGame(sg, fold), "settings.ini's m_mode folds into the profile once");
+            require(wgstate::SetSettings(sg, {{"m_mode", "nonsense"}}).ok() && !FoldSrFromGame(sg, fold) && fold.get("m_mode") == "exact",
+                    "a value that is not a mode is not folded");
+            require(wgstate::SetSettings(sg, {{"m_mode", "fast"}}).ok() && FoldSrFromGame(sg, fold) && fold.get("m_mode") == "fast", "back to fast");
+            if (FindSetting("model")) {
+                const std::filesystem::path rec = Join(StateDir(sg), wgchoice::kRecordFile);
+                wgchoice::Record after;
+                std::string err;
+                const char other = WRONGGPU_MODEL_L ? 'L' : 'K';
+                const string otherKey(1, static_cast<char>(tolower(other)));
+                require(wgchoice::RecordChoice(rec, other, wgchoice::Source::Launcher, &after, &err) == wgchoice::Outcome::Written, "(a launcher record)");
+                require(!FoldSrFromGame(sg, fold) && fold.get("model") == "m", "the launcher's own record is not folded (its decision, not the player's in the game)");
+                require(wgchoice::RecordChoice(rec, other, wgchoice::Source::Plugin, &after, &err) == wgchoice::Outcome::Written, "(the plugin's record)");
+                require(FoldSrFromGame(sg, fold) && fold.get("model") == otherKey && !FoldSrFromGame(sg, fold), "the model chosen in the game folds into the profile once");
+                const char* otherMode = ModeKeyOf(otherKey);
+                require(otherMode && wgstate::SetSettings(sg, {{otherMode, "exact"}}).ok() && FoldSrFromGame(sg, fold) && fold.get(otherMode) == "exact" &&
+                            fold.get("m_mode") == "fast",
+                        "that model's mode folds too; Model M's stays");
+                require(wgchoice::RecordChoice(rec, 'M', wgchoice::Source::Ffx, &after, &err) == wgchoice::Outcome::Written && FoldSrFromGame(sg, fold) &&
+                            fold.get("model") == "m",
+                        "OptiScaler's list (source ffx) back to Model M folds too");
+                // GameProfile: profile.ini, then both folds (the game page shows what the player chose in the game)
+                SaveProfile(ProfilePath(sg), DefaultProfile());
+                require(wgchoice::RecordChoice(rec, other, wgchoice::Source::Plugin, &after, &err) == wgchoice::Outcome::Written, "(the plugin's record again)");
+                const Profile shown = GameProfile(sg);
+                require(shown.get("model") == otherKey && shown.get(otherMode) == "exact" && shown.get("m_mode") == "fast",
+                        "GameProfile folds the model choice record and settings.ini's modes over profile.ini");
+            }
         }
 
         RemoveTree(dir);

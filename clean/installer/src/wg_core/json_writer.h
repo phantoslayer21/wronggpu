@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: a small JSON writer (owned-files.json, `status --json`, `--out` results). Writing only; no
 // third-party code. Written for this project.
 #pragma once

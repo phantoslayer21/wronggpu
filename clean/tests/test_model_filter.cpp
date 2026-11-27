@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model loading of the optional group filter / output_taps (spec 08 draft 2), without a GPU: loads a model with
 // clean/runtime/model.cpp and prints what the loader found. Driven by clean/tests/test_model_filter.py.
 //

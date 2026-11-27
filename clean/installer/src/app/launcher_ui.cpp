@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher: the window (build/launcher-design.md section 3; the "Bench" look of build/launcher/ui-mockup2,
 // light and dark, following Windows' app mode unless Settings picks one): the Library of games as a rack of bays, a page per game (Install / Update / Repair / Uninstall / Roll back / Play, Clean up /
 // Adopt for leftover files, the Basic settings, the last run with its warnings, WrongGPU's OptiScaler setup and what
@@ -29,6 +29,7 @@
 #include "wg_core/optiscaler.h"
 #include "wg_core/payload.h"
 #include "wg_core/pe.h"
+#include "wg_core/fg.h"
 #include "wg_core/rr.h"
 #include "wg_core/rrconfig.h"
 
@@ -1115,6 +1116,15 @@ void ReadModelState(HealthMsg& m) {
     while (!m.hip.empty() && (m.hip.back() == L'\n' || m.hip.back() == L'\r')) m.hip.pop_back();
     m.rr = RrDataValid(g.ctx, &m.rrWhy);  // the Ray Reconstruction data (it hashes the file too)
     if (m.rr) m.rrSource = RrDataSource();
+#if WRONGGPU_MODEL_K
+    m.k = PresetDataReady(L'K', &m.kWhy);
+#endif
+#if WRONGGPU_MODEL_L
+    m.l = PresetDataReady(L'L', &m.lWhy);
+#endif
+#if WRONGGPU_FG
+    m.fg = PresetDataReady(L'G', &m.fgWhy);  // frame generation's data (fg.h)
+#endif
 }
 // The model data's state shown: from the newest read only. Reads run on workers and end in any order (a conversion's own read,
 // the one after every operation): one that began before the state shown now (it may have caught the file mid-swap) is
@@ -1123,8 +1133,11 @@ static unsigned healthTaken = 0;
 void TakeModelState(const HealthMsg& m) {
     if (m.seq && m.seq < healthTaken) return;
     if (m.seq) healthTaken = m.seq;
-    v.modelReady = m.model; v.modelWhy = m.why; v.modelSource = m.source; v.hipLine = m.hip;
+    v.modelReady = m.model; v.modelWhy = m.why; v.modelSource = m.source;
+    if (!m.hip.empty() || v.hipLine.empty()) v.hipLine = m.hip;
     v.rrReady = m.rr; v.rrWhy = m.rrWhy; v.rrSource = m.rrSource;
+    v.modelKReady = m.k; v.modelKWhy = m.kWhy; v.modelLReady = m.l; v.modelLWhy = m.lWhy;
+    v.fgReady = m.fg; v.fgWhy = m.fgWhy;
 }
 void RefreshModelNow() { HealthMsg m; ReadModelState(m); TakeModelState(m); }  // ui-dump only (no window on screen): a live window reads it on a worker
 // At start-up, until StartHealth's check ends (it reads and hashes both model files: seconds on a hard disk): the files on
@@ -1139,6 +1152,15 @@ void TakeModelStateOnDisk() {
     while (!m.hip.empty() && (m.hip.back() == L'\n' || m.hip.back() == L'\r')) m.hip.pop_back();
     m.rr = g.ctx.data && g.ctx.data->fMapId && IsFile(RrDataFile());
     if (m.rr) m.rrSource = RrDataSource();
+#if WRONGGPU_MODEL_K
+    m.k = IsFile(PresetDataFile(L'K'));
+#endif
+#if WRONGGPU_MODEL_L
+    m.l = IsFile(PresetDataFile(L'L'));
+#endif
+#if WRONGGPU_FG
+    m.fg = IsFile(PresetDataFile(L'G'));
+#endif
     TakeModelState(m);
 }
 // Off the UI thread: at start-up (with the graphics card), and after every operation (an install can convert the model,
@@ -1175,12 +1197,16 @@ void RunTask(int kind, std::function<std::function<void()>()> work) {
     // said as it starts (its button turns "Converting..." and keeps the focus): Narrator hears the job, then its result
     // (collecting logs has its own toast; the first run its sheet)
     UiaNotify(kind == T_MODEL ? L"Converting the Model M data\u2026" : kind == T_RRDATA ? L"Converting the Ray Reconstruction data\u2026"
+              : kind == T_MODELK ? L"Converting the Model K data\u2026" : kind == T_MODELL ? L"Converting the Model L data\u2026"
+              : kind == T_MODELFG ? L"Converting the frame generation data\u2026"
               : kind == T_SELFINSTALL ? L"Installing WrongGPU for this user\u2026" : kind == T_SELFUNINSTALL ? L"Uninstalling the launcher\u2026" : L"");
     Invalidate();
     HWND hwnd = v.hwnd;
     // a failure the task did not expect ends as a note titled with what it was doing (the window stays, v.busy clears), never
     // as a crash half way
     const wstring title = kind == T_MODEL ? L"Model M couldn't be converted."
+                          : kind == T_MODELK ? L"Model K couldn't be converted." : kind == T_MODELL ? L"Model L couldn't be converted."
+                          : kind == T_MODELFG ? L"The frame generation data couldn't be converted."
                           : kind == T_RRDATA ? L"The Ray Reconstruction data couldn't be converted."
                           : kind == T_SELFINSTALL || (kind == T_FIRSTRUN && v.first.installOffer && v.first.choice == 1) ? L"WrongGPU couldn't be installed for this user."
                           : kind == T_FIRSTRUN ? L"WrongGPU couldn't be set up."  // portable, or no choice: the model and the adoptions only
@@ -1507,10 +1533,19 @@ void OpenGame(int index) {
 void MenuCommand(int owner, int cmd) {
     if (owner == ID_S_MODELMORE) { if (cmd == ID_S_MODELFILE || cmd == ID_S_RECONVERT) Activate(cmd); return; }  // Settings > Model data > Options...
     if (owner == ID_S_RRMORE) { if (cmd == ID_S_RRFILE || cmd == ID_S_RRCONVERT) Activate(cmd); return; }  // ... > Ray Reconstruction data > Options...
+    if (owner == ID_S_KMORE) { if (cmd == ID_S_KFILE || cmd == ID_S_KCONVERT) Activate(cmd); return; }  // ... > Model K data > Options...
+    if (owner == ID_S_LMORE) { if (cmd == ID_S_LFILE || cmd == ID_S_LCONVERT) Activate(cmd); return; }  // ... > Model L data > Options...
+    if (owner == ID_S_FGMORE) { if (cmd == ID_S_FGFILE || cmd == ID_S_FGCONVERT) Activate(cmd); return; }  // ... > Frame generation data > Options...
     const GameEntry e = v.cur;
     if (owner == ID_G_FILTER) {  // output filter
         static const char* const f[] = {"default", "original", "analytic", "quality5", "quality9"};
         if (cmd >= M_FILTER0 && cmd < M_FILTER0 + 5) SetSetting(v.edit, "output_filter", f[cmd - M_FILTER0], nullptr);
+        Invalidate();
+        return;
+    }
+    if (owner == ID_G_FGPRESENTER) {  // frame generation's presenter (fg.h)
+        static const char* const f[] = {"auto", "dxgi_tearing", "dxgi_vsync", "hwfq"};
+        if (cmd >= M_FGPRESENTER0 && cmd < M_FGPRESENTER0 + 4) SetSetting(v.edit, "fg_presenter", f[cmd - M_FGPRESENTER0], nullptr);
         Invalidate();
         return;
     }
@@ -1583,7 +1618,8 @@ void MenuCommand(int owner, int cmd) {
         case M_RESET: {
             const Profile d = DefaultProfile();
             // the Upscaler section's settings only: the FPS overlay is OptiScaler's (its section, and "Reset OptiScaler settings...")
-            for (auto* k : {"wronggpu", "executor", "output_filter", "pre_exposure", "sparkle_guard"}) SetSetting(v.edit, k, d.get(k), nullptr);
+            for (auto* k : {"wronggpu", "model", "m_mode", "k_mode", "l_mode", "executor", "output_filter", "pre_exposure", "sparkle_guard"})
+                if (FindSetting(k)) SetSetting(v.edit, k, d.get(k), nullptr);
             ShowToast(v.edit.v == v.saved.v ? L"These settings are the defaults already." : L"Default settings are shown. Apply to use them.", 0);
             Invalidate();
             return;
@@ -3283,6 +3319,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (v.busy) {  // what it waits for, in words
                 const wstring what = v.task == T_COLLECT ? L"Still collecting logs." : v.task == T_MODEL ? L"Still converting the Model M data."
                                      : v.task == T_RRDATA ? L"Still converting the Ray Reconstruction data."
+                                     : v.task == T_MODELK ? L"Still converting the Model K data." : v.task == T_MODELL ? L"Still converting the Model L data."
+                                     : v.task == T_MODELFG ? L"Still converting the frame generation data."
                                      : v.task == T_SELFINSTALL || (v.task == T_FIRSTRUN && v.first.installOffer && v.first.choice == 1) ? L"Still installing WrongGPU for this user."
                                      : v.task == T_FIRSTRUN ? L"Still setting up WrongGPU."
                                      : v.task == T_SELFUNINSTALL ? L"Still uninstalling the launcher."
@@ -3329,6 +3367,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 HWND CreateLauncherWindow(bool live) {
     v.live = live;
+    v.fgBuild = FgPayloadAvailable(g.ctx);  // this build has frame generation's files (fg.h)
     v.rrBuild = RrPayloadAvailable(g.ctx);  // this build has the RR files: the RR rows and sections can show (rr-notes.md)
     v.rrEdition = true;  // WrongGPU's edition of OptiScaler (some games' RR needs it): downloaded (optiedition.h)
     SetAccent(AccentFromKey(gl.global.accent), WindowsAccentRgb());

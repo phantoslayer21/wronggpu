@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Host side of the spec 52 input stage: the per-frame constants (52.1.1, 52.8), the camera maps of 52.7.3 and the
 // packing of the constant block that clean/rr_f/kernels/rr_input.hlsl reads (layout K_* there and in
 // clean/rr_f/gpu/input_stage.py, which is the reference this header is tested against: tests/test_input_host.py).

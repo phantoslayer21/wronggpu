@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: the Context, the log file, the model data folder and the embedded converter map. Written for
 // this project.
 #include "context.h"
@@ -48,14 +48,33 @@ wstring ModelBaseDir() { return Join(AppDataPath(), L"model"); }
 #if WRONGGPU_PRESET_K
 int MapResourceId(Context& ctx, bool k) { return k ? ctx.data->kMapId : ctx.data->mapId; }
 const wchar_t* MapSha256(Context& ctx, bool k) { return k ? ctx.data->kMapSha256 : ctx.data->mapSha256; }
-wstring ModelDir(Context& ctx) { return ctx.presetL ? Join(ModelBaseDir(), L"L") : ctx.presetK ? Join(ModelBaseDir(), L"K") : ModelBaseDir(); }
+wstring ModelDir(Context& ctx) {
+    return ctx.presetFG ? Join(ModelBaseDir(), L"FG") : ctx.presetL ? Join(ModelBaseDir(), L"L") : ctx.presetK ? Join(ModelBaseDir(), L"K") : ModelBaseDir();
+}
 #else
 int MapResourceId(Context& ctx, bool) { return ctx.data->mapId; }
 const wchar_t* MapSha256(Context& ctx, bool) { return ctx.data->mapSha256; }
-wstring ModelDir(Context& ctx) { return ctx.presetL ? Join(ModelBaseDir(), L"L") : ModelBaseDir(); }
+wstring ModelDir(Context& ctx) { return ctx.presetFG ? Join(ModelBaseDir(), L"FG") : ctx.presetL ? Join(ModelBaseDir(), L"L") : ModelBaseDir(); }
 #endif
-wchar_t SelectedPreset(const Context& ctx) { return ctx.presetL ? L'L' : ctx.presetK ? L'K' : L'M'; }
+wchar_t SelectedPreset(const Context& ctx) { return ctx.presetFG ? L'G' : ctx.presetL ? L'L' : ctx.presetK ? L'K' : L'M'; }
+wstring PresetName(wchar_t preset) { return preset == L'G' ? wstring(L"FG") : wstring(1, preset); }
 bool SelectPreset(Context& ctx, const wstring& name, wstring& error) {
+    // frame generation (#96): "FG" by name, in a build with its converter map
+    if (name.size() == 2 && towupper(name[0]) == L'F' && towupper(name[1]) == L'G') {
+        if (!ctx.data || !ctx.data->fgMapId) {
+            error = L"This build of WrongGPU has no converter data for frame generation.";
+            return false;
+        }
+        if (ctx.presetFG) return true;
+        ctx.presetFG = true;
+        ctx.presetL = false;
+#if WRONGGPU_PRESET_K
+        ctx.presetK = false;
+#endif
+        ctx.map = wgc::LoadedMap();  // the other model's map is loaded on first use (LoadEmbeddedMap)
+        ctx.mapError.clear();
+        return true;
+    }
     const wchar_t c = name.size() == 1 ? static_cast<wchar_t>(towupper(name[0])) : L'\0';
 #if WRONGGPU_PRESET_K
     const wstring known = L"M, L or K";
@@ -65,7 +84,8 @@ bool SelectPreset(Context& ctx, const wstring& name, wstring& error) {
     const bool isK = false;
 #endif
     if (c != L'M' && c != L'L' && !isK) {
-        error = L"Unknown model \"" + name + L"\" (the models of this build: " + known + L").";
+        error = L"Unknown model \"" + name + L"\" (the models of this build: " + known +
+                (ctx.data && ctx.data->fgMapId ? L"; FG: frame generation" : L"") + L").";
         return false;
     }
     if (c == L'L' && (!ctx.data || !ctx.data->lMapId)) {
@@ -73,6 +93,7 @@ bool SelectPreset(Context& ctx, const wstring& name, wstring& error) {
         return false;
     }
     if (c == SelectedPreset(ctx)) return true;
+    ctx.presetFG = false;
     ctx.presetL = c == L'L';
 #if WRONGGPU_PRESET_K
     ctx.presetK = c == L'K';
@@ -92,13 +113,16 @@ bool LoadEmbeddedMap(Context& ctx) {
     if (ctx.map.map) return true;
     // Model L: its own map, loaded as preset L (the converter refuses a map that names another preset: "converter data
     // damaged"). Models M and K: as before (the map's own preset).
-    const bool l = ctx.presetL;
+    // Frame generation (#96): its own map, loaded as preset FG.
+    const bool l = ctx.presetL, fg = ctx.presetFG;
+    if (fg && !ctx.data->fgMapId) { ctx.mapError = L"this build has no converter data for frame generation"; return false; }
     if (l && !ctx.data->lMapId) { ctx.mapError = L"this build has no converter data for Model L"; return false; }
     DWORD sz = 0;
-    const void* d = ResourceData(l ? ctx.data->lMapId : MapResourceId(ctx, ctx.presetK), sz);
-    if (!d || Sha256Bytes(d, sz) != (l ? ctx.data->lMapSha256 : MapSha256(ctx, ctx.presetK))) { ctx.mapError = L"the converter data is missing or damaged"; return false; }
+    const void* d = ResourceData(fg ? ctx.data->fgMapId : l ? ctx.data->lMapId : MapResourceId(ctx, ctx.presetK), sz);
+    const wchar_t* const want = fg ? ctx.data->fgMapSha256 : l ? ctx.data->lMapSha256 : MapSha256(ctx, ctx.presetK);
+    if (!d || Sha256Bytes(d, sz) != want) { ctx.mapError = L"the converter data is missing or damaged"; return false; }
     const wgc::Result r = wgc::load_map_bytes(string(static_cast<const char*>(d), sz), ctx.map,
-                                               [&ctx](const string& s) { LogLine(ctx, L"converter: " + FromUtf8(s)); }, l ? "L" : "");
+                                               [&ctx](const string& s) { LogLine(ctx, L"converter: " + FromUtf8(s)); }, fg ? "FG" : l ? "L" : "");
     if (r.code != wgc::kOk) { ctx.mapError = FromUtf8(r.message); return false; }
     return true;
 }

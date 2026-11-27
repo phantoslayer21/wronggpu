@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame-uniform input constants, identical FP32 operation order to ki_host in k_io.hip.
 // Native tiled callers establish the geometry guard before using these helpers.
 #pragma once

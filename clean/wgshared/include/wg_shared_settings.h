@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 /* WrongGPU shared settings block, version 1 (i15). Owned by WrongGPU; clean/wgshared/include/wg_shared_settings.h.
  *
  * One process-local block that every WrongGPU DLL in a game process (SR front end, RR plugin, RR runtime, SR runtime)
@@ -17,7 +17,8 @@
  * RR call) and then only writes what its own ini / OptiScaler.ini polling gives. A module that did not win never
  * writes a slot, with one exception (slot owners, i20): the RR plugin's own menu panel owns rr_mode (owner 2026-10-31:
  * RR mode is a box of its own, not an entry of the host's version list) and writes that slot whether or not it won;
- * no other module writes rr_mode. Every writer enters the seqlock by compare-exchange of `generation` from an even
+ * no other module writes rr_mode. Likewise the in-game card of WrongGPU.asi owns the SR mode slots
+ * sr_m_mode / sr_l_mode / sr_k_mode (wg_sr_modes.h; SharedSettings::write_owned_slot). Every writer enters the seqlock by compare-exchange of `generation` from an even
  * value to the next odd one, so two writers never overlap. The creator's seeding happens before publication, so it
  * is not a write in this sense.
  *

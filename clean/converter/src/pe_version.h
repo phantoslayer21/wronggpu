@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Reads the file version of a Windows PE file for display and logs only (spec 08 section 3:
 // the version must never be used to accept or reject a file). Written for this project from
 // Microsoft's public documentation of VS_VERSIONINFO and VS_FIXEDFILEINFO.

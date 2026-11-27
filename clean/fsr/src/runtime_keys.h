@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Keys of the network runtime's options (runtime_options in wronggpu.ini, WG_RUNTIME_OPTIONS), for the .ini reader: a
 // line "network = fused" in [fsr] is a runtime option written on its own line, not a front-end setting (config.cpp
 // ParseConfig appends it to runtime_options with a warning). The list follows the runtime 0.5.1: the D3D12 interop's
@@ -24,7 +24,9 @@ inline bool IsRuntimeOptionKey(const std::string& key) {
         "dec_rdiv", "dec_bdiv", "swin_resident", "post_tf_cpairs", "post_diet", "tf_vdiet", "post_idx", "post_trim",
         "post_sel",
         // model K
-        "model_k_dir", "model_k_map", "network", "fp8_stages", "k_fast", "k_input", "k_diag", "k_head", "input_tiled"};
+        "model_k_dir", "model_k_map", "network", "fp8_stages", "k_fast", "k_input", "k_diag", "k_head", "input_tiled",
+        // the SR models' modes (clean/wgshared/include/wg_sr_modes.h; the front end appends them itself unless one is given)
+        "m_mode", "l_mode", "k_mode", "k_approx"};
     for (const char* k : kKeys)
         if (key == k) return true;
     return false;

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Loading the converted model K; see model_k_load.h. Container: clean/converter/OUTPUT-FORMAT.md.
 #include "model_k_load.h"
 

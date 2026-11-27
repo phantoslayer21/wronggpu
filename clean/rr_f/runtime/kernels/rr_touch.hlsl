@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // clean/rr-f-a14-frame E24 (WrongGPU's own code): rt.touch, a read-only cache warm-up pass. Every lane loads one
 // dword of each of 4 consecutive 128-byte lines of [a0, a0 + a1 * 128) (a1 = lines) so later readers find them in the
 // L2 / Infinity Cache; nothing is written unless a3 != 0 and the sum equals a2 (the runtime always passes a3 = 0; the

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Plain-text descriptions of FidelityFX API structures for the call log. No D3D12 calls; resources are printed
 // from the FfxApiResource fields the game filled in.

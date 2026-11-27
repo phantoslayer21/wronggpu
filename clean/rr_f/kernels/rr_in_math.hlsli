@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Binary32 arithmetic of spec 52.3 / 52.7.2 / 54b.N on the gfx1201 D3D12 path (compile only with gpu/build.py):
 // round to nearest even, f32 subnormal operands and results flushed to zero with the sign kept, where a result that
 // rounds up to the smallest normal stays (round first, then flush). Correctly rounded log2, exp2, rcp, sqrt

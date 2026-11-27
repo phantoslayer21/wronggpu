@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // f16lut proof tool (clean/dx12/f16lut/run.py drives it).
 //   host hip  <oracle.co> <params.bin> <hip.bin>     HIP oracle: per parameter set, out[65536] then row[65536] (u32)
 //   host dx12 <verify.dxil> <params.bin> <hip.bin>   D3D12: per set, orig (post chain) and gen (table generator) for all

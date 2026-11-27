@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L's copies of the converter map's facts agree with the map (data/preset-L.v*.map.json, spec-team output).
 
 Run: python -m unittest discover -s clean/l/tests -t . -p test_l_map.py

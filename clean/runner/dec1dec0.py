@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Stage "dec1dec0" (performance milestone, prototype): the Swin stage dec1 (spec 02) followed by dec0 (spec 05), for
 timing and checking the fused kernel `swin_block_c64_add_dec0[_nc]` (kernels/dec1_dec0.hip) against the separate one.
 

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Generates the installer's embedded resources (replaces build-installer.ps1 of the 0.2.0 installer).
 
     make_payload.py --payload <dir> --map <map.json> --version <x.y.z> [--manifest <setup.manifest>] [--hosted-only]
-                    --out <dir>
+                    [--rr <dir>] [--fg <dir>] --out <dir>
 
 Writes <out>/payload_table.h, <out>/resources.rc and <out>/app.ico. The payload directory mirrors the install folder
 (the folder that holds the game's amd_fidelityfx_dx12.dll): WrongGPU's amd_fidelityfx_dx12.dll (the FSR front end of
@@ -28,6 +28,7 @@ RESERVED = ("amd_fidelityfx_dx12.wronggpu-original.dll", "wronggpu-setup")
 MAP_ID = 900
 MAP_F_ID = 902  # the RR converter map (preset F)
 MAP_L_ID = 903  # Model L's converter map (preset L, #89)
+MAP_FG_ID = 904  # frame generation's converter map (preset FG, #96; a build with WRONGGPU_FG only)
 RR_FIRST_ID = 1601  # the Ray Reconstruction files (--rr)
 RR_FILES = ("plugins\\wronggpu-rr.asi",)  # what an RR folder holds (lower case)
 # release 0.6.0 (owner 2026-11-02: one runtime DLL): the RR runtime is part of the payload's wronggpu_runtime.dll; an RR folder
@@ -38,6 +39,13 @@ RR_LEGACY_RUNTIME = "wronggpu_rr_runtime.dll"
 # as a file)
 RR_VARIANT = re.compile(r"^plugins\\[0-9]+\.[0-9]+\\wronggpu-rr\.asi$")
 RR_INTERFACE = "interposer.json"
+FG_FIRST_ID = 2001  # the frame generation files (--fg): never the payload's ids (1001+) or the RR files' (1601+)
+FG_PLUGIN = "plugins\\wronggpu-fg.asi"  # the frame generation plugin (lower case) as an FG folder holds it
+# Its kernel files, embedded as fg-dxil\<name>.dxil: the plugin reads them from wronggpu-setup\fg-dxil beside itself, and the
+# installer puts them there, next to wherever the plugin goes. An FG folder may hold them in any of these three places (the
+# release's stage folder has fg-dxil\ at its root); one name in two places is refused.
+FG_DXIL = re.compile(r"^(?:(?:plugins\\)?wronggpu-setup\\)?fg-dxil\\([a-z0-9_.-]+\.dxil)$")
+FG_DXIL_LIST = re.compile(r"^(?:(?:plugins\\)?wronggpu-setup\\)?fg-dxil\\manifest\.json$")  # the kernel build's list: not shipped
 
 
 # Never OptiScaler or any file of it (owner 2026-11-02: "The launcher shouldn't include ANY of the optiscaler fork in the
@@ -170,6 +178,50 @@ def rr_files(root):
     return rows, interface
 
 
+def fg_files(root):
+    """The frame generation plugin and its kernels of one FG release build (fg.h): plugins\\WrongGPU-FG.asi and its .dxil kernel
+    files (fg-dxil\\<name>.dxil, or the same under wronggpu-setup\\ or plugins\\wronggpu-setup\\), hashed like the payload and
+    embedded as plugins\\WrongGPU-FG.asi and fg-dxil\\<name>.dxil. Never OptiScaler, an NVIDIA name, a developer runtime, or
+    anything else."""
+    rows, names = [], {}
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        for fn in sorted(filenames):
+            full = os.path.join(dirpath, fn)
+            rel = os.path.relpath(full, root).replace("/", "\\")
+            low = rel.lower()
+            parts = rel.split("\\")
+            if any(p in ("", ".", "..") or ":" in p for p in parts):
+                fail("bad FG folder path %s" % rel)
+            if any(p.lower().startswith(FORBIDDEN_PREFIXES) for p in parts):
+                fail("FG file %s has a name WrongGPU must not use" % rel)
+            if FG_DXIL_LIST.match(low):
+                print("frame generation: %s is the kernel build's list (read here, not shipped)" % rel)
+                continue
+            with open(full, "rb") as f:
+                data = f.read()
+            if optiscaler_file(rel, data):
+                fail("FG folder file %s is OptiScaler: WrongGPU never ships OptiScaler (the launcher downloads its edition)" % rel)
+            refuse_developer_runtime(rel, data, full)
+            if low == FG_PLUGIN:
+                embedded = "plugins\\WrongGPU-FG.asi"
+            elif FG_DXIL.match(low):
+                embedded = "fg-dxil\\" + fn
+            else:
+                fail("FG folder file %s is not plugins\\WrongGPU-FG.asi or fg-dxil\\<name>.dxil (also under wronggpu-setup\\ or "
+                     "plugins\\wronggpu-setup\\)" % rel)
+            if embedded.lower() in names:
+                fail("FG folder files %s and %s are both %s" % (names[embedded.lower()], rel, embedded))
+            names[embedded.lower()] = rel
+            rows.append((embedded, hashlib.sha256(data).hexdigest(), len(data), full))
+    rows.sort(key=lambda r: r[0].lower())
+    if FG_PLUGIN not in names:
+        fail("the FG folder needs plugins\\WrongGPU-FG.asi")
+    if not any(r[0].lower().startswith("fg-dxil\\") for r in rows):
+        fail("the FG folder has no kernel files (fg-dxil\\<name>.dxil): the plugin would find nothing to run")
+    return rows
+
+
 def icon_bmp(n):
     """One 32-bit BMP icon image (BITMAPINFOHEADER, BGRA rows bottom-up, AND mask): a dark rounded square with an
     orange bar and a white W, drawn here so the repository holds no binary art."""
@@ -235,8 +287,11 @@ def main():
                     "(wronggpu_rr_runtime.dll), optionally the plugin's builds for one interface version "
                     "(plugins\\<major>.<minor>\\WrongGPU-RR.asi, with interposer.json); never OptiScaler; omit for an "
                     "installer without them")
+    ap.add_argument("--fg", help="folder with the frame generation plugin (plugins\\WrongGPU-FG.asi) and its kernels (fg-dxil\\<name>.dxil, "
+                    "or the same under wronggpu-setup\\ or plugins\\wronggpu-setup\\); never OptiScaler; omit for an installer without them")
     ap.add_argument("--map-f", help="the RR converter map (preset F); omit for an installer without it")
     ap.add_argument("--map-l", help="Model L's converter map (preset L); omit for an installer without Model L")
+    ap.add_argument("--map-fg", help="frame generation's converter map (preset FG); omit for an installer without frame generation")
     ap.add_argument("--testing", action="store_true", help="a WRONGGPU_TESTING build (CMake passes it): it may embed the test "
                     "suite's stand-in runtime (its build manifest says stand_in); any other build refuses that runtime")
     ap.add_argument("--out", required=True)
@@ -254,6 +309,7 @@ def main():
         with open(a.map_k, "rb") as f:
             map_k_bytes = f.read()
     rr_rows, rr_interface = rr_files(os.path.abspath(a.rr)) if a.rr else ([], "")
+    fg_rows = fg_files(os.path.abspath(a.fg)) if a.fg else []
     map_f_bytes = None
     if a.map_f:
         with open(a.map_f, "rb") as f:
@@ -262,6 +318,10 @@ def main():
     if a.map_l:
         with open(a.map_l, "rb") as f:
             map_l_bytes = f.read()
+    map_fg_bytes = None
+    if a.map_fg:
+        with open(a.map_fg, "rb") as f:
+            map_fg_bytes = f.read()
     os.makedirs(a.out, exist_ok=True)
 
     h = ["// Generated by tools/make_payload.py - do not edit.", "#pragma once",
@@ -281,11 +341,17 @@ def main():
     for i, (rel, sha, size, _) in enumerate(rr_rows):
         h.append('    {%d, L"%s", L"%s", %dull},' % (RR_FIRST_ID + i, rel.replace("\\", "\\\\"), sha, size))
     h += ['    {0, L"", L"", 0ull},  // (an array is never empty)', "};", "static const size_t kRrPayloadCount = %d;" % len(rr_rows),
-          'static const wchar_t kRrInterfaceFile[] = L"%s";' % rr_interface,
+          'static const wchar_t kRrInterfaceFile[] = L"%s";' % rr_interface]
+    h.append("static const wg::PayloadFile kFgPayload[] = {")
+    for i, (rel, sha, size, _) in enumerate(fg_rows):
+        h.append('    {%d, L"%s", L"%s", %dull},' % (FG_FIRST_ID + i, rel.replace("\\", "\\\\"), sha, size))
+    h += ['    {0, L"", L"", 0ull},  // (an array is never empty)', "};", "static const size_t kFgPayloadCount = %d;" % len(fg_rows),
           "static const int kFMapResourceId = %d;" % (MAP_F_ID if map_f_bytes is not None else 0),
           'static const wchar_t kFMapSha256[] = L"%s";' % (hashlib.sha256(map_f_bytes).hexdigest() if map_f_bytes is not None else ""),
           "static const int kLMapResourceId = %d;" % (MAP_L_ID if map_l_bytes is not None else 0),
-          'static const wchar_t kLMapSha256[] = L"%s";' % (hashlib.sha256(map_l_bytes).hexdigest() if map_l_bytes is not None else "")]
+          'static const wchar_t kLMapSha256[] = L"%s";' % (hashlib.sha256(map_l_bytes).hexdigest() if map_l_bytes is not None else ""),
+          "static const int kFgMapResourceId = %d;" % (MAP_FG_ID if map_fg_bytes is not None else 0),
+          'static const wchar_t kFgMapSha256[] = L"%s";' % (hashlib.sha256(map_fg_bytes).hexdigest() if map_fg_bytes is not None else "")]
     h += ["static const int kMapResourceId = %d;" % MAP_ID,
           "static const int kLogoResourceId = %d;" % (LOGO_ID if os.path.isfile(logo) else 0),
           'static const wchar_t kMapSha256[] = L"%s";' % hashlib.sha256(map_bytes).hexdigest(), ""]
@@ -316,8 +382,12 @@ def main():
         rc.append('%d RCDATA "%s"' % (MAP_F_ID, fwd(a.map_f)))
     if a.map_l:
         rc.append('%d RCDATA "%s"' % (MAP_L_ID, fwd(a.map_l)))
+    if a.map_fg:
+        rc.append('%d RCDATA "%s"' % (MAP_FG_ID, fwd(a.map_fg)))
     for i, (_, _, _, full) in enumerate(rr_rows):
         rc.append('%d RCDATA "%s"' % (RR_FIRST_ID + i, fwd(full)))
+    for i, (_, _, _, full) in enumerate(fg_rows):
+        rc.append('%d RCDATA "%s"' % (FG_FIRST_ID + i, fwd(full)))
     if os.path.isfile(logo):
         rc.append('%d RCDATA "%s"' % (LOGO_ID, fwd(logo)))
     if a.manifest:
@@ -329,6 +399,9 @@ def main():
     print("payload: %d files, %.1f MB from %s; map %s" % (len(rows), sum(r[2] for r in rows) / 1048576.0, root, a.map))
     print("Ray Reconstruction: %s; RR converter map %s" % ("%d files from %s" % (len(rr_rows), a.rr) if rr_rows else "none", a.map_f or "none"))
     print("Model L converter map: %s" % (a.map_l or "none"))
+    print("Frame generation converter map: %s" % (a.map_fg or "none"))
+    print("Frame generation: %s" % ("%d files, %.2f MB from %s" % (len(fg_rows), sum(r[2] for r in fg_rows) / 1048576.0, a.fg)
+                                    if fg_rows else "none"))
 
 
 if __name__ == "__main__":

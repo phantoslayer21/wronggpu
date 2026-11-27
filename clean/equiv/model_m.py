@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model M tools of the equivalence tests (Brief 5; clean/EQUIVALENCE-PROTOCOL.md part 1, "Tools" item 1).
 
 Our side's values, written in the specification's storage formats, for the spec team to compare with the original.
@@ -220,7 +220,7 @@ class Conventions:
     JITTER_UNITS = ("render", "output", "uv")
 
     def __init__(self, mv_units="frame", mv_sign=(1, 1), mv_bias=None, jitter_units="render", jitter_sign=(1, 1),
-                 depth="normal", auto_exposure="off", subrect=None):
+                 depth="normal", auto_exposure="off", subrect=None, hdr=False):
         if mv_units not in self.MV_UNITS or jitter_units not in self.JITTER_UNITS:
             raise ValueError("unknown motion or jitter units")
         if depth not in ("normal", "inverted") or auto_exposure not in ("off", "on"):
@@ -234,15 +234,19 @@ class Conventions:
         self.jitter_units, self.jitter_sign = jitter_units, tuple(jitter_sign)
         self.depth, self.auto_exposure = depth, auto_exposure
         self.subrect = tuple(int(v) for v in subrect) if subrect is not None else None
+        self.hdr = bool(hdr)
 
     def flags(self):
-        return {"depth_inverted": self.depth == "inverted", "auto_exposure": self.auto_exposure == "on"}
+        f = {"depth_inverted": self.depth == "inverted", "auto_exposure": self.auto_exposure == "on"}
+        if self.hdr:
+            f["hdr"] = True
+        return f
 
     def record(self):
         return {"mv_units": self.mv_units, "mv_sign": list(self.mv_sign),
                 "mv_bias": list(self.mv_bias) if self.mv_bias is not None else "frame's, else 0,0",
                 "jitter_units": self.jitter_units, "jitter_sign": list(self.jitter_sign), "depth": self.depth,
-                "auto_exposure": self.auto_exposure,
+                "auto_exposure": self.auto_exposure, "hdr": "on" if self.hdr else "off",
                 "subrect": list(self.subrect) if self.subrect else "none (origin 0,0, whole frame)"}
 
     def apply(self, x, render, output):
@@ -282,7 +286,8 @@ def conventions_from_args(a):
                        mv_bias=_pair(a.mv_bias, "--mv-bias") if a.mv_bias else None, jitter_units=a.jitter_units,
                        jitter_sign=_pair(a.jitter_sign, "--jitter-sign", {1.0, -1.0}),
                        depth="inverted" if a.depth_inverted else a.depth, auto_exposure=a.auto_exposure,
-                       subrect=tuple(int(t) for t in a.subrect.split(",")) if a.subrect else None)
+                       subrect=tuple(int(t) for t in a.subrect.split(",")) if a.subrect else None,
+                       hdr=bool(getattr(a, "hdr", False)))
 
 
 def frame_reader(spec, path):
@@ -344,8 +349,9 @@ def dump(pipe, frames, out_dir, tiles=None, full=False, max_frames=None, state=F
             val = _tree_get(tree, path)
             if val is None:
                 man["missing"].append({"frame": i, "boundary": name,
-                                       "why": "not produced by this kernel choice (e.g. a fused post kernel writes no "
-                                              "display image; use --kernels post=post_recon2_r)"})
+                                       "why": "not produced by this kernel choice (fused stage or megakernel skipped "
+                                              "writing this buffer; e.g. use --kernels bneck=none or --backend hip "
+                                              "--kernels post=post_recon2_r)"})
                 continue
             codes = encode(np.asarray(val, np.float32).reshape(-1) if grid == "scalar" else val, fmt)
             base = {"boundary": name, "spec_page": page, "format": fmt, "grid": grid, **meta}
@@ -535,8 +541,13 @@ def _size(s):
 
 def _pipeline(a, conv):
     from clean.runner.pipeline import Pipeline
-    kernels = dict(kv.split("=", 1) for kv in a.kernels.split(",")) if a.kernels else None
-    return Pipeline(a.build, a.rocm, a.model, a.render, a.output, conv.flags(), backend=a.backend, kernels=kernels)
+    kernels = dict(kv.split("=", 1) for kv in a.kernels.split(",")) if a.kernels else {}
+    if getattr(a, "options", None):
+        kernels["options"] = (kernels["options"] + ";" + a.options) if "options" in kernels else a.options
+    kw = {"kernels": kernels or None}
+    if getattr(a, "map", None):
+        kw["map_path"] = a.map
+    return Pipeline(a.build, a.rocm, a.model, a.render, a.output, conv.flags(), backend=a.backend, **kw)
 
 
 def main(argv=None):
@@ -562,8 +573,11 @@ def main(argv=None):
             p.add_argument("--depth", choices=("normal", "inverted"), default="normal")
             p.add_argument("--depth-inverted", action="store_true", help="the same as --depth inverted")
             p.add_argument("--auto-exposure", choices=("off", "on"), nargs="?", const="on", default="off")
+            p.add_argument("--hdr", action="store_true", help="HDR colour input (enables morig post in m_mode=exact)")
             p.add_argument("--subrect", help="X,Y or X,Y,W,H")
             p.add_argument("--kernels")
+            p.add_argument("--options", help="runtime options string, e.g. m_mode=exact;output_filter=original")
+            p.add_argument("--map", help="optional converter map path (e.g. preset-M.v1.map.json)")
             p.add_argument("--backend", default="hip" if name == "dump" else "d3d12")
     d = sub.choices["dump"]
     d.add_argument("--full", action="store_true")

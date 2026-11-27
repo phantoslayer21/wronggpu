@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model L (issue #89): measurement probe, not used by the runtime. One 32-term FP8 op per output computed with RDNA 4's
 // FP8 matrix instruction (two 16 x 16 x 16 steps, float32 accumulator started at the op's start value), to record
 // whether the instruction gives the exact sum for these shapes (clean/l/runner/l_mm8_f32_check.py --wmma).

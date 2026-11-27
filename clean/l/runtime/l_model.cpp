@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model L's model data in the runtime (see l_model.h). Checked against the preset-L map and the structure table by
 // clean/l/runtime/tests/test_l_runtime_load.py.
 #include "l_model.h"

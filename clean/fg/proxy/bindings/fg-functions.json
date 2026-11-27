@@ -1,0 +1,9 @@
+{
+ "schema": "wronggpu.fg-proxy.fg-functions.v1",
+ "comment": "The two FG feature-function names a game requests by name through <get-function> for feature 1000, the same for interface builds 2.14.1 and 2.14.16. names[i] belongs to roles[i]. Each name stands alone on its own line, as in clean/rr_f/proxy/binding/rr-functions.json; everything else in clean/ refers to them by role only. Read at configure time by ../CMakeLists.txt, which writes them into a generated header in the build tree.",
+ "roles": ["fg-state", "fg-options"],
+ "names": [
+  "slDLSSGGetState",
+  "slDLSSGSetOptions"
+ ]
+}

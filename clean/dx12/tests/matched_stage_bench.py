@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Reproducible real-frame stage capture/replay; synthetic Model M only.
 
 --prepare compiles a private executable and generates two original OC input frames

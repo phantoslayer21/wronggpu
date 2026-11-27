@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The GPU chain of net1 (clean/fg/runner/fg_net1_gpu.py) as planned on the CPU: buffers, launches and chain lines."""
 import os
 import sys

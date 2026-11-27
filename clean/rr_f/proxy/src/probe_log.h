@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Log of the probe build (WG_RR_PROBE; never part of the release build): names and numbers only, no image data.
 // Every record has a key (what it is about), a stable part (compared) and an extra part (written, never compared:
 // sequence numbers, thread ids, frame indices, jitter). During the first `full_frames` frames every record is written;

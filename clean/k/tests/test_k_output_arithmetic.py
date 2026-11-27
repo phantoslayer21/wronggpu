@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Exhaustive GPU validation of the production output reciprocal/cubic-beta helpers.
 
 WG_K_GPU_BUILD selects output directory and enables tests. Run under the shared

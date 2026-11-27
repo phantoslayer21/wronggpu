@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model L (issue #89): the per-pixel and per-token matrix kernels of Model L's encoder and decoder
 // (clean/l/FORMATS.md: maps, blobs, arguments, grids). Maps are [rows][cols][C], channel fastest; FP8 E4M3 bytes or
 // FP16. Launch: 1-D grid of ceil(n / 128) workgroups of 256 lanes (8 waves); wave i handles items 16 i .. 16 i + 15

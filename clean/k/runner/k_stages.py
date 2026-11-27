@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model K stages of the spec 90 runner (clean/runner/stage_runner.py): weight packing and launch plans.
 
     r = Runner(build_dir, rocm_dir, model="K")       # stage names without the "k." prefix, or

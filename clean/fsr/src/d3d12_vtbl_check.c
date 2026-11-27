@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 /* Compile-time check of d3d12_vtbl.h against the C declarations of the D3D12 vtables in the Windows SDK or MinGW-w64
  * d3d12.h. Produces no code; compiled with every Windows build in the object library wg_sdk_layout_check, linked into
  * no DLL. */

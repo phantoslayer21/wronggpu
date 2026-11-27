@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher window: Borderlands 4 and Hogwarts Legacy's Engine.ini setting for Ray Reconstruction (Brief 16, owner
 // 2026-11-04; wg_core/rrconfig.h). Their Ray Reconstruction needs one line in the game's own Engine.ini, and Borderlands 4
 // removes that file on every start unless it is read-only.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model L weight packing for the runtime (#89): C++ port of clean/l/runner/l_pack.py (pack_model_l) for the default
 // structure table (clean/l/reference/table.py TABLE), on top of the runtime's packing building blocks
 // (clean/runtime/model.h namespace pack_parts). The blobs are byte-identical to the Python packer's

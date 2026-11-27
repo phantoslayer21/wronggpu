@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Page 54b.5 quarter pool (PH2) through exact tables (kernels/rr_pool.hlsl): host side, qualification, exhaustive check.
 
 The tables (per model: they depend on the symbols only) are built on the GPU by rr_pool_tables with the exact

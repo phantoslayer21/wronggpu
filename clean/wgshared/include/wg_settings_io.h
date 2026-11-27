@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 /* WrongGPU settings I/O: the ONE implementation of the shared settings block, wronggpu.ini, the data folder rule and
  * the settings log words, used by every WrongGPU DLL (SR front end, RR plugin, RR runtime). clean/wgshared.
  *
@@ -177,6 +177,9 @@ inline IniValues parse_ini(const std::string& text) {
     ini.present = true;
     std::string section;
     size_t a = 0;
+    if (text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xEF &&
+        static_cast<unsigned char>(text[1]) == 0xBB && static_cast<unsigned char>(text[2]) == 0xBF)
+        a = 3;
     while (a < text.size()) {
         size_t b = text.find('\n', a);
         if (b == std::string::npos) b = text.size();
@@ -199,9 +202,12 @@ inline IniValues parse_ini(const std::string& text) {
 // a trailing comment on the key's own line. A missing key goes after the last non-empty line of its section; a
 // missing section is appended. Line ends follow the text (CRLF when it has any, else LF; CRLF for empty text).
 inline std::string ini_set(const std::string& text, const std::string& section, const std::string& key, const std::string& value) {
-    const std::string eol = text.empty() || text.find("\r\n") != std::string::npos ? "\r\n" : "\n";
+    const bool hasBom = text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xEF &&
+                        static_cast<unsigned char>(text[1]) == 0xBB && static_cast<unsigned char>(text[2]) == 0xBF;
+    const std::string bom = hasBom ? text.substr(0, 3) : std::string();
+    size_t a = hasBom ? 3 : 0;
+    const std::string eol = text.size() <= a || text.find("\r\n", a) != std::string::npos ? "\r\n" : "\n";
     std::vector<std::string> lines;
-    size_t a = 0;
     while (a < text.size()) {
         size_t b = text.find('\n', a);
         if (b == std::string::npos) b = text.size();
@@ -210,7 +216,7 @@ inline std::string ini_set(const std::string& text, const std::string& section, 
         lines.push_back(line);
         a = b + 1;
     }
-    const bool trailingNewline = !text.empty() && text.back() == '\n';
+    const bool trailingNewline = text.size() > (hasBom ? 3u : 0u) && text.back() == '\n';
     const std::string wantSection = lower(section), wantKey = lower(key);
     std::string current;
     int sectionStart = -1, lastInSection = -1, found = -1;
@@ -243,7 +249,7 @@ inline std::string ini_set(const std::string& text, const std::string& section, 
         lines.push_back("[" + section + "]");
         lines.push_back(newLine);
     }
-    std::string out;
+    std::string out = bom;
     for (size_t i = 0; i < lines.size(); ++i) {
         out += lines[i];
         if (i + 1 < lines.size() || trailingNewline || found < 0) out += eol;
@@ -390,7 +396,8 @@ public:
 
     // Opens Local\WrongGPU.settings.v1.<pid> or creates and seeds it from `iniPath` (module = WG_SS_WRITER_* id of the
     // caller, recorded as creator). `name` overrides the mapping name (tests). Lines for the log go to *log.
-    Status open(uint32_t module, const std::wstring& iniPath, std::string* log, const wchar_t* name = nullptr);
+    // existingOnly: open the block only when another module created it (never create and seed it): Absent otherwise.
+    Status open(uint32_t module, const std::wstring& iniPath, std::string* log, const wchar_t* name = nullptr, bool existingOnly = false);
     void close();
     Status status() const { return status_; }
     bool present() const { return block_ != nullptr; }
@@ -408,6 +415,12 @@ public:
     // no block, or a value out of range.
     bool write_slot(uint32_t slot, int32_t value, bool persist = true);
     bool write_slots(const uint32_t* slots, const int32_t* values, uint32_t n, bool persist = true);
+    // Slot owners (wg_shared_settings.h): the in-game card of WrongGPU.asi owns the SR mode slots (sr_m_mode, sr_l_mode,
+    // sr_k_mode; wg_sr_modes.h) and writes them whether or not its module is the elected writer, in the same seqlock.
+    // Never persisted to wronggpu.ini (the card saves the game's state folder). False: another slot, no block, or a
+    // value out of range.
+    bool write_owned_slot(uint32_t slot, int32_t value);
+    static bool is_owned_slot(uint32_t slot) { return slot == WG_OPT_SR_M_MODE || slot == WG_OPT_SR_L_MODE || slot == WG_OPT_SR_K_MODE; }
     // Text option from the block's text area (key=value, written at seeding).
     bool text(const std::string& key, std::string* out) const;
     const std::wstring& ini() const { return ini_; }
@@ -416,6 +429,7 @@ public:
     WgSharedSettingsBlock* raw_for_tests() { return block_; }
 
 private:
+    void locked_write(const uint32_t* slots, const int32_t* values, uint32_t n);
     void* mapping_ = nullptr;
     WgSharedSettingsBlock* block_ = nullptr;
     Status status_ = Status::Closed;
@@ -553,25 +567,65 @@ bool read_file(const std::wstring& path, std::string* out) {
 }
 
 bool write_file_atomic(const std::wstring& path, const std::string& text) {
-    const std::wstring tmp = path + L".tmp" + std::to_wstring(GetCurrentProcessId());
-    HANDLE f = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    static volatile LONG s_tmpSeq = 0;
+    const DWORD pid = GetCurrentProcessId();
+    const DWORD tid = GetCurrentThreadId();
+    std::wstring tmp;
+    HANDLE f = INVALID_HANDLE_VALUE;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        const LONG seq = InterlockedIncrement(&s_tmpSeq);
+        tmp = path + L".tmp" + std::to_wstring(pid) + L"." + std::to_wstring(tid) + L"." + std::to_wstring(seq);
+        f = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (f != INVALID_HANDLE_VALUE) break;
+        if (GetLastError() != ERROR_FILE_EXISTS) return false;
+    }
     if (f == INVALID_HANDLE_VALUE) return false;
     DWORD put = 0;
     const bool ok = text.empty() || (WriteFile(f, text.data(), static_cast<DWORD>(text.size()), &put, nullptr) && put == text.size());
+    if (ok) FlushFileBuffers(f);
     CloseHandle(f);
-    if (!ok || !MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+    if (!ok) {
         DeleteFileW(tmp.c_str());
         return false;
     }
-    return true;
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        if (MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return true;
+        const DWORD err = GetLastError();
+        if (err != ERROR_ACCESS_DENIED && err != ERROR_SHARING_VIOLATION && err != ERROR_LOCK_VIOLATION) break;
+        Sleep(attempt < 4 ? 1 : 5);
+    }
+    DeleteFileW(tmp.c_str());
+    return false;
 }
 
 uint64_t now_ms() { return GetTickCount64(); }
 
 bool persist_ini_value(const std::wstring& path, const std::string& section, const std::string& key, const std::string& value) {
+    // Serialize read-modify-write across threads and multiple DLL instances in the same process.
+    uint64_t h = 14695981039346656037ull;
+    for (wchar_t c : path) {
+        wchar_t lc = (c >= L'A' && c <= L'Z') ? static_cast<wchar_t>(c - L'A' + L'a') : c;
+        h = (h ^ static_cast<uint64_t>(lc)) * 1099511628211ull;
+    }
+    const std::wstring mname = L"Local\\WrongGPU_IniWrite_" + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(h);
+    HANDLE mu = CreateMutexW(nullptr, FALSE, mname.c_str());
+    bool locked = false;
+    if (mu) {
+        const DWORD wr = WaitForSingleObject(mu, 2000);
+        locked = (wr == WAIT_OBJECT_0 || wr == WAIT_ABANDONED);
+        if (!locked) {
+            CloseHandle(mu);
+            return false;
+        }
+    }
     std::string text;
     if (!read_file(path, &text)) text = kWgDefaultIniText;
-    return write_file_atomic(path, ini_set(text, section, key, value));
+    const bool ok = write_file_atomic(path, ini_set(text, section, key, value));
+    if (mu) {
+        if (locked) ReleaseMutex(mu);
+        CloseHandle(mu);
+    }
+    return ok;
 }
 
 // ---- the block -----------------------------------------------------------------------------------------------------
@@ -591,7 +645,8 @@ void SharedSettings::close() {
 
 std::string SharedSettings::name() const { return narrow(name_); }
 
-SharedSettings::Status SharedSettings::open(uint32_t module, const std::wstring& iniPath, std::string* log, const wchar_t* name) {
+SharedSettings::Status SharedSettings::open(uint32_t module, const std::wstring& iniPath, std::string* log, const wchar_t* name,
+                                            bool existingOnly) {
     close();
     ini_ = iniPath;
     if (name) {
@@ -602,8 +657,14 @@ SharedSettings::Status SharedSettings::open(uint32_t module, const std::wstring&
         name_ = buf;
     }
     auto say = [log](const std::string& line) { if (log) *log += line + "\n"; };
-    HANDLE m = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, WG_SS_SIZE, name_.c_str());
-    const DWORD err = GetLastError();
+    HANDLE m = existingOnly ? OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, name_.c_str())
+                            : CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, WG_SS_SIZE, name_.c_str());
+    const DWORD err = existingOnly && m ? static_cast<DWORD>(ERROR_ALREADY_EXISTS) : GetLastError();
+    if (!m && existingOnly) {
+        say("settings: no shared block " + narrow(name_) + " yet (created by the SR front end or the RR plugin)");
+        status_ = Status::Absent;
+        return status_;
+    }
     if (!m) {
         say("settings: shared block " + narrow(name_) + " not available (error " + std::to_string(err) + "); own ini and environment only");
         status_ = Status::Absent;
@@ -747,6 +808,23 @@ bool SharedSettings::write_slots(const uint32_t* slots, const int32_t* vals, uin
     if (!block_ || !writer_ || !n) return false;
     for (uint32_t i = 0; i < n; ++i)
         if (!value_in_range(slots[i], vals[i])) return false;
+    locked_write(slots, vals, n);
+    if (persist && !ini_.empty()) {
+        bool allOk = true;
+        for (uint32_t i = 0; i < n; ++i)
+            allOk = persist_ini_value(ini_, kWgOptions[slots[i]].ini_section, kWgOptions[slots[i]].key, value_name(slots[i], vals[i])) && allOk;
+        return allOk;
+    }
+    return true;
+}
+
+bool SharedSettings::write_owned_slot(uint32_t slot, int32_t value) {
+    if (!block_ || !is_owned_slot(slot) || !value_in_range(slot, value)) return false;
+    locked_write(&slot, &value, 1);
+    return true;
+}
+
+void SharedSettings::locked_write(const uint32_t* slots, const int32_t* vals, uint32_t n) {
     volatile LONG* gen = wg_gen(block_);
     LONG g;
     for (;;) {  // enter the seqlock (CAS even -> odd: also safe for instances that share a writer id)
@@ -761,11 +839,6 @@ bool SharedSettings::write_slots(const uint32_t* slots, const int32_t* vals, uin
         InterlockedOr(reinterpret_cast<volatile LONG*>(&block_->live_mask[slots[i] >> 5]), static_cast<LONG>(1u << (slots[i] & 31)));
     }
     InterlockedExchange(gen, g + 2);
-    if (persist && !ini_.empty()) {
-        for (uint32_t i = 0; i < n; ++i)
-            persist_ini_value(ini_, kWgOptions[slots[i]].ini_section, kWgOptions[slots[i]].key, value_name(slots[i], vals[i]));
-    }
-    return true;
 }
 
 bool SharedSettings::write_slot(uint32_t slot, int32_t value, bool persist) { return write_slots(&slot, &value, 1, persist); }
@@ -808,10 +881,11 @@ bool HostIniPoll::poll(int* index, uint64_t nowMs) {
     const uint64_t write = (uint64_t(a.ftLastWriteTime.dwHighDateTime) << 32) | a.ftLastWriteTime.dwLowDateTime;
     const uint64_t stamp = write ^ (uint64_t(a.nFileSizeLow) << 1);
     if (stamp == lastWrite_) return false;
-    lastWrite_ = stamp;
     std::string text;
+    if (!read_file(path_, &text)) return false;
+    lastWrite_ = stamp;
     int n = -1;
-    if (!read_file(path_, &text) || !parse_host_index(text, section_, &n) || n == last_) return false;
+    if (!parse_host_index(text, section_, &n) || n == last_) return false;
     last_ = n;
     if (index) *index = n;
     return true;

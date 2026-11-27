@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (issue #96): probe of gfx12's 16 x 16 x 16 matrix instructions against net1's chunk arithmetic.
 
     python clean/fg/runner/fg_wmma_probe.py --build <dir> --rocm "C:\\Program Files\\AMD\\ROCm\\7.2" --prepare

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Pure CPU admission of original synthetic RR-F prepared metadata.
 
 Authority: published specs 51/55/58 and project-owned prepared-known-subset v1.

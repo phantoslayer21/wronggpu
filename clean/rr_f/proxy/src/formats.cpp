@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Format classes of spec 62.5. Numbers: the public DXGI_FORMAT enum of the Windows SDK (dxgiformat.h);
 // tests/test_proxy_core.cpp checks this table against the SDK's named constants.
 #include "formats.h"

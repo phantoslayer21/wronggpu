@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The exhaustive facts behind the fast hybrid kernels' element-wise steps (clean/l/reference/hyb_tables.py), each over
 every possible FP16 input, plus mutants each check catches."""
 import unittest

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher window: "WrongGPU.exe ui-dump", the window's pages painted offscreen as JSON (every page's widgets,
 // the keyboard's paths the launcher tests check) and optional PNGs. Split from launcher_ui.cpp (the window, its input and
 // operations), whose helpers it uses (launcher_window.h). Written for this project.
@@ -337,6 +337,21 @@ int RunLauncherUiDump(const wstring& outFile, const wstring& shotDir, bool noSca
         j.S("opti_info", OptiInfoText(v.opti)).S("opti_outside", OptiOutsideText()).Key("opti_controls");
         DumpHits(j);
         v.menu.open = false;
+#if WRONGGPU_FG
+        // Frame generation (fg.h): the section as it shows once its data is converted (the test PC has none): its switch and
+        // three settings with the page's values (the profile, the state folder's outside changes folded in)
+        if (v.cur.fgUses || v.cur.fgInstalled) {
+            const bool fgWas = v.fgReady;
+            v.fgReady = true;
+            wchar_t fgShot[32]; swprintf(fgShot, 32, L"game-%zu-fg.png", i);
+            RenderFrame(kDefaultW, std::max(760.f, v.contentH[v.page] + 20), 1, shot(fgShot));  // the whole page
+            tall();
+            j.Key("fg_controls");
+            DumpHits(j);
+            v.fgReady = fgWas;
+            tall();
+        }
+#endif
         // Borderlands 4 / Hogwarts Legacy (UI review #2): the Engine.ini file check read again (Check again: its state and its
         // toast), and "Show me how" at the default size: the page scrolled to the card, the keyboard on the first step's Open
         // folder (rr_config_fix=off, as its Apply leaves it; nothing written)

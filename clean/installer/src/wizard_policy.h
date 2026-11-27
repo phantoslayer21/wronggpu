@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 #include <string>
 
@@ -24,6 +24,13 @@
 #ifndef WRONGGPU_MODEL_K
 #define WRONGGPU_MODEL_K 0
 #endif
+// The frame generation choice in the launcher (CMake option WRONGGPU_FG, default OFF: on only in a build whose payload runs
+// WrongGPU's frame generation; wg_core/fg.h). It makes fg, fg_preset, fg_multiplier and fg_presenter settings of the profile
+// (`set <game> fg=on`, off by default) and embeds the preset-FG converter map (`model convert --preset=FG`). OFF: the four
+// keys are refused by name, the map is not embedded, and nothing about frame generation is written into any game.
+#ifndef WRONGGPU_FG
+#define WRONGGPU_FG 0
+#endif
 
 // UI policy only. Silent installations keep their existing explicit command-line contract.
 namespace wg_wizard {
@@ -41,6 +48,27 @@ inline bool IsDirect(Route route) {
 inline bool RouteReady(Route route, bool packageReady) {
     return IsDirect(route) || packageReady;
 }
+inline std::wstring QuoteCmdArg(const std::wstring& arg) {
+    // MSVC / CommandLineToArgvW quoting: double backslashes preceding quotes and any trailing backslashes before closing ".
+    std::wstring out = L"\"";
+    size_t bs = 0;
+    for (wchar_t c : arg) {
+        if (c == L'\\') {
+            ++bs;
+        } else if (c == L'"') {
+            out.append(bs * 2 + 1, L'\\');
+            out.push_back(L'"');
+            bs = 0;
+        } else {
+            out.append(bs, L'\\');
+            bs = 0;
+            out.push_back(c);
+        }
+    }
+    out.append(bs * 2, L'\\');
+    out.push_back(L'"');
+    return out;
+}
 inline std::wstring RouteArguments(Route route, const std::wstring& source) {
     // Windows paths cannot contain a quote. Reject rather than constructing a broken relaunch.
 #if WRONGGPU_DIRECT_ROUTE
@@ -49,7 +77,7 @@ inline std::wstring RouteArguments(Route route, const std::wstring& source) {
     if (route != Route::OptiScaler) return L"";
 #endif
     if (source.empty() || source.find(L'"') != std::wstring::npos) return L"";
-    return L" \"/OPTISCALER=" + source + L"\"";
+    return L" " + QuoteCmdArg(L"/OPTISCALER=" + source);
 }
 inline std::wstring PlayInstructions(Route route, bool presetK = false) {
 #if WRONGGPU_DIRECT_ROUTE

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Original synthetic post FP32 intermediate differential, using private instrumented shader copies.
 
 Build with --build-only, then --run-only under the GPU lock (WG_GPU_LOCK, BUILDING.md). Both builds remain private. Fifteen scalar

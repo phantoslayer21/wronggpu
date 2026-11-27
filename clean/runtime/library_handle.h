@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Small move-free owner for a platform library reference. Kept separate so its acquire/release contract can be tested
 // without initializing a GPU runtime.
 #pragma once

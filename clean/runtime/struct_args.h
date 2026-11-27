@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Struct arguments of the D3D12 kernel ports with pointers inside (manifest argument kind "s", clean/dx12/build_dx12.py).
 // WrongGPU's own code.
 //

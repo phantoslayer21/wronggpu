@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 port of fg_leaky_fast_f16 of fg_net1_mma.co (clean/fg/kernels/fg_net1_mma.hip): fg_leaky_fast16 on n float16
 // values, the exhaustive check of the fast path's leaky ReLU (runner/fg_net1_mma.py). Built only when --only names it.
 //

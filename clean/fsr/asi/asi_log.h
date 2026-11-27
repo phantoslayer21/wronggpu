@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Small plain-text log for WrongGPU.asi, written as wronggpu-asi.log into PluginDataDir(), in the same line format as
 // the front end's wronggpu-fsr.log ([hh:mm:ss.mmm pid] [tag] text). The plugin logs only at load time, so this is a
@@ -23,9 +23,19 @@ inline std::wstring PluginDataDir() {
     HMODULE self = nullptr;
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                        reinterpret_cast<LPCWSTR>(&PluginDataDir), &self);
-    wchar_t file[MAX_PATH] = {};
-    GetModuleFileNameW(self, file, MAX_PATH);
-    std::wstring dir(file);
+    std::wstring dir(260, L'\0');
+    for (;;) {
+        const DWORD n = GetModuleFileNameW(self, &dir[0], DWORD(dir.size()));
+        if (n == 0) {
+            dir.clear();
+            break;
+        }
+        if (n < dir.size() || dir.size() >= 32768) {
+            dir.resize(n);
+            break;
+        }
+        dir.resize(dir.size() * 2);
+    }
     size_t slash = dir.find_last_of(L"\\/");
     dir = slash == std::wstring::npos ? std::wstring() : dir.substr(0, slash);
     slash = dir.find_last_of(L"\\/");

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 port of model K's frame inputs and their fetch helpers (clean/k/kernels/k_io.hip: KFrameIn, KInParams,
 // KOutParams, KiHost, kio_*). WrongGPU's own code; the same operations and bits as the HIP helpers (k_fp.hlsli rules).
 //
@@ -213,13 +213,30 @@ float kio_depth(KFrameIn F, int ix, int iy, int dx, int dy)
 // spec 42 5.2 [MVlo]: offset of the nearest-depth motion pixel
 void kio_nearest(KFrameIn F, int ix, int iy, out int odx, out int ody)
 {
-    const float c = kio_depth(F, ix, iy, 0, 0), a = kio_depth(F, ix, iy, -1, -1), b = kio_depth(F, ix, iy, 1, -1);
-    const float d = kio_depth(F, ix, iy, -1, 1), e = kio_depth(F, ix, iy, 1, 1);
+    float c, a, b, d, e;
+#if !WG_DIRECT_TEXTURES
+    [branch] if (ix >= 1 && ix <= F.rw - 2 && iy >= 1 && iy <= F.rh - 2) {
+        const uint zp = (uint)F.zpitch * 4u;
+        const uint voff = ((uint)(F.zby + iy - 1) * (uint)F.zpitch + (uint)(F.zbx + ix - 1)) * 4u;
+        c = wg_ldf(F.depth + zp + 4u, voff);
+        a = wg_ldf(F.depth, voff);
+        b = wg_ldf(F.depth + 8u, voff);
+        d = wg_ldf(F.depth + 2u * zp, voff);
+        e = wg_ldf(F.depth + 2u * zp + 8u, voff);
+    } else
+#endif
+    {
+        c = kio_depth(F, ix, iy, 0, 0);
+        a = kio_depth(F, ix, iy, -1, -1);
+        b = kio_depth(F, ix, iy, 1, -1);
+        d = kio_depth(F, ix, iy, -1, 1);
+        e = kio_depth(F, ix, iy, 1, 1);
+    }
     const float k = kf_bits(0x3A83126Fu);
     const bool inv = (F.flags & KIO_INV) != 0;
     bool edge;
     if (inv)
-        edge = (c < 0.5f * (a + e) - kf_opq(k * c)) || (c < 0.5f * (b + d) - kf_opq(k * c));
+        edge = (c < 0.5f * (a + e) - kf_pm(k, c)) || (c < 0.5f * (b + d) - kf_pm(k, c));
     else
         edge = (c > kf_fma(c, k, 0.5f * (a + e))) || (c > kf_fma(c, k, 0.5f * (b + d)));
     int bx = 0, by = 0;
@@ -246,12 +263,22 @@ void kio_nearest(KFrameIn F, int ix, int iy, out int odx, out int ody)
 float kio_decode(float t)
 {
     if (t < K_KIO_DECODE_NEAR) return wg_div(1.0f, 1.0f - t);
-    const float e = kf_opq((t + kf_bits(0x3C4FAE29u)) * 9.0f) * kf_bits(0x3FB8AA3Bu);
+    const float e = kf_pm(t + kf_bits(0x3C4FAE29u), 9.0f) * kf_bits(0x3FB8AA3Bu);
     return wg_div(kf_exp2(e) - 1.0f, 9.0f * t);
+}
+// 1 / x correctly rounded (= wg_div(1, x) on every input): one Newton step on v_rcp_f32 for x in [2^-32, 2^32] (the
+// exhaustively GPU-checked reciprocal of k_out.hlsli ko_rcp_refined / k_in_common.hlsli ki_rcp), wg_div elsewhere
+float kio_rcp(float x)
+{
+    [branch] if (x >= asfloat(0x2f800000u) && x <= asfloat(0x4f800000u)) {
+        const float r = rcp(x);
+        return mad(mad(-x, r, 1.0f), r, r);
+    }
+    return wg_div(1.0f, x);
 }
 float kio_encode(float Y)
 {
-    if (Y < K_KIO_ENCODE_NEAR) return wg_div(1.0f, Y + 1.0f);
+    if (Y < K_KIO_ENCODE_NEAR) return kio_rcp(Y + 1.0f);
     return wg_div(wg_div(kf_ln(kf_fma(Y, 9.0f, 1.0f)), 9.0f) - kf_bits(0x3C4FAE29u), Y);
 }
 
@@ -264,21 +291,36 @@ float4 kio_texel_h4(uint img, uint idx)
 }
 float4 kio_bilinear4(uint img, int w, int h, float cx, float cy)
 {
-    const float px = kf_opq(cx * (float)w) - 0.5f, py = kf_opq(cy * (float)h) - 0.5f;
+    const float px = kf_pm(cx, (float)w) - 0.5f, py = kf_pm(cy, (float)h) - 0.5f;
     const float fx0 = floor(px), fy0 = floor(py);
     const float fx = px - fx0, fy = py - fy0;
     // HIP: finite ? (int)max(min(f, w), -1) : (+inf: w, -inf: -1, NaN: 0). The clamp already gives w / -1 for +-inf
     // (min / max are IEEE minNum / maxNum), so only NaN needs the select
     const int x0 = isnan(fx0) ? 0 : (int)kf_max(kf_min(fx0, (float)w), -1.0f);
     const int y0 = isnan(fy0) ? 0 : (int)kf_max(kf_min(fy0, (float)h), -1.0f);
-    const int xa = ki_max(ki_min(x0, w - 1), 0), xb = ki_max(ki_min(x0 + 1, w - 1), 0);
-    const int ya = ki_max(ki_min(y0, h - 1), 0), yb = ki_max(ki_min(y0 + 1, h - 1), 0);
+    uint2 q00u, q10u, q01u, q11u;
+    [branch] if ((uint)x0 <= (uint)(w - 2) && (uint)y0 <= (uint)(h - 2)) {
+        const uint voff = ((uint)y0 * (uint)w + (uint)x0) * 8u, r1 = img + (uint)w * 8u;
+        q00u = wg_ld64(img, voff);
+        q10u = wg_ld64(img + 8u, voff);
+        q01u = wg_ld64(r1, voff);
+        q11u = wg_ld64(r1 + 8u, voff);
+    } else {
+        const int xa = ki_max(ki_min(x0, w - 1), 0), xb = ki_max(ki_min(x0 + 1, w - 1), 0);
+        const int ya = ki_max(ki_min(y0, h - 1), 0), yb = ki_max(ki_min(y0 + 1, h - 1), 0);
+        q00u = wg_ld64(img, ((uint)ya * (uint)w + (uint)xa) * 8u);
+        q10u = wg_ld64(img, ((uint)ya * (uint)w + (uint)xb) * 8u);
+        q01u = wg_ld64(img, ((uint)yb * (uint)w + (uint)xa) * 8u);
+        q11u = wg_ld64(img, ((uint)yb * (uint)w + (uint)xb) * 8u);
+    }
     const float omfy = 1.0f - fy;
-    const float4 q00 = kio_texel_h4(img, (uint)ya * (uint)w + (uint)xa), q10 = kio_texel_h4(img, (uint)ya * (uint)w + (uint)xb);
-    const float4 q01 = kio_texel_h4(img, (uint)yb * (uint)w + (uint)xa), q11 = kio_texel_h4(img, (uint)yb * (uint)w + (uint)xb);
+    const float4 q00 = float4(wg_h2f_lo(q00u.x), wg_h2f_hi(q00u.x), wg_h2f_lo(q00u.y), wg_h2f_hi(q00u.y));
+    const float4 q10 = float4(wg_h2f_lo(q10u.x), wg_h2f_hi(q10u.x), wg_h2f_lo(q10u.y), wg_h2f_hi(q10u.y));
+    const float4 q01 = float4(wg_h2f_lo(q01u.x), wg_h2f_hi(q01u.x), wg_h2f_lo(q01u.y), wg_h2f_hi(q01u.y));
+    const float4 q11 = float4(wg_h2f_lo(q11u.x), wg_h2f_hi(q11u.x), wg_h2f_lo(q11u.y), wg_h2f_hi(q11u.y));
     const float4 t0 = q00 + kf_opq4(q10 - q00) * fx;
     const float4 t1 = q01 + kf_opq4(q11 - q01) * fx;
-    return kf_opq4(t0 * omfy) + kf_opq4(t1 * fy);
+    return kf_pm4(t0, (float4)omfy) + kf_pm4(t1, (float4)fy);
 }
 
 // (Y, Co, Cg) of max(RGB, 0) scaled by kappa first (spec 42 6.2) or not (spec 43 4.2: kappa after)

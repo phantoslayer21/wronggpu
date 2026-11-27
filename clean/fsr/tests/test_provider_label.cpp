@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #include "../src/provider_label.h"
 #ifdef NDEBUG
 #undef NDEBUG

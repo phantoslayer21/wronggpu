@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Original Windows-composed provider badge. No game swap-chain, command-list,
 // queue, fence, query heap, GPU timestamp or neural-kernel operations.

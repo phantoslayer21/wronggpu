@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L oracle self-checks (no GPU, no compiler; synthetic data only).
 
 Run: python -m unittest discover -s clean/l/tests -t .

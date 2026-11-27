@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Generates fused_dec.hlsl (this directory) from the live dec1_dec0.hlsl: d1p12/swin_block_c64_add_dec0_xd_nc, the
 fused dec1 + dec0 kernel launched WITHOUT the barrier after dec2's fused block (fusion xd, swin_block_c96_add_xe_xd_nc,
 fused_swin.hlsl), so that its workgroups start while dec2's last workgroups still write e1.
@@ -107,14 +107,14 @@ def generate(text):
 
 def main():
     s = generate(open(SRC, encoding="utf-8").read())
-    old = open(DST, encoding="utf-8").read() if os.path.exists(DST) else None
+    old = open(DST, encoding="utf-8", newline="").read() if os.path.exists(DST) else None
     if old == s:
         print("fused_dec.hlsl up to date")
         return 0
     if "--check" in sys.argv:
         print("fused_dec.hlsl is STALE (run fused_dec_gen.py)")
         return 1
-    with open(DST, "w", encoding="utf-8") as f:
+    with open(DST, "w", encoding="utf-8", newline="\n") as f:
         f.write(s)
     print("fused_dec.hlsl regenerated")
     return 0

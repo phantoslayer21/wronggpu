@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L's HYBRID form on the fast kernels (WG_L_FORM=hybrid, D3D12): every block stage's parameters in the values
 the hybrid kernels read, packed by the unchanged M-form packers (clean/runner/packing.py pack_stage for the ten shared
 stages, clean/l/runner/l_pack.py pack_model_l for Model L's own launches). Reference of the runtime's C++

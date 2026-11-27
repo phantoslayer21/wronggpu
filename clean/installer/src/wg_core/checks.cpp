@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: the requirement checks (spec 30 "Requirements check"): Windows, the GPU, the HIP runtime
 // (with its child-process probe), anti-cheat, a running game, write access. Written for this project.
 #include "checks.h"

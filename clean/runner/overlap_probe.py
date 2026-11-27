@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Can the matrix unit (WMMA) and the vector ALU work at the same time? Synthetic data only.
 
     python clean/runner/build.py --rocm <ROCm> --out build            # builds overlap.co with the other code objects

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Original regression: a host creates many distinct command-list wrapper tables.
 // Calls the real production patcher and dispatch lookup; no graphics device is needed.
 #include "../src/d3d12_hooks.cpp"

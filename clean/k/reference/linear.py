@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model K FP16 linear layers (spec 41, task K1): per-token linear, 2x2 merge, 2x2 expand.
 
 Numerics (spec 40/41): inputs, parameters and outputs are FP16. A matrix product plus its bias is rounded to FP16

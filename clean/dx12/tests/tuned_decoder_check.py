@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Build/run the original synthetic fused-decoder differential. Use --build-only outside the GPU lock;
 then --run-only under the GPU lock (WG_GPU_LOCK, BUILDING.md). Normal, odd and 4K Performance render geometry, both resets, four seeds.
 This checks the actual stored pack12 A/C/latent bytes; B is intentionally unwritten. No performance claim.

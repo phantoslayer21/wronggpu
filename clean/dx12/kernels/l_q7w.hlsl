@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 ports of Model L's shared-stage kernels in the FP16 form (clean/l/kernels/l_q7w.hip, l_q7w.co; issue #89):
 // the same arithmetic step for step (l_q7_common.hlsli; porting notes in l_q7.hlsl), so the same bytes
 // (clean/l/runner/l_q7w_check.py --d3d12). One source, one build per kernel: Q7_KIND 0 = block (FP8 map in, mirror

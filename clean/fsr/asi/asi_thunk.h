@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // WrongGPU OptiScaler ASI plugin: the logic of the two menu thunks, free of Windows and of ImGui so it can be unit
 // tested with function-pointer stand-ins (tests/test_asi_thunk.cpp). The live plugin (wronggpu_asi.cpp) gives these

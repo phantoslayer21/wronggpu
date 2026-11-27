@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Generate WrongGPU's registry outputs from clean/wgshared/registry/registry.json (the one table).
 
     python clean/wgshared/tools/gen_registry.py                      write the committed outputs

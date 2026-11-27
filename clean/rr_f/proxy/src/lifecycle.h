@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Host bookkeeping of one RR feature instance (page 53; 61.6; 63.3), ported from
 // clean/rr_f/reference/lifecycle.py. No image work: the runtime does that from the plan.
 #pragma once

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The runtime's frame sequence on the CPU (#89): clean/tests/runtime_frame_trace.cpp runs the runtime
 (clean/runtime/runtime.cpp) on a recording device, so whole frames run without a GPU and without HIP. Launches are
 recorded, not executed: the test checks the sequence (code objects loaded, kernels launched per frame with grid and
@@ -81,6 +81,7 @@ class Trace:
 
     def __init__(self, lines):
         self.create, self.allocs, self.uploads, self.loads, self.frames, self.kernels = lines[0], {}, {}, [], [], {}
+        self.warm_skip = []   # --warm-skip: the kernels the route leaves out of the device's warm-up
         for ln in lines[1:]:
             if ln.startswith("alloc b"):
                 k, n = ln[7:].split(" ")
@@ -93,6 +94,8 @@ class Trace:
                 self.frames[-1]["names"][nm] = addr
             elif ln.startswith("load "):
                 self.loads.append(ln[5:])
+            elif ln.startswith("warm_skip "):
+                self.warm_skip.append(ln[10:])
             elif ln.startswith("frame "):
                 f = ln.split(" ")
                 info = {f[i]: int(f[i + 1]) for i in range(2, len(f) - 1, 2)}
@@ -259,6 +262,58 @@ class ModelM(unittest.TestCase):
         lines = run_trace(options="model=L")
         self.assertEqual(len(lines), 1)
         self.assertTrue(lines[0].startswith("ERR create: ") and "Model L" in lines[0], lines[0])
+
+
+class NativeScaleFold(unittest.TestCase):
+    """Native D3D12 (backend 3, the stand-in), staged buffers, pre-exposure != 1: the output scale (scale_rgb) is done by the
+    true-fusion post kernel's store (its pi argument), not launched; the colour is still divided by color_divide.
+    WG_SCALE_FOLD=0 brings the scale_rgb launch back (A/B, same bytes)."""
+
+    COS = ("dec1_dec0__pack12.co", "post_w64.co", "post_w64__orig.co", "swin.co", "encoder.co", "exposure.co", "frame.co",
+           "post.co")
+
+    def frames(self, pre_exposure, env=None):
+        build = tempfile.mkdtemp(prefix="wg_ftb_")
+        try:
+            os.makedirs(os.path.join(build, "dx12"))
+            with open(os.path.join(build, "dx12", "manifest.json"), "w") as f:
+                f.write('{"kernels": [%s]}' % ", ".join('{"name": "x", "co": "%s"}' % c for c in self.COS))
+            e = {k: v for k, v in os.environ.items() if not k.upper().startswith("WG_")}
+            e.update(env or {})
+            r = subprocess.run([trace_exe(), build, model_dir(), "64", "64", "96", "96", "2", "", "--backend=3",
+                                "--pre-exposure=%s" % pre_exposure], capture_output=True, text=True, env=e, timeout=600)
+        finally:
+            shutil.rmtree(build, ignore_errors=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        t = Trace(r.stdout.splitlines())
+        self.assertEqual(len(t.frames), 2, r.stdout)
+        for f in t.frames:
+            self.assertIsNone(f["error"])
+        return t.frames
+
+    @staticmethod
+    def names(frame):
+        return [ln.kernel for ln in frame["launches"]]
+
+    def test_folded_by_default(self):
+        for fr in self.frames("2"):
+            names = self.names(fr)
+            self.assertIn("color_divide", names)
+            self.assertNotIn("scale_rgb", names)
+            self.assertEqual(names[-1], "w64/post_tf_f32_p12_diet_vsit")
+
+    def test_pre_exposure_one_changes_nothing(self):
+        for fr in self.frames("1"):
+            names = self.names(fr)
+            self.assertNotIn("color_divide", names)
+            self.assertNotIn("scale_rgb", names)
+            self.assertEqual(names[-1], "w64/post_tf_f32_p12_diet_vsit")
+
+    def test_switch_brings_the_launch_back(self):
+        for fr in self.frames("2", {"WG_SCALE_FOLD": "0"}):   # scale_rgb after the post
+            names = self.names(fr)
+            self.assertIn("color_divide", names)
+            self.assertEqual(names[-2:], ["w64/post_tf_f32_p12_diet_vsit", "scale_rgb"])
 
 
 if __name__ == "__main__":

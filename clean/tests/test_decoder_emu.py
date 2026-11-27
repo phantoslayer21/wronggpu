@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Stage dec0 (spec 05): the real kernel source (kernels/decoder.hip) run in the host lane emulator through the spec 90
 runner, compared with the NumPy reference (reference/decoder.py). Synthetic data only.
 

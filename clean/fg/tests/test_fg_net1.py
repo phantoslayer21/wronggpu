@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (#96): net1 with the delivered wiring and arithmetic (clean/fg/reference/net1.py), on synthetic
 weights and inputs, against versions written separately here: scalar loops for the upscale rule, exact rationals for
 one convolution, and a hand-composed network (float64 chunk sums, which are exact for this data, numpy max for the

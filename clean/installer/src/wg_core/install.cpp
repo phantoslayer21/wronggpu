@@ -1,9 +1,10 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: the install engine: the routes, AMD's FSR 4 for the comparison key, the install itself.
 // Written for this project.
 #include "install.h"
 
 #include "coexist.h"
+#include "fg.h"
 #include "gamerules.h"
 #include "optiscaler.h"
 #include "payload.h"
@@ -327,6 +328,16 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
             DWORD sz = 0; const void* d = PayloadData(f, sz);
             if (!d || sz != f.size || Sha256Bytes(d, sz) != f.sha256) Fail(L"The installer is damaged (" + wstring(f.rel) + L"). Download it again.", EXIT_DAMAGED);
         }
+    // Frame generation (fg.h): a game with a frame generation library (nvngx_dlssg.dll: it offers DLSS Frame Generation) gets this
+    // build's frame generation plugin and kernels too (OptiScaler setup only: the plugin is one of OptiScaler's plugins). They do
+    // nothing until the player turns frame generation on (fg=on in the game's state folder). Checked here, before anything changes.
+    const bool fgGame = (!kDirectRoute || ctx.opti.ok()) && FgPayloadAvailable(ctx) && GameHasFgLibrary(target.exeDir, dir, target.root);
+    if (fgGame)
+        for (size_t i = 0; i < ctx.data->fgCount; ++i) {
+            const PayloadFile& f = ctx.data->fgFiles[i];
+            DWORD sz = 0; const void* d = PayloadData(f, sz);
+            if (!d || sz != f.size || Sha256Bytes(d, sz) != f.sha256) Fail(L"The installer is damaged (" + wstring(f.rel) + L"). Download it again.", EXIT_DAMAGED);
+        }
     if (!LoadEmbeddedMap(ctx)) Fail(L"The installer is damaged (" + ctx.mapError + L"). Download it again.", EXIT_DAMAGED);
     RequireOptiScaler(ctx);
     if (!target.antiCheat.empty()) Fail(AntiCheatMessage(target.antiCheat), EXIT_ANTICHEAT);
@@ -447,11 +458,11 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
     }
     if (!opti && replace.empty()) Fail(L"None of the game's FSR DLLs in " + dir + L" can be replaced by this installer.", EXIT_REFUSED);
     auto replaced = [&](const wstring& rel) { for (auto* sl : replace) if (IEq(rel, sl->name)) return true; return false; };
-    // OptiScaler mode: WrongGPU's FFX API DLL under its own name, no FSR 3.0 forwarders
-    // OptiScaler 10 (optiscaler.h kOptiSlotFrontEnd): the front end in OptiScaler's custom upscaler slot, no menu plugin
+    // OptiScaler mode: WrongGPU's FFX API DLL under its own name, no FSR 3.0 forwarders.
+    // OptiScaler 10 (optiscaler.h kOptiSlotFrontEnd): the front end in OptiScaler's custom upscaler slot; WrongGPU.asi
+    // still installs so OptiScaler's Custom tab shows the WrongGPU Upscaler card (Model M/K/L + Fast/Exact switching).
     const bool slot = opti && OptiSlotPackage(ctx);
     auto payloadUsed = [&](const PayloadFile& f) {
-        if (slot && OptiOnlyPayload(f.rel)) return false;
         return opti ? !IsSlotName(f.rel) || IEq(f.rel, L"amd_fidelityfx_dx12.dll") : !OptiOnlyPayload(f.rel) && (!IsSlotName(f.rel) || replaced(f.rel));
     };
     // The plugin's place: plugins\ next to OptiScaler, or a folder of its own when Ultimate ASI Loader would start it a
@@ -540,7 +551,7 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
     // downloaded) the RR plugin reports RR unsupported there, so the game keeps its own ray tracing.
     if (opti && rr && rule && rule->needsHostRestore) {
         if (ctx.opti.edition) {
-            LogLine(ctx, L"OptiScaler.dll: WrongGPU's edition of OptiScaler (plugin interface 5): " + wstring(rule->name) + L"'s Ray Reconstruction needs it");
+            LogLine(ctx, L"OptiScaler.dll: WrongGPU's edition of OptiScaler (plugin interface 6): " + wstring(rule->name) + L"'s Ray Reconstruction needs it");
         } else {
             const wstring w = L"This OptiScaler is no OptiScaler edition with plugin interface 5: WrongGPU's Ray Reconstruction isn't offered in " +
                               wstring(rule->name) + L", and the game keeps its own ray tracing.";
@@ -707,6 +718,28 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
         LogLine(ctx, L"Ray Reconstruction: " + Join(Parent(pluginRel), kRrPluginName) + L", " + kRrRuntime + L" (the RR runtime is part of it), " + kRrIni + L" (data " + RrDataFile() +
                          (rrData ? L")" : L", not converted yet: RR off)") + L", " + kRrSettings);
     }
+    if (opti && fgGame) {
+        // the frame generation plugin beside WrongGPU's plugin (OptiScaler's plugins folder, or the plugin's own next to Ultimate
+        // ASI Loader) and its kernels in that folder's wronggpu-setup\fg-dxil, where the plugin reads them: from a temporary copy,
+        // like OptiScaler's files (record entries: backed up, rolled back, removed by an uninstall)
+        const wstring tmp = Join(OptiTempDir(ctx), L"fg");
+        size_t kernels = 0;
+        for (size_t i = 0; i < ctx.data->fgCount; ++i) {
+            const PayloadFile& f = ctx.data->fgFiles[i];
+            const wstring rel = FgInstallRel(pluginRel, f.rel);
+            if (rel.empty()) continue;  // (make_payload.py embeds nothing else)
+            DWORD sz = 0; const void* d = PayloadData(f, sz);
+            const wstring src = Join(tmp, f.rel);
+            EnsureDir(Parent(src));
+            WriteFileAtomic(src, d, sz);
+            optiFiles.push_back({rel, src});
+            kernels += IsFgPlugin(rel) ? 0 : 1;
+        }
+        LogLine(ctx, L"Frame generation: " + FgInstallRel(pluginRel, kFgPayloadPlugin) + L" and " + std::to_wstring(kernels) + L" kernel files in " +
+                         Join(Parent(pluginRel), kFgDxilDir) + L" (the game has DLSS Frame Generation; off until frame generation is turned on)");
+    } else if (FgPayloadAvailable(ctx) && opti) {
+        LogLine(ctx, L"Frame generation: not placed (the game has no frame generation library, " + wstring(kFgLibraryName) + L")");
+    }
     const Conflicts now = FindConflicts(dir, target.exeDir);
     if (!now.outside.empty() || !now.legacyRecordDir.empty()) Fail(L"Files of another mod or an older install could not be handled automatically: " +
                                                                    (now.outside.empty() ? now.legacyRecordDir : now.outside[0]), EXIT_OTHER_MODS);
@@ -794,6 +827,10 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
                  L"Install again to be asked about it.", EXIT_OTHER_MODS);
         }
         if (!writtenOver) disable.push_back(f);
+    }
+    for (auto& f : now.priorEditionFiles) {
+        const bool writtenOver = IsAmdFidelityFxName(f) || std::find_if(optiFiles.begin(), optiFiles.end(), [&](const OptiFile& o) { return IEq(o.rel, f); }) != optiFiles.end();
+        if (!writtenOver && !EndsWithI(f, L".log")) disable.push_back(f);
     }
     for (auto& f : now.legacyFiles) disable.push_back(f);
     // other setups' plugins, moved aside with the player's OK so WrongGPU's RR plugin is the only one (exactly those the plan

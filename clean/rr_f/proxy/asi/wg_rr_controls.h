@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU.asi side of the RR controls (spec 60.9): find the proxy, read its settings contract, decide what the
 // overlay shows, and change settings only through the contract's set functions.
 //

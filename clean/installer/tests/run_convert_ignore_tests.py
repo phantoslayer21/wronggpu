@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The ignore lists of the converter's file search (src/wg_core/convert_ignore.h) through the launcher's command line:
 `model convert` and `rr-data convert` with the well-known lists (%LOCALAPPDATA%\\WrongGPU\\ignore-files.txt and the
 launcher's own data folder's), --ignore-list= and --ignore=.

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """CPU test of the raw-byte comparison with distinct sentinels (clean/k/tests/raw_compare.py): it must pass equal data
 and fail a dropped write, a write only D3D12 made, a changed bit, a NaN payload and a negative zero."""
 import unittest

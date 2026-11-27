@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model L's HYBRID form on the fast kernels (runtime WG_L_FORM=hybrid, native D3D12): the block stages' parameters in
 // the values the hybrid kernels read. The runtime packs them through the unchanged M-form packers
 // (pack_stage_blob, l::pack_model), under the same blob names. This is a C++ port of

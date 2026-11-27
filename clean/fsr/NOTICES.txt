@@ -1,6 +1,8 @@
 WrongGPU FSR front end: third-party notices
 ===========================================
 
+WrongGPU's own code is licensed under GPL-3.0-only from 0.7.0 onward. See wronggpu-license.txt.
+
 WrongGPU's DLLs (amd_fidelityfx_dx12.dll, ffx_fsr3_x64.dll, ffx_fsr3upscaler_x64.dll) contain no third-party code.
 At build time they use type declarations (structures, constants, function signatures) from AMD's FidelityFX SDK API
 headers, which are MIT-licensed:

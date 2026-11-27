@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // c64 Swin block (swin_block_c64_nc) instruction-diet helpers (additive; included by swin_block.hlsl after
 // speed_swin.hlsli).
 #pragma once

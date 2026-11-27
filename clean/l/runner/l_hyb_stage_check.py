@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Per-stage check of the HYBRID C32 kernels (the hybrid check design's per-stage leg): the dump variants
 l_swin_block_c32_enc_hyb_dump / _dec_hyb_dump (SW_HYB_DUMP) write every stage's values; each stage is recomputed by
 the oracle's FP16 form from the kernel's OWN inputs to that stage and compared:

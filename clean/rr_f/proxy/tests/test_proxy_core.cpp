@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Unit tests of the proxy's game-interface logic (spec 60-63) against a fake original and a fake runtime:
 // return codes and their precedence, forwarding of every other feature, proxy answers for feature 1001,
 // creation / reset decisions, rejections, routing of 62.2, formats of 62.5, settings of 60.9, the ASI view.
@@ -1591,6 +1591,12 @@ static void test_rr_off() {
     Env e;
     e.setup();
     e.p->set_rr_off(true, "rr_enabled=0 in test.ini");
+    // lifetime-0 tags while RR is off must not retain/copy or spam "could not be copied"
+    WgTag lt = make_tag(&e.colour.r, WG_BT_COLOUR_IN, WG_LIFE_ONLY_DURING_TAG);
+    const int retains_before = e.rt.retains;
+    CHECK_EQ(e.p->tag(&e.vp, &lt, 1, e.cmd), 0u);
+    CHECK_EQ(e.rt.retains, retains_before);
+    CHECK_EQ(e.p->log_count("could not be copied"), 0u);
     CHECK_EQ(e.frame(0), 7u);
     CHECK_EQ(e.frame(1), 7u);
     CHECK_EQ(e.p->allocate(e.cmd, 1001, &e.vp), 7u);

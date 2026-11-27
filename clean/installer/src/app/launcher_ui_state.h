@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher window: what launcher_ui.cpp (the window, its input and operations) shares with ui_activate.cpp (what a
 // click, Enter or Space on a widget does): the window's messages, the messages its workers post, and the window's state that
 // both use. Split from launcher_ui.cpp (the spec side's 256 KB scan limit) with no change in behaviour. Written for this project.

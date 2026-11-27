@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Optimal render settings (spec 61.5, WrongGPU's rule) and the accepted render-scale window (61.4 step 3).
 #pragma once
 #include <stdint.h>

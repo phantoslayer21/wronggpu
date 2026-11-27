@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L (issue #89): how often the S2a bound sends an FP8 op to the exact fallback on a local recorded run, per layer.
 CPU only: the recorded run of an l_frame_check build is replayed through the oracle (as the frame
 check does), and every 32-wide FP8 op chunk is classified with the kernels' own bound: bounded when

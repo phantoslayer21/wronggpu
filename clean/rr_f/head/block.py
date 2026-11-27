@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Page 51 window block (51.3) and window geometry / borders (51.6), vectorised over windows, as used by D0-R.
 
 Written independently from the spec text for the spec-55 head reference; generic in C and H (D0-R: C = 32, H = 2).

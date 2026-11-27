@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 # cmake -DF1=<file> [-DF2=<file> ... -DF4=<file>] -DOUT=<list> -P sha256_list.cmake: one line "<sha256> <file name>" per file
 # (the testing build's list of WrongGPU.exe and the launcher suite's canaries, tests/launcher_build_facts.py
 # verified_canaries).

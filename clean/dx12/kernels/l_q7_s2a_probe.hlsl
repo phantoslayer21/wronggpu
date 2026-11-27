@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 port of the S2a primitive's measurement probe (clean/l/kernels/l_q7_s2a_probe.hip; the primitive in
 // clean/dx12/hlsl/l_q7_op8.hlsli), not used by the runtime: built only when named (probe=1), compared with the HIP
 // probe and the exact model by clean/l/runner/l_q7_s2a_check.py. Mutant ports: _m1 ... _m4 (l_q7_s2a_probe.hip).

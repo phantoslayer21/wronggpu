@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Exact (rational) rounding to binary floating-point formats, for tables built once over a small domain and for the
 slow test oracles. Pure Python (fractions.Fraction)."""
 from fractions import Fraction

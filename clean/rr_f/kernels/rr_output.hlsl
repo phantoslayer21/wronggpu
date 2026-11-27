@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Original implementation of published spec 54 only; no resolve or learned data.
 // Inputs are decoded f32 or packed head half4/byte4 (packed_head bit 0).
 // packed_head bit 1: E, Ep, invE are read from the exposure pass's result buffer (rr_exposure.hlsl: E, Ep, invE, X3)

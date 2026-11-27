@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The runtime's C++ packers (clean/runtime/model.cpp) against the Python packers, byte for byte, on the CPU (#89):
 
 - every stage blob of a synthetic Model M (enc0, the ten Swin stages, dec0) loaded from the converter's raw layout:

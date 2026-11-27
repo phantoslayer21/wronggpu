@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Tests of clean/wgshared/tools/gen_registry.py.
 
     python clean/wgshared/tests/test_gen_registry.py
@@ -92,7 +92,8 @@ def main():
           "every slot id and SR entry of the initial i15 header kept")
     check("0x5747000000000101ull" not in outs["header"], "no RR entry in the version list")
     for needle in ["#define WG_OPT_SR_MODEL 0", "#define WG_OPT_ENTRY_SOURCE 9", "#define WG_OPT_RR_EXACT_ALLOWED 10",
-                   "#define WG_OPT_RR_HIT_DISTANCE_FILTER 11", "#define WG_OPT_COUNT 12", "#define WG_ENTRY_COUNT 3",
+                   "#define WG_OPT_RR_HIT_DISTANCE_FILTER 11", "#define WG_OPT_SR_M_MODE 12",
+                   "#define WG_OPT_SR_L_MODE 13", "#define WG_OPT_SR_K_MODE 14", "#define WG_OPT_COUNT 15", "#define WG_ENTRY_COUNT 3",
                    "#define WG_RR_MODE_EXACT 0", "#define WG_RR_MODE_ACCURATE 1", "#define WG_RR_MODE_FAST 2",
                    "static const uint32_t kWgContractSlots[WG_CONTRACT_COUNT] = {2, 3, 4, 5, 6, 11};",
                    '#define WG_API_LEVEL_PREFIX "3.1.0"',
@@ -124,7 +125,7 @@ def main():
     check(refused(r, expect="duplicate option id 8"), "refuses a duplicate id")
     r = copy.deepcopy(reg); r["options"][2]["key"], r["options"][3]["key"] = r["options"][3]["key"], r["options"][2]["key"]
     check(refused(r, prev, expect="key changed"), "refuses renumbering (two keys swapped)")
-    r = copy.deepcopy(reg); del r["options"][11]; del r["options"][10]; del r["options"][9]
+    r = copy.deepcopy(reg); del r["options"][9:]
     check(refused(r, prev, expect="removed"), "refuses a removed option")
     r = copy.deepcopy(reg); r["options"][1]["values"] = ["accurate", "exact", "fast"]
     r["modes"] = [r["modes"][1], r["modes"][0], r["modes"][2]]

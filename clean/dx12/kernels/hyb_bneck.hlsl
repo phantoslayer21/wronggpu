@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The HYBRID form's bottleneck in one launch (WG_L_FORM = hybrid, native D3D12): b0 .. b5 as a persistent queue of
 // items, bneck.hlsl's schedule (items of 8 windows in block order; one claimed ahead; per-row counters of every block;
 // an item waits for the rows of the previous block it reads and overwrites; the bounded wait; the last workgroup resets
@@ -22,10 +22,12 @@
 //   swin_bneck6_hyb_tmo       timeout control (probe=1): BNECK_SPIN_LIMIT 1 (a wait gives up at its first poll that
 //                             finds a producer not done): the check requires [12] and [15] nonzero after it (and zero
 //                             after the twin)
-// @wg-kernel swin_bneck6_hyb co=- block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u defines=SW_C=128,SW_HEADS=4,SW_MLP=512,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_MEGA=1,SW_ENTRY_OVERRIDE=swin_bneck6_hyb
-// @wg-kernel swin_bneck6_hyb_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u defines=SW_C=128,SW_HEADS=4,SW_MLP=512,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_MEGA=1,HYB_SCAN_MUTANT=1,SW_ENTRY_OVERRIDE=swin_bneck6_hyb_scanmut
+// @wg-kernel swin_bneck6_hyb co=- block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u defines=SW_C=128,SW_HEADS=4,SW_MLP=512,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_MEGA=1,WG_LD_A16=1,SW_ENTRY_OVERRIDE=swin_bneck6_hyb
+// @wg-kernel swin_bneck6_hyb_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u defines=SW_C=128,SW_HEADS=4,SW_MLP=512,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_MEGA=1,WG_LD_A16=1,HYB_SCAN_MUTANT=1,SW_ENTRY_OVERRIDE=swin_bneck6_hyb_scanmut
 // @wg-kernel swin_bneck6_hyb_mut co=- probe=1 block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u defines=SW_C=128,SW_HEADS=4,SW_MLP=512,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_MEGA=1,SW_HYB_MUT_ORDER=4,SW_ENTRY_OVERRIDE=swin_bneck6_hyb_mut
 // @wg-kernel swin_bneck6_hyb_tmo co=- probe=1 block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u defines=SW_C=128,SW_HEADS=4,SW_MLP=512,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_MEGA=1,BNECK_SPIN_LIMIT=1u,SW_ENTRY_OVERRIDE=swin_bneck6_hyb_tmo
+// @wg-kernel swin_bneck6_q7c_hyb co=- block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u defines=SW_C=128,SW_HEADS=4,SW_MLP=512,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_Q7_CHUNK=1,SW_MEGA=1,SW_ENTRY_OVERRIDE=swin_bneck6_q7c_hyb
+// @wg-kernel swin_bneck6_q7c_hyb_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,p,p,p,p,p,p,p,u,u,u,u,u,u,u defines=SW_C=128,SW_HEADS=4,SW_MLP=512,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_Q7_CHUNK=1,SW_MEGA=1,HYB_SCAN_MUTANT=1,SW_ENTRY_OVERRIDE=swin_bneck6_q7c_hyb_scanmut
 #include "swin_block.hlsl"
 
 #define BQ_SYNC_HEAD 16

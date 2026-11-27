@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Stand-in upscaler (spec 20 "Boundary to the upscaler", "Stand-in (now)"): a D3D12 compute upscale of the color
 // input to the output size, plus debug views for test 20-T2. Implements wronggpu_upscaler.h.

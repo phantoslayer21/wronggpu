@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Original explicit-queue extension of our native D3D12 Device, 2026-10-15.
 // Basis: Device's ordered-stream contract and public Microsoft COM/D3D12 queue/fence APIs.
 #pragma once

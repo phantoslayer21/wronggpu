@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Coefficient decoder of spec/05-coefficient-decoder.md (stage dec0) for gfx1201 (RDNA4).
 //
 // One fused kernel. Projection (spec 05 section 1) on FP8 WMMA, then the per-pixel coefficients A, B, C and the gated
@@ -317,6 +317,11 @@ WG_FN void dec_stage(u8* lds, const u8* __restrict__ w, u32 tid) {
 WG_FN void dec_motion(const WgDecParams& P, const u32* __restrict__ motion, int x0, int y, u32& mv0, u32& mv1) {
   const u32 npix = (u32)(P.rw * P.rh);
   const u32 pix = (u32)(wg_med3i(y, 0, P.rh - 1) * P.rw + wg_min_i(x0, P.rw - 1));
+  if (npix < 2u) {
+    mv0 = wg_ld32(motion, 0u);
+    mv1 = 0u;
+    return;
+  }
   const u32 mo = pix + 1u < npix ? pix : npix - 2u;
   const v2u mv = wg_ld64(motion, mo * 4u);
   mv0 = pix == mo ? mv[0] : mv[1];

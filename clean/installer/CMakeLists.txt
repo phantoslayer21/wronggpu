@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 # WrongGPU installer (spec 30). Windows only: MSVC or MinGW-w64.
 #   cmake -S . -B build -DWRONGGPU_PAYLOAD_DIR=<release payload folder> [-DWRONGGPU_MAP=<map.json>] [-DWRONGGPU_VERSION=x.y.z]
 #   cmake --build build --config Release
@@ -49,6 +49,24 @@ if(WRONGGPU_MAP_L AND EXISTS "${WRONGGPU_MAP_L}")
 else()
   set(MAP_L_ARGS)
   set(MAP_L_FILE)
+endif()
+# Frame generation (#96, src/wg_core/fg.h): strictly off by default. ON (a build whose payload runs WrongGPU's frame generation):
+# the per-game settings fg, fg_preset, fg_multiplier and fg_presenter (`set <game> fg=on`, off by default) and preset FG's
+# converter map embedded for "model convert --preset=FG" (the model's folder: <model>\FG). OFF: none of it; the keys are refused
+# by name and nothing about frame generation is written into any game.
+option(WRONGGPU_FG "Frame generation's per-game settings and converter map (preset FG) in the launcher; OFF = none" OFF)
+set(WRONGGPU_MAP_FG "${CMAKE_CURRENT_SOURCE_DIR}/../../data/fg.v1.map.json" CACHE FILEPATH "Frame generation converter map (preset FG; read only with WRONGGPU_FG)")
+if(WRONGGPU_FG AND WRONGGPU_MAP_FG AND EXISTS "${WRONGGPU_MAP_FG}")
+  set(MAP_FG_ARGS --map-fg ${WRONGGPU_MAP_FG})
+  set(MAP_FG_FILE ${WRONGGPU_MAP_FG})
+else()
+  set(MAP_FG_ARGS)
+  set(MAP_FG_FILE)
+endif()
+if(WRONGGPU_FG)
+  set(FG_DEFINITION WRONGGPU_FG=1)
+else()
+  set(FG_DEFINITION WRONGGPU_FG=0)
 endif()
 option(WRONGGPU_PRESET_K "Preset K in the installer (second model choice, /PRESET=K, its converter map); OFF = Model M only" ON)
 if(WRONGGPU_PRESET_K)
@@ -127,6 +145,31 @@ else()
   set(RR_PAYLOAD_ARGS)
   set(WRONGGPU_RR_FILES)
 endif()
+# Frame generation's files (WRONGGPU_FG only, src/wg_core/fg.h): the frame generation plugin and its kernels of one release
+# build (a folder with plugins\WrongGPU-FG.asi and fg-dxil\<name>.dxil, the release's stage folder layout; the kernels may also
+# be under wronggpu-setup\ or plugins\wronggpu-setup\). An install puts the plugin beside WrongGPU's plugin and the kernels in
+# wronggpu-setup\fg-dxil beside it, where the plugin reads them. Empty: an installer without them (FG games are installed
+# without frame generation's files). Never OptiScaler (tools/make_payload.py refuses it). A WRONGGPU_TESTING build without a
+# folder gets generated stand-ins (tests/make_mock_fg.py), so its tests never need a real FG file.
+set(WRONGGPU_FG_DIR "" CACHE PATH "Folder with the frame generation plugin (plugins/WrongGPU-FG.asi) and its kernels (fg-dxil/*.dxil); read only with WRONGGPU_FG")
+set(FG_PAYLOAD_DIR)
+if(WRONGGPU_FG)
+  set(FG_PAYLOAD_DIR "${WRONGGPU_FG_DIR}")
+  if(NOT FG_PAYLOAD_DIR AND WRONGGPU_TESTING)
+    set(FG_PAYLOAD_DIR ${CMAKE_CURRENT_BINARY_DIR}/mock-fg)
+    execute_process(COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/make_mock_fg.py ${FG_PAYLOAD_DIR} RESULT_VARIABLE MOCK_FG_RESULT)
+    if(NOT MOCK_FG_RESULT EQUAL 0)
+      message(FATAL_ERROR "tests/make_mock_fg.py failed")
+    endif()
+  endif()
+endif()
+if(FG_PAYLOAD_DIR)
+  set(FG_PAYLOAD_ARGS --fg ${FG_PAYLOAD_DIR})
+  file(GLOB_RECURSE WRONGGPU_FG_FILES CONFIGURE_DEPENDS "${FG_PAYLOAD_DIR}/*")
+else()
+  set(FG_PAYLOAD_ARGS)
+  set(WRONGGPU_FG_FILES)
+endif()
 if(EXISTS "${MAP_F_FILE}")
   set(MAP_F_ARGS --map-f ${MAP_F_FILE})
 else()
@@ -142,11 +185,11 @@ add_library(wg_core STATIC
   src/wg_core/model.cpp src/wg_core/checks.cpp src/wg_core/install.cpp src/wg_core/logs.cpp
   src/wg_core/profile.cpp src/wg_core/logtail.cpp src/wg_core/launcher.cpp
   src/wg_core/fingerprint.cpp src/wg_core/optikeys.cpp src/wg_core/leftovers.cpp src/wg_core/rr.cpp src/wg_core/rrprep.cpp src/wg_core/gamerules.cpp
-  src/wg_core/rrconfig.cpp src/wg_core/convert_ignore.cpp)
+  src/wg_core/rrconfig.cpp src/wg_core/convert_ignore.cpp src/wg_core/fg.cpp)
 target_include_directories(wg_core PUBLIC src)
 target_compile_definitions(wg_core PUBLIC ${PRESET_K_DEFINITION} ${DIRECT_ROUTE_DEFINITION})
 # (private: model-choice-tests compiles profile.cpp with the Model L choice on, against this library)
-target_compile_definitions(wg_core PRIVATE ${MODEL_L_DEFINITION} ${MODEL_K_DEFINITION})
+target_compile_definitions(wg_core PRIVATE ${MODEL_L_DEFINITION} ${MODEL_K_DEFINITION} ${FG_DEFINITION})
 if(WRONGGPU_TESTING)
   target_compile_definitions(wg_core PUBLIC WRONGGPU_TESTING)
   if(NOT MSVC)
@@ -193,8 +236,8 @@ add_custom_command(
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/make_payload.py
           --payload ${WRONGGPU_PAYLOAD_DIR} --map ${WRONGGPU_MAP} ${PRESET_K_MAP_ARGS} --version ${WRONGGPU_VERSION}
           --build-id=${WRONGGPU_BUILD_ID} --payload-name=${WRONGGPU_PAYLOAD_NAME}
-          ${DIRECT_ROUTE_PAYLOAD_ARGS} ${RR_PAYLOAD_ARGS} ${MAP_F_ARGS} ${MAP_L_ARGS} ${MANIFEST_ARGS} ${TESTING_PAYLOAD_ARGS} --out ${GEN}
-  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tools/make_payload.py ${MANIFEST} ${WRONGGPU_MAP} ${PRESET_K_MAP_FILE} ${MAP_F_FILE} ${MAP_L_FILE} ${WRONGGPU_PAYLOAD_FILES} ${WRONGGPU_RR_FILES}
+          ${DIRECT_ROUTE_PAYLOAD_ARGS} ${RR_PAYLOAD_ARGS} ${FG_PAYLOAD_ARGS} ${MAP_F_ARGS} ${MAP_L_ARGS} ${MAP_FG_ARGS} ${MANIFEST_ARGS} ${TESTING_PAYLOAD_ARGS} --out ${GEN}
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tools/make_payload.py ${MANIFEST} ${WRONGGPU_MAP} ${PRESET_K_MAP_FILE} ${MAP_F_FILE} ${MAP_L_FILE} ${MAP_FG_FILE} ${WRONGGPU_PAYLOAD_FILES} ${WRONGGPU_RR_FILES} ${WRONGGPU_FG_FILES}
   COMMENT "Embedding the payload and the converter map")
 
 # WrongGPU-Restore.exe: the per-game restorer (uninstall.exe in each game's wronggpu-setup folder): wg_core without the
@@ -265,7 +308,7 @@ target_link_libraries(wg-core-tests PRIVATE wg_core)
 # job files, the update reply, the game environment; no game, payload or GPU).
 add_executable(launcher-core-tests tests/launcher_core_tests.cpp)
 target_link_libraries(launcher-core-tests PRIVATE wg_core)
-target_compile_definitions(launcher-core-tests PRIVATE ${MODEL_L_DEFINITION} ${MODEL_K_DEFINITION})
+target_compile_definitions(launcher-core-tests PRIVATE ${MODEL_L_DEFINITION} ${MODEL_K_DEFINITION} ${FG_DEFINITION})
 # The coexistence tests (M2): fingerprints on synthetic bytes, the proxy picker, byte-exact OptiScaler.ini edits and the
 # inikey journal, the OptiScaler tab's key rules, the record's inikey and coexist lines, the log warnings.
 add_executable(coexist-core-tests tests/coexist_tests.cpp)
@@ -300,13 +343,36 @@ add_test(NAME launcher-core COMMAND launcher-core-tests)
 add_test(NAME model-choice COMMAND model-choice-tests)
 add_test(NAME model-choice-k COMMAND model-choice-k-tests)
 add_test(NAME model-choice-k-only COMMAND model-choice-k-only-tests)
+# The frame generation choice (profile.cpp with WRONGGPU_FG on, whatever this build's switch, so that CI, which keeps it off,
+# runs it): the four settings in their exact spellings, profile.ini and settings.ini round trips beside the other keys, the
+# opt-in rule (nothing written for a game never opted in), fg kept off in the game while its data is not ready.
+add_executable(fg-choice-tests tests/fg_choice_tests.cpp src/wg_core/profile.cpp)
+target_compile_definitions(fg-choice-tests PRIVATE WRONGGPU_FG=1)
+target_link_libraries(fg-choice-tests PRIVATE wg_core)
+add_test(NAME fg-choice COMMAND fg-choice-tests)
+# Frame generation's files (wg_core/fg.h, this build's switch): WrongGPU-FG.asi never another setup's plugin (ForeignPlugins),
+# where an install puts the plugin and its kernels, the record's entry, the library check, OptiScaler's own frame generation, and
+# (WRONGGPU_FG) the state folder's keys folded back into the profile.
+add_executable(fg-files-tests tests/fg_files_tests.cpp)
+target_link_libraries(fg-files-tests PRIVATE wg_core)
+target_compile_definitions(fg-files-tests PRIVATE ${FG_DEFINITION})
+add_test(NAME fg-files COMMAND fg-files-tests)
+# Frame generation's files in the payload step (tools/make_payload.py --fg, any build): the stage folder's layout embedded as
+# plugins\WrongGPU-FG.asi and fg-dxil\<name>.dxil; OptiScaler, NVIDIA names, a developer runtime and any other file refused.
+add_test(NAME fg-payload COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_fg_payload_tests.py --work ${CMAKE_CURRENT_BINARY_DIR}/fg-payload-work)
+# A testing build with frame generation: install, repair and uninstall of its files in generated fixture games with the test
+# launcher (tests/run_fg_install_tests.py; never a real game, never a GPU program).
+if(WRONGGPU_TESTING AND WRONGGPU_FG AND FG_PAYLOAD_DIR)
+  add_test(NAME fg-install COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_fg_install_tests.py --launcher $<TARGET_FILE:WrongGPU>
+           --work ${CMAKE_CURRENT_BINARY_DIR}/fg-install-work --fg-dir ${FG_PAYLOAD_DIR})
+endif()
 add_test(NAME coexist-core COMMAND coexist-core-tests)
 add_test(NAME convert-ignore COMMAND convert-ignore-tests)
 if(WRONGGPU_TESTING)
   add_test(NAME wizard-policy COMMAND wizard-policy-tests)
 endif()
 target_include_directories(WrongGPU PRIVATE ${GEN})
-target_compile_definitions(WrongGPU PRIVATE ${PRESET_K_DEFINITION} ${DIRECT_ROUTE_DEFINITION} ${MODEL_L_DEFINITION} ${MODEL_K_DEFINITION})
+target_compile_definitions(WrongGPU PRIVATE ${PRESET_K_DEFINITION} ${DIRECT_ROUTE_DEFINITION} ${MODEL_L_DEFINITION} ${MODEL_K_DEFINITION} ${FG_DEFINITION})
 target_link_libraries(WrongGPU PRIVATE wg_ui wg_core wgc_core comctl32 shell32 ole32 oleaut32 uuid advapi32 user32 gdi32 gdiplus dwmapi uxtheme d2d1 d3d11 dxgi dwrite windowscodecs uiautomationcore)
 if(MSVC)
   target_compile_options(WrongGPU PRIVATE /Zi)

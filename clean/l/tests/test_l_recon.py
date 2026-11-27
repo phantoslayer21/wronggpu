@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L's reconstruction oracle (clean/l/reference/recon.py) and its variant rule, CPU only, synthetic data.
 
 Run: python -m unittest discover -s clean/l/tests -t . -p test_l_recon.py

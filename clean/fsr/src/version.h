@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Version of the FSR front end, shown in the log and the DLL's version resource.
 // Since 0.6.5: a release build takes the release script's one version (CMake WG_VERSION writes wg_version_override.h and

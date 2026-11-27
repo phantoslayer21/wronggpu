@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model L (issue #89): Swin block kernels at the widths Model L adds, from Model M's block template
 // (clean/kernels/swin.hip, included for its templates only). Same arithmetic, packed weights
 // (clean/runner/packing.py pack_block) and launch geometry as Model M's block kernels (clean/FORMATS.md, "Kernels and

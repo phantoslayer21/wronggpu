@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Independent reference for spec 08 and builder of synthetic test cases.
 
 Written for this project. Python standard library only. Everything here is computed independently of

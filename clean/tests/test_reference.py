@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Checks of the NumPy reference against slow, independently written loop versions of spec 02.
 
 Run: python -m unittest discover -s clean/tests -t .

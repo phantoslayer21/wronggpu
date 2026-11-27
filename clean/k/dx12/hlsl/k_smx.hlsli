@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model K's softmax weight rounding, shared by the narrow (k_common.hlsli wgk_softmax_weights) and wide
 // (k_block_wide.hlsl) stage ports and by the probe kernel k_mix_probe (kernels/k_mix_probe.hlsl). WrongGPU's own code.
 //

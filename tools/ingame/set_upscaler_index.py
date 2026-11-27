@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Set UpscalerIndex in the [WrongGPU] section of the game's OptiScaler.ini (our install's file, backed up by
 game_backup.py; restored by game_restore.py). 0 = WrongGPU Model M, 1 = WrongGPU Model L. Only that one line changes; bytes and line endings otherwise kept.
 usage: set_upscaler_index.py <OptiScaler.ini> <index>"""

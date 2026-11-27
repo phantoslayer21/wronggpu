@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model K (spec/40-model-k.md): FP16 helpers shared by the model K kernels.
 //
 // Everything in model K is FP16 (spec 40, "Numerics"). Elementwise operations round to FP16 after every operation, in

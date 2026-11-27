@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Public D3D12 WARP fence metadata only: no recorded GPU commands or neural data.
 #include "../src/split_progress.h"
 #include <dxgi1_4.h>

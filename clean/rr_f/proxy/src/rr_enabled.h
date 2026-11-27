@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The player's install switch for RR: the launcher's "Use WrongGPU" row of a game's Ray Reconstruction section
 // (launcher spec BE-wide\rr-notes.md), registry key rr_enabled (clean/wgshared/registry, slot WG_OPT_RR_ENABLED).
 // Off = the RR files stay installed but WrongGPU does not take RR: the plugin reports RR unsupported, so the game uses

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """NumPy reference of model K (spec 41 draft 3, wiring and offsets of spec 44 draft 1): task K4's oracle.
 
 All stored values are FP16 (float16 arrays). Matrix products (and their bias) are summed exactly (float64) and rounded

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // A minimal JSON reader for the proxy tests (game profiles under tests/data). Strict enough for files written by
 // tools/probe_log_to_profile.py: objects, arrays, strings with the common escapes, numbers, true / false / null.
 #pragma once

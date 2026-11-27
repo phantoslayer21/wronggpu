@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (issue #96): the per-call configuration values that are settled, as a CPU reference.
 
 Written for this project. None of these values changes the networks or their weights (one weight set serves every

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The compact pixel head (k_stage2_d0_hp / k_stage2h_d0_hp -> k_out_pixel_c) against the 40-channel head map
 (k_stage2_d0_hidden / k_stage2h_d0_hidden -> k_out_pixel): the same head values in another layout, so every output and
 history bit must be the same.

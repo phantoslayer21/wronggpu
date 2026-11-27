@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The integer form of the dithered FP8 quantization used by kernels/encoder.hip (dither_q) against the step-by-step
 definition of spec 03 draft 2 (reference/encoder.py, dither_fp8).
 

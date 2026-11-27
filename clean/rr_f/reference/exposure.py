@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Independent CPU auto-exposure pass from spec 58 (DRAFT 6).
 
 The caller supplies all nine published symbols and the already API-decoded f32

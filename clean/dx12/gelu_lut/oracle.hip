@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // HIP oracle of the MLP hidden path h -> q8(GELU(h)) as the runtime's code objects compute it (swin.co *_nc Swin blocks,
 // dec1_dec0__pack12.co, swin__bmegahg.co bneck6_nc): wg_platform.h wg_gelu (WG_GELU_MODE 2, sigmoid form) of each value,
 // then wg_pack_q8_nc (v_cvt_pk_fp8_f32, no clamp). Built with the runtime's device flags (clean/runner/build.py

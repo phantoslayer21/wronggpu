@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Exact 51.1 matrix step "Y": D = R(C + sum of 32 e4m3 products), the sum exact and rounded once, on the plain fp8
 // WMMA. Proof and evidence: results/2026-10-20-speed-body.md; hardware facts H1 / H2: gpu/probe_y.py.
 //

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 port of frame generation's net1 skip add (issue #96): fg_add_f16 of fg_net1.co (clean/fg/kernels/fg_net1.hip),
 // byte for byte. y = h(a + b) per element of n float16 values: the single-precision sum (one IEEE operation), then
 // float16 by wg_f2h (nearest even); single precision then float16 equals one rounding of the exact sum of two float16

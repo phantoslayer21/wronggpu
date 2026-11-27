@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Micro-benchmark kernels for runner/overlap_probe.py: can the matrix unit (WMMA) and the vector ALU make progress at
 // the same time? Synthetic data only. Device-only (the host emulator has no use for it).
 //

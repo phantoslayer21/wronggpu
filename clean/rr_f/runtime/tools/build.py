@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Build WrongGPU's RR runtime: the kernel library (DXIL, exact arithmetic mode of clean/dx12/build_dx12.py), the
 model-independent tables, the runtime library wronggpu_rr_runtime.dll, the D3D12 test host rr_test_host.exe;
 optionally a stage folder with the runtime and a model file (the proxy's directory layout).
@@ -42,8 +42,17 @@ RRF = os.path.dirname(RT)
 ROOT = os.path.dirname(os.path.dirname(RRF))
 DEFAULT_OUT = os.path.join(os.environ.get("WG_BUILD_ROOT", os.path.join(ROOT, "build")), "rr-f-rt-int", "out")
 
-FAST_OUT_DEFINES = {"OF_HWRCP": 1, "OF_REPROJ_MAX": 1,   # Fast mode's output stage (clean/rr-f-s10-modes)
-                    "OF_UNIF": 1}   # clean/rr-f-lw-fold: uniform scratch words (exact, same bits; faster in output.fast.f only)
+EXACT_OUT_DEFINES = {"OFX_FUSE": 1, "OF_UNIF": 1}   # exact, same bits (output_diff PASS): fused 16-tap loop + uniform scratch words
+FAST_OUT_DEFINES = {"OF_HWRCP": 1, "OF_REPROJ_MAX": 1,   # Fast mode's output stage (clean/rr-f-s10-modes; tier B, NOT exact)
+                    "OF_UNIF": 1, "OFX_FUSE": 1, "OFX_NOCHK": 1}   # fused 16-tap loop + uniform scratch + no subnormal-band check (fast mode only)
+# clean/rr-f-wave4 R4.3 (same bits as without; rr_output_fast.hlsli, written arguments there): extra defines of output.fast.f
+# alone (output.prep.f / output.fallback.f keep their DXIL): OFX_PH1W (the PH1 pool inside each wave64: no groupshared
+# copy, no barrier), OFX_LD3 (the motion pair / eroded texels as one b64 / b32 load), OFX_QST (two neighbour Q texels as
+# one 12-byte store). WG_RR_OUTF_FASTDEFS (JSON object, build time) replaces them; the runtime kernel output.fast.f0 is
+# the same kernel without them (WG_RR_W4 bit 2 = 0 selects it).
+FAST_OUT_FAST_ONLY = {"OFX_PH1W": 1, "OFX_LD3": 1, "OFX_QST": 1}
+# clean/rr-f-wave4c W4C.3: output.fast.f_ph1w = output.fast.f0 plus OFX_PH1W alone
+FAST_OUT_PH1W_ONLY = {"OFX_PH1W": 1}
 
 
 class _env:
@@ -72,6 +81,11 @@ STAGES = ("IN0", "E1", "E2", "E3", "E4", "E5", "D4-F", "D4-R", "D3-F", "D3-R", "
 # invalidate the head kernels' cache keys)
 OWN_KEY_SKIP = ("rr_input.hlsl", "rr_input_mlp.hlsl", "rr_block.hlsl", "rr_block_c32.hlsl", "rr_block_fast.hlsl",
                 "rr_block_wide.hlsl", "rr_fast.hlsli", "rr_mlp_step.hlsli", "rr_dflow.hlsli",   # (s12-dflow)
+                # clean/rr-f-wave4b: the wave64 forms (the head's own file is never included by the other head kernels;
+                # listing them keeps every existing head kernel's cache key)
+                "rr_d0r_w64.hlsl", "rr_block_c64_w64.hlsl",
+                # clean/rr-f-wave4c: the wave64 form of the wide stages (never included by the head)
+                "rr_block_wide_w64.hlsl",
                 "rr_in_math.hlsli",   # a14-frame (request of track C): included by rr_input.hlsl only
                 # clean/rr-f-s10-tail: the output / resolve / pool / exposure kernels are never included by the head
                 "rr_output.hlsl", "rr_output_fast.hlsli", "rr_output_probe.hlsl", "rr_resolve.hlsl", "rr_resolve_fast.hlsl",
@@ -110,6 +124,27 @@ def kernels(out):
     # the default step E on the struct routes (opt-in WG_RR_BODY=E; E1 reads IN0's y2 directly, as for step X)
     assert stage.e1_direct(1, "E") == stage.e1_direct(1, "X")
     res += [("stagee." + n, 37, stage.kernel_for(n, ez, step="E", ldsw=1)) for n in STAGES]
+    # clean/rr-f-wave4 R4.2b: stagee.E1 / D1-F / D0-F share the exact body's LDS overlay (rr_block_fast.hlsl / rr_block_c32.hlsl
+    # RR_OVL); stagee0.* = the same kernels without it (RR_OVL 0, the kernels of fc16c9d; runtime WG_RR_W4 bit 1 = 0)
+    res += [("stagee0." + n, 37, stage.kernel_for(n, ez, step="E", ldsw=1, extra={"RR_OVL": 0})) for n in ("E1", "D1-F", "D0-F")]
+    # clean/rr-f-wave4b R4b.2: the level-1 stages in wave64 (rr_block_c64_w64.hlsl, design D; the same bits as stagee.E1 /
+    # D1-F / D1-R; runtime WG_RR_W4B bits 3 / 2 / 1). Relaxed body only (the exact body keeps wave32).
+    if b32:
+        res += [("stagee." + n + ".w64", 37, stage.kernel_c64_w64(n, ez, step="E", ldsw=1)) for n in stage.W4B_C64_STAGES]
+    else:   # (a non-relaxed library: the names stay, with stagee.<n>'s own DXIL)
+        res += [("stagee." + n + ".w64", 37, stage.kernel_for(n, ez, step="E", ldsw=1)) for n in stage.W4B_C64_STAGES]
+    # clean/rr-f-wave4c W4C.1: the wide stages (E2, D2-F, D2-R, E3, D3-F, D3-R, D4-F, D4-R) in wave64 (rr_block_wide_w64.hlsl, the
+    # same bits as stagee.<n>; runtime WG_RR_W4C bits 0 / 1 / 2 = level 2 / level 3 / level 4 decoder). E4 / E5 keep wave32.
+    if b32:
+        res += [("stagee." + n + ".w64", 37, stage.kernel_wide_w64(n, ez, step="E", ldsw=1)) for n in stage.W4C_WIDE_STAGES]
+    else:
+        res += [("stagee." + n + ".w64", 37, stage.kernel_for(n, ez, step="E", ldsw=1)) for n in stage.W4C_WIDE_STAGES]
+    # clean/rr-f-wave4c W4C.2: stagee.IN0.w4c / stagee.D0-F.w4c = stagee.IN0 / D0-F (rr_block_c32.hlsl wave64) with the deferred Q8 decision
+    # (RR_DEFER), the Dd / Wo weight prefetch and, for IN0, the interleaved front-end MLP (stage.W4C_C32_DEFS); same bits. Runtime
+    # WG_RR_W4C bits 3 / 4. The non-relaxed library repeats stagee.<n>'s DXIL under the names.
+    for n in ("IN0", "D0-F"):
+        res.append(("stagee." + n + ".w4c", 37, stage.kernel_for(n, ez, step="E", ldsw=1, extra=stage.W4C_C32_DEFS[n]) if b32
+                    else stage.kernel_for(n, ez, step="E", ldsw=1)))
     # clean/rr-f-s12-dflow: staged.* = stagee.* in the dataflow form (rr_dflow.hlsli: row counters instead of the UAV
     # barriers; opt-in WG_RR_DFLOW=1). Only the rr_block_wide.hlsl stages have that form; the others repeat stagee.*'s
     # DXIL (kRrDflowMask: the stages that have it)
@@ -203,11 +238,19 @@ def kernels(out):
     for n in ("main", "pool"):
         res.append((f"output.{n}", GO.NARGS, ck("rr_output.hlsl", f"rr_output_{n}", {"WG_BLOCK": 32, "RR_RT": 1},
                                                 tag=f"rr_output_{n}_rt")))
-    for n, (dxil, nargs) in GO.kernel_set(fast=True, names=GO.FAST_KERNELS + ("prepu",), spec=True).items():   # prep, fast, fallback, prepu
+    for n, (dxil, nargs) in GO.kernel_set(defines=EXACT_OUT_DEFINES, fast=True, names=GO.FAST_KERNELS + ("prepu",), spec=True).items():   # prep, fast, fallback, prepu
         res.append((f"output.{n}", nargs, dxil))
-    # clean/rr-f-s10-modes: Fast mode's output stage (OF_HWRCP + OF_REPROJ_MAX; tier B, NOT exact), same four kernels
-    for n, (dxil, nargs) in GO.kernel_set(defines=FAST_OUT_DEFINES, fast=True, names=GO.FAST_KERNELS + ("prepu",), spec=True).items():
+    # clean/rr-f-s10-modes: Fast mode's output stage (OF_HWRCP + OF_REPROJ_MAX + OFX_FUSE + OFX_NOCHK; tier B, NOT exact), same four kernels
+    for n, (dxil, nargs) in GO.kernel_set(defines=FAST_OUT_DEFINES, fast=True, names=GO.FAST_KERNELS + ("prepu",), spec=True,
+                                          fast_only=json.loads(os.environ.get("WG_RR_OUTF_FASTDEFS", json.dumps(FAST_OUT_FAST_ONLY)))).items():
         res.append((f"output.{n}.f", nargs, dxil))
+    # clean/rr-f-wave4: output.fast.f before R4.3 (A/B kernel of the runtime's WG_RR_W4 mask)
+    res.append(("output.fast.f0", GO.NARGS, GO.kernel_set(defines=FAST_OUT_DEFINES, fast=True, names=("fast",), spec=True)["fast"][0]))
+    # clean/rr-f-wave4c W4C.3 (same bits; rr_output_fast.hlsli): output.fast.f with OFX_PH1W alone (the PH1 pool inside each
+    # wave64, no groupshared tile copy: LDS 10,304 -> 7,200 bytes) without OFX_LD3 / OFX_QST, which Wave 4a mixed into the same
+    # kernel. Runtime WG_RR_W4C bit 5 (when WG_RR_W4 bit 2 is off).
+    res.append(("output.fast.f_ph1w", GO.NARGS, GO.kernel_set(defines=FAST_OUT_DEFINES, fast=True, names=("fast",), spec=True,
+                                                              fast_only=json.loads(os.environ.get("WG_RR_OUTF_PH1W_DEFS", json.dumps(FAST_OUT_PH1W_ONLY))))["fast"][0]))
     for n in ("main", "pool"):
         res.append((f"resolve.{n}", 3, ck("rr_resolve.hlsl", f"rr_resolve_{n}", {"WG_BLOCK": 64, "RR_ELEM_EXACT": 1,
                                                                                 "RR_MUT": 0},
@@ -227,6 +270,10 @@ def kernels(out):
     # clean/rr-f-s10-modes: mode exact's resolve (correctly rounded exp2 / reciprocal: WG_RR_RF_DEFINES={})
     res.append(("resolve.fast.x", GRF.NARGS, GRF.fast_kernel(spec=0, extra={})))
     res.append(("resolve.fast2.x", GRF.NARGS, GRF.fast_kernel(spec=2, extra={})))
+    # clean/rr-f-300 R2: the plain configuration (RF_SPEC 3: not extended, no layer / opacity / alpha upscaling; same bits as
+    # resolve.fast / resolve.fast.x for those dispatches), hardware exp2 / reciprocal for Fast (rfd), correctly rounded for the .x
+    res.append(("resolve.fast3", GRF.NARGS, GRF.fast_kernel(spec=3, extra=rfd)))
+    res.append(("resolve.fast3.x", GRF.NARGS, GRF.fast_kernel(spec=3, extra={})))
     for n, (dxil, nargs) in GP.kernels(exact=True).items():       # pool-tables, pool-main (exact tables)
         res.append((n.replace("-", "."), nargs, dxil))
 
@@ -274,9 +321,21 @@ def kernels(out):
     # object, A/B builds only) = extra defines of head.fast.rx
     # clean/rr-mp1-head (owner decision 2026-11-01): accurate mode runs head.fast.rx too (registry mode row, gate-checked);
     # head.fast (exact) remains mode exact's fast head.
-    res.append(("head.fast.rx", 48, own(head, "rr_d0r_head", dict(hz, RR_OUT_PREP=1, RR_HVARL=7, RR_S9=61,
-                                                                  **json.loads(os.environ.get("WG_RR_HEADRX_DEFS", "{}"))),
+    # clean/rr-f-wave4 R4.1a (same bits as without; rr_d0r.hlsl): RR_HSTM 1 (each record whole from the hf0 lane: b128 / b64 /
+    # b32 stores) and RR_HQ8S 1 (step 1's q / v^T tiles quantised per head: 99 -> 95 VGPRs, under the 96 cliff, 0 spills).
+    # head.fast.rx0 = head.fast.rx of fc16c9d (runtime WG_RR_W4 bit 0 = 0). WG_RR_HEADRX_DEFS replaces nothing: it adds to both
+    hrx = dict(hz, RR_OUT_PREP=1, RR_HVARL=7, RR_S9=61, **json.loads(os.environ.get("WG_RR_HEADRX_DEFS", "{}")))
+    res.append(("head.fast.rx", 48, own(head, "rr_d0r_head", dict(hrx, RR_HSTM=1, RR_HQ8S=1,
+                                                                  **json.loads(os.environ.get("WG_RR_HEADRX_W4_DEFS", "{}"))),
                                         hinc, "rr_d0r_head_zexact_oprep")))
+    res.append(("head.fast.rx0", 48, own(head, "rr_d0r_head", hrx, hinc, "rr_d0r_head_zexact_oprep")))
+    # clean/rr-f-wave4b R4b.1 (same bytes as head.fast.rx; head/dx12/rr_d0r_w64.hlsl, written arguments there): the relaxed head
+    # in wave64 (design D of rr_block_c32.hlsl: one wave64 = two token tiles of the window, the weight fragments shared).
+    # Runtime WG_RR_W4B bit 0; head.fast.rx stays as it is (bit 0 = 0 selects it).
+    res.append(("head.fast.rx.w64", 48, own(os.path.join(RRF, "head", "dx12", "rr_d0r_w64.hlsl"), "rr_d0r_head",
+                                            dict(hrx, WG_WAVE=64, RR_HSTM=1, RR_HQ8S=1,
+                                                 **json.loads(os.environ.get("WG_RR_HEADRX_W4_DEFS", "{}"))),
+                                            hinc, "rr_d0r_head_w64_zexact_oprep")))
     rk = os.path.join(RT, "kernels", "rr_runtime.hlsl")
     for name, entry, blk in (("rt.ingest", "rr_rt_ingest", 64), ("rt.fill", "rr_rt_fill", 64),
                              ("rt.store", "rr_rt_store", 64), ("rt.selftest", "rr_rt_selftest", 32),
@@ -285,6 +344,40 @@ def kernels(out):
     # clean/rr-f-a14-frame E24: the read-only cache warm-up pass (WG_RR_TOUCH at creation; not dispatched by default)
     res.append(("rt.touch", 24, own(os.path.join(RT, "kernels", "rr_touch.hlsl"), "rr_rt_touch", {"WG_BLOCK": 256, "WG_WAVE": 32}, [], "rr_rt_touch")))
     res.append(("rt.blkcopy", 24, own(os.path.join(RT, "kernels", "rr_touch.hlsl"), "rr_rt_blkcopy", {"WG_BLOCK": 256, "WG_WAVE": 32}, [], "rr_rt_blkcopy")))
+    # clean/rr-f-wave5b/5c (fast mode only; runtime WG_RR_W5, default 0xaff; NOT exact, network/tail arithmetic relaxed, history logic exact):
+    #   bit 0 head.fast.rx.f.w64 (RR_HFAST_ALU=2: bounded f32 ALU head tail, per-head Q8 reducing VGPR 96->84, branchless Q8, no dead CANDW)
+    #   bit 1 output.fast.w5 (OFX_W5_ALU=1 on output.fast.f0 base: native f16, FMA bilinear, 16-tap half exp2, 3-cmp max, no fallback pass)
+    #   bit 2 resolve.fast2.w5 / resolve.fast3.w5 (RFX_W5_ALU=1: f32 uniforms, uint2 half4 taps, FP16 3x3 clamp before E, no fixup pass)
+    #   bit 3 input.features.w5c (input.features.lite wave64 + RR_IN_SRV_ONLY=1: bit-identical to input.features.lite, CPU-guarded direct SRV, -17% INST / -65% VLD / -41% IMG, 57 VGPR, 5120 B LDS)
+    #   bits 4..8 stagef.* (gpu/stage.py W5_KERNELS: pure f32 RR_B32=1 + branchless clamped RR_Q8_FAST=1, zero narrow-EXEC WMMAs, L0/L1/L2 wave64 + L3/L4/L5 wave32)
+    #   bit 9 pool.main.w5 (RR_POOL_W5=1: hardware f32 mad/mul with exact tables, 0 FP64, -69% INST, bit-identical to quarter_pool)
+    #   bit 10 resolve.fast2.w5c / resolve.fast3.w5c (RFX_W5C=1: QN=28 / QO=896, wave-uniform s1==3 skip; fast2 adds RFX_RP=16 -> RF_RS=1, 12.8 KB LDS 5 WGs/CU, RFX_LLDS=1 eliminating 4x b64 L reads, RFX_QLD=1, 32-bit MV load, rolled 3x3)
+    #   bit 11 output.fast.w5c (OFX_W5_ALU=1, OFX_W5C=1, OFX_PH1W=1, OFX_LD3=1: rolled of_reproj 74->55 VGPR [+50% occ], 7.2 KB LDS, BAR 4->2).
+    # Appended after every wave-4c kernel; all 172 wave-4c kernels above keep bit-identical cache keys and DXIL.
+    res.append(("head.fast.rx.f.w64", 48, own(os.path.join(RRF, "head", "dx12", "rr_d0r_w64.hlsl"), "rr_d0r_head",
+                                              dict(hrx, WG_WAVE=64, RR_HSTM=1, RR_HQ8S=1, RR_HFAST_ALU=2,
+                                                   **json.loads(os.environ.get("WG_RR_HEADRX_W4_DEFS", "{}"))),
+                                              hinc, "rr_d0r_head_w64_f_zexact_oprep")))
+    res.append(("output.fast.w5", GO.NARGS,
+                GO.kernel_set(defines=dict(FAST_OUT_DEFINES, OFX_W5_ALU=1), fast=True, names=("fast",), spec=True)["fast"][0]))
+    res.append(("resolve.fast2.w5", GRF.NARGS, GRF.fast_kernel(spec=2, extra=dict(rfd, RFX_W5_ALU=1))))
+    res.append(("resolve.fast3.w5", GRF.NARGS, GRF.fast_kernel(spec=3, extra=dict(rfd, RFX_W5_ALU=1))))
+    res.append(("input.features.w5c", 1,
+                GI.features_kernel("lite+RR_IN_FAST=31+RR_IN_LDST=0+RR_IN_KCB=1+RR_IN_SRV_ONLY=1", srv=1)))
+    for name, st, kind, defs in stage.W5_KERNELS:
+        # (a non-relaxed library repeats stagee.<n>'s DXIL under the names, as the wave-4 kernels)
+        res.append((name, 37, stage.kernel_w5(st, ez, step="E", ldsw=1) if b32 else stage.kernel_for(st, ez, step="E", ldsw=1)))
+    res.append(("pool.main.w5", GP.NARGS,
+                build.compile_kernel("rr_pool.hlsl", "rr_pool_main",
+                                     {"WG_BLOCK": GP.BLOCK, "WG_WAVE": 32, "RR_ELEM_EXACT": 1, "RR_POOL_TPL": GP.TPL, "RR_POOL_W5": 1},
+                                     tag="rr_pool_main_w5")))
+    res.append(("resolve.fast2.w5c", GRF.NARGS,
+                GRF.fast_kernel(spec=2, extra=dict(rfd, RFX_W5_ALU=1, RFX_W5C=1, RFX_RP=16, RFX_LLDS=1, RFX_QLD=1))))
+    res.append(("resolve.fast3.w5c", GRF.NARGS,
+                GRF.fast_kernel(spec=3, extra=dict(rfd, RFX_W5_ALU=1, RFX_W5C=1))))
+    res.append(("output.fast.w5c", GO.NARGS,
+                GO.kernel_set(defines=dict(FAST_OUT_DEFINES, OFX_W5_ALU=1, OFX_W5C=1, OFX_PH1W=1, OFX_LD3=1),
+                              fast=True, names=("fast",), spec=True)["fast"][0]))
     return res
 
 

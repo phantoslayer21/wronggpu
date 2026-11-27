@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """R1: WG_DEV_DIAGNOSTICS (executor=hip and the frame capture in a game) is off in every release build and package.
 
 No GPU, no compiler needed: the build script's runtime command, the CI and release files, and the library check are read.
@@ -334,7 +334,7 @@ class PackagerRefusesDeveloperRuntime(unittest.TestCase):
         """Every check route's selector value is refused on its own in a library that says dev-diagnostics=0 (review:
         one negative test per selector)."""
         for t in (b"hybrid_mutant", b"hybrid_twin", b"__hybmut", b"WG_DEV_BNECK_ABORT", b"/l_q7__hybmut.co",
-                  b"/l_q7w__hybmut.co"):
+                  b"/l_q7w__hybmut.co", b"WG_L_FAST_MASK"):
             with self.subTest(t=t):
                 self.assertIn(t, chk.DEV_ONLY_STRINGS)
                 ok, text = chk.check_bytes(b"MZ" + MARK0 + b" ... " + t + b" ...")

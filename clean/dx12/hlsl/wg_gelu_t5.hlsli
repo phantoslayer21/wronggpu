@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // GELU table T5 of the MLP hidden path: wg_gelu_lut.hlsli's exact q8(GELU) table re-indexed by the FP32 encoding of
 // w = fma(h, S, B) instead of its FP16 code. Index j = asuint(w) >> 18 (sign, 8 exponent bits, the top 5 mantissa bits):
 // 16384 entries (a, b) as uint2 in a structured buffer (t0, space 1; the D3D12 devices fill it at creation from

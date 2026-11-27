@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Probe-build log (see probe_log.h).
 #include "probe_log.h"
 

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Rates of the exact-body levers L1-L4 (results/2026-10-21-body-levers.md), measured BEFORE building, in NumPy on a
 sequence body dump (`sequence.py --dump-body`; stage inputs rebuilt as in gpu/ratesim.py, IN0 skipped). Nothing here
 feeds a kernel.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Plain-text log file next to the DLL (wronggpu-fsr.log). Adapted from imported/0.2.0-infra/src/common/log.h
 // (audited original WrongGPU code): shared append-mode file, one atomic append per line, time and process id on
@@ -26,15 +26,40 @@ namespace wronggpu {
 // all of WrongGPU's DLLs append to the same file.
 extern const char* const kLogTag;
 
+inline std::wstring ModuleFilePathWide(HMODULE m) {
+    std::wstring buf(260, L'\0');
+    for (;;) {
+        const DWORD n = GetModuleFileNameW(m, &buf[0], DWORD(buf.size()));
+        if (n == 0) return {};
+        if (n < buf.size()) {
+            buf.resize(n);
+            return buf;
+        }
+        if (buf.size() >= 32768) {
+            buf.resize(n);
+            return buf;
+        }
+        buf.resize(buf.size() * 2);
+    }
+}
+
+inline std::string WideToUtf8(const std::wstring& w) {
+    if (w.empty()) return {};
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), int(w.size()), nullptr, 0, nullptr, nullptr);
+    if (n <= 0) return {};
+    std::string out(size_t(n), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), int(w.size()), &out[0], n, nullptr, nullptr);
+    return out;
+}
+
 // Directory of the module containing this code (the game's executable folder when installed).
 inline std::wstring ModuleDirectory() {
     HMODULE self = nullptr;
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                        reinterpret_cast<LPCWSTR>(&ModuleDirectory), &self);
-    wchar_t path[MAX_PATH]{};
-    GetModuleFileNameW(self, path, MAX_PATH);
-    std::wstring dir(path);
-    return dir.substr(0, dir.find_last_of(L"\\/"));
+    const std::wstring dir = ModuleFilePathWide(self);
+    const size_t sl = dir.find_last_of(L"\\/");
+    return sl == std::wstring::npos ? std::wstring(L".") : dir.substr(0, sl);
 }
 
 // Lines are queued in memory and written by a background thread (one per DLL), so a game thread never waits for the
@@ -154,13 +179,13 @@ private:
                 async_ = true;
             }
         }
-        wchar_t exe[MAX_PATH]{};
-        GetModuleFileNameW(nullptr, exe, MAX_PATH);
-        const wchar_t* name = wcsrchr(exe, L'\\');
+        const std::wstring exe = ModuleFilePathWide(nullptr);
+        const size_t sl = exe.find_last_of(L"\\/");
+        const std::string exeName = WideToUtf8(sl == std::wstring::npos ? exe : exe.substr(sl + 1));
         LARGE_INTEGER frequency{}; QueryPerformanceFrequency(&frequency);
         Event("session", "{\"qpc_frequency\":" + std::to_string(frequency.QuadPart) +
               ",\"capture\":\"metadata_only\",\"gpu_completion_proven\":false}");
-        Write("==== session start: %ls (process %lu) ====", name ? name + 1 : exe, GetCurrentProcessId());
+        Write("==== session start: %s (process %lu) ====", exeName.c_str(), GetCurrentProcessId());
         if (!async_ || !diagnosticAvailable_) Write("warning: structured support diagnostics unavailable; legacy text logging only");
     }
     static constexpr size_t kMaxPending = 8u << 20;

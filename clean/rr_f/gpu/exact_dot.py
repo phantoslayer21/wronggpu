@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Original standalone exact spec-51.1 dot32 D3D12 baseline and synthetic qualification.
 
 Run with a private WG_RR_BUILD and --out. Every GPU

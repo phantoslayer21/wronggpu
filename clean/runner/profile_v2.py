@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Per-phase cycle profile of the second Swin design (kernels/swin_v2.hip built as variant "v2prof").
 
     python clean/runner/build.py --rocm <ROCm> --out build --variants v2 --ablations      # builds swin__v2prof.co

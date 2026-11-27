@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The synthetic-values rule for the Model L checkers' real modes (l_hyb_stage_check --real-inputs, l_q7_check /
 l_q7w_check --real, l_mm8_f32_check --real): every intermediate made from real weights or recorded frames (case files,
 replay inputs and outputs) goes only to a private folder OUTSIDE the repository, resolved (real path) before anything is

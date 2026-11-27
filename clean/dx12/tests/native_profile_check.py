@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Validate/summarize original WG_D3D12_PROFILE diagnostic JSONL, without running GPU work.
 
 Basis: native device's original capture schema; public Microsoft D3D12 Timing and ResolveQueryData contracts.

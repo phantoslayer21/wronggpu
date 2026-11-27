@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model M output-filter profiles of WrongGPU's own (runtime option output_filter), D/O = 1.5.
 
 Spec 06's filter truncates the stretched Lanczos-3 kernel to 5 taps and renormalizes. With the +-1/4 pixel phase the

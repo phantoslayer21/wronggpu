@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU RR runtime (clean/rr_f/runtime): the passes around the preset-F kernels that touch the game's resources.
 // Original code; conventions of clean/dx12 (wg_platform.hlsli, one arena at u0, root constants b0). Texture access:
 // one SRV at t0 and one typed UAV at u2 (the runtime's second descriptor table).

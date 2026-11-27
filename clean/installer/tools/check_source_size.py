@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Every source file of the installer / launcher stays below the spec side's scan limit (tools/nv_leak_scan.py: a file
 over 256 KB is reported). The size is counted as git stores the file (LF line ends), as the scan reads it.
 

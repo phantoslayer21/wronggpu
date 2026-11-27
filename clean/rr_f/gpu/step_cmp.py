@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Step I against step X stage by stage (independent check of 2026-10-22, results/2026-10-21-body-levers.md section 5):
 every listed stage runs with step X and with step I (+ its step-X fixup) on the SAME own synthetic weights and inputs in
 one arena; the raw output bytes are compared (zero signs included) and the fixup windows counted.

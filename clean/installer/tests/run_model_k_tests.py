@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The launcher's Model K choice (CMake WRONGGPU_MODEL_K, a development build) through its command line: `set <game>
 model=K|M` on an installed fixture game. K only with Model K's data on this PC; it writes wronggpu.ini's model item and
 OptiScaler's UpscalerIndex (1, Model K's entry right after Model M's), the install record's hashes follow, M puts both files

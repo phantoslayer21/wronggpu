@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Synthetic cases for the converter tests (spec 08 sections 4-9). Written for this project."""
 
 import copy

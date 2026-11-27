@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """FP16 helpers for the model K reference (spec 40: FP16 throughout, round to nearest even after every operation).
 
 Two independent ways to round to IEEE half precision:

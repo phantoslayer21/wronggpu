@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // RR guard: a stand-in "other Ray Reconstruction plugin" of our own (wgtest_other_rr.dll) for
 // tests/test_rr_guard_dll.cpp. It knows nothing of any real plugin; it only takes the game interface's RR calls the
 // generic ways a plugin can, so that WrongGPU RR's guard has something to find:

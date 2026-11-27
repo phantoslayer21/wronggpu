@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Reference of "Motion at output resolution" (spec 03 draft 4, spec 06 section 3): clean/reference/motion_hi.py and
 its use in reference/encoder.py and reference/post.py. Synthetic data and the spec team's vectors
 (data/motion-hi-vectors.json, tests 03-T4 and 06-T6).

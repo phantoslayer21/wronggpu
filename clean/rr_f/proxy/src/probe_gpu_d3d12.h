@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 side of the probe build (WG_RR_PROBE only; never compiled into the release build).
 #pragma once
 #include <stdint.h>

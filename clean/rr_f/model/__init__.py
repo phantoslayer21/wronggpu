@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Preset-F model admission.
 
 - `model_file`: loading and checking a converted model file (`model.wgcm` of clean/converter, map version 5; pages

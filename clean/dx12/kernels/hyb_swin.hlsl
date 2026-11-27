@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The HYBRID form's Swin blocks of the shared stages (WG_L_FORM = hybrid; SW_HYB in swin_block.hlsl): swin_block.hlsl
 // instantiated with SW_HYB=1 at Model M's stage shapes, one window per wave in 256-lane workgroups (HIP's shape; grid =
 // ceil(windows / 8)), the plain schedule (swin_block.hlsl sets the hybrid knob set), unfused: the merges and expands are
@@ -11,21 +11,42 @@
 // (the table's shared_dec_border) and the skip map with the fine mirror; the member input is RN16(E + S).
 // HIP twins: the same names in swin_hyb.co (clean/kernels/swin_hyb.hip).
 //
-// @wg-kernel swin_block_c64_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=64,SW_HEADS=2,SW_MLP=256,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_ENTRY_OVERRIDE=swin_block_c64_hyb,WG_REV_ORDER=1
-// @wg-kernel swin_block_c64_add_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=64,SW_HEADS=2,SW_MLP=256,SW_ADD=1,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_ENTRY_OVERRIDE=swin_block_c64_add_hyb
-// @wg-kernel swin_block_c96_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_ENTRY_OVERRIDE=swin_block_c96_hyb,WG_REV_ORDER=1
-// @wg-kernel swin_block_c96_add_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=1,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_ENTRY_OVERRIDE=swin_block_c96_add_hyb
-// @wg-kernel swin_block_c128_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=128,SW_HEADS=4,SW_MLP=512,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_ENTRY_OVERRIDE=swin_block_c128_hyb
+// @wg-kernel swin_block_c64_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=64,SW_HEADS=2,SW_MLP=256,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_HEAD_UNROLL=1,SW_MLP_STEP=2,SW_COMMIT_EARLY=1,SW_NORM1_EARLY=1,WG_LD_A16=1,SW_ENTRY_OVERRIDE=swin_block_c64_hyb,WG_REV_ORDER=1
+// @wg-kernel swin_block_c64_add_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=64,SW_HEADS=2,SW_MLP=256,SW_ADD=1,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_HEAD_UNROLL=1,SW_MLP_STEP=2,SW_COMMIT_EARLY=1,SW_NORM1_EARLY=1,WG_LD_A16=1,SW_ENTRY_OVERRIDE=swin_block_c64_add_hyb
+// @wg-kernel swin_block_c96_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,WG_LD_A16=1,SW_ENTRY_OVERRIDE=swin_block_c96_hyb,WG_REV_ORDER=1
+// @wg-kernel swin_block_c96_add_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=1,SW_SAFE=1,SW_ECL=0,SW_HYB=1,WG_LD_A16=1,SW_ENTRY_OVERRIDE=swin_block_c96_add_hyb
+// @wg-kernel swin_block_c128_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=128,SW_HEADS=4,SW_MLP=512,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,WG_LD_A16=1,SW_ENTRY_OVERRIDE=swin_block_c128_hyb
 //   swin_block_c64_hyb_scanmut / _c128_hyb_scanmut  the fused-square scan's mutants (probe=1, outside the manifest; see
 //                          l_swin.hlsl l_swin_block_c32_enc_hyb_scanmut): the select-free norm trees KC 4 and 8
-// @wg-kernel swin_block_c64_hyb_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=64,SW_HEADS=2,SW_MLP=256,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,HYB_SCAN_MUTANT=1,SW_ENTRY_OVERRIDE=swin_block_c64_hyb_scanmut
-// @wg-kernel swin_block_c64_add_hyb_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=64,SW_HEADS=2,SW_MLP=256,SW_ADD=1,SW_SAFE=1,SW_ECL=0,SW_HYB=1,HYB_SCAN_MUTANT=1,SW_ENTRY_OVERRIDE=swin_block_c64_add_hyb_scanmut
+// @wg-kernel swin_block_c64_hyb_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=64,SW_HEADS=2,SW_MLP=256,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_HEAD_UNROLL=1,SW_MLP_STEP=2,SW_COMMIT_EARLY=1,SW_NORM1_EARLY=1,WG_LD_A16=1,HYB_SCAN_MUTANT=1,SW_ENTRY_OVERRIDE=swin_block_c64_hyb_scanmut
+// @wg-kernel swin_block_c64_add_hyb_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=64,SW_HEADS=2,SW_MLP=256,SW_ADD=1,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_HEAD_UNROLL=1,SW_MLP_STEP=2,SW_COMMIT_EARLY=1,SW_NORM1_EARLY=1,WG_LD_A16=1,HYB_SCAN_MUTANT=1,SW_ENTRY_OVERRIDE=swin_block_c64_add_hyb_scanmut
 //   swin_block_c96_hyb_scanmut / _c96_add_hyb_scanmut  the same for KC 6, as SUBSTITUTE mutants: the KC 6 tree keeps its
 //                          per-lane selects, so no square ever feeds an add (RGA: every square's first consumer is a
 //                          v_cndmask_b16 or v_permlanex16_b32) and the plain barrier-free build forms no multiply-add;
 //                          with HYB_SCAN_MUTANT, hyb_block.hlsli also bypasses the selects so that a square does feed
 //                          an add, and the scan must find it (wrong values by design; never in a model build)
-// @wg-kernel swin_block_c96_hyb_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,HYB_SCAN_MUTANT=1,SW_ENTRY_OVERRIDE=swin_block_c96_hyb_scanmut
-// @wg-kernel swin_block_c96_add_hyb_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=1,SW_SAFE=1,SW_ECL=0,SW_HYB=1,HYB_SCAN_MUTANT=1,SW_ENTRY_OVERRIDE=swin_block_c96_add_hyb_scanmut
-// @wg-kernel swin_block_c128_hyb_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=128,SW_HEADS=4,SW_MLP=512,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,HYB_SCAN_MUTANT=1,SW_ENTRY_OVERRIDE=swin_block_c128_hyb_scanmut
+// @wg-kernel swin_block_c96_hyb_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_MLP_PAIRS=1,SW_COMMIT_EARLY=1,SW_NORM2_EARLY=1,WG_LD_A16=1,HYB_SCAN_MUTANT=1,SW_ENTRY_OVERRIDE=swin_block_c96_hyb_scanmut
+// @wg-kernel swin_block_c96_add_hyb_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=1,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_MLP_PAIRS=1,SW_COMMIT_EARLY=1,SW_NORM2_EARLY=1,WG_LD_A16=1,HYB_SCAN_MUTANT=1,SW_ENTRY_OVERRIDE=swin_block_c96_add_hyb_scanmut
+// @wg-kernel swin_block_c128_hyb_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=128,SW_HEADS=4,SW_MLP=512,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,WG_LD_A16=1,HYB_SCAN_MUTANT=1,SW_ENTRY_OVERRIDE=swin_block_c128_hyb_scanmut
+// The decoder blocks with their expand fused in (SW_ECL: swin_block.hlsl's fused_expand with the hybrid FP8 point
+// hyb_q8_of_chain, E read through the coarse mirror: hyb_fused_expand there): x = the low-resolution map (the previous
+// decoder stage's output; 128 channels for dec2, 96 for dec1), xadd = the skip map, w = the block's section whose tail
+// (L_TAIL) holds the expand weights (the section expand_c128_hyb / expand_c96_hyb read), aux unused (null). Byte for byte
+// expand_c128_hyb + swin_block_c96_add_hyb / expand_c96_hyb + swin_block_c64_add_hyb (the expanded map is never stored).
+//   swin_block_c96_add_ex_hyb   dec2 (SW_ECL 128)       swin_block_c64_add_ex_hyb   dec1 (SW_ECL 96)
+// @wg-kernel swin_block_c96_add_ex_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u,p defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=1,SW_SAFE=1,SW_ECL=128,SW_HYB=1,WG_LD_A16=1,SW_ENTRY_OVERRIDE=swin_block_c96_add_ex_hyb
+// @wg-kernel swin_block_c64_add_ex_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u,p defines=SW_C=64,SW_HEADS=2,SW_MLP=256,SW_ADD=1,SW_SAFE=1,SW_ECL=96,SW_HYB=1,SW_HEAD_UNROLL=1,SW_MLP_STEP=2,SW_COMMIT_EARLY=1,SW_NORM1_EARLY=1,WG_LD_A16=1,SW_ENTRY_OVERRIDE=swin_block_c64_add_ex_hyb
+// @wg-kernel swin_block_c96_add_ex_hyb_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,p,u,u,u,u,p defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=1,SW_SAFE=1,SW_ECL=128,SW_HYB=1,SW_MLP_PAIRS=1,SW_COMMIT_EARLY=1,SW_NORM2_EARLY=1,WG_LD_A16=1,HYB_SCAN_MUTANT=1,SW_ENTRY_OVERRIDE=swin_block_c96_add_ex_hyb_scanmut
+// @wg-kernel swin_block_c64_add_ex_hyb_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,p,u,u,u,u,p defines=SW_C=64,SW_HEADS=2,SW_MLP=256,SW_ADD=1,SW_SAFE=1,SW_ECL=96,SW_HYB=1,SW_HEAD_UNROLL=1,SW_MLP_STEP=2,SW_COMMIT_EARLY=1,SW_NORM1_EARLY=1,WG_LD_A16=1,HYB_SCAN_MUTANT=1,SW_ENTRY_OVERRIDE=swin_block_c64_add_ex_hyb_scanmut
+// Per-32-chunk FP16-rounded exact q7 twins (SW_Q7_CHUNK=1): same layout/shapes with kord_drow weight packing.
+// @wg-kernel swin_block_c64_q7c_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=64,SW_HEADS=2,SW_MLP=256,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_Q7_CHUNK=1,SW_HEAD_UNROLL=1,SW_MLP_STEP=2,SW_COMMIT_EARLY=1,SW_NORM1_EARLY=1,WG_LD_A16=1,SW_ENTRY_OVERRIDE=swin_block_c64_q7c_hyb,WG_REV_ORDER=1
+// @wg-kernel swin_block_c64_add_q7c_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=64,SW_HEADS=2,SW_MLP=256,SW_ADD=1,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_Q7_CHUNK=1,SW_HEAD_UNROLL=1,SW_MLP_STEP=2,SW_COMMIT_EARLY=1,SW_NORM1_EARLY=1,WG_LD_A16=1,SW_ENTRY_OVERRIDE=swin_block_c64_add_q7c_hyb
+// @wg-kernel swin_block_c96_q7c_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_Q7_CHUNK=1,SW_MLP_PAIRS=1,SW_COMMIT_EARLY=1,SW_NORM2_EARLY=1,WG_LD_A16=1,SW_ENTRY_OVERRIDE=swin_block_c96_q7c_hyb,WG_REV_ORDER=1
+// @wg-kernel swin_block_c96_add_q7c_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=1,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_Q7_CHUNK=1,SW_MLP_PAIRS=1,SW_COMMIT_EARLY=1,SW_NORM2_EARLY=1,WG_LD_A16=1,SW_ENTRY_OVERRIDE=swin_block_c96_add_q7c_hyb
+// @wg-kernel swin_block_c128_q7c_hyb co=- block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=128,SW_HEADS=4,SW_MLP=512,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_Q7_CHUNK=1,WG_LD_A16=1,SW_ENTRY_OVERRIDE=swin_block_c128_q7c_hyb
+// @wg-kernel swin_block_c64_q7c_hyb_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=64,SW_HEADS=2,SW_MLP=256,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_Q7_CHUNK=1,SW_HEAD_UNROLL=1,SW_MLP_STEP=2,SW_COMMIT_EARLY=1,SW_NORM1_EARLY=1,WG_LD_A16=1,HYB_SCAN_MUTANT=1,SW_ENTRY_OVERRIDE=swin_block_c64_q7c_hyb_scanmut
+// @wg-kernel swin_block_c64_add_q7c_hyb_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=64,SW_HEADS=2,SW_MLP=256,SW_ADD=1,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_Q7_CHUNK=1,SW_HEAD_UNROLL=1,SW_MLP_STEP=2,SW_COMMIT_EARLY=1,SW_NORM1_EARLY=1,WG_LD_A16=1,HYB_SCAN_MUTANT=1,SW_ENTRY_OVERRIDE=swin_block_c64_add_q7c_hyb_scanmut
+// @wg-kernel swin_block_c96_q7c_hyb_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_Q7_CHUNK=1,SW_MLP_PAIRS=1,SW_COMMIT_EARLY=1,SW_NORM2_EARLY=1,WG_LD_A16=1,HYB_SCAN_MUTANT=1,SW_ENTRY_OVERRIDE=swin_block_c96_q7c_hyb_scanmut
+// @wg-kernel swin_block_c96_add_q7c_hyb_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=96,SW_HEADS=4,SW_MLP=384,SW_ADD=1,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_Q7_CHUNK=1,SW_MLP_PAIRS=1,SW_COMMIT_EARLY=1,SW_NORM2_EARLY=1,WG_LD_A16=1,HYB_SCAN_MUTANT=1,SW_ENTRY_OVERRIDE=swin_block_c96_add_q7c_hyb_scanmut
+// @wg-kernel swin_block_c128_q7c_hyb_scanmut co=- probe=1 block=256 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=128,SW_HEADS=4,SW_MLP=512,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_HYB=1,SW_Q7_CHUNK=1,WG_LD_A16=1,HYB_SCAN_MUTANT=1,SW_ENTRY_OVERRIDE=swin_block_c128_q7c_hyb_scanmut
 #include "swin_block.hlsl"

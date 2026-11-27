@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """End-to-end tests of wronggpu-convert for map version 5 (spec 57, preset F). Synthetic data only.
 
 Written for this project. Python standard library only. Expected values come from tests/synth5.py (an exact

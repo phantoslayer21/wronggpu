@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The driver-channel probe (runtime/wmma_probe.h) on any host (no GPU, no D3D12). WrongGPU's own code.
 //   clang++ -std=c++17 -O2 test_wmma_probe.cpp -o test_wmma_probe.exe && test_wmma_probe.exe
 //   (or: cl /nologo /std:c++17 /O2 /EHsc test_wmma_probe.cpp)

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The front-end MLP's 51.1 matrix steps for kernels that fold the MLP into another stage (rr_block_c32.hlsl
 // RR_INFOLD), independent of that kernel's own RR_STEP / RR_VARL: copies of rr_step.hlsli's variant E (RR_STEP 0,
 // RR_VARL 0) and of variant X with the fast path for exact sums (RR_STEP 3), the same operations in the same order

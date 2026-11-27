@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The hybrid route never falls back (oversight 2026-11-15 18:36Z, hard rule; executor level: #225): when native D3D12
 cannot take WG_L_FORM=hybrid, the runtime REFUSES at create with one line naming what is missing, and no other route
 (the q7 / scalar reference, the M-form, the HIP executor) runs a frame in its place.

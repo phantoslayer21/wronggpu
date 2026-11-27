@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Stages enc0, dec0 and exposure (performance milestone, clean/PERF.md): GPU timing of every build variant at the
 in-game size, output comparison of the variants with the default build, and spec 09 measures against the NumPy
 references on smaller synthetic cases. Synthetic data only (no model data needed).

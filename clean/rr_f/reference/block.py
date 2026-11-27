@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The window block of spec 51.3 (common core) and the window grid / border rule of 51.6.
 
 Tensors are [Y][X][C]. e4m3 tensors are uint8 codes; f16 tensors are float64 arrays of f16 values."""

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Shared helpers of the Swin ports (swin_block.hlsl, swin_gemm.hlsl): the HLSL counterparts of the helpers at the top of
 // clean/kernels/swin.hip (wg_mirror, load_frags / store_frags, hsum8 / hmax8, lfrag) and the workgroup's LDS.
 //

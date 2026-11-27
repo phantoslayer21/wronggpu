@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model L (issue #89): the width-32 Swin block in its FP16 form (clean/l/reference/oracle.py _block_tokens_q7,
 // table consts form "q7", FP8 op model "exact"), for Model L's encoder block and decoder block.
 //

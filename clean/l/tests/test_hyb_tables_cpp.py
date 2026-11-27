@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """runtime/hyb_tables.h (the arena tables the D3D12 hybrid kernels read) gives exactly the bytes of
 clean/l/reference/hyb_tables.py: GELU16 -> FP8 for all 65,536 inputs, the rsqrt and rcp tables, and the GELU16 table
 with 16-bit entries."""

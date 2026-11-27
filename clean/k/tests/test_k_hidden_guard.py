@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """GPU audit of the actual guarded hidden helper; run under the shared GPU lock."""
 import ctypes as ct
 import os

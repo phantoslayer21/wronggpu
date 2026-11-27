@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Own host mock: a distinct AMD-provider alias beside our hosted DLL, no third-party implementation.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>

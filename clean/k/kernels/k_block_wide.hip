@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model K block of spec 41, wide form for the small stages (levels 3..5: e3, e4, m, d4, d3).
 //
 // The stage kernels of k_block.hip run one 8x8 window per 128-lane workgroup. At levels 3..5 there are only 20..252

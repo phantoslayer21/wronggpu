@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Hosted WrongGPU (wronggpu_ffx_dx12.dll, as OptiScaler loads it) with AMD's versions from the game's own DLLs. Own
 // host mock and test double (fake_original.cpp); no third-party code. Run from one of two folders (CMakeLists.txt):
 //   game: the test, wronggpu_ffx_dx12.dll and the test double as amd_fidelityfx_dx12.dll (the game's own FidelityFX

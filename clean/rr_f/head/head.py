@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Spec 55: the recurrent half of decoder D0 (D0-R) and the network's output head, vectorised NumPy reference.
 
 Entry points:

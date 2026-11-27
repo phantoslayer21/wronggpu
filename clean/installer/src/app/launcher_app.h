@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher: what the launcher's command line (app/cli.cpp) and its window (app/launcher_ui.cpp) share: the
 // launcher's paths, global settings and the engine set up for the launcher. Written for this project.
 #pragma once

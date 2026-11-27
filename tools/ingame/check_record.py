@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Check a game's WrongGPU install record against the folder: every recorded 'copy' file's SHA-256 against the
 record's installed hash (files owned by wg / wg-optibundle only), and list the files in the exe folder's top level and
 OptiScaler\\ that the record doesn't name. Vendor-named files (nvngx*, *dlss*, sl.*, nvapi*) are never opened.

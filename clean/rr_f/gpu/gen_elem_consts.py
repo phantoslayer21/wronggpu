@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Generate clean/rr_f/kernels/rr_elem_consts.hlsli: binary64 / double-double constants of the correctly rounded
 f32 exp2, log2 used by the page-54b kernels (rr_exact_elem.hlsli). Mathematical constants only (Taylor and atanh
 series coefficients, ln 2, 1/ln 2), computed here with 80-digit decimals and rounded to binary64.

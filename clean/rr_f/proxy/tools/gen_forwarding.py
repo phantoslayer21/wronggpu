@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Forwarding-table generator of the RR proxy (spec 60.1, 60.3, 60.9, annexes A9 and A10).
 
     python gen_forwarding.py <binding.json> <out_dir> [--probe] [--hook] [--output-name <file.dll|file.asi>]

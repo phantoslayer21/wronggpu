@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Small per-frame helper kernels of the runtime (spec 10 draft 2, section 5 step 1: pre-exposure).
 //
 // color_divide: the network works on color / pi: out[i] = in[i] / pi per channel (IEEE division), for the stages that

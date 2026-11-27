@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """GPU/D3D12: Model K on the native direct route, frames on the legacy input path, byte for byte against the exact
 reference.
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Original query continuation for D3D12 command-list splits. Based on Microsoft's
 // public CountersAndQueries specification; no SDK/driver implementation copied.

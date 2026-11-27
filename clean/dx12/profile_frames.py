@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Diagnostic native operation attribution on original synthetic Model M frames.
 
 Run it with the GPU otherwise idle (see WG_GPU_LOCK in BUILDING.md). Profiled timestamps perturb scheduling; use time_frames.py

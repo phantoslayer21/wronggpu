@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // RR guard: end-to-end test of the coexistence guard in the hook-mode plugin (src/hook_dll.cpp + rr_guard.h).
 // The executable is the fake game, as in test_hook_dll.cpp: it imports the RR path's functions by name from the stand-in
 // interface (tests/gen_fake_original.py). The "other module" is our own stand-in, wgtest_other_rr.dll

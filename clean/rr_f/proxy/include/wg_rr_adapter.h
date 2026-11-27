@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 /* WrongGPU RR runtime adapter, version 1: the owned boundary between the proxy (pages 60-63) and WrongGPU's
  * preset-F runtime (pages 50-58). Entirely WrongGPU's own design; nothing here is a game interface.
  *

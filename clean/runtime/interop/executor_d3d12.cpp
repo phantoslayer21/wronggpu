@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 executor (executor=dx12; executor.h): Model M on the native D3D12 device (clean/runtime/device_d3d12.h) made on
 // the GAME's D3D12 device, recorded into the game's command list. WrongGPU's own code.
 //
@@ -130,7 +130,7 @@ class D3d12Executor : public Executor {
             log_(true, "measuring again in a " + max_mib + " MiB arena failed (" + e + ")");
           return *err = "D3D12 device: " + e, false;
         }
-        rt = wgrt::runtime_create(c, std::move(dev), &e, true, true);
+        rt = wgrt::runtime_create(c, std::move(dev), &e, true, true, /*measure_only=*/true);
         if (rt || !may_grow || arena || e.find("native D3D12 arena exhausted") == std::string::npos) break;
         grown = true;
         if (log_)
@@ -250,6 +250,8 @@ class D3d12Executor : public Executor {
     enum { kDirect, kProxy16, kProxy32 } route = kDirect;
     if (rows16) route = uav ? kDirect : kProxy16;
     else route = (!is_srgb(ofmt) && uav) ? kDirect : kProxy32;
+    if (route == kProxy32 && !job.conv)
+      return *err = "frame not taken (nothing recorded): no Converter for the output pass", false;
     ID3D12Resource* target = out;
     DXGI_FORMAT tfmt = uav_format(ofmt);
     if (route == kProxy16 && !proxy(&proxy16_, DXGI_FORMAT_R16G16B16A16_FLOAT, f, err)) return false;

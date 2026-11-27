@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: the engine setting Ray Reconstruction needs in Borderlands 4 and Hogwarts Legacy (Brief 16,
 // owner 2026-11-04). Both games create Ray Reconstruction themselves only with one line in the player's own Engine.ini
 // (rrconfig_line.h), section [SystemSettings]; Borderlands 4 deletes that file a few seconds after every start unless it is

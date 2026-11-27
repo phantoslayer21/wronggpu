@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Library interface of the converter (spec 08), used by the installer (spec 30) and by the
 // command-line tool. Written for this project.
 #pragma once

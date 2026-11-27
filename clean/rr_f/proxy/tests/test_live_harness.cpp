@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Live-test harness (clean/rr-f-live2): a fake game that drives the REAL release hook ASI (src/hook_dll.cpp) and the
 // REAL RR runtime on the hardware D3D12 device, the way game A (Cyberpunk 2077, 2.7 interface) does: it statically
 // imports the interface functions by name from the stand-in interface DLL (tests/gen_fake_original.py), loads the ASI

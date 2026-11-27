@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The Model L choice of the launcher (#89; profile.cpp built with WRONGGPU_MODEL_L on, whatever the launcher build's
 // switch): the model setting, profile.ini, wronggpu.ini's model item and the OptiScaler entry OptiScaler starts with
 // (UpscalerIndex). Model M changes nothing in either file, byte for byte. Written for this project. Run by ctest

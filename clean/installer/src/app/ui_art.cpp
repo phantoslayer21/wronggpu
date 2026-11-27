@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher window: game art (ui_shell.h). Read at run time from the player's own Steam cache
 // (<Steam>\appcache\librarycache\<appid>\, directly there or one hashed folder deeper): the wide library_hero.jpg and the
 // game's logo.png (the Library's tiles and featured banner, the game page's banner), header.jpg (a tile without a hero),

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The proxy library (spec 60.1, annexes A9 and A10): installed under the game's interposer file name; loads the
 // renamed original (<own file stem>.wg-original.dll) from its own directory with a full path, forwards every export
 // through generated argument-agnostic stubs, and implements the calls A9.4 marks for the proxy through RrProxy

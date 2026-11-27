@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """GPU time of the output stage alone (fast path and / or rr_output_main) at game sizes on synthetic inputs.
 
     python -m clean.rr_f.gpu.output_bench --size 1706x960:2560x1440 [--path fast,main] [--consts model|synthetic]

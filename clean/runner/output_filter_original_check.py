@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Whole-frame GPU check of the output filter "original" (spec 06 draft 4; runtime option output_filter): synthetic
 Model M parameters that carry made-up output-filter weights (clean/runner/synthetic_model.py --output-taps), synthetic
 frames (resets, render-size changes, both exposure paths, pre-exposure).

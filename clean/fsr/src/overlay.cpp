@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // In-game overlay (overlay.h). Written for WrongGPU.
 #include "overlay.h"
 
@@ -257,17 +257,6 @@ void ProbeNote(ID3D12CommandQueue* q, const char*) {
     ReleaseSRWLockExclusive(&g_scLock);
 }
 
-// The queue learnt for this swap chain (referenced), or null.
-ID3D12CommandQueue* SwapChainQueueOf(IDXGISwapChain* sc) {
-    AcquireSRWLockShared(&g_scLock);
-    ID3D12CommandQueue* q = nullptr;
-    for (const auto& e : g_scQueues)
-        if (e.sc == sc) q = e.queue;
-    if (q) q->AddRef();
-    ReleaseSRWLockShared(&g_scLock);
-    return q;
-}
-
 void ForgetSwapChainQueue(IDXGISwapChain* sc) {
     AcquireSRWLockExclusive(&g_scLock);
     for (auto& e : g_scQueues)
@@ -276,6 +265,29 @@ void ForgetSwapChainQueue(IDXGISwapChain* sc) {
             e = SwapChainQueue{};
         }
     ReleaseSRWLockExclusive(&g_scLock);
+}
+
+// The queue learnt for this swap chain (referenced), or null.
+ID3D12CommandQueue* SwapChainQueueOf(IDXGISwapChain* sc) {
+    AcquireSRWLockShared(&g_scLock);
+    ID3D12CommandQueue* q = nullptr;
+    for (const auto& e : g_scQueues)
+        if (e.sc == sc) q = e.queue;
+    if (q) q->AddRef();
+    ReleaseSRWLockShared(&g_scLock);
+    if (q) {
+        ID3D12Device *scDev = nullptr, *qDev = nullptr;
+        const bool same = SUCCEEDED(sc->GetDevice(IID_PPV_ARGS(&scDev))) && scDev &&
+                          SUCCEEDED(q->GetDevice(IID_PPV_ARGS(&qDev))) && qDev && scDev == qDev;
+        if (scDev) scDev->Release();
+        if (qDev) qDev->Release();
+        if (!same) {
+            ForgetSwapChainQueue(sc);
+            q->Release();
+            return nullptr;
+        }
+    }
+    return q;
 }
 
 constexpr int kSlotSignal = 14, kSlotWait = 15;
@@ -570,7 +582,9 @@ struct Renderer {
     int queueMismatch = 0;
 
     static void WaitFor(ID3D12Fence* f, UINT64 v) {
-        if (!f || f->GetCompletedValue() >= v) return;
+        if (!f) return;
+        const UINT64 done = f->GetCompletedValue();
+        if (done == UINT64_MAX || done >= v) return;
         HANDLE e = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         if (e && SUCCEEDED(f->SetEventOnCompletion(v, e))) WaitForSingleObject(e, 2000);
         if (e) CloseHandle(e);
@@ -1024,7 +1038,15 @@ UINT Layout(Renderer& r, Quad* quads, const View& v, bool panel, const Frames& f
                        kCardGrad[4] = {1, 1, 1.45f, 0.85f}, kEdgeGrad[4] = {1.4f, 0.45f, 1, 1}, kBlue[4] = {0.40f, 0.66f, 1.0f, 1};
     const float* accent = v.state == 1 ? kGreen : v.state == 2 ? kAmber : v.state == 0 || v.state == 4 ? kRed : v.state == 3 ? kBlue : kGrey;
     const wchar_t* chip = v.state == 1 ? L"ACTIVE" : v.state == 2 ? L"STAND-IN" : v.state == 0 ? L"OFF" : v.state == 3 ? L"COMPARING" : v.state == 4 ? L"ERROR" : L"IDLE";
-    std::wstring amdName(v.upscaler.begin(), v.upscaler.end());
+    auto utf8Wide = [](const std::string& s) -> std::wstring {
+        if (s.empty()) return {};
+        const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), int(s.size()), nullptr, 0);
+        if (n <= 0) return std::wstring(s.begin(), s.end());
+        std::wstring w(size_t(n), L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, s.data(), int(s.size()), &w[0], n);
+        return w;
+    };
+    std::wstring amdName = utf8Wide(v.upscaler);
     // AMD's public provider list may return only a version (e.g. "4.1.1").
     if (!amdName.empty() && amdName.front() >= L'0' && amdName.front() <= L'9') amdName = L"AMD FSR " + amdName;
     if (v.state < 0 && !panel) return 0;
@@ -1127,7 +1149,7 @@ UINT Layout(Renderer& r, Quad* quads, const View& v, bool panel, const Frames& f
 #else
                                      : network ? L"Model M \u00B7 neural network"
 #endif
-                                               : std::wstring(v.upscaler.begin(), v.upscaler.end()),
+                                               : utf8Wide(v.upscaler),
                         v.state == 3 ? L"comparison" : L""});
         if (v.renderW && v.outW) {
             std::swprintf(buf, 200, L"%u \u00D7 %u  \u2192  %u \u00D7 %u", v.renderW, v.renderH, v.outW, v.outH);
@@ -1141,7 +1163,7 @@ UINT Layout(Renderer& r, Quad* quads, const View& v, bool panel, const Frames& f
     }
     std::vector<std::wstring> reason;
     if ((v.state == 0 || v.state == 4) && !v.reason.empty()) {
-        std::wstring text(v.reason.begin(), v.reason.end());
+        std::wstring text = utf8Wide(v.reason);
         const float maxW = 380 * s;
         while (!text.empty() && reason.size() < 4) {
             size_t cut = text.size();
@@ -1299,7 +1321,9 @@ void DrawDirect(Renderer& r, IDXGISwapChain3* sc, const View& v, bool panel, con
     const UINT index = sc->GetCurrentBackBufferIndex();
     if (index >= r.buffers) return;
     auto& s = r.slot[index];
-    if (r.fence->GetCompletedValue() < s.done) {  // the previous overlay on this buffer is still running: skip
+    const UINT64 done = r.fence->GetCompletedValue();
+    if (done == UINT64_MAX) return;
+    if (done < s.done) {  // the previous overlay on this buffer is still running: skip
         ++g_state->busy;
         return;
     }
@@ -1310,9 +1334,11 @@ void DrawDirect(Renderer& r, IDXGISwapChain3* sc, const View& v, bool panel, con
     D3D12_CPU_DESCRIPTOR_HANDLE rtv = r.rtvHeap->GetCPUDescriptorHandleForHeapStart();
     rtv.ptr += SIZE_T(index) * r.rtvStep;
     r.device->CreateRenderTargetView(back, nullptr, rtv);
-    s.alloc->Reset();
     ID3D12GraphicsCommandList* l = s.list;
-    l->Reset(s.alloc, r.pso);
+    if (FAILED(s.alloc->Reset()) || FAILED(l->Reset(s.alloc, r.pso))) {
+        back->Release();
+        return;
+    }
     UploadFont(r, l);
     D3D12_RESOURCE_BARRIER b = Transition(back, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
     l->ResourceBarrier(1, &b);
@@ -1333,6 +1359,7 @@ void DrawDirect(Renderer& r, IDXGISwapChain3* sc, const View& v, bool panel, con
 // back buffer on the present queue. The present queue never waits for another queue.
 void DrawCopy(Renderer& r, IDXGISwapChain3* sc, const View& v, bool panel, const Frames& fr) {
     const UINT64 ownDone = r.ownFence->GetCompletedValue(), copyDone = r.fence->GetCompletedValue();
+    if (ownDone == UINT64_MAX || copyDone == UINT64_MAX) return;
     // 1. Render into the free panel texture rendered longest ago.
     Renderer::Panel* target = nullptr;
     for (auto& p : r.panel)
@@ -1344,15 +1371,16 @@ void DrawCopy(Renderer& r, IDXGISwapChain3* sc, const View& v, bool panel, const
         const UINT i = UINT(target - r.panel);
         D3D12_CPU_DESCRIPTOR_HANDLE rtv = r.rtvHeap->GetCPUDescriptorHandleForHeapStart();
         rtv.ptr += SIZE_T(i) * r.rtvStep;
-        target->alloc->Reset();
         ID3D12GraphicsCommandList* l = target->list;
-        l->Reset(target->alloc, r.pso);
+        if (FAILED(target->alloc->Reset()) || FAILED(l->Reset(target->alloc, r.pso))) return;
         UploadFont(r, l);
         D3D12_RESOURCE_BARRIER b = Transition(target->tex, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
         l->ResourceBarrier(1, &b);
         const float clear[4] = {0, 0, 0, 1};
-        D3D12_RECT box{0, 0, LONG(boxW), LONG(boxH)};
-        l->ClearRenderTargetView(rtv, clear, 1, &box);
+        const UINT clampedW = std::min(boxW, r.panelW);
+        const UINT clampedH = std::min(boxH, r.panelH);
+        D3D12_RECT box{0, 0, LONG(clampedW), LONG(clampedH)};
+        if (clampedW && clampedH) l->ClearRenderTargetView(rtv, clear, 1, &box);
         RecordText(r, sc, l, rtv, r.panelW, r.panelH, target->quads, quads);
         b = Transition(target->tex, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
         l->ResourceBarrier(1, &b);
@@ -1362,8 +1390,8 @@ void DrawCopy(Renderer& r, IDXGISwapChain3* sc, const View& v, bool panel, const
             r.ownQueue->Signal(r.ownFence, ++r.ownValue);
             target->rendered = r.ownValue;
             target->seq = ++r.panelSeq;
-            target->boxW = boxW;
-            target->boxH = boxH;
+            target->boxW = clampedW;
+            target->boxH = clampedH;
         }
     } else if (!panel && v.state < 0) {
         return;
@@ -1384,11 +1412,13 @@ void DrawCopy(Renderer& r, IDXGISwapChain3* sc, const View& v, bool panel, const
     if (FAILED(sc->GetBuffer(index, IID_PPV_ARGS(&back))) || !back) return;
     float x0 = 0, y0 = 0;
     Place(r, float(ready->boxW), float(ready->boxH), &x0, &y0);
-    const UINT w = std::min(ready->boxW, r.width - std::min(r.width, UINT(x0)));
-    const UINT h = std::min(ready->boxH, r.height - std::min(r.height, UINT(y0)));
-    s.alloc->Reset();
+    const UINT w = std::min({ready->boxW, r.panelW, r.width - std::min(r.width, UINT(x0))});
+    const UINT h = std::min({ready->boxH, r.panelH, r.height - std::min(r.height, UINT(y0))});
     ID3D12GraphicsCommandList* l = s.list;
-    l->Reset(s.alloc, nullptr);
+    if (FAILED(s.alloc->Reset()) || FAILED(l->Reset(s.alloc, nullptr))) {
+        back->Release();
+        return;
+    }
     D3D12_RESOURCE_BARRIER in[2] = {Transition(back, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST),
                                     Transition(ready->tex, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE)};
     l->ResourceBarrier(2, in);
@@ -1572,6 +1602,7 @@ void DrawGuarded(IDXGISwapChain* sc) {
 void ForgetSwapChain(IUnknown* swapChain) {
     IDXGISwapChain3* sc = nullptr;
     if (FAILED(swapChain->QueryInterface(IID_PPV_ARGS(&sc))) || !sc) return;
+    ForgetSwapChainQueue(sc);
     {
         std::lock_guard<std::mutex> lock(g_state->mutex);
         for (auto& r : g_state->renderers)
@@ -1660,6 +1691,7 @@ bool InstallHooks(ID3D12Device* device) {
     auto createFactory = dxgi ? ProcAddress<PfnCreateFactory>(dxgi, "CreateDXGIFactory2") : nullptr;
     IDXGIFactory2* factory = nullptr;
     if (!createFactory || FAILED(createFactory(0, IID_PPV_ARGS(&factory)))) {
+        if (dxgi) FreeLibrary(dxgi);
         Log::Get().Write("overlay: CreateDXGIFactory2 failed; overlay off");
         return false;
     }
@@ -1704,6 +1736,7 @@ bool InstallHooks(ID3D12Device* device) {
     if (wnd) DestroyWindow(wnd);
     SafeRelease(queue);
     factory->Release();
+    if (dxgi) FreeLibrary(dxgi);
     Log::Get().Write(ok ? "overlay: hooks installed (swap chain Present, Present1, ResizeBuffers, ResizeBuffers1, SetColorSpace1; queue ExecuteCommandLists)"
                         : "overlay: could not hook the swap chain; overlay off");
     return ok;
@@ -1714,9 +1747,9 @@ bool InstallHooks(ID3D12Device* device) {
 // dispatch (with WrongGPU's network that span holds the input copies, the hand-over to the network and back, and the
 // output copy); resolved into a readback buffer that is read kTimerSlots / 2 dispatches later, without waiting.
 
-struct GpuTimer {
-    SRWLOCK lock = SRWLOCK_INIT;
-    ID3D12Device* device = nullptr;  // referenced: the heap below belongs to it
+struct GpuTimerEntry {
+    const void* deviceKey = nullptr;  // lookup key (unreferenced when Setup fails)
+    ID3D12Device* device = nullptr;   // referenced: the heap below belongs to it
     ID3D12QueryHeap* heap = nullptr;
     ID3D12Resource* readback = nullptr;
     const uint64_t* results = nullptr;  // mapped readback: begin, end per slot
@@ -1725,16 +1758,17 @@ struct GpuTimer {
     uint64_t lastBegin[kTimerSlots] = {};
     bool failed = false;  // set up failed for this device: no timing
 
-    void Release() {
+    void ReleaseResources() {
         if (readback && results) readback->Unmap(0, nullptr);
         results = nullptr;
         SafeRelease(readback);
         SafeRelease(heap);
         SafeRelease(device);
     }
+
     bool Setup(ID3D12Device* d) {
-        Release();
         failed = true;
+        deviceKey = d;
         device = d;
         d->AddRef();
         std::fill(std::begin(lastBegin), std::end(lastBegin), 0);
@@ -1743,13 +1777,13 @@ struct GpuTimer {
         D3D12_COMMAND_QUEUE_DESC qd{D3D12_COMMAND_LIST_TYPE_DIRECT};
         ID3D12CommandQueue* q = nullptr;
         UINT64 freq = 0;
-        if (FAILED(d->CreateCommandQueue(&qd, IID_PPV_ARGS(&q))) || !q) return false;
+        if (FAILED(d->CreateCommandQueue(&qd, IID_PPV_ARGS(&q))) || !q) { ReleaseResources(); return false; }
         const HRESULT hrFreq = q->GetTimestampFrequency(&freq);
         q->Release();
-        if (FAILED(hrFreq) || freq == 0) return false;
+        if (FAILED(hrFreq) || freq == 0) { ReleaseResources(); return false; }
         ticksPerMs = double(freq) / 1000.0;
         D3D12_QUERY_HEAP_DESC hd{D3D12_QUERY_HEAP_TYPE_TIMESTAMP, kTimerSlots * 2, 0};
-        if (FAILED(d->CreateQueryHeap(&hd, IID_PPV_ARGS(&heap))) || !heap) return false;
+        if (FAILED(d->CreateQueryHeap(&hd, IID_PPV_ARGS(&heap))) || !heap) { ReleaseResources(); return false; }
         D3D12_HEAP_PROPERTIES hp{D3D12_HEAP_TYPE_READBACK};
         D3D12_RESOURCE_DESC rd{};
         rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
@@ -1760,19 +1794,42 @@ struct GpuTimer {
         rd.SampleDesc.Count = 1;
         rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
         if (FAILED(d->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                              IID_PPV_ARGS(&readback))) || !readback)
+                                              IID_PPV_ARGS(&readback))) || !readback) {
+            ReleaseResources();
             return false;
+        }
         void* mapped = nullptr;
         const D3D12_RANGE all{0, SIZE_T(rd.Width)};
-        if (FAILED(readback->Map(0, &all, &mapped)) || !mapped) return false;
+        if (FAILED(readback->Map(0, &all, &mapped)) || !mapped) { ReleaseResources(); return false; }
         results = static_cast<const uint64_t*>(mapped);
         failed = false;
         return true;
     }
 };
-GpuTimer g_timer;
+struct GpuTimerTable {
+    SRWLOCK lock = SRWLOCK_INIT;
+    std::vector<std::unique_ptr<GpuTimerEntry>> entries;  // per device; kept alive so in-flight GPU timestamps never UAF
+    GpuTimerEntry* Find(ID3D12Device* d) {
+        for (auto& e : entries)
+            if (e->deviceKey == d) return e.get();
+        return nullptr;
+    }
+    GpuTimerEntry* GetOrCreate(ID3D12Device* d, bool* createdFailed) {
+        if (createdFailed) *createdFailed = false;
+        if (GpuTimerEntry* e = Find(d)) return e;
+        if (entries.size() >= 16) return nullptr;
+        auto e = std::make_unique<GpuTimerEntry>();
+        const bool ok = e->Setup(d);
+        if (!ok && createdFailed) *createdFailed = true;
+        GpuTimerEntry* raw = e.get();
+        entries.push_back(std::move(e));
+        return raw;
+    }
+};
+GpuTimerTable g_timer;
 thread_local int t_timerDepth = 0;
 thread_local UINT t_timerSlot = UINT(-1);  // this thread's open measurement
+thread_local ID3D12Device* t_timerDevice = nullptr;  // device whose timer owns t_timerSlot
 thread_local bool t_timerOwner = false;    // this DLL's outermost call holds SharedStatus::timerThread
 
 void PublishUpscalerMs(double ms) {
@@ -1796,6 +1853,7 @@ void GpuTimerImpl(void* commandList, bool end) {
     if (!end) {
         if (++t_timerDepth != 1) return;
         t_timerSlot = UINT(-1);
+        t_timerDevice = nullptr;
         t_timerOwner = false;
         SharedStatus* s = Shared();
         if (g_settings.mode == 0 || !l || !s) return;
@@ -1806,36 +1864,42 @@ void GpuTimerImpl(void* commandList, bool end) {
         if (type != D3D12_COMMAND_LIST_TYPE_DIRECT && type != D3D12_COMMAND_LIST_TYPE_COMPUTE) return;
         ID3D12Device* d = nullptr;
         if (FAILED(l->GetDevice(IID_PPV_ARGS(&d))) || !d) return;
+        bool logFail = false;
         AcquireSRWLockExclusive(&g_timer.lock);
-        if (g_timer.device != d && !g_timer.Setup(d)) Log::Get().Write("overlay: GPU timestamps unavailable; no upscaler time");
-        if (!g_timer.failed) {
-            t_timerSlot = UINT(g_timer.next++ % kTimerSlots);
-            l->EndQuery(g_timer.heap, D3D12_QUERY_TYPE_TIMESTAMP, t_timerSlot * 2);
+        GpuTimerEntry* te = g_timer.GetOrCreate(d, &logFail);
+        if (te && !te->failed) {
+            t_timerSlot = UINT(te->next++ % kTimerSlots);
+            t_timerDevice = d;
+            l->EndQuery(te->heap, D3D12_QUERY_TYPE_TIMESTAMP, t_timerSlot * 2);
         }
         ReleaseSRWLockExclusive(&g_timer.lock);
+        if (logFail) Log::Get().Write("overlay: GPU timestamps unavailable; no upscaler time");
         d->Release();
         return;
     }
     if (t_timerDepth > 0 && --t_timerDepth != 0) return;
     const UINT slot = t_timerSlot;
+    ID3D12Device* const dev = t_timerDevice;
     t_timerSlot = UINT(-1);
+    t_timerDevice = nullptr;
     if (t_timerOwner) {
         t_timerOwner = false;
         if (SharedStatus* s = Shared()) InterlockedExchange(&s->timerThread, 0);
     }
-    if (slot == UINT(-1)) return;
+    if (slot == UINT(-1) || !dev) return;
     double ms = -1;
     AcquireSRWLockExclusive(&g_timer.lock);
-    if (!g_timer.failed) {
-        l->EndQuery(g_timer.heap, D3D12_QUERY_TYPE_TIMESTAMP, slot * 2 + 1);
-        l->ResolveQueryData(g_timer.heap, D3D12_QUERY_TYPE_TIMESTAMP, slot * 2, 2, g_timer.readback, UINT64(slot) * 2 * sizeof(uint64_t));
+    GpuTimerEntry* te = g_timer.Find(dev);
+    if (te && !te->failed) {
+        l->EndQuery(te->heap, D3D12_QUERY_TYPE_TIMESTAMP, slot * 2 + 1);
+        l->ResolveQueryData(te->heap, D3D12_QUERY_TYPE_TIMESTAMP, slot * 2, 2, te->readback, UINT64(slot) * 2 * sizeof(uint64_t));
         // The slot written kTimerSlots / 2 dispatches ago. A slot the GPU has not resolved again since the last read
         // keeps its begin value (skipped); a half-written one has end < begin or an absurd span (skipped).
         const UINT old = (slot + kTimerSlots / 2) % kTimerSlots;
-        const uint64_t b = g_timer.results[old * 2], e = g_timer.results[old * 2 + 1];
-        if (b && e > b && b != g_timer.lastBegin[old]) {
-            g_timer.lastBegin[old] = b;
-            ms = double(e - b) / g_timer.ticksPerMs;
+        const uint64_t b = te->results[old * 2], e = te->results[old * 2 + 1];
+        if (b && e > b && b != te->lastBegin[old]) {
+            te->lastBegin[old] = b;
+            ms = double(e - b) / te->ticksPerMs;
         }
     }
     ReleaseSRWLockExclusive(&g_timer.lock);
@@ -1851,6 +1915,7 @@ void OverlayGpuTimer(void* commandList, bool end) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         t_timerDepth = 0;
         t_timerSlot = UINT(-1);
+        t_timerDevice = nullptr;
         if (t_timerOwner) {
             t_timerOwner = false;
             if (SharedStatus* s = Shared()) InterlockedExchange(&s->timerThread, 0);
@@ -1867,7 +1932,9 @@ bool OverlayCompareAmd() {
 }
 
 void OverlayToggle() {
-    if (g_state) Toggle(Now());
+    if (!g_state) return;
+    std::lock_guard<std::mutex> lock(g_state->mutex);
+    Toggle(Now());
 }
 
 double OverlayUpscalerMs() {

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The launcher suite's load marker (tests/launcher_build_facts.py self_checks): a DLL that writes <its own path>.loaded when
 // it is loaded, so the suite can prove a planted stand-in was never loaded. Not a HIP runtime. Written for this project.
 #include <windows.h>

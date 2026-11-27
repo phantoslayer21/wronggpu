@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96), the matrix probe (fg_probe.hip, clean/dx12/kernels/fg_probe.hlsl): is a float32 value
 // (bits) exactly halfway between two adjacent float16 values? Only there can RN16(RN32(s)) differ from RN16(s) for an
 // exact sum s, so a float32-accumulate path is exact once these values are redone exactly. Integer code, the same on

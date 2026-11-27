@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (issue #96): exact float16 chunk accumulation, as a CPU reference.
 
 Written for this project. net1's convolutions accumulate in float16, starting at the bias: each chunk of 16 products
@@ -91,5 +91,40 @@ def acc_dot16(acc, a, b, axis=-1):
     if np.any(bad):
         with np.errstate(invalid="ignore", over="ignore"):
             slow = h(acc + np.sum(a * b, axis=axis))
+        out = np.where(bad, slow, out)
+    return out
+
+
+def _exact_matmul(p, q):
+    """p @ q for int64 matrices whose every partial sum stays below 2^53 in magnitude: computed in float64 (each product
+    and each partial sum is an integer below 2^53, so exact in any summation order) and returned as int64."""
+    return np.rint(p.astype(np.float64) @ q.astype(np.float64)).astype(np.int64)
+
+
+def acc_matmul16(acc, a, b):
+    """RN16(acc + a @ b) per element, exact for finite float16 inputs: a [n, k], b [k, m] with k <= 16, acc [n, m] (or
+    broadcasting to it). The same result as acc_dot16 over the k axis, computed with three matrix products of the
+    20-bit parts (each partial sum below 2^45, so float64 matrix products are exact). Non-finite operands as in
+    acc_dot16."""
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    if a.ndim != 2 or b.ndim != 2 or a.shape[1] != b.shape[0]:
+        raise ValueError("a [n, k] and b [k, m] expected")
+    if a.shape[1] > 16:
+        raise ValueError("a chunk has at most 16 products")
+    acc = np.broadcast_to(np.asarray(acc, dtype=np.float64), (a.shape[0], b.shape[1]))
+    fin_a, fin_b = np.isfinite(a), np.isfinite(b)
+    ah, al = _split(_ints(np.where(fin_a, a, 0.0)))
+    bh, bl = _split(_ints(np.where(fin_b, b, 0.0)))
+    hh = _exact_matmul(ah, bh)
+    mid = _exact_matmul(ah, bl) + _exact_matmul(al, bh)
+    ll = _exact_matmul(al, bl)
+    fin_acc = np.isfinite(acc)
+    m_acc = _ints(np.where(fin_acc, acc, 0.0))
+    out = round16_parts(hh, mid + (m_acc << 4), ll)
+    bad = ~(np.all(fin_a, axis=1)[:, None] & np.all(fin_b, axis=0)[None, :] & fin_acc)
+    if np.any(bad):
+        with np.errstate(invalid="ignore", over="ignore"):
+            slow = h(acc + a @ b)
         out = np.where(bad, slow, out)
     return out

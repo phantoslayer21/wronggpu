@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Exact q8(GELU) lookup: oracle, generator and exhaustive proof in one run.
 
     python clean/dx12/gelu_lut/run.py --work build/gelu-lut [--runtime-co <dir with swin.co ...>]

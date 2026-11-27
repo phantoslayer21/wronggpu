@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model L's runtime packer (clean/l/runtime/l_pack.cpp) on the CPU, for test_l_runtime_pack.py:
 //
 //   l_pack_dump pack <tensor dir> <out dir>

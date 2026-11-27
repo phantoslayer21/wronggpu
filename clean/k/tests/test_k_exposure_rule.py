@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model K host rules in front of the stages, CPU only (no device, no emulator, no network weights):
 
 - clean/k/reference/exposure.py: which exposure value is which (E_cur the game's exposure or 1, E_aux the auto-exposure

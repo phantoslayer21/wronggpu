@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: other mods, tools and older installs next to a game (build/launcher-design.md section 5,
 // milestone M2): the installer's conflict rules (FindConflicts: what an install moves aside with the player's OK), the
 // rules table of the launcher (AssessCoexistence: every tool recognised by its fingerprint, with a decision) and the
@@ -12,11 +12,12 @@
 namespace wg {
 
 struct Conflicts {
-    std::vector<wstring> mods;       // names of other upscaler mods found (the player's OptiScaler)
-    std::vector<wstring> modFiles;   // their files in the install folder (moved into the backup with the player's OK)
-    std::vector<wstring> outside;    // mod files outside the install folder: cannot be handled automatically
-    wstring legacyRecordDir;         // folder with an older install's record (byte-exact restore with /REMOVEOLD)
-    std::vector<wstring> legacyFiles;// an older install's loose files without a record (moved into the backup)
+    std::vector<wstring> mods;               // names of other upscaler mods found (the player's OptiScaler)
+    std::vector<wstring> modFiles;           // their files in the install folder (moved into the backup with the player's OK)
+    std::vector<wstring> priorEditionFiles;  // older WrongGPU OptiScaler edition files (upgraded on install, backed up)
+    std::vector<wstring> outside;            // mod files outside the install folder: cannot be handled automatically
+    wstring legacyRecordDir;                 // folder with an older install's record (byte-exact restore with /REMOVEOLD)
+    std::vector<wstring> legacyFiles;        // an older install's loose files without a record (moved into the backup)
     bool modsFound() const { return !mods.empty(); }
     bool oldFound() const { return !legacyRecordDir.empty() || !legacyFiles.empty(); }
 };

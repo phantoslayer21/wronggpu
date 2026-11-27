@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Independent scalar regressions for the standalone exact spec51 dot baseline."""
 import unittest
 from unittest import mock

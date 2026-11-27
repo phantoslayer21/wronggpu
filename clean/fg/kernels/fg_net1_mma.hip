@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96): net1's convolutions on gfx12's 16 x 16 x 16 matrix instructions (the fast path of
 // handoff note NET1-FAST-PATH, step 2). Not bit-exact to the CPU reference: the matrix unit's chunk sum is not the exact
 // one (clean/fg/records/wmma-probe-2026-11-14.json); net1's output against the CPU reference is reported, not gated.

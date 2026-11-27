@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // SHA-256 as specified in FIPS 180-4, sections 4.1.2, 4.2.2, 5.1.1, 5.3.3 and 6.2.
 #include "sha256.h"
 

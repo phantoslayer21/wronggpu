@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // c96 Swin block instruction diet (track diet-c96): helpers of swin_block.hlsl's fused expand (swin_block_c96_add_ex_nc).
 // Included by swin_block.hlsl after its wg_low0 (the kernel arguments H, W, ox, oy are in scope).
 #pragma once

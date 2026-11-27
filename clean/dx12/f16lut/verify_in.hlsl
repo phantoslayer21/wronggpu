@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 side of the encoder colour-table proof (run_in.py). Root constants: obase, e0 bits, pi bits, mode.
 // mode 0, for every FP16 bit pattern i (lane i of a 65536-lane grid) and one parameter set (e0 = expo[0], pi):
 //   orig[i] = the direct encoder's own colour values (v, gc) of the texel value f16tof32(i): kernels/encoder.hlsl, copied

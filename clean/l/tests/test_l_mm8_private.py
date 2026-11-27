@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The synthetic-values rule for clean/l/runner/l_mm8_f32_check.py (its --real mode reads a local recorded run): that
 mode's intermediates go only to a folder outside the repository, and every record it writes is aggregate-only.
 Regression checks of both; no GPU, no model, no recorded data (every value here is constructed).

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 /* A stand-in for the AMD HIP runtime with the few public HIP entry points the installer's probe calls (test only).
    MOCK_DEVICE_NAME and MOCK_ARCH select what it reports. Like a real runtime confused by a stray LLVM_PATH, it fails
    hipInit when LLVM_PATH is set, so the tests can check that the installer clears it. Written for this project. */

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Original regression against the production output converter. Synthetic finite
 // HDR values only; no model or third-party renderer is loaded.
 #define main existing_interop_test_main

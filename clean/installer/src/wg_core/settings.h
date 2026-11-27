@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: wronggpu.ini: reading and changing keys, the defaults of earlier versions. The per-game
 // profile of build/launcher-design.md section 4 comes here (M1). Written for this project.
 #pragma once

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #include "settings.h"
 
 #ifndef WIN32_LEAN_AND_MEAN

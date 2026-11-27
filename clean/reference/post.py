@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """NumPy reference of spec/06-reconstruction-and-output.md: output reconstruction (stage "post") and output filter
 (stage "filter"). The clean team's oracle for those stages.
 

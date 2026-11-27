@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: "Last run" from the tail of a game's wronggpu-fsr.log (build/launcher-design.md section 3):
 // which upscaler the front end used, whether the network runtime started and on which executor, fallbacks to AMD's
 // FSR and the last support code; warnings the launcher shows (M2): command lists recorded into another tool's tables

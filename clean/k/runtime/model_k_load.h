@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Loading the converted model K (spec 48 section 7) from the converter's model.wgcm (clean/converter/OUTPUT-FORMAT.md)
 // for the runtime. Same checks as the model M loader (clean/runtime/model.cpp load_wgcm_model), for the K stage list:
 // whole-file SHA-256, container version, SHA-256 of the map the runtime ships, every output group's keyed digest

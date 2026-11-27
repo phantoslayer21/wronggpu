@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 ports of Model L's FP16-form width-32 blocks (clean/l/kernels/l_q7.hip, l_q7.co; issue #89): the same
 // arithmetic step for step, so the same bytes (clean/l/runner/l_q7_check.py compares both back ends and the oracle).
 //

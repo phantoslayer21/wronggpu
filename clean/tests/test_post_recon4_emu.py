@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """post_recon4_* (SPEED APPROXIMATIONS of post_recon, kernels/post.hip) in the host lane emulator: finite outputs on
 the post test cases (NaN/inf inputs included) and a single-frame PSNR floor against the exact path on synthetic data
 (random history: harder for the bilinear variants than real images). The whole-pipeline rule of spec 09 draft 2 is

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Build direct-texture/staged supplied-device tests. CPU/build work only.
 
 GPU execution is a separate native_direct_test.exe command under the GPU lock (WG_GPU_LOCK, BUILDING.md).

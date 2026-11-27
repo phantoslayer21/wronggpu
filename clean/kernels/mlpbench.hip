@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Micro-benchmark of the MLP tile loop of the Swin block (W1 chain -> GELU + FP8 pack -> W2), with every other part of
 // the block removed: no global loads, no weight staging, no barriers, no attention. The weights are a fixed LDS unit
 // (synthetic bytes), exactly as the real loop reads them (one 8-byte fragment per lane and WMMA). Driver:

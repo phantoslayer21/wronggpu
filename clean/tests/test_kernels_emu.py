@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Run the real kernel sources in the host lane emulator and compare against the NumPy reference.
 
 Needs a host C++ compiler (clang++ or g++, env CXX) on Linux; the emulator library is built into a temporary

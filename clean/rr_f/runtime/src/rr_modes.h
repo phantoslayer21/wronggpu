@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // RR modes of the runtime, derived from the registry (clean/wgshared/include/wg_registry_gen.h, round i15).
 //
 // The registry's mode rows (kWgModeRows) name each mode's kernel variants by word (head exact / relaxed, input exact /

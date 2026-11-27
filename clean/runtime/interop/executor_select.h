@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Which executor runs a context (backend.cpp Context::create): the decision alone, free of D3D12, so that
 // tests/test_executor_select.cpp checks it on any host. WrongGPU's own code.
 //

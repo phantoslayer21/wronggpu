@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Test-only bridge to the actual native helper, including locally restored CPU modes.
 #include "../runtime/k_input_uniforms.h"
 #include <xmmintrin.h>

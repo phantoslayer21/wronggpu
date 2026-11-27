@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (issue #96): net1 on gfx12's matrix instructions (tier B of the fast path), HIP and D3D12, with the
 exact path selectable.
 

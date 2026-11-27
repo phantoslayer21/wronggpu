@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L's shipped default on native D3D12 (0.6.5: WG_L_FORM unset = hybrid_full) is the hybrid route WITH its arena
 tables, byte for byte the explicit WG_L_FORM=hybrid (oversight 2026-11-15 standing rule: every release-path check also
 runs once with no model / form variable set). Found by code reading: the D3D12 device used to reserve and fill the

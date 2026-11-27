@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: the per-game rules, REFramework's detection and its mirror (gamerules.h). Written for this
 // project; REFramework is recognised by the words its own files carry, never read further.
 #include "gamerules.h"

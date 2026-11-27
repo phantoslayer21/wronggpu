@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L (#89) by name through the launcher's command line: `model status --preset=L` and `model convert --preset=L`
 pick Model L's converter map (data/preset-L.v1.map.json, the spec side's revision v1.1) and its model folder
 (%LOCALAPPDATA%\\WrongGPU\\model\\L, the runtime's folder for model=L); a file without Model L's data is refused with

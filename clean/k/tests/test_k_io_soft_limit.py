@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Spec43 soft limiting: thresholds/nonfinite taps, compared with the clean reference."""
 import unittest
 import numpy as np

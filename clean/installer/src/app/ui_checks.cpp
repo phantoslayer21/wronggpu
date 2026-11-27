@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher window: the first run's checks, on a worker (launcher_ui.cpp's StartFirstRun starts them; the sheet is
 // ui_settings.cpp's). They only read: nothing on this PC changes before the player chooses and presses Continue. Written
 // for this project.
@@ -41,19 +41,23 @@ void FirstRunChecks(HWND hwnd, const GlobalSettings& gs, const wstring& dll, boo
     // release 0.6.0 (owner 2026-11-02): the RX 9060 series is supported but not yet tested on hardware; RR takes about twice
     // the RX 9070 XT's time there (an estimate), and its 8 GB cards are untested
     const bool rx9060 = gpu.rdna4 && gpu.name.find(L"9060") != wstring::npos;
-    m->lines.push_back({gpu.rdna4 ? 0 : 2, L"Graphics card detected: " + (gpu.name.empty() ? wstring(L"none") : gpu.name) +
+    m->lines.push_back({gpu.rdna4 ? 0 : 2, L"Graphics card: " + (gpu.name.empty() ? wstring(L"none") : gpu.name) +
                                                (!gpu.rdna4 ? L". WrongGPU's models need an RX\u00a09000-series GPU; games use AMD FSR."
                                                 : rx9060   ? L". Supported, not yet tested on this card. Ray Reconstruction takes about twice as long as on an RX\u00a09070\u00a0XT."
                                                            : L"")});
     // short words behind the sheet's Show details (how Model M runs is the game page's Runs on); without the card, only
     // what it means here (the card's line above says what to do)
     m->lines.push_back({gpu.rdna4 ? 0 : 1, gpu.rdna4 ? L"Direct3D 12: Ready" : L"Direct3D 12: Not available on this card"});
+    wstring hipFound;
     if (dump) m->lines.push_back({1, L"HIP runtime: Not checked in this run"});
     else {  // optional: a note, not a problem (the probe's own words go to setup.log)
         const HipInfo h = CheckHip(g.ctx);
         if (!h.ok) LogLine(g.ctx, L"first run: " + h.text);
         // found or not, and that it is optional (the card is the line above); the file, device and architecture go to the log
-        if (h.ok) LogLine(g.ctx, L"first run: HIP runtime " + h.dll + L" works on " + h.device + L" (" + h.arch + L")");
+        if (h.ok) {
+            hipFound = h.dll;
+            LogLine(g.ctx, L"first run: HIP runtime " + h.dll + L" works on " + h.device + L" (" + h.arch + L")");
+        }
         m->lines.push_back({h.ok ? 0 : 1, h.ok ? wstring(L"HIP runtime: Found (optional)")
                                                : wstring(L"HIP runtime: Not found (optional). Model M runs on Direct3D\u00a012 without it.")});
     }
@@ -132,6 +136,7 @@ void FirstRunChecks(HWND hwnd, const GlobalSettings& gs, const wstring& dll, boo
     if (!ignored.empty())
         LogLine(g.ctx, L"first run: " + std::to_wstring(ignoredN) + L" developer/test keys not taken as settings (they stay in wronggpu.ini): " + ignored);
     ReadModelState(m->health);  // the model data as Settings and the toolbar show it, read here (it hashes the file)
+    if (m->health.hip.empty() && !hipFound.empty()) m->health.hip = hipFound;
     FirstRunMsg* done = m;
     m = nullptr;  // posted here, not by postAnyway
     if (!PostMessageW(hwnd, WM_APP_FIRSTRUN, 0, (LPARAM)done)) delete done;

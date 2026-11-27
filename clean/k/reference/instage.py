@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """NumPy reference of the model K input stage (spec 42 draft 2): one frame's game inputs and the previous frame's
 colour history Hc and hidden history Hh -> the network input map [Bh, Bw, 16] (FP16).
 

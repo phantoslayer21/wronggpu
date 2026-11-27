@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Connected synthetic GPU body/head -> page-54 output stage -> page-54b resolve and quarter pooled history.
 
 One arena, one submission. The resolve consumes the output stage's Q (binary16 RGB, Wh x Hh) and PH1 (RGB10A2

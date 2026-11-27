@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher: the command line (build/launcher-design.md section 2 "CLI"). WrongGPU.exe <verb> [game] [options]:
 //   scan                          the games the launcher finds (store libraries, --library=<folder>, managed, added)
 //   status [game]                 one game or all: status, versions, last run, problems
@@ -22,7 +22,10 @@
 //   collect <game> [--out=<zip>]  logs into a zip
 //   hipcheck                      the HIP runtime check alone
 //   model status | model convert [--model=<dll>]   [--preset=M|L]: the model by name (its converter map and folder; K too in
-//                                 a build with Preset K)
+//                                 a build with Preset K; FG, frame generation from a game's nvngx_dlssg.dll of version 310.1 or
+//                                 newer, in a build with frame generation, wg_core/fg.h)
+//                                 set <game> fg=off|on fg_preset=A|B|C fg_multiplier=2..6 fg_presenter=auto|hwfq|dxgi_tearing|
+//                                 dxgi_vsync: frame generation (a build with its choice; off by default, exact spellings)
 //   rr-data status | rr-data convert [--dll=<RR model file>]   the Ray Reconstruction data (shared by the RR games)
 //                                 both converts: --ignore=<path> | --ignore=<path> sha256=<hex> (both must match) |
 //                                 --ignore=sha256=<hex> (every identical copy), --ignore-list=<file> (repeatable; added
@@ -418,7 +421,8 @@ void EntryJson(Json& j, const GameEntry& e) {
     j.Obj().S("name", e.name).S("exe", e.exe).S("dir", e.dir).S("source", e.source).S("status", StatusName(e.status)).S("status_text", e.statusText);
     if (e.hasRecord) {
         j.S("installed_version", e.installedVersion).B("other_build", e.otherBuild).B("record_v1", e.recordV1).B("per_game_entry", e.perGameEntry).B("optiscaler_route", e.hosted)
-            .B("adoptable", e.adoptable).B("repair_suggested", e.repairSuggested).S("proxy", e.proxy);
+            .B("adoptable", e.adoptable).B("repair_suggested", e.repairSuggested).S("proxy", e.proxy)
+            .B("optiscaler_edition", e.optiEdition).B("optiscaler_edition_outdated", e.optiEditionOutdated);
         j.B("can_roll_back", e.hasPrevious);  // the kept version fits this install's layout (launcher.cpp PreviousFits)
         if (e.hasPrevious && !e.previous.empty()) j.S("previous_version", e.previous);
         j.Key("problems").Arr(); for (auto& p : e.problems) j.Str(p); j.End();
@@ -431,6 +435,11 @@ void EntryJson(Json& j, const GameEntry& e) {
         j.Key("rr").Obj().B("found", e.last.rrFound).B("used", e.last.rrUsed).S("mode", e.last.rrMode).S("ms", e.last.rrMs).N("frames", e.last.rrFrames).End();
         j.End();
     }
+#if WRONGGPU_FG
+    // Frame generation (fg.h): only a game that offers it says anything of its files
+    j.B("fg_uses", e.fgUses);
+    if (e.fgUses) j.B("fg_installed", e.fgInstalled);
+#endif
     // Ray Reconstruction (rr.h): only a game that uses it says anything of it
     j.B("rr_uses", e.rrUses);
     if (e.rrUses) j.S("rr_why", e.rrWhy).B("rr_installed", e.rrInstalled).B("rr_enabled", e.rrEnabled).S("rr_mode", e.rrMode).B("rr_path_tracing_only", e.rrPathTracingOnly);
@@ -439,7 +448,6 @@ void EntryJson(Json& j, const GameEntry& e) {
     if (e.rrUses) {
         const bool noEdition = e.rrDirect && e.hasRecord && e.rrInstalled && !e.optiEdition;
         j.B("rr_direct", e.rrDirect).B("rr_available", !noEdition);
-        if (e.hasRecord) j.B("optiscaler_edition", e.optiEdition);
         if (noEdition) j.S("rr_unavailable_why", L"the game creates Ray Reconstruction itself, and this install's OptiScaler is not WrongGPU's edition (plugin interface 4 or newer)");
     }
     // a tool of the player's the game needs first (gamerules.h): only such a game says anything of it
@@ -567,6 +575,60 @@ static void IgnoreJson(Output& o, const IgnoreReport& r) {
     o.j.End();
 }
 
+// `set <game> fg=on` (frame generation, fg.h): what it needs before it is saved. The game must have a frame generation library
+// (nvngx_dlssg.dll); when frame generation's data on this PC is not ready, it is converted now from the game's own library
+// (version 310.1 or newer; an older one is refused by its version). EXIT_OK: go on with the apply; anything else: refused,
+// nothing saved (the reason in the result's "error" and on the console). The selected model is put back afterwards.
+static int PrepareFgForGame(const wstring& dir, Output& o) {
+    wstring dataWhy;
+    const bool ready = ModelFileReady(g.ctx, L'G', &dataWhy);
+    wstring library, why;
+    const FgEnable e = CheckFgEnable(dir, ready, &library, &why);
+    if (e == FgEnable::READY) return EXIT_OK;
+    if (e != FgEnable::CONVERT) {
+        o.j.S("error", why);
+        Print(why);
+        return EXIT_NO_MODEL;
+    }
+    const wchar_t was = SelectedPreset(g.ctx);
+    wstring err, msg;
+    int code = EXIT_OK;
+    if (!SelectPreset(g.ctx, L"FG", err)) {
+        msg = err;
+        code = EXIT_NO_MODEL;
+    } else {
+        OpLogBegin();
+        GameTarget t;
+        const wstring root = GameRoot(dir);
+        t.dir = dir;
+        t.root = !root.empty() ? root : dir;
+        LogLine(g.ctx, L"frame generation: its data is not ready (" + dataWhy + L"); converting it from this game's library " + library);
+        const ModelState m = FindModel(g.ctx, &t, L"", {});
+        IgnoreJson(o, m.ignored);
+        if (m.ok()) {
+            Ui ui; ui.step = [](int, int, const wstring&) {}; ui.log = [](const wstring& s) { LogLine(g.ctx, s); };
+            try {
+                const ModelResult r = WriteModel(g.ctx, m, ui);
+                o.j.Key("fg_data").Obj().S("library", m.dll).S("outcome", r.outcome).End();
+                Print(L"frame generation data: " + r.outcome);
+            } catch (const SetupError& ex) {
+                msg = ex.msg;
+                code = ex.code ? ex.code : EXIT_FAILED;
+            }
+        } else {
+            msg = m.error;
+            code = m.damaged ? EXIT_DAMAGED : m.code ? m.code : EXIT_NO_MODEL;
+        }
+        OpLogEnd();
+    }
+    SelectPreset(g.ctx, PresetName(was), err);
+    if (!code) return EXIT_OK;
+    msg = L"Frame generation was not turned on: " + msg;
+    o.j.S("error", msg);
+    Print(msg);
+    return code;
+}
+
 int Verb(const wstring& verb, const Args& a, Output& o) {
     if (IgnoreArgsMisplaced(verb, a, o)) return o.code;
     const bool noScan = a.has(L"noscan");
@@ -601,6 +663,29 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
         o.j.Key("game"); EntryJson(o.j, e);
         Print(e.name + L": " + e.statusText);
         if (e.hasRecord) Print(L"  last run: " + e.last.Summary());
+        if (FindSetting(kFgKeyEnable) && e.hasRecord) {  // frame generation (fg.h; a build with its choice): profile and game
+            const wstring gdir = e.dir.empty() ? dir : e.dir;
+            const Profile p = GameProfile(gdir);
+            const FgState fs = FgStateOf(wgstate::ReadSettings(gdir).kv);
+            wstring dataWhy;
+            const bool ready = ModelFileReady(g.ctx, L'G', &dataWhy);
+            o.j.Key("fg").Obj();
+            o.j.Key("profile").Obj();
+            for (const char* k : kFgKeys) o.j.S(k, p.get(k));
+            o.j.End();
+            o.j.Key("game").Obj();
+            for (const char* k : kFgKeys) o.j.S(k, fs.v.at(k));
+            o.j.End();
+            o.j.B("data_ready", ready).S("data_why", ready ? wstring() : dataWhy);
+            o.j.Key("issues").Arr(); for (auto& s : fs.issues) o.j.Str(s); o.j.End();
+            o.j.End();
+            const auto& multiplier = fs.v.at(kFgKeyMultiplier);
+            const wstring multiplierText = multiplier == "auto" ? L"auto" : FromUtf8(multiplier) + L"x";
+            Print(L"  frame generation: " + FromUtf8(fs.v.at(kFgKeyEnable)) + L" (preset " + FromUtf8(fs.v.at(kFgKeyPreset)) + L", " +
+                  multiplierText + L", presenter " + FromUtf8(fs.v.at(kFgKeyPresenter)) + L"; data " +
+                  (ready ? wstring(L"ready") : L"not ready: " + dataWhy) + L")");
+            for (auto& s : fs.issues) Print(L"  " + s);
+        }
         return EXIT_OK;
     }
     if (verb == L"fingerprint") {
@@ -817,11 +902,13 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
         Profile p = GameProfile(dir);
         std::vector<std::pair<string, string>> optiEdits;
         bool modelGiven = false;  // a model=<m> item: the player's explicit model choice
+        bool fgGiven = false;     // an fg=<on|off> item (frame generation, fg.h)
         if (verb == L"set") {
             for (size_t i = 1; i < a.pos.size(); ++i) {
                 const wstring& kv = a.pos[i];
                 const size_t eq = kv.find(L'=');
                 if (eq != wstring::npos && IEq(kv.substr(0, eq), L"model")) modelGiven = true;
+                if (eq != wstring::npos && IEq(kv.substr(0, eq), FromUtf8(kFgKeyEnable))) fgGiven = true;
                 wstring why;
                 if (eq == wstring::npos) why = L"use key=value: " + kv;
                 else if (StartsWithI(kv, L"opti.")) {  // an OptiScaler.ini key (the OptiScaler tab): checked when applied
@@ -838,6 +925,12 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
                 if (!why.empty() || !SetSetting(p, ToUtf8(kv.substr(0, eq)), ToUtf8(kv.substr(eq + 1)), &why)) {
                     o.j.S("error", why); Print(why); return EXIT_USAGE;
                 }
+            }
+            // fg=on (frame generation, fg.h): the game needs a frame generation library, and frame generation's data on this PC is
+            // converted first from the game's own library when it is not ready; refused (nothing saved) when that can't be done
+            if (fgGiven && FindSetting(kFgKeyEnable) && p.get(kFgKeyEnable) == "on") {
+                const int code = PrepareFgForGame(dir, o);
+                if (code) return code;
             }
             if (NeedsElevation(dir)) { o.j.S("error", L"administrator permission is needed for " + dir); Print(L"administrator permission is needed for " + dir); return EXIT_REFUSED; }
             OpLogBegin();
@@ -863,6 +956,13 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
             eff["rr_enabled"] = rs.enabled ? "on" : "off";
             if (!rs.mode.empty()) eff["rr_mode"] = rs.mode;
         }
+        // frame generation (fg.h; a build with its choice): the game's state folder (settings.ini) holds what the game runs
+        std::vector<wstring> fgIssues;
+        if (FindSetting(kFgKeyEnable)) {
+            const FgState fs = FgStateOf(wgstate::ReadSettings(dir).kv);
+            for (auto& kv : fs.v) eff[kv.first] = kv.second;
+            fgIssues = fs.issues;
+        }
         // rr_config_fix (rrconfig.h): on while the record says the game's Engine.ini has WrongGPU's line
         eff["rr_config_fix"] = m.rrconfig.present ? "on" : p.get("rr_config_fix") == "on" ? "off" : p.get("rr_config_fix");
         if (const RrConfigGame* rg = RrConfigGameFor(m.exe))
@@ -878,6 +978,11 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
             if (verb == L"get") Print(FromUtf8(d.key) + L" = " + FromUtf8(p.get(d.key)) + (eff.at(d.key) != p.get(d.key) ? L"  (file: " + FromUtf8(eff.at(d.key)) + L")" : L""));
         }
         o.j.End();
+        if (FindSetting(kFgKeyEnable)) {  // invalid frame generation values in settings.ini (the default is used for each)
+            o.j.Key("fg_issues").Arr();
+            for (auto& s : fgIssues) { o.j.Str(s); if (verb == L"get") Print(L"  " + s); }
+            o.j.End();
+        }
         o.j.Key("outside_edits").Arr();
         for (auto& x : OutsideEdits(p, wini, oini)) o.j.Obj().S("key", x.key).S("file", x.fileValue).S("profile", x.profileValue).End();
         o.j.End();
@@ -910,7 +1015,7 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
             wstring why;
             if (!SelectPreset(g.ctx, a.get(L"preset"), why)) { o.j.S("error", why); Print(why); return EXIT_USAGE; }
         }
-        o.j.S("preset", wstring(1, SelectedPreset(g.ctx)));
+        o.j.S("preset", PresetName(SelectedPreset(g.ctx)));
         if (sub == L"convert") {
             if (!ConvertIgnoreArgs(a, o)) return o.code;
             OpLogBegin();
@@ -1146,10 +1251,18 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
 }  // namespace
 
 int RunCli(int argc, wchar_t** argv) {
-    const wstring verb = Lower(argv[1]);
+    wstring verb;
     Args a;
     wstring logFile;
-    for (int i = 2; i < argc; ++i) {
+    auto takesValue = [](const wstring& name) {
+        return name == L"out" || name == L"job" || name == L"result" || name == L"batch" || name == L"data" ||
+               name == L"log" || name == L"dir" || name == L"opti" || name == L"model" || name == L"library" ||
+               name == L"startmenu" || name == L"zip" || name == L"out-zip" || name == L"rr-config-fix" ||
+               name == L"preset" || name == L"passes" || name == L"dll" || name == L"repair-after" ||
+               name == L"dump" || name == L"shots" || name == L"apply" || name == L"out-dir" ||
+               name == L"fixture" || name == L"size" || name == L"scales" || name == L"frames" || name == L"theme";
+    };
+    for (int i = 1; i < argc; ++i) {
         const wstring s = argv[i];
         if (s.rfind(L"--", 0) == 0) {
             const size_t eq = s.find(L'=');
@@ -1162,10 +1275,11 @@ int RunCli(int argc, wchar_t** argv) {
             };
             if (eq != wstring::npos) {
                 put(s.substr(eq + 1));
-            } else if ((name == L"out" || name == L"job" || name == L"result" || name == L"batch" || name == L"data" || name == L"log" || name == L"dir" || name == L"opti" ||
-                        name == L"model" || name == L"library" || name == L"startmenu") && i + 1 < argc) {  // (--ignore and --ignore-list need their "=")
+            } else if (takesValue(name) && i + 1 < argc && wstring(argv[i + 1]).rfind(L"--", 0) != 0) {  // (--ignore and --ignore-list need their "=")
                 put(argv[++i]);
             } else a.flags.insert(name);
+        } else if (verb.empty()) {
+            verb = Lower(s);
         } else a.pos.push_back(s);
     }
     gl.dataOverride = a.get(L"data");

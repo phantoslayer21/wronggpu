@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The model file each model resolves to on every executor (model_path_check.cpp, model_select.h model_wgcm_path):
 model=L -> <model_dir>\\L\\model.wgcm, model=M unchanged (<model_dir>\\model.wgcm). CPU only."""
 import os

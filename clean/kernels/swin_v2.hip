@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Swin block kernels, design 2 ("v2"), for gfx1201 (RDNA4): an independent, speed-oriented design of the five fused
 // Swin block kernels of spec/02-swin-block.md. Same kernel names, arguments, packed-weight and feature-map formats
 // (clean/FORMATS.md, clean/runner/packing.py) and launch interface as kernels/swin.hip, so the runner and the runtime

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Input encoder for motion vectors at output resolution (spec/03-input-encoder.md draft 4, "Motion at output
 // resolution"): the kernel input_encoder_mo, in its own code object (encoder_mo.co) so that encoder.co stays the file
 // it was. The whole of encoder.hip is included with its kernel made an internal function (the compiler drops it); the

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """GPU self-test with synthetic data: checks the hardware facts the Swin kernels rely on.
 
     python clean/runner/selftest.py --build <build_dir> --rocm <ROCm>

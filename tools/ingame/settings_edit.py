@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """A game's graphics settings for an in-game run: back the file up byte for byte, change only the named keys, put the
 backup back and check its SHA-256.
 

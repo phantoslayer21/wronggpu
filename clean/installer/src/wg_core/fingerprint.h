@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: fingerprints of the DLLs other tools put next to a game (build/launcher-design.md section
 // 5): a file is recognised by what it contains (its version resource, its exports, text in it), never by its name.
 // File names only decide which files are looked at (the names Windows loads from a game folder). Also the graphics

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU installer: what this executable embeds, for wg::Context::data. Written for this project.
 #include "app/payload_embed.h"
 
@@ -15,6 +15,12 @@ const wg::EmbeddedData& EmbeddedPayload() {
 #endif
                                        kLogoResourceId, SETUP_VERSION, SETUP_BUILD_ID, SETUP_PAYLOAD_NAME,
                                        kRrPayload, kRrPayloadCount, kFMapResourceId, kFMapSha256,  // Ray Reconstruction (rr.h)
-                                       kRrInterfaceFile, kLMapResourceId, kLMapSha256};  // Model L's converter map
+                                       kRrInterfaceFile, kLMapResourceId, kLMapSha256,  // Model L's converter map
+                                       kFgMapResourceId, kFgMapSha256,                  // frame generation's converter map (fg.h)
+#if WRONGGPU_FG
+                                       kFgPayload, kFgPayloadCount};                    // ...and its plugin and kernels
+#else
+                                       nullptr, 0};                                     // (a build without frame generation: none)
+#endif
     return data;
 }

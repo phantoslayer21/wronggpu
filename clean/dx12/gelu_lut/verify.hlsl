@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Exhaustive check of the D3D12 hidden-path conversion h -> q8(GELU(h)) against HIP's run-length form (gelu_lut/host.cpp
 // "dx12" mode, driven by run.py). Every lane takes 8 consecutive FP32 bit patterns u0 .. u0 + 7, converts them as the MLP
 // kernels do (8 values -> 2 dwords of FP8 bytes) and compares each byte with HIP's (binary search in pos[]).

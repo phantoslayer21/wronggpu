@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 ports of the patch-merge and expand kernels of clean/kernels/swin.hip as built into swin.co (WG_GEMM_THREADS 256,
 // WG_NT 2: two groups of 16 tokens per wave; the weight fragments staged in LDS and shared by the 8 waves).
 // HIP ISA: <build>\dx12-m\isa\patch_merge_c64.s, patch_merge_c96.s, expand_c96.s. The arithmetic is the

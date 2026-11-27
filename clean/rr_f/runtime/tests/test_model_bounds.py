@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Bounds checks of the RR runtime's model loaders (src/rr_model.cpp: read_wgcm for model.wgcm, load_own for WGRRMOD1).
 No GPU and no model data: clean/rr_f/runtime/tests/test_model_bounds.cpp is built with MSVC cl (on PATH, e.g. a developer
 prompt or CI, or through vcvars64.bat; skipped without one) together with src/rr_model.cpp (a stub stands in for the

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Lists the DXGI adapters and exits. run_wine_tests.py runs it first with a time limit: a Wine that hangs when a program
 // starts Vulkan (the D3D12 tests' first step) hangs here too, in seconds instead of the tests' long limits.
 #include <dxgi.h>

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 ports of model K's wide stage kernels k_stagew<NG>_<name> (clean/k/kernels/k_block_wide.hip, FP32 accumulation;
 // HIP build: k_block_wide.co). WrongGPU's own code. Basis, operation orders and every deviation: hlsl/k_wide.hlsli.
 // The runtime (clean/k/runtime/runtime_k.cpp wide_ng) launches e3 / d3 with NG = 2, m with NG = 4, e4 / d4 with NG = 4
@@ -20,7 +20,9 @@
 // @wg-kernel k_stagew4_d4__rodd co=k_block_wide.co block=512 wave=32 args=s184:p19.b32 entry=kw_stage defines=K_SMX=1,KW_C=128,KW_HEADS=4,KW_IN=1,KW_CIN=160,KW_CNEXT=0,KW_NG=4,KW_RD=12
 // @wg-kernel k_stagew2_d4__rodd co=k_block_wide.co block=256 wave=32 args=s184:p19.b32 entry=kw_stage defines=K_SMX=1,KW_C=128,KW_HEADS=4,KW_IN=1,KW_CIN=160,KW_CNEXT=0,KW_NG=2
 // @wg-kernel k_stagew2_d3__rodd co=k_block_wide.co block=256 wave=32 args=s184:p19.b32 entry=kw_stage defines=K_SMX=1,KW_C=96,KW_HEADS=4,KW_IN=1,KW_CIN=128,KW_CNEXT=0,KW_NG=2,KW_RD=4
-#define KW_LD_A16 1   // 16-byte aligned loads (hlsl/k_wide.hlsli)
+#ifndef KW_LD_A16
+#define KW_LD_A16 1   // 16-byte aligned loads: the whole address masked (hlsl/k_wide.hlsli; 2 = scalar base only: loses RADV's b128 loads)
+#endif
 #include "wg_platform.hlsli"
 
 WG_ARGS_BEGIN
@@ -201,7 +203,7 @@ WG_KERNEL(kw_stage)
         const uint r16 = (s16 & 0x7fffu) == 0u ? 0u : wg_f2h(rsqrt(f16tof32(s16)));
         const uint4 rv = kw_splat8(r16);
         [unroll] for (int kt = 0; kt < KT; ++kt)
-            n[kt] = kw_mul8(n[kt], kw_opq4(kw_mul8(rv, g1v[kt])));
+            n[kt] = kw_mul8(n[kt], kw_mulo8(rv, g1v[kt]));
     }
 
     // 2. token mixing in rounds of NG heads; yacc (owned tiles) accumulates the output projection

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """FP8 E4M3FN and FP16 rounding helpers (spec 02, notation section; spec 01, numeric formats).
 
 E4M3FN: 1 sign bit, 4 exponent bits (bias 7), 3 mantissa bits, no infinities, one NaN pattern per sign

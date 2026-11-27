@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // HIP oracle of the output value the direct post kernel's table replaces (clean/dx12/hlsl/wg_f16lut.hlsli), as the HIP
 // executor computes it from the lz5 result r (FP16): post.hip's vertical pass of post_tf_f32_p12_diet_vsit (qc =
 // clampf(r, 1e-4, 3), dec_m1_poly below kDecPolyMax else wg_exp2(qc kDecK) - 1, the f32 row v * dec_scale), then

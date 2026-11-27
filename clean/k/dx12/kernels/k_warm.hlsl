@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // k_warm: cache warm-up of model K's weights on the D3D12 executors (no HIP counterpart; runtime_k.cpp KRuntime::warm,
 // runtime option k_warm). WrongGPU's own code. Launched unordered beside a stage whose grid leaves most of the GPU idle
 // (dev_->unordered_next()), it reads one 4-byte word per `line` bytes of up to twelve byte ranges (the weight blobs of

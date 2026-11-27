@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """CPU regression: invalid event spans must not become accepted timing summaries."""
 import sys
 from pathlib import Path

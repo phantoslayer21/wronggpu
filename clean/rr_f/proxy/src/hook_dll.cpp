@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Hook-mode delivery of the RR proxy (HOOK-MODE.md). Built as an OptiScaler ASI plugin
 // (WrongGPU-RR.asi release, WrongGPU-RR-probe.asi probe), loaded by OptiScaler from
 // bin\x64\plugins\. It does NOT replace the game's interface file. Instead it finds the already-loaded genuine
@@ -65,6 +65,8 @@
 #include <vector>
 
 #include <atomic>
+#include <stdexcept>
+#include <type_traits>
 
 #include "log_append.h"
 #include "ngx_rr.h"
@@ -100,9 +102,13 @@ HMODULE g_self = nullptr;
 HMODULE g_interposer = nullptr;   // the genuine game interface module (never patched)
 // The route of this run (release 0.6.0: one build for 2.7 / 2.8 / 2.14): the game interface's minor version, set from its
 // version before the core is built (do_hook / on_host_hooked); the binding table's (2.14) until then.
-uint32_t g_api_minor = WG_BINDING_API_MINOR;
+// 0.7.0: atomic, as the game's threads read it (role_in_route) while the host's hook callback may still set it.
+std::atomic<uint32_t> g_api_minor{WG_BINDING_API_MINOR};
 const uint32_t kWgRouteMinors[] = {7u, 8u, 14u};
 const int kWgRoleTagForFrame = 13;  // gen_forwarding.ROLES order; absent from the 2.7 interface (A9.4)
+// 0.7.0: the interface has the frame-scoped tag function (slSetTagForFrame): 2.8 and later by version, an interface
+// accepted by its exports by whether it exports it (route_by_exports)
+std::atomic<bool> g_has_tag_for_frame{WG_BINDING_API_MINOR >= 8u};
 // The interface version `major.minor` has a route in this build; *names: the families served, for the log.
 bool route_for(uint32_t major, uint32_t minor, std::string* names) {
   bool ok = false;
@@ -124,14 +130,47 @@ const char* const kNgxStillServed = "";
 const char* const kNgxStillServed = "; games that call NGX directly can still get WrongGPU RR (the NGX route)";
 #endif
 // role `role` exists in this run's interface family
-bool role_in_route(int role) { return !(role == kWgRoleTagForFrame && g_api_minor < 8u); }
+bool role_in_route(int role) { return !(role == kWgRoleTagForFrame && !g_has_tag_for_frame.load(std::memory_order_acquire)); }
+void* handler_for(int role);  // (below, with the IAT code)
+void log_line(const std::string& s);  // (below)
+// 0.7.0: an interface of another 2.x version (2.7 or later) is accepted when it exports every core function the route
+// hooks (GetProcAddress under a module reference, so it cannot unload meanwhile); slSetTagForFrame, exported or not,
+// decides the frame-scoped tag role. *missing: the first core export it lacks (empty: another major, or below 2.7).
+bool route_by_exports(HMODULE m, uint32_t major, uint32_t minor, bool* tag_for_frame, std::string* missing) {
+  if (major != 2u || minor < 7u || !m) return false;
+  const wgrr::guard::ModuleRef ref(m);
+  if (!ref.held()) {
+    if (missing) *missing = "the module (unloaded)";
+    return false;
+  }
+  for (unsigned i = 0; i < WG_BINDING_HOOK_ROLE_COUNT; ++i) {
+    const int role = kWgHookRoles[i];
+    if (role == kWgRoleTagForFrame || !kWgRoleNames[role][0] || !handler_for(role)) continue;
+    if (!GetProcAddress(static_cast<HMODULE>(ref.handle()), kWgRoleNames[role])) {
+      if (missing) *missing = kWgRoleNames[role];
+      return false;
+    }
+  }
+  if (tag_for_frame) *tag_for_frame = GetProcAddress(static_cast<HMODULE>(ref.handle()), kWgRoleNames[kWgRoleTagForFrame]) != nullptr;
+  return true;
+}
 // Host routes (plugin interface 3): for a game that loads the interface at run time and resolves it by name, the host
 // (OptiScaler) puts our handlers in front of the interface's exports when it hooks the module; each role's function
 // to continue with is then the host's `next` pointer, not the export (calling the export would come back to us).
 bool g_wait_for_host = false;     // do_hook found no interface module and no import of it
 std::atomic<bool> g_route_mode{false};
 WgHostMenuPlugin* g_host_plugin = nullptr;
-void* g_route_next[32] = {};      // by role index (gen_forwarding.ROLES order)
+// by role index (gen_forwarding.ROLES order). 0.7.0: atomic (the host writes them while it installs our routes and the
+// game's threads read them); the host's table takes a void**, the same object (pointer-sized and lock-free)
+std::atomic<void*> g_route_next[32] = {};
+static_assert(sizeof(std::atomic<void*>) == sizeof(void*) && std::atomic<void*>::is_always_lock_free,
+              "the host writes g_route_next through a void**");
+// 0.7.0: the host routes are registered and where a passing handler goes is published (g_fwd): until then a handler the
+// host already installed passes every call straight on to the host's next function, never into a half-built core
+std::atomic<bool> g_routes_ready{false};
+// 0.7.0: a fault (structured exception or C++ exception) inside WrongGPU RR on the game-interface route: every handler
+// passes its call on for the rest of the run (sl_fault)
+std::atomic<bool> g_sl_faulted{false};
 HMODULE g_runtime_module = nullptr;
 const WgRrRuntimeV1* g_runtime = nullptr;
 wgrr::Settings g_settings;
@@ -220,7 +259,7 @@ wgrr::ProbeLog* probe_log() {
       const wgrr::LogLock shared(g_probe_path, wgrr::kLogLockWaitMs);
       wgrr::append_log_text(g_probe_path, wgrr::log_stamp() + line + "\r\n");  // each write reaches the file at once
     });
-    g_probe_log->note(std::string("probe start: build Streamline 2.") + std::to_string(g_api_minor) +
+    g_probe_log->note(std::string("probe start: build Streamline 2.") + std::to_string(g_api_minor.load()) +
                       " (hook mode), process " + std::to_string(GetCurrentProcessId()));
   });
   return g_probe_log;
@@ -328,6 +367,35 @@ bool module_file_version(HMODULE m, unsigned v[4]) {
   return true;
 }
 
+// The route for the interface `m` of version major.minor (0.7.0): a family this build was built for (2.7, 2.8, 2.14), else
+// an interface accepted by its exports (route_by_exports). Sets this run's version (g_api_minor) and whether it has the
+// frame-scoped tag role before the core is built, and logs the choice; false: no game-interface route (logged, with
+// `none`: what was not done).
+bool choose_route(HMODULE m, uint32_t major, uint32_t minor, const char* none) {
+  std::string families;
+  if (route_for(major, minor, &families)) {
+    g_has_tag_for_frame.store(minor >= 8u, std::memory_order_release);
+    g_api_minor.store(minor, std::memory_order_release);
+    log_line("hook: route Streamline 2." + std::to_string(minor) + " chosen for this game interface");
+    return true;
+  }
+  bool tag_for_frame = false;
+  std::string missing;
+  if (route_by_exports(m, major, minor, &tag_for_frame, &missing)) {
+    g_has_tag_for_frame.store(tag_for_frame, std::memory_order_release);
+    g_api_minor.store(minor, std::memory_order_release);
+    log_line("hook: game interface version 2." + std::to_string(minor) + " accepted by its exports (every core function "
+             "the route hooks is exported; " + (tag_for_frame ? "slSetTagForFrame exported: frame-scoped tags on" :
+                                                "no slSetTagForFrame: frame-scoped tags off") + ")");
+    log_line("hook: route Streamline 2." + std::to_string(minor) + " chosen for this game interface");
+    return true;
+  }
+  log_line("hook: game interface version does not match this build's binding version (" + families + ".x" +
+           (missing.empty() ? std::string() : "; export probe: no " + missing) + "): " + kNoGameInterfaceRoute + none +
+           kNgxStillServed);
+  return false;
+}
+
 // ---------------------------------------------------------------- the core (reused unchanged)
 uint32_t status_word();
 void ensure_settings();
@@ -343,8 +411,9 @@ bool frame_by_token() {
 template <typename F>
 void bind(F& slot, int role) {
   const char* name = role_in_route(role) ? kWgRoleNames[role] : "";
-  if (g_route_mode.load() && g_route_next[role]) {
-    slot = reinterpret_cast<F>(g_route_next[role]);  // host route: continue through the host's chain
+  void* next = g_route_mode.load() ? g_route_next[role].load(std::memory_order_acquire) : nullptr;
+  if (next) {
+    slot = reinterpret_cast<F>(next);  // host route: continue through the host's chain
     return;
   }
   if (g_guard.state() == wgrr::guard::State::kTaken && g_prev[role]) {  // RR guard, take: continue through the
@@ -729,17 +798,80 @@ bool ngx_route_holds_rr(uint32_t feature) {
 // are installed; a handler passes the call on unchanged (to g_fwd) while WrongGPU RR is not active.
 void guard_first_call();
 bool guard_pass() {
+  if (g_sl_faulted.load(std::memory_order_acquire)) return true;  // a fault inside WrongGPU RR: everything passes on
+  if (g_route_mode.load(std::memory_order_acquire) && !g_routes_ready.load(std::memory_order_acquire)) return true;
   if (!g_guard.frozen() && g_hook_done.load(std::memory_order_acquire)) guard_first_call();
   return !g_guard.active();
 }
 // publishes the pass-through targets (an immutable snapshot; a replaced one is leaked: a handful per run at most)
 void set_fwd(const wgrr::OriginalApi& o) { g_fwd.store(new wgrr::OriginalApi(o), std::memory_order_release); }
-#define WG_PASS(field, ...)                                                                  \
-  if (guard_pass()) {                                                                        \
-    const wgrr::OriginalApi* fwd_ = g_fwd.load(std::memory_order_acquire);                   \
-    return fwd_ && fwd_->field ? fwd_->field(__VA_ARGS__) : WG_E_MISSING_OR_INVALID_API;     \
-  }                                                                                          \
+// (0.7.0: before the pass-through targets are published, a host route continues at the host's next function of `role`)
+#define WG_PASS(role, field, ...)                                                                          \
+  if (guard_pass()) {                                                                                      \
+    const wgrr::OriginalApi* fwd_ = g_fwd.load(std::memory_order_acquire);                                 \
+    if (fwd_ && fwd_->field) return fwd_->field(__VA_ARGS__);                                              \
+    void* next_ = g_route_mode.load(std::memory_order_acquire) ? g_route_next[role].load(std::memory_order_acquire) : nullptr; \
+    return next_ ? reinterpret_cast<decltype(wgrr::OriginalApi::field)>(next_)(__VA_ARGS__) : WG_E_MISSING_OR_INVALID_API;   \
+  }                                                                                                        \
   (void)0
+
+// 0.7.0: fault isolation of the game-interface route, as the NGX route's (ngx_create_seh): a structured exception or a
+// C++ exception inside WrongGPU RR (an unexpected game structure, the runtime) never reaches the game. The call answers
+// WG_E_EXCEPTION_HANDLER, a command-list bracket left open on this thread is closed (the host's nesting and state
+// tracking stay balanced), and from then on every handler passes its call on to the game interface (guard_pass), so the
+// game keeps its own path; a lock the faulting thread held is never taken again.
+void sl_fault(const char* call) {
+#if !WG_RR_PROBE
+  wgrr::RrProxy::close_open_bracket_after_fault();
+#endif
+  if (!g_sl_faulted.exchange(true))
+    log_line(std::string("hook: a fault inside WrongGPU RR's ") + call + " on the game-interface route; every game-interface "
+             "call passes on to the game interface for the rest of the run (the game keeps its own path)");
+}
+using SlBody = WgResultCode (*)(void* ctx);
+WgResultCode sl_call_cpp(SlBody body, void* ctx, const char* call) {
+  try {
+    return body(ctx);
+  } catch (...) {
+    sl_fault(call);
+    return WG_E_EXCEPTION_HANDLER;
+  }
+}
+// No C++ objects in this frame (structured exception handling).
+WgResultCode sl_call_seh(SlBody body, void* ctx, const char* call) {
+  __try {
+    return sl_call_cpp(body, ctx, call);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    sl_fault(call);
+    return WG_E_EXCEPTION_HANDLER;
+  }
+}
+template <typename L>
+WgResultCode sl_guarded(const char* call, L&& body) {
+  using B = std::remove_reference_t<L>;
+  return sl_call_seh([](void* c) -> WgResultCode { return (*static_cast<B*>(c))(); }, &body, call);
+}
+#if defined(WG_TEST_FAULT_HOOKS)
+// tests only (a separate build, tools/build.py; never the release plugin): the first call of the role WG_TEST_FAULT_ROLE
+// names faults inside the guarded part: an access violation, or a C++ exception with WG_TEST_FAULT_CPP=1
+std::atomic<int> g_test_fault_role{-2};  // -2: not read yet
+void test_fault_point(int role) {
+  int want = g_test_fault_role.load();
+  if (want == -2) {
+    char e[16] = {};
+    want = GetEnvironmentVariableA("WG_TEST_FAULT_ROLE", e, sizeof e) ? atoi(e) : -1;
+    g_test_fault_role.store(want);
+  }
+  if (want != role) return;
+  g_test_fault_role.store(-1);
+  char cpp[4] = {};
+  if (GetEnvironmentVariableA("WG_TEST_FAULT_CPP", cpp, sizeof cpp) && cpp[0] == '1') throw std::runtime_error("test fault");
+  RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr);
+}
+#define WG_TEST_FAULT(role) test_fault_point(role)
+#else
+#define WG_TEST_FAULT(role) (void)0
+#endif
 
 }  // namespace
 
@@ -747,101 +879,118 @@ void set_fwd(const wgrr::OriginalApi& o) { g_fwd.store(new wgrr::OriginalApi(o),
 extern "C" {
 
 WgResultCode wg_role_init(const WgPreferences* p, uint64_t v) {
-  WG_PASS(init, p, v);
-  auto* t = entered(0);
-  char buf[200];
-  snprintf(buf, sizeof buf, "init entered: thread %lu preferences=0x%llx sdk_version=0x%016llx (hook mode)",
-           (unsigned long)GetCurrentThreadId(), (unsigned long long)(uintptr_t)p, (unsigned long long)v);
-  log_line(buf);
-  return t->init(p, v);
+  WG_PASS(0, init, p, v);
+  return sl_guarded(kWgRoleNames[0], [&] {
+    auto* t = entered(0);
+    char buf[200];
+    snprintf(buf, sizeof buf, "init entered: thread %lu preferences=0x%llx sdk_version=0x%016llx (hook mode)",
+             (unsigned long)GetCurrentThreadId(), (unsigned long long)(uintptr_t)p, (unsigned long long)v);
+    log_line(buf);
+    WG_TEST_FAULT(0);
+    return t->init(p, v);
+  });
 }
 WgResultCode wg_role_shutdown(void) {
-  WG_PASS(shutdown);
-  return entered(1)->shutdown();
+  WG_PASS(1, shutdown);
+  return sl_guarded(kWgRoleNames[1], [&] { WG_TEST_FAULT(1); return entered(1)->shutdown(); });
 }
 WgResultCode wg_role_is_supported(uint32_t f, const WgAdapterInfo* a) {
-  WG_PASS(is_supported, f, a);
-  return entered(2)->is_supported(f, a);
+  WG_PASS(2, is_supported, f, a);
+  return sl_guarded(kWgRoleNames[2], [&] { WG_TEST_FAULT(2); return entered(2)->is_supported(f, a); });
 }
 WgResultCode wg_role_is_loaded(uint32_t f, bool* l) {
-  WG_PASS(is_loaded, f, l);
-  return entered(3)->is_loaded(f, l);
+  WG_PASS(3, is_loaded, f, l);
+  return sl_guarded(kWgRoleNames[3], [&] { WG_TEST_FAULT(3); return entered(3)->is_loaded(f, l); });
 }
 WgResultCode wg_role_set_loaded(uint32_t f, bool l) {
-  WG_PASS(set_loaded, f, l);
-  return entered(4)->set_loaded(f, l);
+  WG_PASS(4, set_loaded, f, l);
+  return sl_guarded(kWgRoleNames[4], [&] { WG_TEST_FAULT(4); return entered(4)->set_loaded(f, l); });
 }
 WgResultCode wg_role_requirements(uint32_t f, WgRequirements* r) {
-  WG_PASS(requirements, f, r);
-  return entered(5)->requirements(f, r);
+  WG_PASS(5, requirements, f, r);
+  return sl_guarded(kWgRoleNames[5], [&] { WG_TEST_FAULT(5); return entered(5)->requirements(f, r); });
 }
 WgResultCode wg_role_version(uint32_t f, WgFeatureVersion* v) {
-  WG_PASS(version, f, v);
-  return entered(6)->version(f, v);
+  WG_PASS(6, version, f, v);
+  return sl_guarded(kWgRoleNames[6], [&] { WG_TEST_FAULT(6); return entered(6)->version(f, v); });
 }
 WgResultCode wg_role_get_function(uint32_t f, const char* n, void** o) {
-  WG_PASS(get_function, f, n, o);
-  return entered(7)->get_function(f, n, o);
+  WG_PASS(7, get_function, f, n, o);
+  return sl_guarded(kWgRoleNames[7], [&] { WG_TEST_FAULT(7); return entered(7)->get_function(f, n, o); });
 }
 WgResultCode wg_role_allocate(void* c, uint32_t f, const WgViewport* v) {
-  WG_PASS(allocate, c, f, v);
+  WG_PASS(8, allocate, c, f, v);
   if (ngx_route_holds_rr(f)) return WG_E_INVALID_STATE;
-  return entered(8)->allocate(c, f, v);
+  return sl_guarded(kWgRoleNames[8], [&] { WG_TEST_FAULT(8); return entered(8)->allocate(c, f, v); });
 }
 WgResultCode wg_role_free(uint32_t f, const WgViewport* v) {
-  WG_PASS(free_resources, f, v);
-  return entered(9)->free_resources(f, v);
+  WG_PASS(9, free_resources, f, v);
+  return sl_guarded(kWgRoleNames[9], [&] { WG_TEST_FAULT(9); return entered(9)->free_resources(f, v); });
 }
 WgResultCode wg_role_set_device(void* d) {
-  WG_PASS(set_device, d);
-  return entered(10)->set_device(d);
+  WG_PASS(10, set_device, d);
+  return sl_guarded(kWgRoleNames[10], [&] { WG_TEST_FAULT(10); return entered(10)->set_device(d); });
 }
 WgResultCode wg_role_tag(const WgViewport* v, const WgTag* t, uint32_t n, void* c) {
-  WG_PASS(tag, v, t, n, c);
-  return entered(12)->tag(v, t, n, c);
+  WG_PASS(12, tag, v, t, n, c);
+  return sl_guarded(kWgRoleNames[12], [&] { WG_TEST_FAULT(12); return entered(12)->tag(v, t, n, c); });
 }
 WgResultCode wg_role_tag_for_frame(const WgFrameToken* k, const WgViewport* v, const WgTag* t, uint32_t n, void* c) {
-  WG_PASS(tag_for_frame, k, v, t, n, c);
-  return entered(13)->tag_for_frame(k, v, t, n, c);
+  WG_PASS(13, tag_for_frame, k, v, t, n, c);
+  return sl_guarded(kWgRoleNames[13], [&] { WG_TEST_FAULT(13); return entered(13)->tag_for_frame(k, v, t, n, c); });
 }
 WgResultCode wg_role_constants(const WgConstants* c, const WgFrameToken* k, const WgViewport* v) {
-  WG_PASS(constants, c, k, v);
-  return entered(14)->constants(c, k, v);
+  WG_PASS(14, constants, c, k, v);
+  return sl_guarded(kWgRoleNames[14], [&] { WG_TEST_FAULT(14); return entered(14)->constants(c, k, v); });
 }
 WgResultCode wg_role_new_frame_token(WgFrameToken** o, const uint32_t* i) {
-  WG_PASS(new_frame_token, o, i);
-  return entered(15)->new_frame_token(o, i);
+  WG_PASS(15, new_frame_token, o, i);
+  return sl_guarded(kWgRoleNames[15], [&] { WG_TEST_FAULT(15); return entered(15)->new_frame_token(o, i); });
 }
 WgResultCode wg_role_evaluate(uint32_t f, const WgFrameToken* k, const WgHeader* const* in, uint32_t n, void* c) {
-  WG_PASS(evaluate, f, k, in, n, c);
+  WG_PASS(16, evaluate, f, k, in, n, c);
   if (ngx_route_holds_rr(f)) return WG_E_INVALID_STATE;
-  const WgResultCode rc = entered(16)->evaluate(f, k, in, n, c);
-  if (rc == WG_OK && f == WG_FEAT_RAY_RECONSTRUCTION) {
-    g_last_rr_frame_ms.store(GetTickCount64(), std::memory_order_relaxed);
+  return sl_guarded(kWgRoleNames[16], [&] {
+    WG_TEST_FAULT(16);
+    const WgResultCode rc = entered(16)->evaluate(f, k, in, n, c);
+    if (rc == WG_OK && f == WG_FEAT_RAY_RECONSTRUCTION) {
+      g_last_rr_frame_ms.store(GetTickCount64(), std::memory_order_relaxed);
 #if !WG_RR_PROBE
-    wgrr::panel::frame_done();  // the RR name and GPU time in OptiScaler's overlay
+      wgrr::panel::frame_done();  // the RR name and GPU time in OptiScaler's overlay
 #endif
-  }
-  return rc;
+    }
+    return rc;
+  });
 }
 #if WG_RR_PROBE
 WgResultCode wg_role_set_vulkan_info(const void* info) {
-  WG_PASS(set_vulkan_info, info);
-  return entered(11)->set_vulkan_info(info);
+  WG_PASS(11, set_vulkan_info, info);
+  return sl_guarded(kWgRoleNames[11], [&] { WG_TEST_FAULT(11); return entered(11)->set_vulkan_info(info); });
 }
 WgResultCode wg_role_upgrade_interface(void** iface) {
-  WG_PASS(upgrade_interface, iface);
-  return entered(17)->upgrade_interface(iface);
+  WG_PASS(17, upgrade_interface, iface);
+  return sl_guarded(kWgRoleNames[17], [&] { WG_TEST_FAULT(17); return entered(17)->upgrade_interface(iface); });
 }
 WgResultCode wg_role_native_interface(void* w, void** n) {
-  WG_PASS(native_interface, w, n);
-  return entered(18)->native_interface(w, n);
+  WG_PASS(18, native_interface, w, n);
+  return sl_guarded(kWgRoleNames[18], [&] { WG_TEST_FAULT(18); return entered(18)->native_interface(w, n); });
 }
 #endif
 
-WgResultCode wg_rr_optimal_fn(const WgRrOptions* o, WgRrOptimal* s) { return entered("rr-optimal")->rr_optimal(o, s); }
-WgResultCode wg_rr_state_fn(const WgViewport* v, WgRrState* s) { return entered("rr-state")->rr_state(v, s); }
-WgResultCode wg_rr_options_fn(const WgViewport* v, const WgRrOptions* o) { return entered("rr-options")->rr_options(v, o); }
+// the RR feature functions (handed out by get-function): guarded too; after a fault they answer at once (the core and the
+// locks a faulting thread held are not entered again)
+WgResultCode wg_rr_optimal_fn(const WgRrOptions* o, WgRrOptimal* s) {
+  if (g_sl_faulted.load(std::memory_order_acquire)) return WG_E_EXCEPTION_HANDLER;
+  return sl_guarded("rr-optimal", [&] { return entered("rr-optimal")->rr_optimal(o, s); });
+}
+WgResultCode wg_rr_state_fn(const WgViewport* v, WgRrState* s) {
+  if (g_sl_faulted.load(std::memory_order_acquire)) return WG_E_EXCEPTION_HANDLER;
+  return sl_guarded("rr-state", [&] { return entered("rr-state")->rr_state(v, s); });
+}
+WgResultCode wg_rr_options_fn(const WgViewport* v, const WgRrOptions* o) {
+  if (g_sl_faulted.load(std::memory_order_acquire)) return WG_E_EXCEPTION_HANDLER;
+  return sl_guarded("rr-options", [&] { return entered("rr-options")->rr_options(v, o); });
+}
 
 const WgRrSettingsContract* wg_get_settings_contract(void) {
   // RR guard: a second copy keeps its hands off the log (the active copy writes it)
@@ -910,6 +1059,7 @@ std::vector<PatchRecord> g_patches;  // for an optional restore (the ASI does no
 // handler was rewritten (the delay helper or another module), an unpatched delay-load slot that left its thunk was bound
 // by the helper (the game called that function). Read only: nothing is patched again.
 struct SlotWatch {
+  HMODULE mod;                     // owning module (validated before dereferencing slot)
   void** slot;
   std::string name, module, kind;  // kind: "import" / "delay-load"
   void* ours;                      // our handler (null: a slot we left alone)
@@ -919,6 +1069,7 @@ struct SlotWatch {
 std::vector<SlotWatch> g_watch;   // filled while hooking (one thread), then read by the checks
 std::mutex g_watch_mutex;
 unsigned g_watch_checks = 0;
+HANDLE g_watch_stop = nullptr;
 
 // "<module file>+0x<offset>", or the bare address when no module holds it
 std::string where(const void* p) {
@@ -940,63 +1091,54 @@ std::string where(const void* p) {
 
 // Patch, in `module`, every IAT slot that imports a hooked role name from the interposer DLL. Returns the number of
 // slots patched. Non-RR imports and imports from other DLLs are left untouched.
+// 0.7.0: the headers, descriptors, names and slots are read through the RR guard's checked reader (wgrr::guard::PeView /
+// Reader / import_slots: every read inside the mapped image, a fault-safe copy) under a module reference (ModuleRef), so a
+// packed, damaged or unloading module is "nothing found", never an access violation at start-up.
 unsigned patch_module_imports(HMODULE module, const char* interposer_leaf) {
-  const uint8_t* base = reinterpret_cast<const uint8_t*>(module);
-  const IMAGE_DOS_HEADER* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-  if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
-  const IMAGE_NT_HEADERS64* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
-  if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
-  const IMAGE_DATA_DIRECTORY& d = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
-  if (!d.VirtualAddress || !d.Size) return 0;
+  const wgrr::guard::ModuleRef ref(module);
+  if (!ref.held()) return 0;
+  wgrr::guard::Reader r;
+  wgrr::guard::Budget b(wgrr::guard::kScanMaxEntries, wgrr::guard::kScanMaxMs);
   unsigned patched = 0;
-  for (const IMAGE_IMPORT_DESCRIPTOR* imp = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(base + d.VirtualAddress);
-       imp->Name; ++imp) {
-    const char* dll = reinterpret_cast<const char*>(base + imp->Name);
-    if (_stricmp(dll, interposer_leaf) != 0) continue;  // only the game's interface DLL
-    // OriginalFirstThunk names the imports; FirstThunk is the IAT we patch. Fall back to FirstThunk for names when
-    // the import was already bound in place (no separate name table).
-    const IMAGE_THUNK_DATA64* names = reinterpret_cast<const IMAGE_THUNK_DATA64*>(
-        base + (imp->OriginalFirstThunk ? imp->OriginalFirstThunk : imp->FirstThunk));
-    IMAGE_THUNK_DATA64* iat = reinterpret_cast<IMAGE_THUNK_DATA64*>(const_cast<uint8_t*>(base) + imp->FirstThunk);
-    for (; names->u1.AddressOfData; ++names, ++iat) {
-      if (names->u1.Ordinal & IMAGE_ORDINAL_FLAG64) continue;  // the games import by name only (A9.2)
-      const IMAGE_IMPORT_BY_NAME* by = reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(base + names->u1.AddressOfData);
-      void* h = handler_for_name(reinterpret_cast<const char*>(by->Name));
-      if (!h) continue;  // non-RR import: leave it pointing at the genuine interface
-      void** slot = reinterpret_cast<void**>(&iat->u1.Function);
-      void* original = *slot;
-      if (original == h) continue;
-      if (patch_slot(slot, h)) {
-        g_patches.push_back({slot, original});
-        g_watch.push_back({slot, reinterpret_cast<const char*>(by->Name), module_path(module), "import", h, original, h});
-        ++patched;
-        log_line(std::string("hook: patched IAT slot ") + reinterpret_cast<const char*>(by->Name) + " in " +
-                 module_path(module));
-      } else {
-        log_line(std::string("hook: FAILED to patch IAT slot ") + reinterpret_cast<const char*>(by->Name) + " in " +
-                 module_path(module));
-      }
+  // OriginalFirstThunk names the imports; FirstThunk is the IAT we patch (FirstThunk names them when the import was
+  // bound in place); by name only (the games import by name, A9.2)
+  wgrr::guard::import_slots(module, interposer_leaf, r, b, [&](const char* name, void** slot) {
+    void* h = handler_for_name(name);
+    if (!h) return;  // non-RR import: leave it pointing at the genuine interface
+    void* original = nullptr;
+    if (!r.get(slot, &original) || original == h) return;
+    if (patch_slot(slot, h)) {
+      g_patches.push_back({slot, original});
+      g_watch.push_back({module, slot, name, module_path(module), "import", h, original, h});
+      ++patched;
+      log_line(std::string("hook: patched IAT slot ") + name + " in " + module_path(module));
+    } else {
+      log_line(std::string("hook: FAILED to patch IAT slot ") + name + " in " + module_path(module));
     }
-  }
+  });
   return patched;
 }
 
 // The delay-load descriptor in `module` that names the interposer DLL, or nullptr. Delay-load imports are bound on the
 // first call through them (the linker's delay helper loads the DLL then), so a game that links the interface this way
 // has not loaded it yet when the plugin runs.
+// (0.7.0: through the checked reader, as patch_module_imports: descriptors only within the directory's declared size)
 const IMAGE_DELAYLOAD_DESCRIPTOR* find_delay_import(HMODULE module, const char* interposer_leaf) {
-  const uint8_t* base = reinterpret_cast<const uint8_t*>(module);
-  const IMAGE_DOS_HEADER* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-  if (dos->e_magic != IMAGE_DOS_SIGNATURE) return nullptr;
-  const IMAGE_NT_HEADERS64* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
-  if (nt->Signature != IMAGE_NT_SIGNATURE) return nullptr;
-  const IMAGE_DATA_DIRECTORY& d = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT];
-  if (!d.VirtualAddress || !d.Size) return nullptr;
-  for (const IMAGE_DELAYLOAD_DESCRIPTOR* dl =
-           reinterpret_cast<const IMAGE_DELAYLOAD_DESCRIPTOR*>(base + d.VirtualAddress);
-       dl->DllNameRVA; ++dl) {
-    if (!dl->Attributes.RvaBased) continue;  // pre-VC7 VA-based descriptors: not produced by any supported game
-    if (_stricmp(reinterpret_cast<const char*>(base + dl->DllNameRVA), interposer_leaf) == 0) return dl;
+  const wgrr::guard::ModuleRef ref(module);
+  if (!ref.held()) return nullptr;
+  wgrr::guard::Reader r;
+  wgrr::guard::PeView pe;
+  uint32_t rva = 0, size = 0;
+  if (!pe.open(module, r) || !pe.dir(IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT, &rva, &size)) return nullptr;
+  const uint32_t count = size / sizeof(IMAGE_DELAYLOAD_DESCRIPTOR) < 4096 ? size / sizeof(IMAGE_DELAYLOAD_DESCRIPTOR) : 4096;
+  for (uint32_t k = 0; k < count; ++k) {
+    const uint8_t* dp = pe.at(rva + (uint64_t)k * sizeof(IMAGE_DELAYLOAD_DESCRIPTOR), sizeof(IMAGE_DELAYLOAD_DESCRIPTOR));
+    IMAGE_DELAYLOAD_DESCRIPTOR dl;
+    if (!dp || !r.get(dp, &dl) || !dl.DllNameRVA) return nullptr;
+    if (!dl.Attributes.RvaBased) continue;  // pre-VC7 VA-based descriptors: not produced by any supported game
+    char name[64];
+    if (pe.str(dl.DllNameRVA, name, sizeof name, r) && _stricmp(name, interposer_leaf) == 0)
+      return reinterpret_cast<const IMAGE_DELAYLOAD_DESCRIPTOR*>(dp);
   }
   return nullptr;
 }
@@ -1005,33 +1147,42 @@ const IMAGE_DELAYLOAD_DESCRIPTOR* find_delay_import(HMODULE module, const char* 
 // helper's thunk; once patched, the game calls our handler directly and the helper never runs for that function. The
 // other slots keep their thunks and bind to the genuine interface through the helper as usual.
 unsigned patch_module_delay_imports(HMODULE module, const IMAGE_DELAYLOAD_DESCRIPTOR* dl) {
-  uint8_t* base = reinterpret_cast<uint8_t*>(module);
-  const IMAGE_THUNK_DATA64* names = reinterpret_cast<const IMAGE_THUNK_DATA64*>(base + dl->ImportNameTableRVA);
-  IMAGE_THUNK_DATA64* iat = reinterpret_cast<IMAGE_THUNK_DATA64*>(base + dl->ImportAddressTableRVA);
+  // (0.7.0: the name and address tables through the checked reader, as patch_module_imports)
+  const wgrr::guard::ModuleRef ref(module);
+  if (!ref.held() || !dl) return 0;
+  wgrr::guard::Reader r;
+  wgrr::guard::PeView pe;
+  IMAGE_DELAYLOAD_DESCRIPTOR d;
+  uint32_t dir_rva = 0, dir_size = 0;
+  const uint8_t* dir_base = (pe.open(module, r) && pe.dir(IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT, &dir_rva, &dir_size))
+                                ? pe.at(dir_rva, dir_size)
+                                : nullptr;
+  const uintptr_t dl_addr = reinterpret_cast<uintptr_t>(dl);
+  const uintptr_t dir_lo = reinterpret_cast<uintptr_t>(dir_base);
+  const uintptr_t dir_hi = dir_lo + dir_size;
+  if (!dir_base || dir_size < sizeof(IMAGE_DELAYLOAD_DESCRIPTOR) || dl_addr < dir_lo ||
+      dl_addr > dir_hi - sizeof(IMAGE_DELAYLOAD_DESCRIPTOR) || !r.get(dl, &d))
+    return 0;
+  wgrr::guard::Budget b(wgrr::guard::kScanMaxEntries, wgrr::guard::kScanMaxMs);
   unsigned patched = 0;
-  for (; names->u1.AddressOfData; ++names, ++iat) {
-    if (names->u1.Ordinal & IMAGE_ORDINAL_FLAG64) continue;  // by name only, as for the import table
-    const IMAGE_IMPORT_BY_NAME* by = reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(base + names->u1.AddressOfData);
-    void* h = handler_for_name(reinterpret_cast<const char*>(by->Name));
+  wgrr::guard::thunks(pe, r, b, d.ImportNameTableRVA, d.ImportAddressTableRVA, [&](const char* name, void** slot) {
+    void* original = nullptr;
+    if (!r.get(slot, &original)) return;
+    void* h = handler_for_name(name);
     if (!h) {  // clean/rr-sl-diag 2: watched only (bound by the helper when the game calls it)
-      void** other = reinterpret_cast<void**>(&iat->u1.Function);
-      g_watch.push_back({other, reinterpret_cast<const char*>(by->Name), module_path(module), "delay-load", nullptr, *other, *other});
-      continue;
+      g_watch.push_back({module, slot, name, module_path(module), "delay-load", nullptr, original, original});
+      return;
     }
-    void** slot = reinterpret_cast<void**>(&iat->u1.Function);
-    void* original = *slot;
-    if (original == h) continue;
+    if (original == h) return;
     if (patch_slot(slot, h)) {
       g_patches.push_back({slot, original});
-      g_watch.push_back({slot, reinterpret_cast<const char*>(by->Name), module_path(module), "delay-load", h, original, h});
+      g_watch.push_back({module, slot, name, module_path(module), "delay-load", h, original, h});
       ++patched;
-      log_line(std::string("hook: patched delay-load IAT slot ") + reinterpret_cast<const char*>(by->Name) + " in " +
-               module_path(module));
+      log_line(std::string("hook: patched delay-load IAT slot ") + name + " in " + module_path(module));
     } else {
-      log_line(std::string("hook: FAILED to patch delay-load IAT slot ") + reinterpret_cast<const char*>(by->Name) +
-               " in " + module_path(module));
+      log_line(std::string("hook: FAILED to patch delay-load IAT slot ") + name + " in " + module_path(module));
     }
-  }
+  });
   return patched;
 }
 
@@ -1069,17 +1220,26 @@ std::string interface_importers() {
   if (!K32EnumProcessModules(GetCurrentProcess(), mods, sizeof mods, &need)) return "(modules not listed)";
   const unsigned count = (unsigned)(need / sizeof(HMODULE)) < 1024 ? (unsigned)(need / sizeof(HMODULE)) : 1024;
   for (unsigned i = 0; i < count; ++i) {
+    // (0.7.0: through the checked reader under a module reference: a module that unloads meanwhile, or a packed one,
+    // is skipped, never read past)
     const uint8_t* base = reinterpret_cast<const uint8_t*>(mods[i]);
-    const IMAGE_DOS_HEADER* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) continue;
-    const IMAGE_NT_HEADERS64* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) continue;
+    const wgrr::guard::ModuleRef ref(mods[i]);
+    if (!ref.held()) continue;
+    wgrr::guard::Reader r;
+    wgrr::guard::PeView pe;
+    if (!pe.open(mods[i], r)) continue;
     bool imp = false;
-    const IMAGE_DATA_DIRECTORY& d = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
-    if (d.VirtualAddress && d.Size)
-      for (const IMAGE_IMPORT_DESCRIPTOR* e = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(base + d.VirtualAddress);
-           e->Name; ++e)
-        imp = imp || _stricmp(reinterpret_cast<const char*>(base + e->Name), kWgInterposerFile) == 0;
+    uint32_t rva = 0, size = 0;
+    if (pe.dir(IMAGE_DIRECTORY_ENTRY_IMPORT, &rva, &size)) {
+      const uint32_t n = size / sizeof(IMAGE_IMPORT_DESCRIPTOR) < 4096 ? size / sizeof(IMAGE_IMPORT_DESCRIPTOR) : 4096;
+      for (uint32_t k = 0; k < n && !imp; ++k) {
+        const uint8_t* dp = pe.at(rva + (uint64_t)k * sizeof(IMAGE_IMPORT_DESCRIPTOR), sizeof(IMAGE_IMPORT_DESCRIPTOR));
+        IMAGE_IMPORT_DESCRIPTOR e;
+        if (!dp || !r.get(dp, &e) || !e.Name) break;
+        char name[64];
+        imp = pe.str(e.Name, name, sizeof name, r) && _stricmp(name, kWgInterposerFile) == 0;
+      }
+    }
     const bool delay = find_delay_import(mods[i], kWgInterposerFile) != nullptr;
     if (!imp && !delay) continue;
     if (!out.empty()) out += "; ";
@@ -1101,7 +1261,9 @@ void slot_check_now(const char* why) {
   };
   unsigned changed = 0, ours = 0, bound = 0;
   for (SlotWatch& w : g_watch) {
-    void* v = *reinterpret_cast<void* volatile*>(w.slot);
+    const wgrr::guard::ModuleRef ref(w.mod);
+    void* v = nullptr;
+    if (!ref.held() || !wgrr::guard::safe_get(w.slot, &v)) continue;
     if (w.ours && v == w.ours) ++ours;
     if (!w.ours && v != w.original) ++bound;
     if (n == 1 || v != w.last) {
@@ -1129,20 +1291,30 @@ std::string slot_schedule() {
   return wgrr::slot_check_schedule(n && n < sizeof env ? env : nullptr);
 }
 
-DWORD WINAPI slot_watch_thread(void*) {
+DWORD WINAPI slot_watch_thread(void* mod_ref) {
+  HMODULE pinned = static_cast<HMODULE>(mod_ref);
   const std::string spec = slot_schedule();
-  if (spec.empty()) return 0;
-  const ULONGLONG t0 = GetTickCount64();
-  size_t at = 0;
-  while (at < spec.size()) {
-    const size_t comma = spec.find(',', at);
-    const unsigned s = (unsigned)strtoul(spec.substr(at, comma == std::string::npos ? std::string::npos : comma - at).c_str(), nullptr, 10);
-    at = comma == std::string::npos ? spec.size() : comma + 1;
-    const ULONGLONG due = t0 + 1000ull * s;
-    const ULONGLONG now = GetTickCount64();
-    if (due > now) Sleep((DWORD)(due - now));
-    slot_check_now(("timer, " + std::to_string(s) + " s after the hook").c_str());
+  if (!spec.empty()) {
+    const ULONGLONG t0 = GetTickCount64();
+    size_t at = 0;
+    while (at < spec.size()) {
+      const size_t comma = spec.find(',', at);
+      const unsigned s = (unsigned)strtoul(spec.substr(at, comma == std::string::npos ? std::string::npos : comma - at).c_str(), nullptr, 10);
+      at = comma == std::string::npos ? spec.size() : comma + 1;
+      const ULONGLONG due = t0 + 1000ull * s;
+      const ULONGLONG now = GetTickCount64();
+      if (due > now) {
+        const DWORD wait_ms = (DWORD)(due - now);
+        if (g_watch_stop) {
+          if (WaitForSingleObject(g_watch_stop, wait_ms) == WAIT_OBJECT_0) break;
+        } else {
+          Sleep(wait_ms);
+        }
+      }
+      slot_check_now(("timer, " + std::to_string(s) + " s after the hook").c_str());
+    }
   }
+  if (pinned) FreeLibraryAndExitThread(pinned, 0);
   return 0;
 }
 
@@ -1313,10 +1485,30 @@ void guard_scan_exports(HMODULE module, const wgrr::guard::Env& env, bool anon_o
   }
 }
 
+struct DelayImportHit {
+  HMODULE mod;
+  const IMAGE_DELAYLOAD_DESCRIPTOR* desc;
+};
+
+// Every loaded module (other than ourselves and the interface) whose delay-load directory names `interposer_leaf`.
+std::vector<DelayImportHit> find_all_delay_imports(const char* interposer_leaf) {
+  std::vector<DelayImportHit> hits;
+  HMODULE mods[1024];
+  DWORD need = 0;
+  if (!K32EnumProcessModules(GetCurrentProcess(), mods, sizeof mods, &need)) return hits;
+  const unsigned count = (unsigned)(need / sizeof(HMODULE)) < 1024 ? (unsigned)(need / sizeof(HMODULE)) : 1024;
+  for (unsigned i = 0; i < count; ++i) {
+    if (mods[i] == g_self || mods[i] == g_interposer) continue;
+    if (const IMAGE_DELAYLOAD_DESCRIPTOR* dl = find_delay_import(mods[i], interposer_leaf))
+      hits.push_back({mods[i], dl});
+  }
+  return hits;
+}
+
 // At load (do_hook, before the core is built and before anything is patched): S1 over every module's import slots of
-// the interface (and the exe's delay-load slots), S2 over the RR exports. True: go on (active, or take). False: off (a
+// the interface (and every module's delay-load slots), S2 over the RR exports. True: go on (active, or take). False: off (a
 // second copy of WrongGPU RR, or rr_other_plugin=yield with a named module on the path).
-bool guard_at_load(const IMAGE_DELAYLOAD_DESCRIPTOR* delay) {
+bool guard_at_load(const std::vector<DelayImportHit>& delays) {
   namespace g = wgrr::guard;
   guard_read_override();
   LARGE_INTEGER t0;
@@ -1346,14 +1538,19 @@ bool guard_at_load(const IMAGE_DELAYLOAD_DESCRIPTOR* delay) {
       });
     }
   }
-  g::PeView pe;
-  // the exe's delay-load slots: unbound ones hold the delay helper's thunk in the exe
-  if (delay && !budget.over() && pe.open(exe, r)) {
-    guard_thunks(pe, r, budget, delay->ImportNameTableRVA, delay->ImportAddressTableRVA,
+  for (const DelayImportHit& hit : delays) {
+    if (budget.over()) break;
+    const g::ModuleRef ref(hit.mod);
+    if (!ref.held()) continue;
+    g::PeView pe;
+    IMAGE_DELAYLOAD_DESCRIPTOR d;
+    if (!pe.open(hit.mod, r) || !r.get(hit.desc, &d)) continue;
+    const std::string mod_leaf = leaf_text(hit.mod);
+    guard_thunks(pe, r, budget, d.ImportNameTableRVA, d.ImportAddressTableRVA,
                  [&](int role, const char* nm, void** slot) {
       void* val = nullptr;
       const g::Where w = r.get(slot, &val) ? g::classify(val, env, false) : g::Where();
-      v.add(w, std::string("the delay-load slot ") + nm + " of " + leaf_text(exe), false, true);
+      v.add(w, std::string("the delay-load slot ") + nm + " of " + mod_leaf, false, true);
       if (val && w.owner != g::Owner::kInterface && w.owner != g::Owner::kExeThunk && w.owner != g::Owner::kHost)
         prev[role] = val;
     });
@@ -1422,26 +1619,101 @@ void guard_first_call() {
   g_guard.freeze_once([] { return guard_late("the game's first call", true); });
 }
 
+// True when the delay-load IAT slot for `fn_name` in `module` still points inside `module` (the linker's unbound
+// delay-load thunk: the game has not called it yet even if another plugin already loaded the DLL).
+bool delay_slot_unbound(HMODULE module, const IMAGE_DELAYLOAD_DESCRIPTOR* dl, const char* fn_name) {
+  const wgrr::guard::ModuleRef ref(module);
+  if (!ref.held() || !dl || !fn_name || !fn_name[0]) return false;
+  wgrr::guard::Reader r;
+  wgrr::guard::PeView pe;
+  IMAGE_DELAYLOAD_DESCRIPTOR d;
+  uint32_t dir_rva = 0, dir_size = 0;
+  const uint8_t* dir_base = (pe.open(module, r) && pe.dir(IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT, &dir_rva, &dir_size))
+                                ? pe.at(dir_rva, dir_size)
+                                : nullptr;
+  const uintptr_t dl_addr = reinterpret_cast<uintptr_t>(dl);
+  const uintptr_t dir_lo = reinterpret_cast<uintptr_t>(dir_base);
+  const uintptr_t dir_hi = dir_lo + dir_size;
+  if (!dir_base || dir_size < sizeof(IMAGE_DELAYLOAD_DESCRIPTOR) || dl_addr < dir_lo ||
+      dl_addr > dir_hi - sizeof(IMAGE_DELAYLOAD_DESCRIPTOR) || !r.get(dl, &d))
+    return false;
+  wgrr::guard::Budget b(wgrr::guard::kScanMaxEntries, wgrr::guard::kScanMaxMs);
+  bool unbound = false;
+  const uintptr_t lo = reinterpret_cast<uintptr_t>(pe.base());
+  const uintptr_t hi = lo + pe.size_of_image();
+  wgrr::guard::thunks(pe, r, b, d.ImportNameTableRVA, d.ImportAddressTableRVA, [&](const char* name, void** slot) {
+    if (unbound || strcmp(name, fn_name) != 0) return;
+    void* val = nullptr;
+    if (r.get(slot, &val)) {
+      const uintptr_t a = reinterpret_cast<uintptr_t>(val);
+      unbound = (a >= lo && a < hi);
+    }
+  });
+  return unbound;
+}
+
+// True when at least one loaded module (other than ourselves and the interface) imports a hooked role from `leaf`
+// via static import table or delay-load table.
+bool any_module_imports_interposer(const char* leaf) {
+  HMODULE mods[1024];
+  DWORD need = 0;
+  if (!K32EnumProcessModules(GetCurrentProcess(), mods, sizeof mods, &need)) return false;
+  const unsigned count = (unsigned)(need / sizeof(HMODULE)) < 1024 ? (unsigned)(need / sizeof(HMODULE)) : 1024;
+  wgrr::guard::Reader r;
+  wgrr::guard::Budget b(wgrr::guard::kScanMaxEntries, wgrr::guard::kScanMaxMs);
+  bool found = false;
+  for (unsigned i = 0; i < count && !found && b.step(); ++i) {
+    if (mods[i] == g_self || mods[i] == g_interposer) continue;
+    const wgrr::guard::ModuleRef ref(mods[i]);
+    if (!ref.held()) continue;
+    wgrr::guard::import_slots(mods[i], leaf, r, b, [&](const char* name, void**) {
+      if (handler_for_name(name)) found = true;
+    });
+    if (!found) {
+      if (const IMAGE_DELAYLOAD_DESCRIPTOR* dl = find_delay_import(mods[i], leaf)) {
+        wgrr::guard::PeView pe;
+        IMAGE_DELAYLOAD_DESCRIPTOR d;
+        if (pe.open(mods[i], r) && r.get(dl, &d)) {
+          wgrr::guard::thunks(pe, r, b, d.ImportNameTableRVA, d.ImportAddressTableRVA, [&](const char* name, void**) {
+            if (handler_for_name(name)) found = true;
+          });
+        }
+      }
+    }
+  }
+  return found;
+}
+
 void do_hook() {
   diagnostics("InitializeASI");
   std::wstring interposer_w;
   for (const char* c = kWgInterposerFile; *c; ++c) interposer_w.push_back((wchar_t)(unsigned char)*c);
   g_interposer = GetModuleHandleW(interposer_w.c_str());
-  const IMAGE_DELAYLOAD_DESCRIPTOR* delay = nullptr;
+  std::vector<DelayImportHit> delays = find_all_delay_imports(kWgInterposerFile);
+  bool loaded_by_us = false;
   if (!g_interposer) {
-    delay = find_delay_import(GetModuleHandleW(nullptr), kWgInterposerFile);
-    if (delay) g_interposer = load_delay_linked_interposer(interposer_w);
+    if (!delays.empty()) {
+      g_interposer = load_delay_linked_interposer(interposer_w);
+      loaded_by_us = g_interposer != nullptr;
+    }
     if (!g_interposer) {
-      if (!delay) {
+      if (delays.empty()) {
         g_wait_for_host = true;
         log_line("hook: the game interface module " + std::string(kWgInterposerFile) +
-                 " is not loaded at InitializeASI and the exe does not link it by import or delay-load import; "
+                 " is not loaded at InitializeASI and no loaded module links it by import or delay-load import; "
                  "waiting for the host's game-interface routes (OptiScaler plugin interface 3).");
       }
       return;
     }
   } else {
-    log_line("hook: game interface module found: " + module_path(g_interposer) + " (already loaded via import table)");
+    HMODULE exe_mod = GetModuleHandleW(nullptr);
+    bool exe_delay = false;
+    for (const DelayImportHit& hit : delays)
+      if (hit.mod == exe_mod) { exe_delay = true; break; }
+    log_line("hook: game interface module found: " + module_path(g_interposer) +
+             (exe_delay ? " (already loaded; exe links it by delay-load import)"
+                        : !delays.empty() ? " (already loaded; module(s) link it by delay-load import)"
+                                          : " (already loaded via import table)"));
   }
 
   unsigned v[4] = {0, 0, 0, 0};
@@ -1450,27 +1722,45 @@ void do_hook() {
     return;
   }
   std::string families;
-  const bool routed = route_for(v[0], v[1], &families);
+  route_for(v[0], v[1], &families);
   log_line("hook: game interface version " + std::to_string(v[0]) + "." + std::to_string(v[1]) + "." +
            std::to_string(v[2]) + "." + std::to_string(v[3]) + ", this build serves " + families + ".x");
-  if (!routed) {
-    log_line("hook: game interface version does not match this build's binding version (" + families + ".x): " +
-             kNoGameInterfaceRoute + " (no import slot patched)" + kNgxStillServed);
+  if (!choose_route(g_interposer, v[0], v[1], " (no import slot patched)")) return;
+
+  std::wstring interposer_leaf_w;
+  module_leaf(g_interposer, &interposer_leaf_w);
+  const std::string interposer_leaf = narrow(interposer_leaf_w);
+  if (_stricmp(interposer_leaf.c_str(), kWgInterposerFile) != 0)
+    delays = find_all_delay_imports(interposer_leaf.c_str());
+
+  // Another ASI plugin (e.g. WrongGPU-FG.asi) may have loaded the interface before us in a game that resolves it
+  // dynamically via GetProcAddress (no static or delay-load import): let OptiScaler's host routes handle it.
+  if (delays.empty() && !any_module_imports_interposer(interposer_leaf.c_str())) {
+    g_wait_for_host = true;
+    log_line("hook: " + interposer_leaf +
+             " is already loaded, but no module links it by import or delay-load import; waiting for the host's "
+             "game-interface routes (OptiScaler plugin interface 3).");
     return;
   }
-  g_api_minor = v[1];
-  log_line("hook: route Streamline 2." + std::to_string(g_api_minor) + " chosen for this game interface");
 
   // RR guard: a second copy of WrongGPU RR (or rr_other_plugin=yield with a named module on the path) keeps WrongGPU RR
   // off (nothing built or patched); a named module alone is only logged
-  if (!guard_at_load(delay)) return;
+  if (!guard_at_load(delays)) return;
   set_fwd(bind_original());  // where a passing handler sends a call (the late decision, guard_first_call)
 
   // Build the core now, so our handlers forward to the genuine exports (the IAT's pre-patch addresses).
   (void)target();
-  // We loaded the interface ourselves for a delay-load import: nothing has called it, so the game's <init> is still
-  // to come and will reach our handler; there is nothing to adopt.
-  if (!delay) {
+  // Delay-load import: if we loaded the interface ourselves, or another plugin loaded it before any delay-load
+  // <init> thunk ran, the game's <init> is still to come and will reach our handler; there is nothing to adopt.
+  bool delay_init_unbound = false;
+  for (const DelayImportHit& hit : delays) {
+    if (delay_slot_unbound(hit.mod, hit.desc, kWgRoleNames[0])) {
+      delay_init_unbound = true;
+      break;
+    }
+  }
+  const bool init_pending = loaded_by_us || delay_init_unbound;
+  if (!init_pending) {
 #if WG_RR_PROBE
     // In hook mode the game's <init> may already have run (the interposer initialised before the plugin loaded); the
     // core adopts it with the safe default (no command-list state restore) rather than refusing RR.
@@ -1481,10 +1771,6 @@ void do_hook() {
       log_line("hook: patched after the game interface initialised; using safe defaults (see HOOK-MODE.md)");
 #endif
   }
-
-  std::wstring interposer_leaf_w;
-  module_leaf(g_interposer, &interposer_leaf_w);
-  const std::string interposer_leaf = narrow(interposer_leaf_w);
 
   HMODULE mods[1024];
   DWORD need = 0;
@@ -1498,8 +1784,8 @@ void do_hook() {
       modules_patched += (p != 0);
     }
   }
-  if (delay) {
-    const unsigned p = patch_module_delay_imports(GetModuleHandleW(nullptr), delay);
+  for (const DelayImportHit& hit : delays) {
+    const unsigned p = patch_module_delay_imports(hit.mod, hit.desc);
     total += p;
     modules_patched += (p != 0);
   }
@@ -1508,8 +1794,18 @@ void do_hook() {
     log_line("diag: watching " + std::to_string(g_watch.size()) + " game-interface slot(s) (" + std::to_string(total) +
              " patched); modules linking the game interface now: " + interface_importers() +
              (checks ? "" : "; slot checks off (WG_RR_SLOT_CHECKS=on enables them)"));
-    if (checks)
-      if (HANDLE th = CreateThread(nullptr, 0, slot_watch_thread, nullptr, 0, nullptr)) CloseHandle(th);
+    if (checks) {
+      if (!g_watch_stop) g_watch_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+      HMODULE pinned = nullptr;
+      if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                             reinterpret_cast<LPCWSTR>(&slot_watch_thread), &pinned) && pinned) {
+        if (HANDLE th = CreateThread(nullptr, 0, slot_watch_thread, pinned, 0, nullptr)) {
+          CloseHandle(th);
+        } else {
+          FreeLibrary(pinned);
+        }
+      }
+    }
   }
   log_line("hook: redirected " + std::to_string(total) + " IAT slot(s) across " + std::to_string(modules_patched) +
            " module(s) to WrongGPU; RR " +
@@ -1535,16 +1831,11 @@ void on_host_hooked(void* module, uint32_t major, uint32_t minor, uint32_t patch
     return;
   }
   std::string families;
-  const bool routed = route_for(major, minor, &families);
+  route_for(major, minor, &families);
   log_line("hook: the host hooked the game interface " + module_path(static_cast<HMODULE>(module)) + ", version " +
            version + ", this build serves " + families + ".x");
-  if (!routed) {
-    log_line("hook: game interface version does not match this build's binding version (" + families + ".x): " +
-             kNoGameInterfaceRoute + " (no host routes registered)" + kNgxStillServed);
-    return;
-  }
-  g_api_minor = minor;  // before the core is built (target() below)
-  log_line("hook: route Streamline 2." + std::to_string(g_api_minor) + " chosen for this game interface");
+  // (the route's version is set before the core is built: target() below)
+  if (!choose_route(static_cast<HMODULE>(module), major, minor, " (no host routes registered)")) return;
   // RR guard: the RR exports of the module the host hooked (its own trampolines are accepted), before our routes
   namespace g = wgrr::guard;
   if (!g_guard.active()) {
@@ -1568,10 +1859,11 @@ void on_host_hooked(void* module, uint32_t major, uint32_t minor, uint32_t patch
     const int role = kWgHookRoles[i];
     void* h = handler_for(role);
     if (!role_in_route(role) || !kWgRoleNames[role][0] || !h) continue;
-    routes.push_back({kWgRoleNames[role], h, &g_route_next[role]});
+    routes.push_back({kWgRoleNames[role], h, reinterpret_cast<void**>(&g_route_next[role])});
   }
   g_interposer = static_cast<HMODULE>(module);
-  g_route_mode.store(true);
+  g_routes_ready.store(false, std::memory_order_release);  // a game thread the host lets in at once passes on (guard_pass)
+  g_route_mode.store(true, std::memory_order_release);
   if (!api->register_streamline_routes(g_host_plugin, routes.data(), (uint32_t)routes.size())) {
     // the host's API refused our registration: positive by contract, the game-interface route stays off (the NGX route
     // is decided by the host's own answer there)
@@ -1598,10 +1890,12 @@ void on_host_hooked(void* module, uint32_t major, uint32_t minor, uint32_t patch
     guard_log_unclear("of the host routes", v);
     set_fwd(bind_original());  // the host's next functions
     if (guard_apply(v, g::Stage::kRoutes) == g::State::kPassThrough) {
+      g_routes_ready.store(true, std::memory_order_release);
       g_hook_done.store(true, std::memory_order_release);
       return;
     }
   }
+  g_routes_ready.store(true, std::memory_order_release);  // the pass-through targets and the guard's decision are published
   g_hook_done.store(true, std::memory_order_release);
   (void)target();  // the core forwards to the host's next functions from now on
   log_line("hook: " + std::to_string(installed) + " of " + std::to_string(routes.size()) +
@@ -1934,7 +2228,9 @@ void register_ngx_provider(const WgHostMenuApi* api, WgHostMenuPlugin* plugin) {
     d.log = log_line;
     d.clock = [] { return (uint64_t)GetTickCount64(); };
     d.device_of = device_of_cmd_list;
-    d.other_route_busy = [] { return g_proxy != nullptr && g_proxy->has_instance(); };
+    d.other_route_busy = [] {
+      return !g_sl_faulted.load(std::memory_order_acquire) && g_proxy != nullptr && g_proxy->has_instance();
+    };
     d.frame_done = [] {
       g_last_rr_frame_ms.store(GetTickCount64(), std::memory_order_relaxed);
       wgrr::panel::frame_done();  // the RR name and GPU time in OptiScaler's overlay, as for the other route
@@ -2088,14 +2384,17 @@ void exit_summary() {
 }  // namespace
 #endif
 
-BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID) {
+BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
   if (reason == DLL_PROCESS_ATTACH) {
     g_self = inst;
     DisableThreadLibraryCalls(inst);
     record_attach(inst);  // fixed-buffer record only; the log is written at the first call
   }
+  if (reason == DLL_PROCESS_DETACH) {
+    if (!reserved && g_watch_stop) SetEvent(g_watch_stop);
 #if !WG_RR_PROBE
-  if (reason == DLL_PROCESS_DETACH) exit_summary();
+    exit_summary();
 #endif
+  }
   return TRUE;
 }

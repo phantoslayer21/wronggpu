@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Re-runs the reference on every stored spec 51 vector case (read back from the binary files) and checks that the
 stored expected outputs, row sums and traces are reproduced; also checks the scalar tables. Exit code 0 = all equal.
 

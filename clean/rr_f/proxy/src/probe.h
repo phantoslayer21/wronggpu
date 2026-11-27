@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Probe build of the RR proxy (build flag WG_RR_PROBE, output wg_rr_proxy_probe.dll; never in the release build).
 //
 // Purpose: one run in a game answers the probe questions of spec 63.6 (open items 3, 10, 13, 15) with names and

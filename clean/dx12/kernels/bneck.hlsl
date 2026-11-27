@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 port of bneck/swin_bneck6_nc (clean/kernels/swin_v2.hip, bneck6<WPW 1, 256 lanes, SAFE> with the swin.hip
 // arithmetic of WG_V2_BASEMATH; HIP build: swin__bmegahg.co = swin_v2.hip with WG_V2_BASEMATH=1, header vectors read
 // from global memory (WG_V2_MEGA_HDR_GLOBAL 1), ISA isa/swin_bneck6_nc.s).

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Move files out of a game tree for a test and put them back byte for byte (e.g. another mod's files).
 The files' contents are never parsed: only hashed (SHA-256), stat'ed and renamed (same volume: a rename keeps bytes,
 timestamps and attributes).

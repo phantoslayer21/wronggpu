@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Exact roundings for spec 08 sections 2 and 6. Written for this project.
 //
 // All roundings are done with explicit integer/power-of-two arithmetic on binary64 values that are

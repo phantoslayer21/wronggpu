@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model K FP16 linear layers for gfx1201 (spec 40 task K1, spec 41): per-token linear, 2x2 merge, 2x2 expand.
 //
 // One template, three addressing modes:

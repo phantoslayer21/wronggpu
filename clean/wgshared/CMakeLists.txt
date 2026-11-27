@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 # WrongGPU shared pieces (clean/wgshared): tests of the registry generator and of the shared settings block.
 # Stand-alone:   cmake -S clean/wgshared -B build/wgshared && cmake --build build/wgshared --config Release
 #                ctest --test-dir build/wgshared -C Release --output-on-failure

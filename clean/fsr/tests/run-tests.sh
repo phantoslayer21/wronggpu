@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 # Runs every offline test of the FSR front end that this machine can run:
 #   1. the D3D12-free unit test on the host (with AddressSanitizer and UBSan when the compiler has them);
 #   2. the MinGW-w64 cross build and the release audit (tests/audit-release.sh);

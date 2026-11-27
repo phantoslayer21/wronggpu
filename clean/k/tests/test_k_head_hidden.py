@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Exact d0 head/hidden fusion against the unchanged standalone hidden kernel."""
 import ctypes
 import os

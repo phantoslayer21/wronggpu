@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model K's per-frame runtime on the D3D12 devices against the HIP backend, frame by frame, byte for byte (issue #15).
 
 The same frames (a synthetic model K, random FP16 parameters; clean/k/tests/test_k_runtime_gpu.py) go through two
@@ -78,7 +78,7 @@ WRITTEN = ["exposure.pair", "k.scalars", "k.x0", "k.S0", "k.S1", "k.S2", "k.S3",
 STATE = ["exposure.measured", "k.Hc", "k.L", "k.Hh"]
 # kernels a HDR / LDR frame of the default path launches (the D3D12 ports must run every one of them in the hybrid device)
 STAGES = ["k_stage2_e0", "k_stage2_e1", "k_stage_e2", "k_stagew2_e3", "k_stagew4_e4", "k_stagew4_m", "k_stagew4_d4",
-          "k_stagew2_d3", "k_stage_d2", "k_stage2_d1", "k_stage2_d0_hp"]
+          "k_stagew2_d3", "k_stage_d2", "k_stage_d1", "k_stage2_d0_hp"]
 ALWAYS = ["k_expo_scalars", "k_out_pixel_c"]
 TILED = ["kx/k_in_tiled", "kx/k_in_tiled_uniform"]
 LEGACY = ["kx/k_in_color", "kx/k_in_base"]   # (+ kx/k_in_reset on a reset frame)
@@ -379,7 +379,7 @@ class TestKRuntimeD3D12(unittest.TestCase):
         k_split_m_wo / w1 / w2 have no softmax: they are the same launches in both forms, so only the attention phase
         has a mix form to forbid."""
         ng = "k_stagew2_" if big else "k_stagew4_"
-        stages = ["k_stage_e2", "k_stagew2_e3", ng + "e4", ng + "d4", "k_stagew2_d3", "k_stage_d2", "k_stage2_d1"]
+        stages = ["k_stage_e2", "k_stagew2_e3", ng + "e4", ng + "d4", "k_stagew2_d3", "k_stage_d2", "k_stage_d1"]
         if split:
             rodd, mix = ["k_split_m_attn__rodd", "k_split_m_wo", "k_split_m_w1", "k_split_m_w2"], ["k_split_m_attn"]
         else:

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The proxy's game-interface logic (spec 60-63): answers feature 1001, records/copies what the RR path needs,
 // forwards everything else to the original unchanged. Platform-free: the DLL glue (proxy_dll.cpp) supplies the
 // original's function pointers, the runtime adapter, the clock and the log; tests supply fakes.
@@ -149,6 +149,10 @@ class RrProxy {
 
   // clean/rr-re9-pt: bracket runtime work on the game's list for the host (CmdListBracket); empty = no host.
   void set_cmd_list_bracket(CmdListBracket bracket);
+  // Fault guard (hook_dll.cpp, 0.7.0): after a fault caught on this thread, ends the core's command-list bracket if it is
+  // still open there (a structured exception skipped its scope), so the host's nesting depth and state tracking stay
+  // balanced. No effect when no bracket is open on this thread.
+  static void close_open_bracket_after_fault();
   // clean/rr-re9-pt: RR refused for this game (<is-supported>(1001) answers adapter-not-supported, so the game hides
   // its RR options): set when the game needs the host's restore and the host has none (hook_dll.cpp). `why` is logged
   // once, at the first refused query.
@@ -261,7 +265,6 @@ class RrProxy {
   std::map<std::pair<uint32_t, uint32_t>, StoredTag> viewport_tags_;  // (viewport, type)
   std::map<uint64_t, std::unique_ptr<FrameData>> frames_;            // keyed by frame_key (60.7)
   uint64_t frame_seq_ = 0;
-  std::map<const void*, uint32_t> token_index_;
   std::map<uint32_t, WgConstants> latest_constants_;  // per viewport, for an <allocate> that creates
 
   // logged once per proxy instance
@@ -271,6 +274,7 @@ class RrProxy {
 
   std::atomic<uint64_t> last_complete_ms_{0};
   std::atomic<bool> last_eval_completed_{false};
+  std::atomic<bool> has_instance_{false};
 };
 
 // The RR plugin's slot watch (a background thread that reads the patched game-interface slots again, and one check at

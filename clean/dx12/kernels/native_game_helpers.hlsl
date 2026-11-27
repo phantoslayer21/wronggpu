@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Private borrowed-device qualification and Model M supplied-exposure helper.
 // Original WrongGPU code; basis: own io_probe, exposure.hip exposure_pair_diet,
 // spec 07/10 and the existing strict build arithmetic contract. No alternate I/O path.

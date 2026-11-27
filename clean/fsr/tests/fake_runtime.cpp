@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Test double of the WrongGPU network runtime (wronggpu_runtime.dll, spec 10) for the end-to-end tests of
 // `upscaler = network`: it exports wgGetUpscalerBackend like the real runtime and records nothing on the GPU except,
 // in mode "split", the same-frame split (a queue signals resume right after done, as HIP would after the network).

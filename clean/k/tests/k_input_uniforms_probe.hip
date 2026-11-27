@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Original numerical audit of the ACTUAL production ki_host helper.
 // Compile this separate test object from clean/k/kernels so the include resolves
 // to the production source under test; do not add this entry to runtime routing.

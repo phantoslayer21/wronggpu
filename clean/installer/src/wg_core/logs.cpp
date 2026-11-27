@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: the log collector: one .zip (stored, no compression) with WrongGPU's logs, the Windows events
 // that matter and basic system information (support-manifest.json). Written for this project.
 #include "logs.h"
@@ -81,12 +81,14 @@ string RecentWindowsEvents(const wstring& exeName) {
         {L"System", L"*[System[Provider[@Name='Display'] and TimeCreated[timediff(@SystemTime) <= 1209600000]]]", false},
     };
     auto attr = [](const wstring& x, size_t from, size_t to, const wstring& name) -> wstring {
+        if (from == wstring::npos || to == wstring::npos || from >= x.size()) return L"";
         size_t a = x.find(L" " + name + L"=", from);
         if (a == wstring::npos || a > to) return L"";
         a += name.size() + 2;
+        if (a >= to || a >= x.size()) return L"";
         const wchar_t q = x[a];
         const size_t e = x.find(q, a + 1);
-        return e == wstring::npos ? L"" : x.substr(a + 1, e - a - 1);
+        return (e == wstring::npos || e > to) ? L"" : x.substr(a + 1, e - a - 1);
     };
     auto unescape = [](wstring s) {
         const std::pair<const wchar_t*, const wchar_t*> ents[] = {{L"&lt;", L"<"}, {L"&gt;", L">"}, {L"&quot;", L"\""}, {L"&apos;", L"'"}, {L"&amp;", L"&"}};
@@ -115,9 +117,19 @@ string RecentWindowsEvents(const wstring& exeName) {
                 const bool gpuReset = lx.find(L"livekernelevent") != wstring::npos;
                 if (q.gameOnly && !gpuReset && (exe.empty() || lx.find(exe) == wstring::npos)) continue;
                 const size_t sys = x.find(L"<System>");
-                const size_t prov = x.find(L"<Provider", sys), time = x.find(L"<TimeCreated", sys), id = x.find(L"<EventID", sys);
-                wstring line = L"  " + attr(x, time, x.find(L'>', time), L"SystemTime") + L"  " + attr(x, prov, x.find(L'>', prov), L"Name");
-                if (id != wstring::npos) { const size_t a = x.find(L'>', id) + 1; line += L" " + x.substr(a, x.find(L'<', a) - a); }
+                const size_t prov = sys == wstring::npos ? wstring::npos : x.find(L"<Provider", sys);
+                const size_t time = sys == wstring::npos ? wstring::npos : x.find(L"<TimeCreated", sys);
+                const size_t id = sys == wstring::npos ? wstring::npos : x.find(L"<EventID", sys);
+                wstring line = L"  " + attr(x, time, time == wstring::npos ? wstring::npos : x.find(L'>', time), L"SystemTime") + L"  " +
+                               attr(x, prov, prov == wstring::npos ? wstring::npos : x.find(L'>', prov), L"Name");
+                if (id != wstring::npos) {
+                    const size_t gt = x.find(L'>', id);
+                    if (gt != wstring::npos) {
+                        const size_t a = gt + 1;
+                        const size_t lt = x.find(L'<', a);
+                        if (lt != wstring::npos) line += L" " + x.substr(a, lt - a);
+                    }
+                }
                 line += L"\r\n   ";
                 for (size_t p = x.find(L"<Data"); p != wstring::npos; p = x.find(L"<Data", p + 5)) {
                     const size_t close = x.find(L'>', p);

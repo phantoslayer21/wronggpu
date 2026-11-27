@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The C++ host packing of the input stage (clean/rr_f/host/rr_input_host.h) against the Python reference
 (reference/input_stage.frame_constants + gpu/input_stage.scalar_words): per-frame constants, camera maps (every
 camera kind of the synthetic set), flags and symbols, word for word. Builds the test driver with MSVC

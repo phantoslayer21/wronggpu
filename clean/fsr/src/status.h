@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // What the front end did with one upscale dispatch, reported to the platform (Platform::status) for the in-game overlay
 // (overlay.h). Plain C++, no Windows headers.

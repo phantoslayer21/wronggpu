@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model L's model data in the runtime (#89): the stages and tensors of Model L in the converter's raw layout, and the
 // raw loader for them (clean/runtime/model.h load_raw_stages). Stages, names and shapes are those of the preset-L map
 // (data/preset-L.v1.map.json), which the structure table (clean/l/reference/table.py param_shapes) groups the same way:

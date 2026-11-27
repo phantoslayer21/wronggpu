@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: the install record (v1), the "Apps & features" entry and the restore / uninstall engine.
 // Written for this project.
 #include "record.h"
@@ -14,6 +14,7 @@
 #endif
 
 #include "detect.h"
+#include "fg.h"
 #include "fingerprint.h"
 #include "gamerules.h"
 #include "json_writer.h"
@@ -744,7 +745,11 @@ DWORD DeleteHeldBinary(const wstring& path) { return t_gate ? t_gate->guard.Dele
 std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool failedInstall, bool keepState, std::map<wstring, wstring>* keptWarnings) {
     Record m;
     if (!LoadRecord(RecordPath(dir), m) || m.legacy) Fail(L"No WrongGPU installation record was found in " + dir + L".", EXIT_NOT_INSTALLED);
-    if (!IEq(m.game, dir)) Fail(L"The installation record belongs to a different folder: " + m.game);
+    auto normDir = [](wstring s) {
+        while (s.size() > 3 && (s.back() == L'\\' || s.back() == L'/')) s.pop_back();
+        return s;
+    };
+    if (!IEq(normDir(m.game), normDir(dir))) Fail(L"The installation record belongs to a different folder: " + m.game);
     // #219: never while a running program has WrongGPU loaded (wg_state.h, the loaded protocol: the state lock is held for the
     // whole restore, so no game registers in between; a failed install's own restore runs under its install's guard)
     const auto gate = failedInstall ? nullptr : GuardOperation(dir, &m);
@@ -902,6 +907,34 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
                     warnings.push_back(L"Left in place (changed since install): " + e.rel);
                     LogLine(ctx, warnings.back());
                 } else ui.log(L"removed " + e.rel + L" (the game's file is back under its name, or kept)");
+            }
+            if (e.existed && !e.orig.empty()) {
+                const wstring origSrc = p.source.empty() ? EntryBackupPath(dir, e) : p.source;
+                if (!failedInstall || Exists(origSrc)) {
+                    if (Exists(t)) {
+                        const wstring keptAt = KeptOriginal(dir, e.rel, origSrc, e.orig);
+                        warnings.push_back(leaveWarning(e, t, keptAt));
+                        if (keptWarnings) (*keptWarnings)[Lower(e.rel)] = warnings.back();
+                        LogLine(ctx, warnings.back());
+                    } else {
+                        DWORD cerr = 0;
+                        EnsureDir(Parent(t));
+                        if (!CopyNew(origSrc, t, &cerr)) {
+                            if (cerr == ERROR_FILE_EXISTS || cerr == ERROR_ALREADY_EXISTS) {
+                                const wstring keptAt = KeptOriginal(dir, e.rel, origSrc, e.orig);
+                                warnings.push_back(leaveWarning(e, t, keptAt));
+                                if (keptWarnings) (*keptWarnings)[Lower(e.rel)] = warnings.back();
+                                LogLine(ctx, warnings.back());
+                            } else {
+                                Fail(L"Cannot copy " + origSrc + L" to " + t + L": " + ErrText(cerr));
+                            }
+                        } else {
+                            if (!failedInstall && !IEq(Sha256File(t), e.orig))
+                                Fail(L"Restore verification failed for " + e.rel);
+                            ui.log(L"restored " + e.rel);
+                        }
+                    }
+                }
             }
             continue;
         }
@@ -1337,8 +1370,18 @@ bool PayloadDiffers(Context& ctx, const Record& m) {
     if (m.payloadVersion.empty()) return true;  // no payload line: another build (one that didn't write it)
     Record cur = m;                               // the same entries: the menu plugin counts only where the record copies it
     SetPayloadLine(ctx, cur);
-    return !IEq(m.runtimeSha, cur.runtimeSha) || !IEq(m.frontEndSha, cur.frontEndSha) || !IEq(m.pluginSha, cur.pluginSha) ||
-           !IEq(InstalledRrPluginSha(m), cur.rrPluginSha);
+    if (!IEq(m.runtimeSha, cur.runtimeSha) || !IEq(m.frontEndSha, cur.frontEndSha) || !IEq(m.pluginSha, cur.pluginSha) ||
+        !IEq(InstalledRrPluginSha(m), cur.rrPluginSha))
+        return true;
+    // frame generation's plugin (fg.h): where the install placed it and this build has it, by the record entry's hash (the
+    // payload line has no field of its own for it); another build of it is an update too
+    if (RecordHasFg(m) && FgPayloadAvailable(ctx)) {
+        wstring installed, now;
+        for (auto& e : m.e) if (e.action == L"copy" && IsFgPlugin(e.rel)) installed = e.inst;
+        for (size_t i = 0; i < ctx.data->fgCount; ++i) if (IEq(ctx.data->fgFiles[i].rel, kFgPayloadPlugin)) now = ctx.data->fgFiles[i].sha256;
+        if (!IEq(installed, now)) return true;
+    }
+    return false;
 }
 string OwnedFilesJson(const Record& m) {
     Json j;

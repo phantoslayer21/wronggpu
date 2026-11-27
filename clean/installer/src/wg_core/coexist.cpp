@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: other mods, tools and older installs next to a game (coexist.h): the installer's conflict
 // rules, the launcher's rules table (build/launcher-design.md section 5) and the proxy picker. Written for this project.
 #include "coexist.h"
@@ -10,7 +10,9 @@
 
 #include "checks.h"  // FindAntiCheat, VersionLess
 #include "gamerules.h"
+#include "optiedition.h"
 #include "optiscaler.h"
+#include "fg.h"
 #include "pe.h"
 #include "rr.h"
 
@@ -25,16 +27,25 @@ static const wchar_t* const kOptiMarkers[] = {L"OptiScaler.ini", L"OptiScaler.lo
 
 Conflicts FindConflicts(const wstring& dir, const wstring& exeDir) {
     Conflicts c;
-    std::set<wstring> files;
+    std::set<wstring> files, priorFiles;
     std::vector<wstring> dirs{dir};
     if (!IEq(FullPath(exeDir), FullPath(dir))) dirs.push_back(exeDir);
     for (size_t di = 0; di < dirs.size(); ++di) {
         const wstring& d = dirs[di];
-        std::vector<wstring> hits;
+        std::vector<wstring> hits, loaded;
         for (auto f : kOptiMarkers) if (IsFile(Join(d, f))) hits.push_back(f);
         // the player's OptiScaler by its fingerprint, under whichever name it loads (never by the name alone)
-        for (auto f : kOptiLoadNames) if (IsFile(Join(d, f)) && IdentifyFile(Join(d, f)).tool == Tool::OptiScaler) hits.push_back(f);
+        for (auto f : kOptiLoadNames)
+            if (IsFile(Join(d, f)) && IdentifyFile(Join(d, f)).tool == Tool::OptiScaler) {
+                hits.push_back(f);
+                loaded.push_back(f);
+            }
         if (hits.empty()) continue;
+        // An older WrongGPU edition of OptiScaler (e.g. v5) in the install folder is upgraded in place, not a foreign mod.
+        if (di == 0 && loaded.size() == 1 && IsPriorEditionDll(Join(d, loaded[0]))) {
+            for (auto& h : hits) priorFiles.insert(h);
+            continue;
+        }
         if (std::find(c.mods.begin(), c.mods.end(), L"OptiScaler") == c.mods.end()) c.mods.push_back(L"OptiScaler");
         for (auto& h : hits) {
             if (di == 0) files.insert(h);
@@ -42,6 +53,7 @@ Conflicts FindConflicts(const wstring& dir, const wstring& exeDir) {
         }
     }
     c.modFiles.assign(files.begin(), files.end());
+    c.priorEditionFiles.assign(priorFiles.begin(), priorFiles.end());
     // Older WrongGPU / DLSS 4.5 AMD: a record next to the exe or in the install folder, or loose files without one.
     for (auto& d : dirs) if (c.legacyRecordDir.empty() && IsFile(LegacyRecordPath(d))) c.legacyRecordDir = d;
     if (c.legacyRecordDir.empty()) {
@@ -167,6 +179,16 @@ ProxyChoice PickProxy(const wstring& exeDir, const Record* ours, const wstring& 
     }
     wstring order, skipped;
     for (auto n : kProxyOrder) order += (order.empty() ? L"" : L", ") + wstring(n);
+    // Upgrade an older WrongGPU OptiScaler edition (e.g. v5) in place at its proxy name before taking a second slot.
+    for (auto n : kProxyOrder) {
+        if (hipTool && IEq(n, L"version.dll")) continue;
+        const wstring p = Join(exeDir, n);
+        if (IsFile(p) && IsPriorEditionDll(p)) {
+            c.name = n;
+            c.reason = L"upgrading WrongGPU's older OptiScaler edition (" + wstring(n) + L")" + suffix;
+            return c;
+        }
+    }
     for (auto n : kProxyOrder) {
         if (hipTool && IEq(n, L"version.dll")) { skipped += (skipped.empty() ? L"" : L", ") + wstring(n) + L" (never next to a HIP-based tool)"; continue; }
         const wstring p = Join(exeDir, n);
@@ -213,6 +235,10 @@ static std::vector<wstring> UnrecordedPlugins(const wstring& exeDir, const Recor
     for (auto sub : kPluginDirs)
         for (auto& f : ListFiles(Join(exeDir, sub), L"*.asi")) {
             const wstring rel = f.substr(exeDir.size() + 1), recRel = prefix.empty() ? rel : Join(prefix, rel);
+            // WrongGPU's frame generation plugin (fg.h) is WrongGPU's own, recorded or not (a repair's restore takes it out first,
+            // a release's files dropped in by hand): it hooks frame generation, never Ray Reconstruction, so it never keeps
+            // WrongGPU's RR out and is never moved aside as another setup's
+            if (IsFgPlugin(rel)) continue;
             bool mine = false;
             if (ours)
                 for (auto& e : ours->e)
@@ -341,6 +367,10 @@ CoexistReport AssessCoexistence(Context& ctx, const wstring& exe, const wstring&
             if (loaded.size() >= 2) {
                 add(Tool::OptiScaler, Decision::Refuse, L"Two OptiScaler copies (" + JoinList(loaded) + L")", all, f ? f->evidence : wstring(),
                     L"This game loads OptiScaler twice. Keep one of them (remove the other yourself), then install WrongGPU.", EXIT_OTHER_MODS);
+            } else if (loaded.size() == 1 && IsPriorEditionDll(Join(exeDir, loaded[0]))) {
+                add(Tool::OptiScaler, Decision::Migrate, L"WrongGPU's older OptiScaler edition as " + loaded[0], all,
+                    f ? f->evidence : L"file " + loaded[0],
+                    L"An older WrongGPU edition of OptiScaler: upgraded to WrongGPU's current edition on install (the earlier copy is backed up).");
             } else {
                 wstring msg = L"Install asks you to switch to WrongGPU's OptiScaler setup: your OptiScaler files are backed up and put back byte for byte when WrongGPU is uninstalled.";
                 if (!loaded.empty() && IEq(loaded[0], L"nvngx.dll")) msg += L" (An older OptiScaler layout: it loads as nvngx.dll.)";

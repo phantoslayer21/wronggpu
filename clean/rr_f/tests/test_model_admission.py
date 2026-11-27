@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Synthetic-only admission checks against independent spec-team fixtures."""
 import copy
 import hashlib

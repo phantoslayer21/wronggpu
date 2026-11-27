@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Vectorised binary32 arithmetic with the rules of spec 52.3 / 54b.N (RR preset F input stage).
 
 Every operation is one IEEE binary32 operation, round to nearest even; subnormal operands are flushed to zero

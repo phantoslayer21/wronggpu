@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Unit tests of the game's model choice record (clean/fsr/src/model_choice_record.h) on REAL files in a fresh folder under
 // the system temporary folder, and with REAL processes (this program started again as a writer, a reader, a launcher
 // apply, a lock holder, or a lock holder that dies): the strict three-key format, seq order with each source winning in

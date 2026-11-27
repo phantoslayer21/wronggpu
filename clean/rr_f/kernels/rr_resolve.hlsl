@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Page 54b on D3D12: output resolve (plain / extended: transparency layer with the colour-before-particles rule,
 // opacity layer, alpha upscaling), quarter pooled history, and probes of the exact elementary functions.
 // Own implementation of the final page 54b (with errata 50-53); reference: clean/rr_f/reference/resolve.py

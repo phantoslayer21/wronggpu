@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Connected preset-F frames on one D3D12 arena: exposure (page 58) -> input stage (page 52: features, front-end
 MLP) -> the sixteen-stage body with the E1 regroup -> the D0-R head (pages 51, 55). The body's IN0 reads the input
 stage's x0 and state-stream seed straight from the GPU (no prepared tokens are uploaded); the input stage reads E,

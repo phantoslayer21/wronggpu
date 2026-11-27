@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Original private synthetic game-device test. No game files or learned tensors.
 // Converter arithmetic is shared verbatim by both paths; reference network inputs
 // are downloaded AFTER GPU conversion, never regenerated with host float math.

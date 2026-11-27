@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Exact arithmetic of the D3D12 ports: HLSL that gives the bits of the HIP kernels' gfx1201 instructions.
 //
 // ARITHMETIC MODE (clean/dx12/build_dx12.py, README.md "Arithmetic mode"). Kernels are compiled by DXC with IEEE

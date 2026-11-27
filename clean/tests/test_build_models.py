@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The build script's optional models (clean/runner/build.py OPTIONAL_MODELS, #89): model K's row is the former
 --no-model-k switch, and a further optional model plugs in with its own row, its own --no-model-<name> option and its
 own define, without changing what model M or model K get. No GPU, no compiler.

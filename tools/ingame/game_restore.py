@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """After an in-game run, for any exe folder (the game root itself or a subfolder such as <root>\\bin\\x64): put back every file of the
 backup (copy2), remove the files the update added under <exe dir>\\wronggpu-setup\\previous\\ (listed as 'added' by
 the manifest check, file by file, then their now-empty folders), and bring %LOCALAPPDATA%\\WrongGPU (model\\ excluded)

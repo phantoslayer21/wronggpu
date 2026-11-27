@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The Model K choice of the launcher (profile.cpp built with WRONGGPU_MODEL_K on, whatever the launcher build's switch;
 // CMake builds this file twice: with the Model L choice too, and without it). The model setting accepts k, profile.ini
 // says model=k, wronggpu.ini's model item is model=K (last, every other model item out) and OptiScaler's UpscalerIndex

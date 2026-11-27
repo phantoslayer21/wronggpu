@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // One log line, one append (RR guard, 0.6.1). Original code, written for this project.
 //
 // Two copies of WrongGPU RR in one process (an integrator's kit next to WrongGPU's own install: the case the

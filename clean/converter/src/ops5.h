@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The decode operations, value checks and attention-constant check of spec 57 section 6 (map version 5, preset F).
 // Pure functions on bit patterns, so that they can be unit-tested against data/57-T5-vectors.json. Written for
 // this project from spec 57 sections 2 and 6, spec 51 section 51.1 (Q8) and 51.3 steps 3-4.

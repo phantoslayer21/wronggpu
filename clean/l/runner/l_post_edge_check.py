@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L (issue #89): the reconstruction kernels' history sample at the image edges and at small, odd image sizes,
 D3D12 against HIP byte for byte, HIP against the oracle, with a counter that proves the D3D12 interior fast path runs.
 

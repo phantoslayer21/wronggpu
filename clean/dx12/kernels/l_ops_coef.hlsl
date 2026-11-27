@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 port of Model L's coefficient step (issue #89): l_coef of l_ops.co (clean/l/kernels/l_ops.hip), byte for byte.
 // y2 [fh][fw][32] FP16 (the decoder block's output) -> A, B (3 unorm8 codes each), C (two dwords: C[2 i] = FP16 sx^2 |
 // sy^2 << 16, C[2 i + 1] = FP16 sxy rho in the low half) and the new latent (4 snorm8 codes), [rh][rw] each, pixels

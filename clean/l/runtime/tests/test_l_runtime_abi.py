@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L's code objects against what the runtime launches (#89), without running them: l_enc_values.co, l_ops.co,
 l_swin.co and l_post.co are compiled (clean/l/runner/l_c32_check.py compile_kernels; HIP SDK clang, compile only),
 and each kernel the runtime frame launches (clean/runtime/runtime.cpp, clean/l/FORMATS.md) must be exported with the

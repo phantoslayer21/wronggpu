@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // A tiny DLL for test_wg_state: a real image that a process can load, standing in for a WrongGPU binary the game has loaded.
 // Built twice: WG_TEST_DLL_VALUE 219 (the "old" binary) and 220 (the "new" one), so a test can tell which complete file a
 // process loaded. Written for this project.

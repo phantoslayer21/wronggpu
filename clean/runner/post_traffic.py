@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Memory-traffic floor of the spec 06 stages at the in-game size, against the real kernels, warm and cold cache.
 
     python clean/runner/post_traffic.py --build build --rocm "C:\\Program Files\\AMD\\ROCm\\7.2" [--json traffic.json]

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The converter map of spec 08 section 5 (map versions 1 and 4), spec 48 section 5 (versions 2 and 3) and spec 57
 // section 5 (version 5, preset F): parsing and validation. Written for this project.
 #pragma once

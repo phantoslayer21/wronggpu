@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """GPU/D3D12: the executor prepares only the kernels model K selected, so an opt-in form that is not selected cannot
 affect a default context.
 

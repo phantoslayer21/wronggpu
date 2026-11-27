@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model selection shared by the runtime, the D3D12 interop and the builds with and without model K (#89): the model
 // table (name, converter map, folder under the model directory, native D3D12 support) and the parser of the runtime
 // option model=<name>. Model M is the default and the first row; a model's row says what it needs from its

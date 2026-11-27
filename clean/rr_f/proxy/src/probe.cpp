@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Probe build of the RR proxy (see probe.h). Section numbers refer to spec/60-63-rr-f-interface.md and its annexes.
 #include "probe.h"
 

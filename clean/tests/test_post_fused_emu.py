@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Fused reconstruction + output filter (post_fused*, kernels/post.hip) in the host lane emulator: bit-identical to the
 two-kernel path (post_recon + post_filter) on the cases of test_post_emu, and within spec 09 of the reference.
 

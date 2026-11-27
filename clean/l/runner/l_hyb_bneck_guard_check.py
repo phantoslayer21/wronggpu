@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The hybrid bottleneck's wait timeout REFUSES the frame and writes no history (review P1), on native D3D12 with a
 developer runtime (build.py --dev-diagnostics: the hook WG_DEV_BNECK_ABORT=<frame> writes, right after that frame's
 swin_bneck6_hyb launch, the words a timed-out wait writes: the abort word and the timeout count; hyb_bneck.hlsl).

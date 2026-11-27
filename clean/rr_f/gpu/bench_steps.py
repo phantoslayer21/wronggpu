@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """GPU time of the spec 51 stage kernels for several step / Z variants in ONE host call (one GPU lock): for every
 stage the variants' dispatches follow each other on the same arguments, so every variant is timed under the same
 GPU state (clock, power, other load). Synthetic weights and inputs as in bench.py.

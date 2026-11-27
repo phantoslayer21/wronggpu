@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Native KiHost precompute versus the actual GPU helper, with CPU-mode fallbacks.
 
 Requires test-only k_input_uniforms_probe.co and input_uniforms_probe.dll in

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher window: drawing with Direct2D 1.1, DirectWrite and WIC (ui_shell.h). One class for the window's
 // swap chain (a Direct3D 11 flip-model swap chain drawn through a Direct2D device context) and for offscreen renders
 // into a WIC bitmap (ui-dump, ui-render), so both paint the same frame.

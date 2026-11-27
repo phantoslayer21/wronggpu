@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Exact q8(GELU) lookup v2 (2 KB groupshared table): generator and exhaustive D3D12 proof in one run.
 
     python clean/dx12/gelu_lut/run2.py --work <dir> --rle <rle.bin> [--host <host.exe>] [--write-header] [--hip-check <oracle.co>]

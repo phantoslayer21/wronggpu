@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Probes of the two hardware facts the exact matrix step Y (rr_step_y.hlsli) is built on (gpu/probe_y.py):
 //   rr_py_wmma : H1, v_wmma_f32_16x16x16_fp8_fp8 is exact in the "integer regime": D1 = A1 B1 + C, D2 = A2 B2 + D1
 //                with every product and C a multiple of 2^g and the sum of all magnitudes below 2^(g + 24).

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: leftover WrongGPU files in a game folder that has no install record (build/launcher-design.md
 // section 6, "Leftovers", milestone M2): a file counts only when its SHA-256 is one of WrongGPU's releases'
 // (known_releases.h, generated from our release builds) or of the payload this launcher embeds; never by its name.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Dump the production table for the exhaustive Python oracle.
 #include "../runtime/k_s_breakpoints.h"
 #include <cstdio>

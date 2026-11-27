@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Exact per-frame table of the direct post kernel's output chain (kernels/post.hlsl, POST_OUT 3, vertical pass): every
 // output value is a function of ONE FP16 value, the lz5 filter result r, and three per-frame scalars (dec_scale, the
 // pre-exposure pi, NativeDirectParams.output_rne16):

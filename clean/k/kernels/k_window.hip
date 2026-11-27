@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model K window partition for gfx1201 (spec 40, task K3): 8x8 windows with origin (ox, oy) and a margin of k tokens.
 //
 // Window (i, j) has its core columns [8 i - ox, 8 i - ox + 8) and rows [8 j - oy, 8 j - oy + 8); with a margin k it

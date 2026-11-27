@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Tests of wg_state.h (the per-game state folder, its lock, the operation guard and atomic writes) on real files and real
 // processes. The test runs itself as the child process (--child-...). Scratch files go to the TMP folder of the run.
 //  - the settings.ini format: tolerant (BOM, comments in any UTF-8, spaces around '=', sections, unknown lines: kept and

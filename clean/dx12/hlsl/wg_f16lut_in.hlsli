@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Exact per-frame 64K table of the direct encoder's colour chain (round 2 of the f16lut track; wg_f16lut.hlsli has the
 // post output table). The game's colour arrives as an FP16 texture (RGBA16F, R11G11B10F, RG16F, R16F: every value a
 // texel load returns is an FP16 value, so it is f16tof32 of its own f32tof16 bits; f16lut/run.py proves the round trip for

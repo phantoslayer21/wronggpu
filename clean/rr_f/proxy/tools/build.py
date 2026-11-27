@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Build and test the RR proxy (CPU only: no game; the probe test uses the software D3D12 adapter, WARP).
 
     python clean/rr_f/proxy/tools/build.py [--out DIR] [--binding FILE [--probe] [--hook]] [--no-tests]
@@ -225,7 +225,7 @@ def build_probe(binding, out, logs, imports, name):
     return n, built
 
 
-def build_hook(binding, out, probe, name):
+def build_hook(binding, out, probe, name, extra_flags=""):
     """Build the hook-mode ASI plugin (src/hook_dll.cpp; HOOK-MODE.md): the proxy core, settings and (probe) the
     probe, with the transport that patches the game interface's import tables. No forwarding stubs."""
     gen = os.path.join(out, "gen")
@@ -242,7 +242,7 @@ def build_hook(binding, out, probe, name):
     files = files + ["setupapi_identity.cpp"]  # clean/rr-sm2-shim: the SetupAPI identity shim (Spider-Man2.exe only)
     files = files + ["rr_guard.cpp"]  # RR guard: another Ray Reconstruction plugin (both builds)
     sources = " ".join(src("src", c) for c in files)
-    flags = CLFLAGS + (" /DWG_RR_PROBE=1" if probe else "")
+    flags = CLFLAGS + (" /DWG_RR_PROBE=1" if probe else "") + (" " + extra_flags if extra_flags else "")
     built = os.path.join(out, n["proxy_file"])
     sh(f'cl {flags} /LD /I"{gen}" {src("src", "hook_dll.cpp")} {sources} /Fo"{obj}\\\\" /Fe"{built}" '
        f'/link /DEF:"{os.path.join(gen, "wg_hook.def")}" "{res}" version.lib psapi.lib'
@@ -257,7 +257,7 @@ def build_hook(binding, out, probe, name):
     return n, gen, built
 
 
-def fake_interface(binding, out, n, file_version_parts):
+def fake_interface(binding, out, n, file_version_parts, drop=None):
     """A stand-in game interface DLL under the interposer file name with the real export names (A9.3), an import
     library so the fake game can import it statically, and a version resource with `file_version_parts` (the hook
     plugin's version gate reads it). Our own stand-in; no real library is read."""
@@ -267,6 +267,10 @@ def fake_interface(binding, out, n, file_version_parts):
                         proxy_name], capture_output=True, text=True)
     if r.returncode:
         raise SystemExit(r.stdout + r.stderr)
+    if drop:  # 0.7.0: an interface without one export (the hook plugin's export probe must refuse it)
+        dpath = os.path.join(out, "fake_original.def")
+        lines = open(dpath).read().splitlines()
+        open(dpath, "w").write("\n".join(l for l in lines if l.strip().split("=")[0].split(" ")[0] != drop) + "\n")
     rc = os.path.join(out, "fake_iface.rc")
     comma = ",".join(str(x) for x in file_version_parts)
     with open(rc, "w") as f:
@@ -307,7 +311,49 @@ def build_hook_and_test(binding, out, logs, probe):
 HOOK_TABLE_MINOR = 14
 
 
-def test_hook(built, binding, out, logs, probe, n=None, gen=None):
+def test_versions_and_faults(built, fault_built, exe, runtime, binding, out, logs, n, iface_name):
+    """0.7.0: the hook plugin accepts a game interface of another 2.x version (2.7 or later) when it exports every core
+    function the route hooks (2.10 and 2.15 from the 2.14 table; 2.10 from the 2.7 table, without slSetTagForFrame), and
+    refuses 2.6 or an interface that lacks a core export (nothing patched). With the fault build (WG_TEST_FAULT_HOOKS, tests
+    only): an access violation and a C++ exception inside the guarded part leave the game running, every later call passed on."""
+    minor = n["minor"]
+    cases = []
+    if minor == 14:
+        cases += [([2, 10, 0, 0], None, ["--probedver"]), ([2, 15, 0, 0], None, ["--probedver"]),
+                  ([2, 6, 0, 0], None, ["--badver"]), ([2, 10, 0, 0], "slFreeResources", ["--badver", "--probe-missing"])]
+    if minor == 7:
+        cases += [([2, 10, 0, 0], None, ["--probedver", "--no-tff"])]
+    for k, (ver, drop, flags) in enumerate(cases):
+        sub = os.path.join(out, f"stage-ver{k}")
+        shutil.rmtree(sub, ignore_errors=True)
+        os.makedirs(sub)
+        iface = fake_interface(binding, os.path.join(out, f"iface-ver{k}"), n, ver, drop)[0]
+        shutil.copy(exe, sub)
+        shutil.copy(iface, os.path.join(sub, iface_name))
+        shutil.copy(built, os.path.join(sub, n["proxy_file"]))
+        shutil.copy(runtime, sub)
+        r = subprocess.run([os.path.join(sub, "test_hook_dll.exe"), sub] + flags, capture_output=True, text=True, timeout=300)
+        logs.append(f"[2.{minor} hook release, interface {'.'.join(map(str, ver))}{' without ' + drop if drop else ''}] "
+                    f"{r.stdout.strip()}" + (f"\n{r.stderr.strip()}" if r.stderr.strip() else ""))
+        if r.returncode:
+            raise SystemExit("\n".join(logs))
+    if fault_built and minor == 14:
+        for flag in ("--fault", "--fault-cpp"):
+            sub = os.path.join(out, "stage" + flag.replace("--", "-"))
+            shutil.rmtree(sub, ignore_errors=True)
+            os.makedirs(sub)
+            shutil.copy(exe, sub)
+            shutil.copy(os.path.join(out, "iface", iface_name), sub)
+            shutil.copy(fault_built, os.path.join(sub, n["proxy_file"]))
+            shutil.copy(runtime, sub)
+            r = subprocess.run([os.path.join(sub, "test_hook_dll.exe"), sub, flag], capture_output=True, text=True, timeout=300)
+            logs.append(f"[2.{minor} hook release (fault build) {flag}] {r.stdout.strip()}"
+                        + (f"\n{r.stderr.strip()}" if r.stderr.strip() else ""))
+            if r.returncode:
+                raise SystemExit("\n".join(logs))
+
+
+def test_hook(built, binding, out, logs, probe, n=None, gen=None, fault_built=None):
     """Drive the built hook ASI through a fake game of `binding`'s version whose import table it patches. Release: a
     fake runtime. Probe: a short WARP sequence. Plus a wrong-version refusal run (release only)."""
     if n is None:
@@ -373,6 +419,7 @@ def test_hook(built, binding, out, logs, probe, n=None, gen=None):
                     + (f"\n{r.stderr.strip()}" if r.stderr.strip() else ""))
         if r.returncode:
             raise SystemExit("\n".join(logs))
+        test_versions_and_faults(built, fault_built, exe, rt, binding, out, logs, n, iface_name)
     # the same runs with the delay-load fake game
     for bad_run in ((False, True) if not probe else (False,)):
         dstage = os.path.join(out, "stage-delay-badver" if bad_run else "stage-delay")
@@ -392,13 +439,14 @@ def test_hook(built, binding, out, logs, probe, n=None, gen=None):
                     + (f"\n{r.stderr.strip()}" if r.stderr.strip() else ""))
         if r.returncode:
             raise SystemExit("\n".join(logs))
-        if not probe and not bad_run:  # rr_enabled = 0 with the delay-load game too
-            r = subprocess.run([os.path.join(dstage, "test_hook_dll.exe"), dstage, "--rr-off"],
-                               capture_output=True, text=True, timeout=600)
-            logs.append(f"[2.{minor} hook {kind}, delay-load --rr-off] {r.stdout.strip()}"
-                        + (f"\n{r.stderr.strip()}" if r.stderr.strip() else ""))
-            if r.returncode:
-                raise SystemExit("\n".join(logs))
+        if not probe and not bad_run:  # rr_enabled = 0 and preloaded interface (another plugin loaded it first)
+            for flag in ("--rr-off", "--preloaded"):
+                r = subprocess.run([os.path.join(dstage, "test_hook_dll.exe"), dstage, flag],
+                                   capture_output=True, text=True, timeout=600)
+                logs.append(f"[2.{minor} hook {kind}, delay-load {flag}] {r.stdout.strip()}"
+                            + (f"\n{r.stderr.strip()}" if r.stderr.strip() else ""))
+                if r.returncode:
+                    raise SystemExit("\n".join(logs))
     test_guard(built, out, logs, probe, n, gen, iface_dll, implib, iface_name)
     return n, built
 
@@ -581,6 +629,8 @@ def main():
     hook_table = os.path.join(PROXY, "binding", f"rr-f-2.{HOOK_TABLE_MINOR}.json")
     nhk, _, hook = build_hook(hook_table, os.path.join(a.out, "hook"), False, None)
     nhp, _, hook_probe = build_hook(hook_table, os.path.join(a.out, "hook-probe"), True, None)
+    # 0.7.0: the same release plugin with the fault guard's test trigger (WG_TEST_FAULT_HOOKS; tests only, never shipped)
+    _, _, hook_fault = build_hook(hook_table, os.path.join(a.out, "hook-fault"), False, None, "/DWG_TEST_FAULT_HOOKS=1")
     built += [("2.7 / 2.8 / 2.14 (one build)", "hook", hook), ("2.7 / 2.8 / 2.14 (one build)", "hook-probe", hook_probe)]
     for minor in VERSIONS:
         vout = os.path.join(a.out, f"2.{minor}")
@@ -590,7 +640,7 @@ def main():
         nr, release = build_release(table, os.path.join(vout, "release"), logs, imports,
                                     output_name(table, a.proxy_name))
         npb, probe = build_probe(table, os.path.join(vout, "probe"), logs, imports, output_name(table, a.probe_name))
-        test_hook(hook, table, os.path.join(vout, "hook-test"), logs, False)
+        test_hook(hook, table, os.path.join(vout, "hook-test"), logs, False, fault_built=hook_fault)
         test_hook(hook_probe, table, os.path.join(vout, "hook-probe-test"), logs, True)
         proxy_as, original_as = stage_names(nr)
         install = {

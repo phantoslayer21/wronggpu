@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Write a SYNTHETIC model directory in the layout of the converter's --raw output (spec 08 sections 7 and 10):
 <dir>/raw/<stage>/<name>.bin, row-major little-endian float32 (uint8 for enc0 T), every tensor of spec 08 section 7.2.
 

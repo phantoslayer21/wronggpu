@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Diagnostics of rr_resolve_fast on a real model: which check sends pixels to rr_resolve_fixup.
 
 Generates a variant of rr_resolve_fast_main.hlsli (kernels/_why_*.hlsl*, removed afterwards) in which every

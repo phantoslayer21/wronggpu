@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Runtime library without model K (clean/runner/build.py --no-model-k). No GPU, no model data.
 
   python -m unittest clean.tests.test_no_model_k                  build lists only (own fixtures)

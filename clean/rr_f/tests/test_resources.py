@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Synthetic storage traces, not full evaluate or missing-pass correctness.
 
 The harness explicitly reports a fictitious resolve to test next-frame resource

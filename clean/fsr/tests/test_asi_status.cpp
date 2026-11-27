@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // CPU-only WrongGPU diagnostic tests. No InitializeASI call or foreign image inspection.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>

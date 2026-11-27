@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model K on the interop's FP32 input-conversion pass (the HIP executor's route when the colour or motion texture is
 not FP16): the pass writes the raw motion texels for model K and the backend passes motion_scale and the raw-unit
 offset in WgRtFrame, so K folds the scale into its motion factor as the reference / buffer form (issue #26).

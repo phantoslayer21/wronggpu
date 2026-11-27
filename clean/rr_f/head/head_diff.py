@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Head outputs of runtime arena dumps (rr_test_host frame dumps, WG_RR_ALIAS=0): extract and compare (track r3-head).
 
     python -m clean.rr_f.head.head_diff extract <host dir> <out.npz> [--delete]   (frame_NNN.arena + meta.jsonl)

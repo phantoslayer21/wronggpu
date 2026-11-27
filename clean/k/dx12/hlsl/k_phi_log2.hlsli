@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The HDR phi argument is RN32(12 * maxNum(Y, 0) + 1), hence in [1, +inf].
 #pragma once
 
@@ -12,18 +12,18 @@ float ki_phi_log2(float x)
         const float e = (float)((int)(bits >> 23) - 127 + (int)fold);
         const int j = (int)round((m - 1.0f) * 128.0f) + 32;
         const float inv = asfloat(KF_LOG_INV[j]);
-        const float p = kf_opq(m * inv);
+        const float p = kf_pm(m, inv);
         const float t = p - 1.0f;
         const float dt = kf_fma(m, inv, -p);
 
         // log2(1 + t + dt) through t^5, with the first two terms of its derivative for dt.
-        const float lead = kf_opq(t * KF2_INV_LN2_H);
+        const float lead = kf_pm(t, KF2_INV_LN2_H);
         const float lead_tail = kf_fma(t, KF2_INV_LN2_H, -lead);
         const float q = kf_fma(t, kf_fma(t, kf_fma(t, 0.2885390082f, -0.3606737602f),
                                        0.4808983470f), -0.7213475204f);
         const float dt_scaled = kf_fma(dt, kf_fma(-t, KF2_INV_LN2_H, KF2_INV_LN2_H),
                                        kf_fma(t, KF2_INV_LN2_L, lead_tail));
-        const float corr = kf_fma(kf_opq(t * t), q, dt_scaled + asfloat(KF_LOG_L[j]));
+        const float corr = kf_fma(kf_pm(t, t), q, dt_scaled + asfloat(KF_LOG_L[j]));
         const kf2 v = kf2_fast_two_sum(asfloat(KF_LOG_H[j]), lead);
         const kf2 s = kf2_fast_two_sum(e, v.h);
         const kf2 r = kf2_fast_two_sum(s.h, (v.l + corr) + s.l);

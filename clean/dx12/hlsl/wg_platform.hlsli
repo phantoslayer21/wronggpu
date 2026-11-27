@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Platform layer of the D3D12 ports: the HLSL counterparts of clean/kernels/wg_platform.h and wg_mem.h, with the same names
 // and the same bits (wg_math.hlsli: arithmetic mode, rules and exceptions). Conventions: clean/dx12/README.md.
 //

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Locating the sources in the DLL (spec 08 sections 4.2 and 4.3). Written for this project.
 #pragma once
 

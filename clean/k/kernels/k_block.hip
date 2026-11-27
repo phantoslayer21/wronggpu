@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model K block of spec 41 for gfx1201 (task K5): the block, and whole stages with the block's neighbours fused in.
 //
 // Kernels: k_block_c<C>_h<H>_<mix> (the block on its input map, mirror border rule), k_blockp_... (the block on a

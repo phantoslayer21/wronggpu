@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Retain direct-resource correctness or matched benchmark evidence.
 
 Run only under the machine-wide the GPU lock (WG_GPU_LOCK, BUILDING.md). This tool does not establish

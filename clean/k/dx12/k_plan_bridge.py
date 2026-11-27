@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model K port checks: run a launch plan of the stage runner (clean/k/runner/k_stages.py prepare: buffers and launches
 as the HIP kernels take them) on HIP in this process, and write the same launches as a kernel_replay chain, so that the
 D3D12 ports run on the same input bytes (clean/k/dx12/k_port_check.py compares the raw bytes).

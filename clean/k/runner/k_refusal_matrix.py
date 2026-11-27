@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """R1 / H2: no supported context reaches the D3D12 create refusal. Run under the shared GPU lock.
 
 Runs test_interop_d3d12.exe's `matrix` case against a runtime build: every usual upscaler-mode render ratio x output size x

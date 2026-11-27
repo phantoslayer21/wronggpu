@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 port of model K's exact scalar FP32 / FP16 / FP64 helpers (clean/k/kernels/k_fp.h; specs 42, 43). WrongGPU's own
 // code. Same names and the same bits as the HIP helpers on gfx1201, in the exact arithmetic mode of build_dx12.py
 // (clean/dx12/hlsl/wg_math.hlsli: one IEEE operation per written operation, mad() = one v_fma_f32, rcp() = v_rcp_f32,
@@ -38,10 +38,27 @@
 #include "k_fp_tables.hlsli"
 
 static uint kf_opq_z_;                         // 0, opaque to the compiler (KF_SETUP)
-#define KF_SETUP() (kf_opq_z_ = wg_grid_ >> 31)
+static float kf_nz_;                           // -0.0 ^ the opaque zero: -0.0 at run time, unknown to the compiler (KF_SETUP, one SGPR)
+#define KF_SETUP() (kf_opq_z_ = wg_grid_ >> 31, kf_nz_ = asfloat(0x80000000u ^ (wg_grid_ >> 31)))
 float kf_opq(float x) { return asfloat(asuint(x) ^ kf_opq_z_); }
 float2 kf_opq2(float2 x) { return asfloat(asuint(x) ^ kf_opq_z_); }
 float4 kf_opq4(float4 x) { return asfloat(asuint(x) ^ kf_opq_z_); }
+// A product rounded as its own instruction: kf_pm(a, b) = RN(a b) = fma(a, b, -0.0 ^ opaque zero) bit for bit (the exact
+// product plus -0.0 rounds once: a zero product keeps its sign, NaN / infinities / FTZ as the multiply), the addend
+// unknown to the compiler: no fusion into a following addition, no regrouping. One v_fma_f32 with the SGPR addend instead
+// of the multiply and the xor of kf_opq(a * b) (k_common.hlsli wgk_fm is the FP16 twin). KF_PM = 0: kf_opq(a * b).
+#ifndef KF_PM
+#define KF_PM 1
+#endif
+#if KF_PM
+float kf_pm(float a, float b) { return mad(a, b, kf_nz_); }
+float3 kf_pm3(float3 a, float3 b) { return mad(a, b, (float3)kf_nz_); }
+float4 kf_pm4(float4 a, float4 b) { return mad(a, b, (float4)kf_nz_); }
+#else
+float kf_pm(float a, float b) { return kf_opq(a * b); }
+float3 kf_pm3(float3 a, float3 b) { return asfloat(asuint(a * b) ^ kf_opq_z_); }
+float4 kf_pm4(float4 a, float4 b) { return kf_opq4(a * b); }
+#endif
 
 // ---- elementary steps -----------------------------------------------------------------------------------------------
 
@@ -282,7 +299,7 @@ kf2 kf2_fast_two_sum(float a, float b)                                      // |
 }
 kf2 kf2_two_prod(float a, float b)
 {
-    const float p = kf_opq(a * b);
+    const float p = kf_pm(a, b);
     return kf2_make(p, kf_fma(a, b, -p));
 }
 kf2 kf2_add(kf2 a, kf2 b)
@@ -349,8 +366,8 @@ kf2 kf2_exp2(float y)
     const kf2 x = kf2_mul(kf2_make(r, 0.0f), kf2_make(KF2_LN2_H, KF2_LN2_L));   // |x| < 0.0055
     // e^x = 1 + x + x^2/2 + x^3/6 + x^4/24 + x^5/120; HIP's order ((xh xh) xh) poly, each product rounded
     const float xh = x.h;
-    const float x2 = kf_opq(xh * xh), x3 = kf_opq(x2 * xh);
-    const float tail = kf_opq(x3 * kf_fma(xh, kf_fma(xh, KF_1_120, KF_1_24), KF_SIXTH));   // not fused into q.h + tail
+    const float x2 = kf_pm(xh, xh), x3 = kf_pm(x2, xh);
+    const float tail = kf_pm(x3, kf_fma(xh, kf_fma(xh, KF_1_120, KF_1_24), KF_SIXTH));   // not fused into q.h + tail
     kf2 q = kf2_two_prod(xh, xh);
     q.h = q.h * 0.5f;
     q.l = kf_fma(xh, x.l, q.l * 0.5f);

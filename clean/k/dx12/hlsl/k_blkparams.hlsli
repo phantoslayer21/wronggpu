@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model K's stage kernel arguments for the D3D12 ports (WrongGPU's own code): KBlkParams of clean/k/kernels/k_block.hip
 // as the manifest token s184:p19.b32 lays it out (clean/runtime/struct_args.h). Include before WG_ARGS_BEGIN and put
 // KBLK_PARAMS_DECL inside the argument block; the kernel's other headers (k_block.hlsli, k_common.hlsli) come after

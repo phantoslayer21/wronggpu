@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Private, read-only CPU diagnostics. No fence signals/waits, command recording or model data.
 #include <d3d12.h>

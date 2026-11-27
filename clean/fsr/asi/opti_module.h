@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // WrongGPU OptiScaler ASI plugin: find OptiScaler's module in the running process, whatever name it was loaded under
 // (dxgi.dll, winmm.dll, version.dll, ..., OptiScaler.dll), never the plugin itself, the game's executable or a system

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model K's softmax self-check reference is bound to its sources (host checks, no GPU).
 
 clean/k/runtime/k_smx_selfcheck.h holds the HIP reference's hashes of the self-check cases and kSourceDigest, the digest

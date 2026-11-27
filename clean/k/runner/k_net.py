@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The whole model K network (spec 41 stages, wiring and offsets of spec 44) on one device: task K4's harness core.
 
     net = KNet(dev, func, wb, hb, params)        # dev: clean.runner.hip.Hip or clean.runner.emu.Emu

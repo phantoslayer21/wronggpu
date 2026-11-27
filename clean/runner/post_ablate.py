@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Where does the time of the spec 06 kernels go? Timing-only ablation builds of kernels/post.hip (synthetic data;
 the outputs of the ablation builds are wrong on purpose).
 

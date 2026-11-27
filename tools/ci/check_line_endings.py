@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Line-ending check (CI): every tracked file is stored as committed, without line-ending conversion.
 
 The repository's .gitattributes says `* -text`: git never converts line endings, so the converter maps and the test

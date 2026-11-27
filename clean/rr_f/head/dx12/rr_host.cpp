@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 test host of the D0-R kernel (rr_d0r.hlsl): runs one compute kernel on one arena buffer described by a job
 // file, writes the requested regions back, optionally times it. Driven by run_dx12.py (which builds this file).
 //

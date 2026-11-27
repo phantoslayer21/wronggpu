@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // ffx_fsr3_x64.dll replacement (spec 20, integration point 2): forwards every export to AMD's original,
 // ffx_fsr3_x64.wronggpu-original.dll, logs each call with its parameters and caller, and (when WrongGPU's
 // ffx_fsr3upscaler_x64.dll did not see the upscale) lets the stand-in overwrite the upscale output (fsr30_hook.h).
@@ -90,20 +90,21 @@ Hook& H() {
         // How many upscaler dispatches WrongGPU's ffx_fsr3upscaler_x64.dll has seen on this thread (0 if not ours).
         p.upscalerSeenOnThread = [] {
             using SeenFn = uint64_t (*)();
-            static std::atomic<SeenFn> fn{nullptr};
-            SeenFn f = fn.load();
-            if (!f) {
-                if (HMODULE up = GetModuleHandleW(L"ffx_fsr3upscaler_x64.dll")) f = ProcAddress<SeenFn>(up, "wgFsr3UpscalerSeenOnThread");
-                if (f) fn.store(f);
-            }
-            return f ? f() : uint64_t(0);
+            HMODULE up = nullptr;
+            if (!GetModuleHandleExW(0, L"ffx_fsr3upscaler_x64.dll", &up) || !up) return uint64_t(0);
+            SeenFn f = ProcAddress<SeenFn>(up, "wgFsr3UpscalerSeenOnThread");
+            const uint64_t seen = f ? f() : uint64_t(0);
+            FreeLibrary(up);
+            return seen;
         };
         // Whether the upscaler context AMD's ffx_fsr3 creates next (on this thread) belongs to an UPSCALING_ONLY context.
         p.hintUpscalingOnly = [](int hint) {
             using HintFn = void (*)(int);
-            HMODULE up = GetModuleHandleW(L"ffx_fsr3upscaler_x64.dll");
-            HintFn f = up ? ProcAddress<HintFn>(up, "wgFsr3UpscalerHintUpscalingOnly") : nullptr;
+            HMODULE up = nullptr;
+            if (!GetModuleHandleExW(0, L"ffx_fsr3upscaler_x64.dll", &up) || !up) return;
+            HintFn f = ProcAddress<HintFn>(up, "wgFsr3UpscalerHintUpscalingOnly");
             if (f) f(hint);
+            FreeLibrary(up);
         };
         g_hook = new Hook(p, config, "");
         LoadOriginal();

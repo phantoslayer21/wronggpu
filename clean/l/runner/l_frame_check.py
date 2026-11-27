@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L (issue #89): the runtime's Model L frame on HIP against the CPU reference, on synthetic frames, with a
 synthetic Model L or (--model) the converter's model.wgcm. Model M's frame on the same harness is the control.
 

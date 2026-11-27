@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Adversarial cases for Model K's softmax weight rounding (hlsl/k_smx.hlsli, kernels/k_mix_probe.hlsl). WrongGPU's own
 code.
 

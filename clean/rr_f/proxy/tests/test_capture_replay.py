@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Tests of the offline RR runner on captures (tools/rr_capture_replay.py, CAPTURE.md).
 
     python -m unittest test_capture_replay                       (from clean/rr_f/proxy/tests; CPU only)

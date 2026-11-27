@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The launcher test runners' guard against the PC's own game folders (#243). A WRONGGPU_TESTING launcher logs every store
 access (util.h LibraryAccess: "library access: <path>", "library access refused: <path>") to WRONGGPU_TEST_ACCESS_LOG
 before the read; check_isolation parses that log after every launcher or installer call and stops the whole run, loudly, on

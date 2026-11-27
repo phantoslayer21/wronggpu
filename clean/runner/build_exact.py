@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Whole frames through two builds of the runtime library with the SAME kernel choices and options: every stage
 output, every state image and the output must be equal byte for byte. For a change that must not alter anything
 unless a new option is given (e.g. motion vectors at output resolution: runtime option motion_outres).

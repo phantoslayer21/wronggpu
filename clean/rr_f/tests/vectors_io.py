@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Reading and writing the spec 51 test vectors (binary files + JSON manifest).
 
 File types: `.e4m3` = uint8 codes, `.f16` = little-endian uint16 bit patterns, `.u8` = uint8 (masks).

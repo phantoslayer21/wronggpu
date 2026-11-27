@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // A loader of our own that behaves like OptiScaler 10's custom upscaler folder as spec 65 describes it (65.1, 65.2,
 // 65.6), for the FFX slot: the DLL custom\<folder>\ffx\<FFX DX12 upscaler file name> is loaded once per folder, from

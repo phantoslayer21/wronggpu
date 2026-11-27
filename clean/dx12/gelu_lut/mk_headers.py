@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Writes hlsl/wg_gelu_lut.hlsli and runtime/gelu_lut_table.h from gen_compact.py outputs.
 
     python clean/dx12/gelu_lut/mk_headers.py --gen <dir with gelu_lut.json + gelu_lut_table.bin> [--gen2 <dir>]

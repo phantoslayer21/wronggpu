@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Input encoder with motion vectors at output resolution (spec/03-input-encoder.md draft 4, "Motion at output
 // resolution"; create flag WG_CREATE_MOTION_OUTPUT_RES). Included by encoder.hip before encoder_main; the kernel that
 // uses it is in encoder_mo.hip. Written for WrongGPU from spec 03.

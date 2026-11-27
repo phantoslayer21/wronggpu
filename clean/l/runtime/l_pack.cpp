@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model L weight packing for the runtime; see l_pack.h.
 #include "l_pack.h"
 #include "l_q7_pack.h"

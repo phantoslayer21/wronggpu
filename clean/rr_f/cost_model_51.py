@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Issue-slot cost model behind DESIGN-51.md section 10 (no GPU, no kernel code).
 
 Counts, per wave-tile (16 tokens of one 8 x 8 window, the work unit of one wave), the v_wmma_f32_16x16x16_fp8_fp8

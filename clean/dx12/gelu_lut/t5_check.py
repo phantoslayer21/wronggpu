@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Host proof of the GELU T5 table (hlsl/wg_gelu_t5.hlsli, runtime/gelu_t5_table.h) against the arena table T16
 (runtime/gelu_lut_table.h): for every FP32 bit pattern w (all 2^32, NaN encodings excepted), the T5 entry j = w >> 18
 is the T16 entry of slot f16_rtz(w) >> 5 that the arena-table path uses (same slot, so the same (a, b), the same fma and

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU UI kit (wg_ui): the owner-drawn widgets of the installer's wizard - buttons, check boxes and radio buttons,
 // a progress bar, cards, the palette of WrongGPU's in-game overlay, fonts, the wordmark, the dark title bar - for the
 // wizard and the launcher. Windows' own GDI, GDI+, DWM and comctl32 only (no third-party code). Moved from setup.cpp.

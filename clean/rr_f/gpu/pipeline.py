@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Connected synthetic GPU body/head -> spec54 history outputs; no input stage or resolve.
 
 All 19 dispatches execute in one arena/submission. CPU references are evaluated

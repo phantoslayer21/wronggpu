@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Exact arithmetic of the page-54b kernels (rr_resolve.hlsl): the f32 rule of 54b.N (one RNE rounding per
 // operation, FTZ of inputs and results, results first rounded on the IEEE grid), binary16 fma chains, the
 // plain min / max of 54b.N with -0 below +0 (WrongGPU's choice), and correctly rounded f32 exp2 / log2 / rcp.

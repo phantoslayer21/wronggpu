@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Spec 03 reference (clean/reference/encoder.py) vs a slow scalar version written separately from the spec text,
 plus the reset test 03-T2 and properties of the dithered quantization. Synthetic data only.
 

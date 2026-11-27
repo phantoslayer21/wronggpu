@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model L's per-pixel coefficient functions (issue #89; HIP l_coef_body of clean/l/kernels/l_ops.hip), shared by
 // kernels/l_ops_coef.hlsl (l_coef, l_coef_pack12) and the decoder block that ends in them (kernels/l_swin.hlsl,
 // l_swin_block_c32_dec_coef12_nc): one pixel's channels 0..15 of the decoder block's FP16 output (y2) -> A, B, C and

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Synthetic 16-stage preset-F body on one D3D12 arena, including the independent D0-R head.
 
 This is a stage-integration qualification, not the missing page-52 frontend,

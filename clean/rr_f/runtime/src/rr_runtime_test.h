@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Test hooks of the RR runtime (not used by the proxy): exported as WrongGPU_RrRuntimeTestV1 next to the adapter.
 #pragma once
 #include <stdint.h>

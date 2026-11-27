@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Probes of the fast output-stage arithmetic (rr_output_fast.hlsl) against the operation helpers of rr_output.hlsl
 // (copied verbatim below as *_ref): exhaustive over every f32 input for the unary helpers and over every pair of f16
 // values for the f16 helpers; sampled operand triples (stored by the host) for the f32 binary / ternary helpers.

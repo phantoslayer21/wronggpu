@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher window: Ray Reconstruction's kernels prepared by the launcher (release 0.6.0, owner 2026-11-02: "It HAS
 // to pre compile inside the launcher"; wg_core/rrprep.h). After an install, update or repair of a game with Ray
 // Reconstruction, at Play when they aren't prepared (a driver or WrongGPU update since), and with the game page's Prepare.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // In-process test of the WrongGPU OptiScaler plugin's module identification (clean/fsr/asi/opti_module.h) with the
 // real, built WrongGPU.asi. Written for this project.
 //

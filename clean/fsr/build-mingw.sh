@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 # Cross-builds the FSR front end for 64-bit Windows with MinGW-w64 and collects the files the spec team needs.
 #   clean/fsr/build-mingw.sh [build-dir]        (default: <repo>/build/fsr-mingw)
 # Needs: cmake, x86_64-w64-mingw32-g++-posix (Debian/Ubuntu package g++-mingw-w64-x86-64-posix).

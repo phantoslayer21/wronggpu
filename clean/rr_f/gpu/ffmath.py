@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Float-float (pairs of binary32) log2 / exp2 used by the input-stage kernel's fast path (kernels/rr_in_math.hlsli),
 as a NumPy model of the shader's operation sequence plus the tables the host uploads.
 

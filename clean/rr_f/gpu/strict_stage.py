@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Opt-in correctness-only fragment/common-stage/D0R qualification; no default changes."""
 import argparse
 import hashlib

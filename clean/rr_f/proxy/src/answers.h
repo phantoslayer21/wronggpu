@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The proxy's own answers for feature 1001 that the release build and the probe build share (spec 60.8, 61.5).
 #pragma once
 #include <stdint.h>

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher window: the colours that carry meaning, without any drawing (ui_shell.h's Theme is made from them; the
 // launcher's unit tests check their contrast). The "Unlock palette" (build/launcher/ui-options/BE-wide/notes.md, owner
 // 2026-11-01): green means WrongGPU is working (status dots, installed / worked / checks passed, the end of a progress

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Probe kernels for runner/selftest.py: check on the GPU the hardware facts the Swin kernels rely on, using
 // synthetic data only (WMMA operand/result register layouts, the FP8 encoding of the WMMA inputs, hardware FP8
 // conversions versus the software ones in wg_platform.h, and the FP8 pack/unpack functions the kernels use).

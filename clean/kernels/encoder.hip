@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Input encoder of spec/03-input-encoder.md (stage enc0) for gfx1201 (RDNA4).
 //
 // One fused kernel: per-pixel values (spec 03 "The 20 values per pixel"), dithered FP8 quantization, and the 64 x 80

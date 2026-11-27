@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Test doubles for AMD's FSR 3.0 component DLLs, built twice:
 //   FAKE_UPSCALER -> ffx_fsr3upscaler_x64.wronggpu-original.dll
 //   FAKE_FSR3     -> ffx_fsr3_x64.wronggpu-original.dll

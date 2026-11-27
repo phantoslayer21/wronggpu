@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: WrongGPU's edition of OptiScaler, downloaded from its own project's release (optiedition.h).
 // Written for this project. Windows' own WinHTTP and the core's SHA-256 only.
 #include "optiedition.h"
@@ -8,16 +8,21 @@
 
 namespace wg {
 
+// Known older WrongGPU edition DLL SHA-256 hashes (upgraded in place to the pinned edition, never treated as foreign).
+static const wchar_t* const kPriorEditionDllSha256[] = {
+    L"ff6f06ca2f8e761016f41313e2533fd176623a7a85f9e9169c9fc003b227826d",  // WrongGPU edition v5 (wronggpu-edition-20261102.1)
+};
+
 EditionInfo PinnedEdition() {
     EditionInfo e;
-    e.url = L"https://github.com/phantoslayer21/OptiScaler/releases/download/wronggpu-edition-20261102.1/"
-            L"OptiScaler_v10.0.0-pre1_20261030_WrongGPU-edition-v5.zip";
+    e.url = L"https://github.com/phantoslayer21/OptiScaler/releases/download/wronggpu-edition-20261127.1/"
+            L"OptiScaler_v10.0.0-pre1_20261127_WrongGPU-edition-v6.zip";
     e.page = kEditionPage;
-    e.file = L"OptiScaler_v10.0.0-pre1_20261030_WrongGPU-edition-v5.zip";
-    e.size = 185500996ull;
-    e.sha256 = L"c285e7e3c029924dccf196c1d1c3b63ef499669df3cdd330161d62119eef90fb";
-    e.dllSha256 = L"ff6f06ca2f8e761016f41313e2533fd176623a7a85f9e9169c9fc003b227826d";
-    e.version = L"10.0.0-pre1 (WrongGPU edition v5)";
+    e.file = L"OptiScaler_v10.0.0-pre1_20261127_WrongGPU-edition-v6.zip";
+    e.size = 185383587ull;
+    e.sha256 = L"1876b742ac5b20b35eee161df223ec02c9cdb71274c7a1e3a7028a9bfcf7fca4";
+    e.dllSha256 = L"d377dfb47a4d635c8fa7adc71845cee5018d0507f054cd12a74e1039709727ab";
+    e.version = L"10.0.0-pre1 (WrongGPU edition v6)";
 #ifdef WRONGGPU_TESTING
     // tests: their own server and stand-in archive, or no download at all
     const wstring t = EnvVar(L"WRONGGPU_TEST_EDITION");
@@ -28,9 +33,9 @@ EditionInfo PinnedEdition() {
         if (b == wstring::npos) break;
         a = b + 1;
     }
-    if (parts.size() == 4) {
+    if (parts.size() == 4 || parts.size() == 5) {
         e.url = parts[0]; e.size = _wtoi64(parts[1].c_str()); e.sha256 = Lower(parts[2]); e.dllSha256 = Lower(parts[3]);
-        e.file = L"edition-test.zip";
+        e.file = (parts.size() == 5 && !parts[4].empty()) ? parts[4] : L"edition-test.zip";
     } else {
         e.url.clear();
         if (!t.empty()) e.dllSha256.clear();
@@ -60,6 +65,23 @@ bool EditionCached(const wstring& dataDir, wstring* path) {
 bool IsEditionDll(const wstring& optiDll) {
     const EditionInfo e = PinnedEdition();
     return !e.dllSha256.empty() && IsFile(optiDll) && IEq(Sha256File(optiDll), e.dllSha256);
+}
+
+bool IsPriorEditionHash(const wstring& sha256) {
+    if (sha256.empty()) return false;
+    const EditionInfo cur = PinnedEdition();
+    if (!cur.dllSha256.empty() && IEq(sha256, cur.dllSha256)) return false;
+    for (auto h : kPriorEditionDllSha256)
+        if (IEq(sha256, h)) return true;
+#ifdef WRONGGPU_TESTING
+    const wstring extra = EnvVar(L"WRONGGPU_TEST_PRIOR_EDITION_DLL");
+    if (!extra.empty() && IEq(sha256, extra)) return true;
+#endif
+    return false;
+}
+
+bool IsPriorEditionDll(const wstring& optiDll) {
+    return IsFile(optiDll) && IsPriorEditionHash(Sha256File(optiDll));
 }
 
 // One GET into `dest` (truncated first). status: the HTTP status (0: no answer). False: no complete body (err says why).

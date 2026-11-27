@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model K whole frame (clean/k/runner/k_frame.py) in the host emulator: input stage -> network -> output stage with
 histories and the frame index, over a short sequence with a render-size change (no reset for K: the history is
 kept) and then a game reset, with the exposure rule of spec 42 draft 3 section 4 (clean/k/reference/exposure.py:

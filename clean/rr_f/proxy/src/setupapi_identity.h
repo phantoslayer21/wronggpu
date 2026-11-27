@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // SetupAPI identity shim (clean/rr-sm2-shim, Brief 10; written for this project from the spec team's functional
 // description and the public Win32 SetupAPI documentation).
 //

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: Ray Reconstruction's kernels prepared by the launcher (rrprep.h). Written for this project.
 // Windows' own DXGI (loaded at run time), process and pipe functions only.
 #include "rrprep.h"

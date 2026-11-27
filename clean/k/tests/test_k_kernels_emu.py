@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model K kernels in the host lane emulator, through the spec 90 Runner (model="K"), against the NumPy reference.
 
 Builds a model K-only emulator library (clean/k/runner/k_build.py) into a temporary directory and opens it as the

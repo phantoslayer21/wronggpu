@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Kernel-level check of the HYBRID form's shared-stage kernels (S3: clean/dx12/kernels/hyb_swin.hlsl, hyb_gemm.hlsl;
 HIP twins clean/kernels/swin_hyb.hip -> swin_hyb.co): random parameters in the hybrid values (l_hyb_pack.py), FP8
 input maps with special codes in every other case, both window offsets of each table kind.

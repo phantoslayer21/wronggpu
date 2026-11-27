@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Build the private synthetic supplied-device candidate. CPU/build work only.
 
 GPU execution is a separate native_game_test.exe command under the GPU lock (WG_GPU_LOCK, BUILDING.md).

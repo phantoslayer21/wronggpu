@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame sequences through the lifecycle (pages 52.8, 53): ResourceState.run_input against the input stage called
 with explicitly tracked state (52.10 item 9 shape): first call (pending reset), a normal frame reading the previous
 frame's PM, a render-size change (zero-filled images, no reset on the change frame), the following pending reset,

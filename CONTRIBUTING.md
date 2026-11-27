@@ -38,14 +38,15 @@ Reconstruction), together with its SDK (NGX, Streamline), its runtime and its mo
 > documentation; leaked or decompiled upscaler or denoiser code of any vendor; another project's port or
 > reimplementation of the original upscaler's networks or their kernels. I have not used the original upscaler's
 > learned weights, or data computed from them, to write or test my contribution. My contribution is my own work, or
-> third-party code under a licence listed in CONTRIBUTING.md, and I have the right to submit it under the MIT licence.
+> third-party code under a licence listed in CONTRIBUTING.md. I have the right to submit my own work under
+> GPL-3.0-only and any third-party code under its existing licence.
 
 If you cannot make this statement, please do not contribute code; bug reports, game reports and test results from your
 own PC are still very welcome.
 
 ## Sign-off (Developer Certificate of Origin)
 
-Sign off every commit to certify the [Developer Certificate of Origin 1.1](https://developercertificate.org/):
+Contributions of your own work are licensed under GPL-3.0-only. Sign off every commit to certify the [Developer Certificate of Origin 1.1](https://developercertificate.org/):
 
 ```text
 Signed-off-by: Your Name <you@example.com>
@@ -69,7 +70,7 @@ derived from them, game files, game screenshots, game frame captures, or binarie
 
 ## What every change needs
 
-- Add an MIT SPDX licence line to every new source file. Use `SPDX-License-Identifier` followed by `MIT`, as in the
+- Add `SPDX-License-Identifier: GPL-3.0-only` to every new WrongGPU source file, as in the
   existing source files. Cover files that cannot carry a header, such as JSON, in `REUSE.toml`. The `**` rule in
   `REUSE.toml` already covers every file, so REUSE lint passes without a header. Reviewers catch a missing header
   instead.

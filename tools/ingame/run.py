@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """One in-game run of WrongGPU with a record and a byte-for-byte restore: a game folder's manifest, backups, foreign
 files moved aside or hashed, the candidate installed through the launcher's command line, a model choice (e.g. Model L,
 issue #89), screenshots, the runtime's own proof lines and timing, then everything put back and verified.

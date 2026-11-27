@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // HIP twin of clean/dx12/hlsl/wg_hyb.hlsli: the element-wise steps of the HYBRID block form (SW_HYB / WG_L_FORM=hybrid),
 // the same values computed directly instead of from the D3D12 arena tables.
 // - RN16: the (_Float16) conversion (v_cvt_f16_f32, round to nearest even).
