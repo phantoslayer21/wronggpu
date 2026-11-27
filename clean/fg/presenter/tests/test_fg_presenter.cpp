@@ -1324,6 +1324,44 @@ void TestTearingPlanHeadNearCeiling() {
     }
 }
 
+void TestTearingAtFiveImagesPerInterval() {
+    g_case = "tearing service time at five images per interval";
+    constexpr FgTicks slot = 31600;        // the x6 request scheduled four generated and one real at 15.8 ms
+    constexpr FgTicks min_interval = 28619;
+    constexpr FgTicks call_duration = 3600;  // sensitivity case: 0.36 ms of synchronous wrapper/Present work
+    auto run = [&](bool admission_consumed) {
+        FgTicks last_anchor = 0;
+        FgTicks last_start = 0;
+        FgTicks call_done = 0;
+        uint32_t dropped = 0;
+        for (int i = 0; i < 600; ++i) {
+            const FgTicks target = kSecond + i * slot;
+            const bool real = i % 5 == 4;
+            const FgTicks ready = target + (real ? 25000 : 0);  // real-frame slip in the live burst's median range
+            const FgTicks now = std::max(ready, call_done);
+            const auto decision =
+                FgPlanTearingImage(target, real, now, last_anchor, min_interval, 20000, true, target + slot);
+            if (decision.drop_late) {
+                CHECK(!real);
+                ++dropped;
+                continue;
+            }
+            const FgTicks start = std::max(now, decision.issue_at);
+            if (last_start > 0) CHECK(start - last_start >= min_interval);
+            last_start = start;
+            call_done = start + call_duration;
+            last_anchor = FgTearingPacingAnchor(start, call_done, admission_consumed);
+        }
+        return dropped;
+    };
+    const uint32_t legacy = run(false);
+    const uint32_t consumed = run(true);
+    std::printf("    five-image cadence: %u/%u generated images late (present/consumed), 480 scheduled\n",
+                legacy, consumed);
+    CHECK(legacy >= 36);    // the replay is sensitive to charging service time to each slot
+    CHECK(consumed < 24);   // under 5% generated images late
+}
+
 void TestRc2SchedulerPacing() {
     g_case = "rc2 scheduler pacing";
     {
@@ -1574,6 +1612,7 @@ int main() {
     TestFrameStartWaitableCadence();
     TestRealConsumptionBeforePresentation();
     TestTearingPlanHeadNearCeiling();
+    TestTearingAtFiveImagesPerInterval();
     std::printf("test_fg_presenter: %d checks, %d failure(s)\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

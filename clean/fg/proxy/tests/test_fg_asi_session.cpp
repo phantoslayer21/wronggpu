@@ -2305,6 +2305,15 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::strin
         return out;
     };
 
+    if (only == "consumed-6x") {
+        // RT-on windows at x6 were display-limited to about five output images per 15.8 ms interval.
+        const SmokeRunResult on = run_leg("x6-15.8ms-rt", true, 5u, 12, 25000, 240, 15800, 7600);
+        CHECK(on.present_errors == 0 && on.session_failures == 0);
+        CHECK(on.steady_base_fps >= 56.0 && on.steady_max_scheduled >= 3);
+        CHECK(on.steady_late_drop_pct < 5.0);
+        return;
+    }
+
     if (only == "real-only-admission") {
         // Match the RT-on baseline's ~13 ms render period at latency 1, with FG explicitly disabled.
         const SmokeRunResult off = run_leg("off-real-only-admission", false, 5u, 0, 0, 180, 13000, 7000);
@@ -2450,7 +2459,7 @@ int main(int argc, char** argv) {
                                            only.empty() || only == "cadence");
                 }
                 if (preset < 0 && (only.empty() || only == "smoke" || only == "admission" ||
-                                   only == "real-only-admission")) {
+                                   only == "real-only-admission" || only == "consumed-6x")) {
                     g_case = "gpu-smoke-pacing";
                     TestSmokeGpuBoundPacing(g, dxil, only);
                 }

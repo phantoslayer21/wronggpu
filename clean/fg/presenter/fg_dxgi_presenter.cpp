@@ -656,10 +656,13 @@ bool FgDxgiPresenter::PresentHead(HANDLE stop) {
             YieldProcessor();
         }
     }
+    FgTicks present_started = 0;
     if (SUCCEEDED(hr)) {
+        present_started = FgInterruptNow();
         hr = swap->Present(tearing ? 0 : 1, tearing ? DXGI_PRESENT_ALLOW_TEARING : 0);
         if (tearing && hr == DXGI_ERROR_INVALID_CALL) {
             // DXGI_PRESENT_ALLOW_TEARING is invalid in exclusive fullscreen; retry without the tearing flag.
+            present_started = FgInterruptNow();
             hr = swap->Present(0, 0);
         }
     }
@@ -679,7 +682,7 @@ bool FgDxgiPresenter::PresentHead(HANDLE stop) {
         return true;
     }
     const bool shown = SUCCEEDED(hr) && hr != DXGI_STATUS_OCCLUDED;
-    // R3B-8: stamp issue/display estimate consistently with present_done (after overlay + DXGI Present return).
+    // Keep the submission and display estimates anchored to the return from the Present call.
     engine_.FinishLeasedPresent(head.present.slot, SUCCEEDED(hr) ? present_done : 0,
                                 tearing ? present_done : head.shown_at, shown);
     if (FAILED(hr)) {
@@ -688,7 +691,14 @@ bool FgDxgiPresenter::PresentHead(HANDLE stop) {
         return true;
     }
     ++info_.presents;
-    last_issue_ = present_done;
+    const FgTicks duration = present_done - present_started;
+    info_.present_call_total += duration;
+    if (duration > info_.present_call_max) info_.present_call_max = duration;
+    // The worker serializes calls. Time spent inside Present already uses part of the interval between issue starts.
+    // A real-only interval has a single real image at index 1 and keeps the original completion-based pacing.
+    const bool generating_interval = !head.present.real || head.present.index > 1;
+    last_issue_ = FgTearingPacingAnchor(present_started, present_done,
+                                      tearing && desc_.pace_generated_intervals_from_start && generating_interval);
     if (!tearing) {
         have_vblank_ = true;
         last_vblank_ = head.shown_at;

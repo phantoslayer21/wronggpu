@@ -1150,7 +1150,10 @@ struct FgAsiSessionHost::Impl {
                 const wgfg::FgDxgiPresenterInfo in = dx->Info();
                 reasons += "; dxgi presents=" + std::to_string(in.presents) +
                        " latency_timeouts=" + std::to_string(in.latency_timeouts) +
-                       " occlusion_retired_real=" + std::to_string(in.occlusion_retired_real);
+                       " occlusion_retired_real=" + std::to_string(in.occlusion_retired_real) +
+                       " present_call_us_mean=" +
+                       std::to_string(in.presents ? static_cast<uint64_t>(in.present_call_total) / in.presents / 10 : 0) +
+                       " present_call_us_max=" + std::to_string(in.present_call_max / 10);
             }
             uint64_t ret = 0, cw = 0, timeouts = 0, qw = 0;
             size_t queue_peak = 0;
@@ -1491,6 +1494,7 @@ struct FgAsiSessionHost::Impl {
         base.slot_count = kPresenterSlots;
         base.max_pending_intervals = kPresenterMaxPendingIntervals;  // N-B3: aligned to 20 slots (3 full 6x intervals)
         base.dxgi_timer_lead = 2000;                                 // 0.2 ms wake lead for DXGI tearing
+        base.dxgi_pace_generated_intervals_from_start = !admission_until_present;
         base.dxgi_late_tolerance = 20000;                            // 2.0 ms base tolerance (scaled per slot in worker)
         base.device = device.Get();
         base.queue = chain_queue ? chain_queue.Get() : queue.Get();  // the queue the real chain presents on

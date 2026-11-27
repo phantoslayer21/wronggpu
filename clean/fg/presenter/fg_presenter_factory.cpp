@@ -192,6 +192,7 @@ FgWinResult FgCreatePresenter(const FgPresenterFactoryDesc& desc, FgCreatedPrese
     dd.refresh_period = desc.display.refresh_period;
     dd.timer_lead = desc.dxgi_timer_lead;
     dd.late_tolerance = desc.dxgi_late_tolerance;
+    dd.pace_generated_intervals_from_start = desc.dxgi_pace_generated_intervals_from_start;
     dd.max_generated = desc.max_generated;
     dd.slot_count = desc.slot_count;
     dd.max_pending_intervals = desc.max_pending_intervals;

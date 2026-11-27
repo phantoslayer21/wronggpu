@@ -280,13 +280,16 @@ bool FgPlanFitsRefresh(const FgIntervalPlan& plan, FgTicks refresh_period);
 FgTicks FgTimerDue(FgTicks target, FgTicks now, FgTicks lead);
 
 // R3B-7: tearing / VRR head planning decision shared by FgDxgiPresenter::PlanHeadLocked and
-// FgWinCompPresenter::SubmitOutboxLocked. Enforces >= min_interval spacing via issue_at while giving `next` a bounded
-// slip allowance min(tol/2, slot/2) so near-ceiling VRR output (320-349 Hz) tolerates ordinary 0.3-1.0 ms issue jitter
-// without dropping ready generated images.
+// FgWinCompPresenter::SubmitOutboxLocked. Enforces >= min_interval between issue anchors and gives the next image
+// a fraction of one slot to absorb submission jitter without accumulating arbitrary delay.
 struct FgTearingPlanDecision {
     FgTicks issue_at = 0;
     bool drop_late = false;
 };
+
+inline FgTicks FgTearingPacingAnchor(FgTicks started, FgTicks completed, bool pace_from_start) {
+    return pace_from_start ? started : completed;
+}
 
 inline FgTearingPlanDecision FgPlanTearingImage(FgTicks target, bool real, FgTicks now, FgTicks last_issue,
                                                 FgTicks min_interval, FgTicks base_late_tolerance, bool has_next,
