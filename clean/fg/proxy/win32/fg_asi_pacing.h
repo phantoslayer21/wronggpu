@@ -107,6 +107,14 @@ constexpr int64_t FirstImageFastEaseStepCap(int64_t budget, bool consumed_admiss
     return budget > 225000 ? 55000 : (budget > 165000 ? 25000 : (budget > 135000 ? 17000 : 10000));
 }
 
+constexpr int64_t FirstImageReadinessSlack(int64_t budget, bool consumed_admission, uint32_t scheduled) {
+    if (consumed_admission) return std::max<int64_t>(35000, budget / 2);
+    // At N=1 there is more space between generated images. A clean window can probe that headroom
+    // while the p95 readiness floor and the existing 1 ms near-budget easing limit still apply.
+    if (scheduled == 1) return std::clamp<int64_t>(budget / 2, 35000, 60000);
+    return 35000;
+}
+
 struct FirstImageProducerWindow {
     uint64_t scheduled;
     uint64_t missed;

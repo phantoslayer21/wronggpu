@@ -2567,6 +2567,14 @@ void TestHighCountPresentBudgetEasesInSmallSteps() {
     CHECK(FirstImageFastEaseStepCap(219000, false, 5) == 25000);
 }
 
+void TestOneImageCleanBudgetCanEaseWithMeasuredHeadroom() {
+    g_case = "pacing-n1-clean-headroom";
+    CHECK(FirstImageReadinessSlack(126000, false, 1) == 60000);
+    CHECK(FirstImageReadinessSlack(100000, false, 1) == 50000);
+    CHECK(FirstImageReadinessSlack(60000, false, 1) == 35000);
+    CHECK(FirstImageReadinessSlack(126000, false, 2) == 35000);
+}
+
 void TestBudgetCapExpiresAfterMissesAndRaises() {
     g_case = "pacing-sampled-cap-expiry";
     FirstImageBudgetLimits limits;
@@ -2655,6 +2663,7 @@ int main(int argc, char** argv) {
     TestFirstImageBudgetEasingFloor();
     TestBudgetCapNeedsReliableSamplesAndPreservesFloors();
     TestHighCountPresentBudgetEasesInSmallSteps();
+    TestOneImageCleanBudgetCanEaseWithMeasuredHeadroom();
     TestBudgetControllerUsesProducerMissesAndResetsItsBaseline();
     TestMissFloorDecaysAfterCleanWindows();
     TestBudgetNeedsTwoMissesToRaise();

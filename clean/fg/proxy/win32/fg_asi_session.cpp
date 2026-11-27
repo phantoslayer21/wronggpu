@@ -1342,8 +1342,7 @@ struct FgAsiSessionHost::Impl {
         // before WaitForCreditRoom returned (d_p90 is below the slack threshold) and the newest cadence caught up to the
         // current budget (p_med <= budget + 3.5 ms) so we never stack downward steps across phase lag.
         const wgfg::FgTicks d_orig_p90_pre = d_origins.Percentile(0.90);
-        const wgfg::FgTicks slack_threshold =
-            consumed_admission ? std::max<wgfg::FgTicks>(35000, budget / 2) : 35000;
+        const wgfg::FgTicks slack_threshold = FirstImageReadinessSlack(budget, consumed_admission, last_generating_count);
         const wgfg::FgTicks p_med_pre = base_dts.Percentile(0.50, 4);
         if (clean_excess_check &&
             (d_origins.Empty() || d_orig_p90_pre > slack_threshold || budget <= kBudgetBase + 40000 ||
