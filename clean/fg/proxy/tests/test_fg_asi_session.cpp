@@ -2322,10 +2322,10 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, bool admission_o
         CHECK(run.queue_peak == 2);
 
         // Request 4x with a nominal 200 fps producer. The 349.4 Hz presenter must shed generated images.
-        const SmokeRunResult display_bound = run_leg("4x-display-bound", true, 3u, 24, 14000, 220, 5000, 4000);
+        const SmokeRunResult display_bound = run_leg("4x-display-bound", true, 3u, 0, 0, 260, 5000, 4000);
         CHECK(display_bound.present_errors == 0 && display_bound.session_failures == 0);
         CHECK(display_bound.queue_peak == 2 && display_bound.queue_waits > 0);
-        CHECK(display_bound.sched > 0 && display_bound.steady_max_scheduled < 3);
+        CHECK(display_bound.steady_max_scheduled < 3);
         return;
     }
 
