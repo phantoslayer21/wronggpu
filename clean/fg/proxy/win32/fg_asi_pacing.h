@@ -66,7 +66,11 @@ struct FirstImageBudgetLimits {
         if (count >= 6) sampled_cap = FirstImageBudgetCap(readiness_p75, latency_limit);
     }
 
-    void RecordMiss(int64_t budget) { miss_floor = std::max(miss_floor, budget); }
+    void RecordMiss(int64_t budget) {
+        miss_floor = std::max(miss_floor, budget);
+        BudgetRaised();
+    }
+    void BudgetRaised() { sampled_cap = kFirstImageBudgetMax; }
     void TrackCleanWindow(bool full, bool clean, int64_t minimum, int64_t readiness_p95) {
         if (!clean || (full && readiness_p95 <= 0)) {
             clean_windows = 0;
@@ -86,6 +90,10 @@ struct FirstImageBudgetLimits {
         return std::max(sampled_cap, EasingFloor(minimum, readiness_p95));
     }
 };
+
+constexpr int64_t ApplySampledBudgetCap(int64_t proposed, int64_t cap, int64_t current, int64_t easing_step) {
+    return std::min(proposed, std::max(cap, current - easing_step));
+}
 
 constexpr int64_t FirstImageFastEaseStepCap(int64_t budget, bool consumed_admission, uint32_t scheduled) {
     // A first-present gate can hide the producer tail during a high-count downward step.

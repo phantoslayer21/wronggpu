@@ -1349,6 +1349,7 @@ struct FgAsiSessionHost::Impl {
         if (need_more_budget) budget_limits.RecordMiss(budget);
         const wgfg::FgTicks b_cap = budget_limits.Cap(kBudgetBase, d_p95, producer_miss_window);
         wgfg::FgTicks next = budget;
+        wgfg::FgTicks easing_step_cap = kBudgetEaseFast;
         if (producer_miss_window) {  // > 2% of scheduled generated images missed
             quiet_windows = 0;
             wgfg::FgTicks want = budget;
@@ -1406,6 +1407,7 @@ struct FgAsiSessionHost::Impl {
                     const wgfg::FgTicks step =
                         large_excess ? std::min<wgfg::FgTicks>(excess_cap, std::max(kBudgetEaseFast, (budget - floor_b) / 2))
                                      : (far_above_miss ? kBudgetEaseFast : kBudgetEaseProbe);
+                    easing_step_cap = step;
                     // A full presenter queue can hide GPU work behind admission. Let the fast probe remove lead
                     // above the running cadence, then use ordinary readiness windows for smaller changes.
                     const wgfg::FgTicks probe_floor = large_excess && consumed_admission
@@ -1419,9 +1421,12 @@ struct FgAsiSessionHost::Impl {
             quiet_windows = 0;
             cap_miss_windows = 0;
         }
-        next = std::min(next, b_cap);
+        next = ApplySampledBudgetCap(next, b_cap, budget, easing_step_cap);
         if (next == budget || !session->SetFirstImageBudget(next)) return;
-        if (next > budget) budget_grace_frames = p_med >= 250000 ? 4u : 2u;
+        if (next > budget) {
+            budget_limits.BudgetRaised();
+            budget_grace_frames = p_med >= 250000 ? 4u : 2u;
+        }
         if (budget_lines < 64) {
             ++budget_lines;
             char line[352];
