@@ -428,6 +428,10 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
     }
 
     const bool consecutive_real_only = n == 0 && !last_interval_generated_;
+    // Keep this narrow: the measured cadence must fit one generated image with the normal re-entry
+    // margin, and must be too fast for three output slots at the current tearing floor.
+    const bool single_near_ceiling = n == 1 && config_.adaptive_count && config_.fixed_refresh_period == 0 &&
+                                     period_estimate / 3 < w.min_interval && Fits(n, period_estimate, w.hysteresis);
     FgReanchorReason anchor_reason = FgReanchorReason::None;
     if (!anchored_ || period_estimate == 0 || consecutive_real_only) {
         anchor_reason = ev == FgIntervalEstimator::Event::Discontinuity ? FgReanchorReason::CadenceChange
@@ -464,7 +468,10 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
             const FgTicks gen_span = lead_need - config_.first_image_budget;
             const FgTicks first_gen_lead = lead - gen_span;
             const FgTicks min_slack = period_estimate / 4 < 35000 ? period_estimate / 4 : 35000;
-            const FgTicks slack = slot / 2 > min_slack ? slot / 2 : min_slack;
+            // A short admission wait moves the budget origin even though the game cadence did not move.
+            // Allow at most one output slot for that movement. The hard deadline check still uses origin.
+            const FgTicks transient_wait = single_near_ceiling ? Clamp(origin - frame.arrival, 0, slot) : 0;
+            const FgTicks slack = (slot / 2 > min_slack ? slot / 2 : min_slack) + transient_wait;
             if (first_gen_lead < config_.bridge_and_submit_margin) {
                 anchor_reason = FgReanchorReason::GeneratedDeadline;
                 shortfall_run_ = 0;
@@ -550,7 +557,9 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
         period = period_estimate + correction;
         FgTicks floor = 0;
         if (!CheckedMul(static_cast<FgTicks>(n) + 1, w.min_interval, &floor)) return FgStatus::Overflow;
-        if (config_.adaptive_count && config_.fixed_refresh_period == 0 && n > 0 && diff < -deadband && period < floor) {
+        // If N=1 already fits with headroom, a lead correction may reach the floor without suspending FG.
+        if (config_.adaptive_count && config_.fixed_refresh_period == 0 && n > 0 && diff < -deadband && period < floor &&
+            !single_near_ceiling) {
             // Excess playout lead wants a shorter period than (n + 1) * min_interval allows; clamping at the VRR
             // floor would throttle an L=1 waitable caller to (n + 1) * min_interval forever. Require exit_intervals
             // consecutive frames so transient alternating jitter near the VRR ceiling does not step N down.

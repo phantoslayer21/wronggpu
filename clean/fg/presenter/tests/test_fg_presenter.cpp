@@ -1453,6 +1453,62 @@ void TestSchedulerReportsReanchorCauses() {
     CHECK(r.plans.back().reanchored && r.plans.back().reanchor_reason == FgReanchorReason::CadenceChange);
 }
 
+void TestRtOffTearingFloorReplay() {
+    g_case = "RT-off tearing floor replay";
+    constexpr FgTicks physical = 27778;
+    constexpr FgTicks configured = 28619;
+    struct ReplayResult {
+        uint32_t generating = 0;
+        uint32_t out_of_window = 0;
+        uint32_t reanchors = 0;
+        uint32_t lead_shortfall = 0;
+    };
+    const auto replay = [&](uint32_t requested, bool bounded) {
+        auto config = DefaultScheduler();
+        config.first_image_budget = 85000;
+        config.bridge_and_submit_margin = 2500;
+        config.display.min_interval = configured;
+        config.adaptive_count = true;
+        FgTargetScheduler scheduler(config);
+        CHECK(scheduler.BeginEpoch(1) == FgStatus::Ok);
+        ReplayResult result;
+        FgTicks arrival = kSecond;
+        for (uint32_t i = 1; i <= 512; ++i) {
+            // Advance at about 140 fps. Replay intermittent high p85 reports and one pair of queue
+            // waits per ten frames. These inputs model the host signals, not a measured GPU workload.
+            arrival += 73529 + (static_cast<FgTicks>(i % 7) - 3) * 600;
+            const FgTicks call_p85 = i % 64 >= 16 && i % 64 < 32 ? 21100 : 4000;
+            scheduler.SetDisplayMinInterval(bounded ? FgTearingScheduledMinInterval(configured, physical, call_p85)
+                                                    : std::max(configured, physical + call_p85));
+            FgGameFrame frame{1, i, arrival, requested, true, false,
+                              arrival + (i % 10 == 3 || i % 10 == 4 ? 35000 : 0)};
+            FgIntervalPlan plan;
+            CHECK(scheduler.Commit(frame, &plan) == FgStatus::Ok);
+            CHECK(plan.generated_count <= 1);
+            if (i <= 16) continue;
+            if (plan.generated_count > 0) {
+                ++result.generating;
+                if (plan.reanchored) ++result.reanchors;
+                if (plan.reanchor_reason == FgReanchorReason::LeadShortfall) ++result.lead_shortfall;
+            }
+            if (plan.real_only_reason == FgRealOnlyReason::OutOfVrrWindow) ++result.out_of_window;
+        }
+        return result;
+    };
+    const ReplayResult previous = replay(5, false);
+    const ReplayResult bounded = replay(5, true);
+    const ReplayResult x2 = replay(1, true);
+    std::printf("    RT-off replay previous/bounded: generating=%u/%u out-of-window=%u/%u "
+                "reanchors=%u/%u lead-shortfall=%u/%u\n",
+                previous.generating, bounded.generating, previous.out_of_window, bounded.out_of_window,
+                previous.reanchors, bounded.reanchors, previous.lead_shortfall, bounded.lead_shortfall);
+    CHECK(bounded.out_of_window < previous.out_of_window);
+    CHECK(bounded.generating >= 480);
+    CHECK(bounded.reanchors <= 2 && bounded.lead_shortfall == 0);
+    CHECK(bounded.generating == x2.generating && bounded.out_of_window == x2.out_of_window &&
+          bounded.reanchors == x2.reanchors);
+}
+
 void TestRc2SchedulerPacing() {
     g_case = "rc2 scheduler pacing";
     for (const bool adaptive : {true, false}) {
@@ -1735,6 +1791,7 @@ int main() {
     TestTearingSchedulerFitsPresenterThroughput();
     TestFixedGridCountCandidateRestartsItsStreak();
     TestSchedulerReportsReanchorCauses();
+    TestRtOffTearingFloorReplay();
     std::printf("test_fg_presenter: %d checks, %d failure(s)\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }
