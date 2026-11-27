@@ -1386,6 +1386,9 @@ void TestTearingSchedulerFitsPresenterThroughput() {
     g_case = "tearing scheduler fits measured presenter throughput";
     constexpr FgTicks physical = 27778;
     constexpr FgTicks configured = 28619;
+    CHECK(FgTearingScheduledMinInterval(configured, physical, 4500) == 32278);
+    CHECK(FgTearingScheduledMinInterval(configured, physical, 21100) == 34722);
+    CHECK(FgTearingScheduledMinInterval(configured, physical, 0) == configured);
     FgPresentCallPacing pacing;
     for (int i = 0; i < 32; ++i) pacing.Observe(i == 3 ? 870000 : 3900);
     CHECK(pacing.Estimate() == 3900);

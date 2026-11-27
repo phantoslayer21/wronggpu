@@ -322,7 +322,12 @@ private:
 };
 
 inline FgTicks FgTearingScheduledMinInterval(FgTicks configured, FgTicks physical_period, FgTicks call_estimate) {
-    return physical_period > 0 && call_estimate > 0 ? std::max(configured, physical_period + call_estimate) : configured;
+    if (physical_period <= 0 || call_estimate <= 0) return configured;
+    // Present returns can include waits outside routine dispatch work. Let those waits jitter the schedule
+    // without allowing a batch of blocked calls to redefine the display window. The issue guard still uses
+    // the actual previous completion and enforces the physical spacing independently.
+    const FgTicks call_allowance = std::min(call_estimate, physical_period / 4);
+    return std::max(configured, physical_period + call_allowance);
 }
 
 inline FgTearingPlanDecision FgPlanTearingImage(FgTicks target, bool real, FgTicks now, FgTicks earliest,
