@@ -135,6 +135,7 @@ inline FirstImageProducerWindow ProducerWindow(const wgfg::FgPresentStats& now, 
 struct OverflowDelivery {
     uint32_t cap = 0;
     uint32_t clean_windows = 0;
+    uint32_t bad_windows = 0;
     bool ready = false;
 
     void Observe(uint64_t offered, uint64_t missed, uint32_t active, uint32_t requested, bool overflow,
@@ -143,8 +144,17 @@ struct OverflowDelivery {
         if (missed * 100 >= offered) {
             ready = false;
             clean_windows = 0;
-            if (overflow && active > 1 && missed >= 2) cap = cap ? std::min(cap, active - 1) : active - 1;
+            const bool severe = missed >= 3 && missed * 100 >= offered * 8;
+            if (full_window) ++bad_windows;
+            if (overflow && active > 1 && (severe || bad_windows >= 2)) {
+                const uint32_t next = active - 1;
+                if (cap == 0 || next < cap) {
+                    cap = next;
+                    bad_windows = 0;
+                }
+            }
         } else if (full_window) {
+            bad_windows = 0;
             if (!has_headroom) {
                 ready = false;
                 clean_windows = 0;

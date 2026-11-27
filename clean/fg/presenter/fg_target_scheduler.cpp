@@ -503,7 +503,8 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
         last_reduction_reason_ = FgRealOnlyReason::LatencyCap;
     }
 
-    const bool track_playout = config_.consumed_admission && adaptive_vrr && n > 0;
+    const bool track_playout = config_.consumed_admission && adaptive_vrr && n > 0 &&
+                               period_estimate / 4 < w.min_interval;
     if (track_playout) {
         const auto nominal = period_estimate;
         if (playout_period_ == 0 || ev == FgIntervalEstimator::Event::Discontinuity) {
@@ -521,7 +522,12 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
     }
 
     const auto needed_lead = [&](std::uint32_t count) {
-        return RequiredLead(period_estimate, count == 0 && last_interval_count_ > 0 ? effective : count);
+        const auto budgeted = RequiredLead(period_estimate, count == 0 && last_interval_count_ > 0 ? effective : count);
+        // A little headroom at high base rates absorbs the wake and bridge jitter left
+        // after producer readiness. Admission still releases on consumption.
+        if (!track_playout || count == 0) return budgeted;
+        const auto reserve = std::min<FgTicks>(10000, period_estimate / 8);
+        return budgeted > kTicksMax - reserve ? kTicksMax : budgeted + reserve;
     };
 
     FgTicks lead_need = needed_lead(n);
@@ -566,7 +572,7 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
             // A missed submit margin still reanchors immediately. The soft VRR check tolerates
             // transient producer jitter and waits for three consecutive shortfalls.
             const FgTicks slot = period_estimate / (static_cast<FgTicks>(n) + 1);
-            const FgTicks gen_span = lead_need - config_.first_image_budget;
+            const FgTicks gen_span = RequiredLead(period_estimate, n) - config_.first_image_budget;
             const FgTicks first_gen_lead = lead - gen_span;
             const FgTicks min_slack = std::min(period_estimate / 4, adaptive_vrr ? FgTicks{25000} : FgTicks{35000});
             const FgTicks slack = adaptive_vrr ? Clamp(slot / 2, min_slack, 35000) : std::max(slot / 2, min_slack);
@@ -650,13 +656,12 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
         if (diff > deadband) {
             const bool recover_single = adaptive_vrr && n == 1 && period_estimate / 3 < w.min_interval &&
                                         shortfall_run_ > 0;
-            const bool recover_playout = track_playout && shortfall_run_ > 0;
-            const FgTicks limit = n == 0 || recover_playout ? period_estimate / 8
-                                                           : period_estimate / (recover_single ? 16 : 128);
-            correction = Clamp(diff / 8, 0, limit);
+            const FgTicks limit = track_playout ? period_estimate / 4 :
+                                  n == 0 ? period_estimate / 8 : period_estimate / (recover_single ? 16 : 128);
+            correction = Clamp(diff / (track_playout ? 2 : 8), 0, limit);
         } else if (diff < -deadband) {
             const FgTicks limit = diff < -period_estimate / 4 ? period_estimate / 4 : period_estimate / 8;
-            correction = Clamp(diff / 2, -limit, 0);
+            correction = Clamp(diff / (track_playout ? 8 : 2), -limit, 0);
         }
         period = period_estimate + correction;
         FgTicks floor = 0;

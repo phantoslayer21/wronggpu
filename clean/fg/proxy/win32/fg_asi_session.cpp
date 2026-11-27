@@ -295,7 +295,8 @@ struct FgAsiSessionHost::Impl {
     OverflowDelivery delivery;
     wgfg::FgPresentStats delivery_base;
     uint32_t delivery_frames = 0, delivery_requested = 0, delivery_active = 0;
-    bool delivery_overflow = false, guard_delivery = false;
+    uint32_t delivery_overflow_frames = 0, delivery_drain_frames = 0;
+    bool delivery_fill = false, guard_delivery = false;
     uint64_t delivery_cap_steps = 0;
     uint32_t cap_miss_windows = 0;
     uint32_t window_frames = 0;
@@ -1452,7 +1453,8 @@ struct FgAsiSessionHost::Impl {
         delivery = {};
         delivery_base = {};
         delivery_frames = delivery_requested = delivery_active = 0;
-        delivery_overflow = guard_delivery = false;
+        delivery_overflow_frames = delivery_drain_frames = 0;
+        delivery_fill = guard_delivery = false;
         delivery_cap_steps = 0;
         budget_limits = {};
         budget_grace_frames = 0;
@@ -1496,21 +1498,27 @@ struct FgAsiSessionHost::Impl {
             delivery_base = presenter->Stats();
             delivery_requested = generating ? requested : 0;
             delivery_frames = delivery_active = 0;
-            delivery_overflow = false;
+            delivery_overflow_frames = delivery_drain_frames = 0;
+            delivery_fill = false;
             return;
         }
         if (result.scheduled == 0) return;
+        if (delivery_drain_frames != 0) {
+            if (--delivery_drain_frames == 0) delivery_base = presenter->Stats();
+            return;
+        }
         ++delivery_frames;
         delivery_active = std::max(delivery_active, result.scheduled);
-        delivery_overflow |= result.fill_period > 0 ||
-                             session->LastReductionReason() == wgfg::FgRealOnlyReason::OutOfVrrWindow;
+        delivery_fill |= result.fill_period > 0;
+        if (session->LastReductionReason() == wgfg::FgRealOnlyReason::OutOfVrrWindow)
+            ++delivery_overflow_frames;
         const bool full = delivery_frames >= kBudgetWindow;
         if (!full && delivery_frames % kBudgetFastCheck != 0) return;
         const auto current = presenter->Stats();
         const auto offered = current.generated_scheduled - delivery_base.generated_scheduled;
         const auto missed = current.dropped_late - delivery_base.dropped_late +
                             current.dropped_pressure - delivery_base.dropped_pressure;
-        if (!full && (missed < 2 || missed * 100 < offered)) return;
+        if (!full && (missed < 3 || missed * 100 < offered * 8)) return;
         PacingSamples<kBudgetWindow> margins;
         {
             std::lock_guard<std::mutex> lock(trace_mu);
@@ -1524,16 +1532,20 @@ struct FgAsiSessionHost::Impl {
         const bool headroom = margins.Size() >= 12 && margins.Percentile(0.10) >= 10000;
         const auto old_cap = delivery.cap;
         const auto old_ready = delivery.ready;
-        delivery.Observe(offered, missed, delivery_active, requested, delivery_overflow || delivery.cap != 0,
+        const bool overflow = delivery_fill || delivery_overflow_frames * 2 > delivery_frames || delivery.cap != 0;
+        delivery.Observe(offered, missed, delivery_active, requested, overflow,
                          headroom, full);
         if (old_cap != delivery.cap) {
             if (delivery.cap != 0 && (old_cap == 0 || delivery.cap < old_cap)) ++delivery_cap_steps;
             ApplyCountCaps();
+            // Wait for both outstanding intervals to drain before attributing misses to the new count.
+            delivery_drain_frames = 2;
         }
         if (old_ready != delivery.ready) session->SetOverflowReady(delivery.ready);
         delivery_base = current;
         delivery_frames = delivery_active = 0;
-        delivery_overflow = false;
+        delivery_overflow_frames = 0;
+        delivery_fill = false;
     }
 
     void ControlLateness(bool consumed_admission) {

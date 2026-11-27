@@ -2645,12 +2645,17 @@ void TestOverflowDeliveryRequiresHeadroomAndStepsBackOnMisses() {
     CHECK(!policy.ready);
     policy.Observe(100, 0, 3, 5, true, true, true);
     CHECK(policy.ready);
-    policy.Observe(26, 2, 4, 5, true, true, false);
+    policy.Observe(26, 3, 4, 5, true, true, false);
     CHECK(!policy.ready && policy.cap == 3);
     for (int i = 0; i < 4; ++i) policy.Observe(100, 0, 3, 5, true, true, true);
     CHECK(policy.ready && policy.cap == 4);
     policy.Observe(60, 2, 3, 3, false, false, true);
     CHECK(policy.cap == 4);  // the overflow controller cannot lower a fitting row on that evidence
+    OverflowDelivery moderate;
+    moderate.Observe(90, 2, 3, 5, true, false, true);
+    CHECK(moderate.cap == 0);
+    moderate.Observe(90, 2, 3, 5, true, false, true);
+    CHECK(moderate.cap == 2);
 }
 
 void TestMissFloorDecaysAfterCleanWindows() {
