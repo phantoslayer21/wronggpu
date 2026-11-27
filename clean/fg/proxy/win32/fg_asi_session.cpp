@@ -2054,9 +2054,9 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
             if (!m.admission_timeout_logged)
                 m.Log("fg host: Present admission timed out; handing this frame to the real-only copy path");
             m.admission_timeout_logged = true;
-            // R3B-3: count persistent admission timeouts toward the session failure limit so a stalled presenter
-            // falls back to plain passthrough instead of looping create -> 100 ms stall -> destroy forever.
-            m.RecordSessionFailure();
+            // Only the first real-only startup window gets grace. Later stalls still count toward
+            // the failure limit so a persistent problem ends in passthrough.
+            if (!startup_grace) m.RecordSessionFailure();
             // Only one owner may present on the real chain. Discard queued work and drain the in-progress lease
             // before passing through. The next frame may create a session again unless the failure limit was reached.
             m.DestroySession("admission timeout");

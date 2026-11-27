@@ -1566,23 +1566,42 @@ void TestRc2LatencyAndPacing(Gpu& gpu, const std::string& dxil, bool run_latency
                 WgFgOptions off = Options(false, 2);
                 core.set_options(WG_FEAT_FRAME_GENERATION, 1, &off, &off);
                 submit_frame(nullptr, 0, true);
-                ComPtr<ID3D12Fence> startup_stall;
+                ComPtr<ID3D12Fence> startup_stall, startup_overrun;
                 CHECK(SUCCEEDED(gpu.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&startup_stall))));
-                if (startup_stall) {
+                CHECK(SUCCEEDED(gpu.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&startup_overrun))));
+                if (startup_stall && startup_overrun) {
                     submit_frame(startup_stall.Get(), 1, true);
                     std::thread release([fence = startup_stall]() {
-                        Sleep(120);
+                        WaitMsPrecise(120);
                         fence->Signal(1);
                     });
-                    submit_frame(nullptr, 0, false);
+                    submit_frame(startup_overrun.Get(), 1, false);
                     release.join();
-                    CHECK(gpu.Wait());
                 }
                 const FgAsiSessionStats start_st = host->Stats();
                 std::printf("    first real-only startup: timeouts=%llu sessions=%llu\n",
                             static_cast<unsigned long long>(start_st.admission_timeouts),
                             static_cast<unsigned long long>(start_st.sessions_created));
                 CHECK(start_st.admission_timeouts == 0 && start_st.sessions_created == 1);
+
+                // The next real frame stalls beyond the entire grace period. Recover the session
+                // and report the timeout, while preserving the three normal failure strikes.
+                if (startup_overrun) {
+                    std::thread release([fence = startup_overrun]() {
+                        WaitMsPrecise(220);
+                        fence->Signal(1);
+                    });
+                    submit_frame(nullptr, 0, false);
+                    release.join();
+                    CHECK(gpu.Wait());
+                }
+                const FgAsiSessionStats overrun_st = host->Stats();
+                std::printf("    startup grace overrun: timeouts=%llu failures=%llu destroyed=%llu\n",
+                            static_cast<unsigned long long>(overrun_st.admission_timeouts),
+                            static_cast<unsigned long long>(overrun_st.session_failures),
+                            static_cast<unsigned long long>(overrun_st.sessions_destroyed));
+                CHECK(overrun_st.admission_timeouts == 1 && overrun_st.session_failures == 0);
+                CHECK(overrun_st.sessions_destroyed == 1);
                 core.set_options(WG_FEAT_FRAME_GENERATION, 1, &on, &on);
 
                 // Three consecutive admission timeouts must hit kMaxSessionFailures and give up.
@@ -1606,7 +1625,7 @@ void TestRc2LatencyAndPacing(Gpu& gpu, const std::string& dxil, bool run_latency
                             static_cast<unsigned long long>(gave_st.admission_timeouts),
                             static_cast<unsigned long long>(gave_st.session_failures), gave_st.gave_up ? 1 : 0,
                             static_cast<unsigned long long>(gave_st.sessions_created), host->LiveStatus().phase);
-                CHECK(gave_st.admission_timeouts == 3);
+                CHECK(gave_st.admission_timeouts == 4);
                 CHECK(gave_st.session_failures == 3 && gave_st.gave_up);
                 CHECK(host->LiveStatus().phase == kFgPhaseStopped);
                 const uint64_t created_before = gave_st.sessions_created;
@@ -1614,7 +1633,7 @@ void TestRc2LatencyAndPacing(Gpu& gpu, const std::string& dxil, bool run_latency
                 for (int extra_f = 0; extra_f < 4; ++extra_f) submit_frame(nullptr, 0, true);
                 const FgAsiSessionStats after_st = host->Stats();
                 CHECK(after_st.sessions_created == created_before);
-                CHECK(after_st.admission_timeouts == 3 && after_st.gave_up);
+                CHECK(after_st.admission_timeouts == 4 && after_st.gave_up);
                 CHECK(host->LiveStatus().phase == kFgPhaseStopped);
 
                 CHECK(gpu.Wait());
