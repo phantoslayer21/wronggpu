@@ -283,7 +283,7 @@ struct FgAsiSessionHost::Impl {
     uint64_t generating_reanchors = 0;
     uint32_t last_generating_count = 0;
     uint32_t quiet_windows = 0;
-    wgfg::FgTicks budget_miss_floor = 0;
+    FirstImageBudgetLimits budget_limits;
     uint32_t budget_grace_frames = 0;
     uint32_t budget_lines = 0;
     bool have_last_preset = false;
@@ -1191,7 +1191,7 @@ struct FgAsiSessionHost::Impl {
         quiet_windows = 0;
         cap_miss_windows = 0;
         lateness_count_cap = 0;
-        budget_miss_floor = 0;
+        budget_limits = {};
         budget_grace_frames = 0;
         display_sample_at = 0;
         display_sample_frames = 0;
@@ -1286,7 +1286,7 @@ struct FgAsiSessionHost::Impl {
         if (clean_excess_check &&
             (d_origins.Empty() || d_orig_p90_pre > slack_threshold || budget <= kBudgetBase + 40000 ||
              (p_med_pre > 0 && p_med_pre > budget + 35000) ||
-             (budget_miss_floor > 0 && budget <= budget_miss_floor + 40000))) {
+             (budget_limits.miss_floor > 0 && budget <= budget_limits.miss_floor + 40000))) {
             return;
         }
 
@@ -1315,16 +1315,16 @@ struct FgAsiSessionHost::Impl {
         const wgfg::FgTicks d_p95 = d_origins.Percentile(0.95);
         // A rate observed after admission blocked is paced by the budget itself. Use producer readiness from
         // intervals with at most 0.5 ms admission/slot wait, and leave the dynamic cap unknown without such data.
-        const wgfg::FgTicks b_cap = FirstImageBudgetCap(unthrottled_readiness.Percentile(0.75, 8),
-                                                       st_latency_limit.load());
-        budget_miss_floor = std::min(budget_miss_floor, b_cap);
+        budget_limits.Observe(unthrottled_readiness.Size(), unthrottled_readiness.Percentile(0.75, 8),
+                              st_latency_limit.load());
 
         const uint64_t on_time = sched > missed ? sched - missed : 0;
+        const bool need_more_budget = missed * 50 > sched && (d_origins.Empty() || d_p95 + 2500 > budget);
+        if (need_more_budget) budget_limits.RecordMiss(budget);
+        const wgfg::FgTicks b_cap = budget_limits.Cap(kBudgetBase, d_p95);
         wgfg::FgTicks next = budget;
         if (missed * 50 > sched) {  // > 2% of scheduled generated images missed
             quiet_windows = 0;
-            const bool need_more_budget = d_origins.Empty() || d_p95 + 2500 > budget;
-            if (need_more_budget) budget_miss_floor = std::min(b_cap, std::max(budget_miss_floor, budget));
             wgfg::FgTicks want = budget;
             if (need_more_budget && budget < b_cap) {
                 const wgfg::FgTicks measured_target =
@@ -1357,12 +1357,12 @@ struct FgAsiSessionHost::Impl {
             }
         } else if (missed * 100 <= sched) {  // <= 1% missed: release count cap first, then ease latency back
             cap_miss_windows = 0;
-            const wgfg::FgTicks floor_b = FirstImageBudgetFloor(kBudgetBase, d_p95, budget_miss_floor);
-            const bool far_above_miss = budget_miss_floor == 0 || budget > budget_miss_floor + 7500;
+            const wgfg::FgTicks floor_b = budget_limits.EasingFloor(kBudgetBase, d_p95);
+            const bool far_above_miss = budget_limits.miss_floor == 0 || budget > budget_limits.miss_floor + 7500;
             const bool cadence_caught_up = p_med_pre == 0 || p_med_pre <= budget + 35000;
             const bool large_excess = !d_origins.Empty() && d_p90 <= slack_threshold && cadence_caught_up &&
                                       budget > floor_b + 30000 &&
-                                      (budget_miss_floor == 0 || budget > budget_miss_floor + 30000);
+                                      (budget_limits.miss_floor == 0 || budget > budget_limits.miss_floor + 30000);
             const uint32_t need_wins = large_excess ? 1u : (far_above_miss ? 2u : 5u);
             if (++quiet_windows >= need_wins) {
                 quiet_windows = 0;
@@ -2012,7 +2012,7 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
                     m.lateness_count_cap = 0;
                     m.cap_miss_windows = 0;
                     m.quiet_windows = 0;
-                    m.budget_miss_floor = 0;
+                    m.budget_limits = {};
                     m.budget_grace_frames = 0;
                     m.window_first = true;
                     m.window_frames = 0;

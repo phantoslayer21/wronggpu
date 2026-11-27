@@ -2413,6 +2413,22 @@ void TestFirstImageBudgetEasingFloor() {
     CHECK(FirstImageBudgetFloor(40000, 5000, 0) == 40000);
 }
 
+void TestBudgetCapNeedsReliableSamplesAndPreservesFloors() {
+    g_case = "pacing-budget-cap-confidence";
+    FirstImageBudgetLimits limits;
+    limits.Observe(6, 120000, 1);
+    CHECK(limits.Cap(40000, 120000) == 155000);
+    limits.Observe(5, 15000, 1);  // sparse fast samples during a warm-up transition
+    CHECK(limits.Cap(40000, 120000) == 155000);
+    limits.Observe(0, 0, 1);
+    CHECK(limits.Cap(40000, 120000) == 155000);
+    limits.RecordMiss(140000);
+    limits.Observe(6, 15000, 1);  // enough fast samples, but a retained miss sets the usable floor
+    CHECK(limits.miss_floor == 140000);
+    CHECK(limits.Cap(40000, 120000) == 145000);
+    CHECK(limits.Cap(40000, 158000) == 161000);
+}
+
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     bool gpu = false;
@@ -2433,6 +2449,7 @@ int main(int argc, char** argv) {
     TestPacingPercentileKeepsFrameOrder();
     TestReadyBudgetCapAfterSpeedup();
     TestFirstImageBudgetEasingFloor();
+    TestBudgetCapNeedsReliableSamplesAndPreservesFloors();
     std::printf("cpu: %d checks, %d failed\n", g_checks, g_failed);
     if (gpu) {
         g_case = "gpu-init";
