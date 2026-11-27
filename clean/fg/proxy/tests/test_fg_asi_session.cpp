@@ -1561,8 +1561,30 @@ void TestRc2LatencyAndPacing(Gpu& gpu, const std::string& dxil, bool run_latency
                     ++tok;
                 };
 
-                // First frame establishes the session description.
+                // Establish the first session with FG disabled, then hold its second real frame
+                // for longer than ordinary admission allows. A short startup stall must recover.
+                WgFgOptions off = Options(false, 2);
+                core.set_options(WG_FEAT_FRAME_GENERATION, 1, &off, &off);
                 submit_frame(nullptr, 0, true);
+                ComPtr<ID3D12Fence> startup_stall;
+                CHECK(SUCCEEDED(gpu.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&startup_stall))));
+                if (startup_stall) {
+                    submit_frame(startup_stall.Get(), 1, true);
+                    std::thread release([fence = startup_stall]() {
+                        Sleep(120);
+                        fence->Signal(1);
+                    });
+                    submit_frame(nullptr, 0, false);
+                    release.join();
+                    CHECK(gpu.Wait());
+                }
+                const FgAsiSessionStats start_st = host->Stats();
+                std::printf("    first real-only startup: timeouts=%llu sessions=%llu\n",
+                            static_cast<unsigned long long>(start_st.admission_timeouts),
+                            static_cast<unsigned long long>(start_st.sessions_created));
+                CHECK(start_st.admission_timeouts == 0 && start_st.sessions_created == 1);
+                core.set_options(WG_FEAT_FRAME_GENERATION, 1, &on, &on);
+
                 // Three consecutive admission timeouts must hit kMaxSessionFailures and give up.
                 for (int round = 0; round < 3; ++round) {
                     // Create the session cleanly on an unstalled queue before stalling the admitted frame.

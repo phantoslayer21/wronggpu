@@ -88,6 +88,7 @@ bool QueryMonitorRefresh(HWND hwnd, wgfg::FgTicks* period_out, uint32_t* hz_out)
 
 constexpr DWORD kDestroyWaitMs = 1000;
 constexpr DWORD kLatencyWaitMs = 100;
+constexpr DWORD kStartupAdmissionWaitMs = 140;
 constexpr uint32_t kCopyRing = 4;
 
 bool FileExists(const std::string& p) {
@@ -236,6 +237,8 @@ struct FgAsiSessionHost::Impl {
     uint64_t real_retires = 0;
     uint64_t credit_waits = 0;
     uint64_t admission_timeouts = 0;
+    uint64_t startup_present_base = 0;
+    wgfg::FgTicks startup_admission_until = 0;
     bool admission_timeout_logged = false;
     bool pending_copy = false;
     bool pending_copy_latency = false;
@@ -1136,6 +1139,7 @@ struct FgAsiSessionHost::Impl {
     }
 
     bool DestroySession(const char* why, bool final_detach = false) {
+        startup_admission_until = 0;
         if (!session) {
             exec_source.reset();
             win_source.reset();
@@ -1717,6 +1721,10 @@ struct FgAsiSessionHost::Impl {
         c->set_executor(&h);
         ++stats.sessions_created;
         const wgfg::FgPresenterChoice chosen = win_source->LastSelection().chosen;
+        if (stats.sessions_created == 1 && chosen == wgfg::FgPresenterChoice::DxgiFlipTearing) {
+            startup_present_base = st_presents.load();
+            startup_admission_until = wgfg::FgInterruptNow() + 10000000;  // first second on the first chain
+        }
         tearing_schedule_base = base.min_interval;
         tearing_physical_period = chosen == wgfg::FgPresenterChoice::DxgiFlipTearing ? base.display.refresh_period : 0;
         tearing_schedule_interval = tearing_physical_period > 0 ? tearing_schedule_base : 0;
@@ -2033,7 +2041,13 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
         // frame 1's target/slip) and BEFORE any host credit/slot wait so throttling never perturbs the cadence estimate.
         const wgfg::FgTicks t_arrival = wgfg::FgInterruptNow();
         if (m.session_draining) m.DestroySession("previous interval drain");
-        if (m.session && !m.session_draining && desc && !m.WaitForCreditRoom(kLatencyWaitMs, consume)) {
+        // A cold wrapped Present can hold up the first real-only queue. Restrict the extra wait
+        // to the first four Presents and end it as soon as the game enables generation.
+        if (fg_enabled) m.startup_admission_until = 0;
+        const bool startup_grace = t_arrival < m.startup_admission_until &&
+                                   m.st_presents.load() - m.startup_present_base < 4;
+        const DWORD admission_wait = startup_grace ? kStartupAdmissionWaitMs : kLatencyWaitMs;
+        if (m.session && !m.session_draining && desc && !m.WaitForCreditRoom(admission_wait, consume)) {
             if (!m.admission_timeout_logged)
                 m.Log("fg host: Present admission timed out; handing this frame to the real-only copy path");
             m.admission_timeout_logged = true;
