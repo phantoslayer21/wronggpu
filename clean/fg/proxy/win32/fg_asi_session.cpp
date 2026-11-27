@@ -37,13 +37,11 @@ namespace {
 
 constexpr uint32_t kMaxSessionFailures = 3;
 // Lateness control: first-image budget starts at 4.0 ms and tracks measured GPU-bound readiness
-// (t_first_gen_ready / t_real_ready - t_after_wait) within a dynamic period-bounded ceiling
-// clamp(min(latency_limit, 2) * median_base_dt + 3.0 ms, 8.0 ms, 32.0 ms). Uses truthful generated_scheduled as the
+// (t_first_gen_ready / t_real_ready - t_after_wait) within a dynamic GPU-readiness ceiling
+// clamp(min(latency_limit, 2) * ready_lag + 3.5 ms, 8.0 ms, 32.0 ms). Uses truthful generated_scheduled as the
 // denominator and a miss-floor holdoff (TCP ssthresh style) to ease latency down cleanly without sawtooth oscillation.
 // Switching to a faster preset (e.g. A/B -> C) resets the budget immediately (N-B7).
 constexpr wgfg::FgTicks kBudgetBase = 40000;
-constexpr wgfg::FgTicks kBudgetCapMin = 80000;
-constexpr wgfg::FgTicks kBudgetCapMax = 320000;
 constexpr wgfg::FgTicks kBudgetStepMin = 6000;
 constexpr wgfg::FgTicks kBudgetEaseFast = 5000;
 constexpr wgfg::FgTicks kBudgetEaseProbe = 2500;
@@ -1194,6 +1192,7 @@ struct FgAsiSessionHost::Impl {
         std::vector<int64_t> base_dts;
         std::vector<int64_t> d_origins;
         std::vector<int64_t> d_arrivals;
+        std::vector<int64_t> unthrottled_readiness;
         {
             std::lock_guard<std::mutex> lock(trace_mu);
             const uint32_t want_scan = std::max<uint32_t>(window_frames, 12u);
@@ -1222,6 +1221,8 @@ struct FgAsiSessionHost::Impl {
                             const int64_t d_arr =
                                 tr.t_arrival > 0 && ready_ts > tr.t_arrival ? ready_ts - tr.t_arrival : d;
                             d_arrivals.push_back(d_arr <= 1000000 ? d_arr : d);
+                            if (tr.t_arrival > 0 && tr.t_after_wait - tr.t_arrival <= 5000)
+                                unthrottled_readiness.push_back(d);
                         }
                     }
                 }
@@ -1283,12 +1284,12 @@ struct FgAsiSessionHost::Impl {
         const wgfg::FgTicks d_p75 = Percentile(d_eff_recent, 0.75);
         const wgfg::FgTicks d_p90 = d_orig_p90_pre;
         const wgfg::FgTicks d_eff_p90 = Percentile(d_effs, 0.90);
-        const uint32_t depth = std::min<uint32_t>(std::max<uint32_t>(st_latency_limit.load(), 1u), 2u);
-        wgfg::FgTicks b_cap = kBudgetCapMin;
-        if (p_med > 0) {
-            const wgfg::FgTicks raw_cap = static_cast<wgfg::FgTicks>(depth) * p_med + 35000;
-            b_cap = std::max(kBudgetCapMin, std::min(kBudgetCapMax, raw_cap));
-        }
+        // A rate observed after admission blocked is paced by the budget itself. Use producer readiness from
+        // intervals with at most 0.5 ms admission/slot wait, and leave the dynamic cap unknown without such data.
+        if (unthrottled_readiness.size() > 8)
+            unthrottled_readiness.erase(unthrottled_readiness.begin(), unthrottled_readiness.end() - 8);
+        const wgfg::FgTicks b_cap = FirstImageBudgetCap(Percentile(unthrottled_readiness, 0.75),
+                                                       st_latency_limit.load());
 
         const uint64_t on_time = sched > missed ? sched - missed : 0;
         wgfg::FgTicks next = budget;
@@ -1375,6 +1376,7 @@ struct FgAsiSessionHost::Impl {
             quiet_windows = 0;
             cap_miss_windows = 0;
         }
+        next = std::min(next, b_cap);
         if (next == budget || !session->SetFirstImageBudget(next)) return;
         if (next > budget) budget_grace_frames = 2;
         if (budget_lines < 64) {

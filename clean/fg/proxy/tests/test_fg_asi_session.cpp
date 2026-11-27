@@ -2321,6 +2321,15 @@ void TestPacingPercentileKeepsFrameOrder() {
     CHECK(origins == chronological);
 }
 
+void TestReadyBudgetCapAfterSpeedup() {
+    g_case = "pacing-budget-cap";
+    CHECK(FirstImageBudgetCap(250000, 1) == 285000);
+    CHECK(FirstImageBudgetCap(70000, 1) == 105000);
+    CHECK(FirstImageBudgetCap(70000, 2) == 175000);
+    CHECK(FirstImageBudgetCap(10000, 1) == 80000);
+    CHECK(FirstImageBudgetCap(0, 1) == 320000);
+}
+
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     bool gpu = false;
@@ -2339,6 +2348,7 @@ int main(int argc, char** argv) {
     TestFlags();
     TestPanel(scratch);
     TestPacingPercentileKeepsFrameOrder();
+    TestReadyBudgetCapAfterSpeedup();
     std::printf("cpu: %d checks, %d failed\n", g_checks, g_failed);
     if (gpu) {
         g_case = "gpu-init";
