@@ -2513,6 +2513,14 @@ void TestPacingSamplesRemainBounded() {
     if (samples.Size() == 2) CHECK(samples.Percentile(1.0) == 200);
 }
 
+void TestPresenterAdmissionHasAHardSlotBound() {
+    g_case = "pacing-presenter-hard-bound";
+    CHECK(!PresenterAdmissionAtCapacity(19, 20, false));
+    CHECK(PresenterAdmissionAtCapacity(20, 20, false));
+    CHECK(PresenterAdmissionAtCapacity(2, 20, true));
+    CHECK(!PresenterAdmissionAtCapacity(1, 20, true));
+}
+
 void TestReadyBudgetCapAfterSpeedup() {
     g_case = "pacing-budget-cap";
     CHECK(FirstImageBudgetCap(250000, 1) == 285000);
@@ -2642,6 +2650,7 @@ int main(int argc, char** argv) {
     TestPanel(scratch);
     TestPacingPercentileKeepsFrameOrder();
     TestPacingSamplesRemainBounded();
+    TestPresenterAdmissionHasAHardSlotBound();
     TestReadyBudgetCapAfterSpeedup();
     TestFirstImageBudgetEasingFloor();
     TestBudgetCapNeedsReliableSamplesAndPreservesFloors();

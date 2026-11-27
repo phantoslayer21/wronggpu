@@ -52,7 +52,6 @@ constexpr uint32_t kBudgetWindow = 30;
 // Presenter slots: enough for three intervals in flight at 6x (3 * 6 = 18) plus the one on screen and real reserve.
 constexpr uint32_t kPresenterSlots = 20;
 constexpr uint32_t kPresenterMaxPendingIntervals = 3;
-constexpr size_t kPresenterAdmissionDepth = 2;  // head interval and one following interval
 enum class AdmissionMode { Policy, Present, Consumed };
 // Back-pressure: free presenter slots a game frame waits for (its real image and the reserve), at most 50 ms
 constexpr uint32_t kBackPressureSlots = 2;
@@ -663,8 +662,9 @@ struct FgAsiSessionHost::Impl {
 
     bool PresenterAdmissionFullLocked(bool consume) const {
         if (presenter_intervals.size() < kPresenterAdmissionDepth) return false;
-        return consume || std::any_of(presenter_intervals.begin(), presenter_intervals.end(),
-                                      [](const auto& interval) { return interval.consumed; });
+        const bool has_consumed = consume || std::any_of(presenter_intervals.begin(), presenter_intervals.end(),
+                                                       [](const auto& interval) { return interval.consumed; });
+        return PresenterAdmissionAtCapacity(presenter_intervals.size(), kPresenterSlots, has_consumed);
     }
 
     bool WaitForCreditRoom(uint32_t max_ms, bool consume) {
@@ -1711,7 +1711,7 @@ FgAsiSessionHost::FgAsiSessionHost(const FgAsiSessionConfig& cfg, std::unique_pt
     : impl_(new Impl()) {
     impl_->cfg = cfg;
     impl_->pending_admissions.reserve(16);
-    impl_->presenter_intervals.reserve(kPresenterSlots + 1);
+    impl_->presenter_intervals.reserve(kPresenterSlots);
     char admission[16] = {};
     const DWORD mode_length = GetEnvironmentVariableA("WG_FG_ADMISSION", admission, sizeof(admission));
     if (mode_length == 7 && std::strcmp(admission, "present") == 0) {

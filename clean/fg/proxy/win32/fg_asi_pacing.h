@@ -45,6 +45,12 @@ private:
 constexpr int64_t kFirstImageBudgetMax = 320000;  // 32 ms
 constexpr int64_t kFirstImageMissMargin = 5000;
 
+constexpr std::size_t kPresenterAdmissionDepth = 2;  // head and one following interval
+
+constexpr bool PresenterAdmissionAtCapacity(std::size_t intervals, std::size_t slots, bool has_consumed_interval) {
+    return intervals >= slots || (has_consumed_interval && intervals >= kPresenterAdmissionDepth);
+}
+
 constexpr int64_t FirstImageBudgetCap(int64_t ready_lag, uint32_t latency_limit) {
     constexpr int64_t min_cap = 80000;   // 8 ms
     if (ready_lag <= 0) return kFirstImageBudgetMax;
