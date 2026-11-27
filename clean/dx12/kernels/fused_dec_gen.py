@@ -107,14 +107,14 @@ def generate(text):
 
 def main():
     s = generate(open(SRC, encoding="utf-8").read())
-    old = open(DST, encoding="utf-8").read() if os.path.exists(DST) else None
+    old = open(DST, encoding="utf-8", newline="").read() if os.path.exists(DST) else None
     if old == s:
         print("fused_dec.hlsl up to date")
         return 0
     if "--check" in sys.argv:
         print("fused_dec.hlsl is STALE (run fused_dec_gen.py)")
         return 1
-    with open(DST, "w", encoding="utf-8") as f:
+    with open(DST, "w", encoding="utf-8", newline="\n") as f:
         f.write(s)
     print("fused_dec.hlsl regenerated")
     return 0
