@@ -468,10 +468,9 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
             const FgTicks gen_span = lead_need - config_.first_image_budget;
             const FgTicks first_gen_lead = lead - gen_span;
             const FgTicks min_slack = period_estimate / 4 < 35000 ? period_estimate / 4 : 35000;
-            // A short admission wait moves the budget origin even though the game cadence did not move.
-            // Allow at most one output slot for that movement. The hard deadline check still uses origin.
-            const FgTicks transient_wait = single_near_ceiling ? Clamp(origin - frame.arrival, 0, slot) : 0;
-            const FgTicks slack = (slot / 2 > min_slack ? slot / 2 : min_slack) + transient_wait;
+            // A stable game cadence does not restore lead spent waiting for admission. Use the regular
+            // jitter allowance against the post-wait origin, including at the single-image ceiling.
+            const FgTicks slack = slot / 2 > min_slack ? slot / 2 : min_slack;
             if (first_gen_lead < config_.bridge_and_submit_margin) {
                 anchor_reason = FgReanchorReason::GeneratedDeadline;
                 shortfall_run_ = 0;

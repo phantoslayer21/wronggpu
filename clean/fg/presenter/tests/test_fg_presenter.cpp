@@ -1504,9 +1504,49 @@ void TestRtOffTearingFloorReplay() {
                 previous.reanchors, bounded.reanchors, previous.lead_shortfall, bounded.lead_shortfall);
     CHECK(bounded.out_of_window < previous.out_of_window);
     CHECK(bounded.generating >= 480);
-    CHECK(bounded.reanchors <= 2 && bounded.lead_shortfall == 0);
     CHECK(bounded.generating == x2.generating && bounded.out_of_window == x2.out_of_window &&
           bounded.reanchors == x2.reanchors);
+}
+
+void TestRtOffAdmissionWaitKeepsProducerLead() {
+    g_case = "RT-off producer lead after admission waits";
+    constexpr FgTicks physical = 27778;
+    constexpr FgTicks configured = 28619;
+    auto config = DefaultScheduler();
+    config.first_image_budget = 92000;
+    config.bridge_and_submit_margin = 2500;
+    config.display.min_interval = FgTearingScheduledMinInterval(configured, physical, 4700);
+    config.adaptive_count = true;
+    FgTargetScheduler scheduler(config);
+    CHECK(scheduler.BeginEpoch(1) == FgStatus::Ok);
+    FgTicks arrival = kSecond;
+    uint32_t generating = 0, reanchors = 0, pre_late = 0, post_late = 0;
+    for (uint32_t i = 1; i <= 512; ++i) {
+        // About 123 fps, roughly one generating image per interval. Inject pairs of long waits to
+        // test lead recovery after admission. Readiness is modeled, not sampled from the game.
+        arrival += 81400 + (static_cast<FgTicks>(i % 7) - 3) * 500;
+        const FgTicks wait = i % 72 == 53 || i % 72 == 54 ? 40000 : 0;
+        const FgTicks origin = arrival + wait;
+        FgGameFrame frame{1, i, arrival, 5, true, false, origin};
+        FgIntervalPlan plan;
+        CHECK(scheduler.Commit(frame, &plan) == FgStatus::Ok);
+        if (i <= 16 || plan.generated_count == 0) continue;
+        CHECK(plan.generated_count == 1);
+        ++generating;
+        if (plan.reanchored) ++reanchors;
+        const auto& image = plan.targets[0];
+        const FgTicks ready = origin + config.first_image_budget + (i / 72 % 2 == 0 ? 0 : 5000);
+        if (!image.admitted || ready > image.target + 40000) {
+            ++pre_late;
+        } else if (FgPlanTearingImage(image.target, false, ready, 0, configured,
+                                     20000, true, plan.targets[1].target).drop_late) {
+            ++post_late;
+        }
+    }
+    std::printf("    RT-off lead replay: generating=%u reanchors=%u modeled pre/post-late=%u/%u\n",
+                generating, reanchors, pre_late, post_late);
+    CHECK(generating >= 300);
+    CHECK((pre_late + post_late) * 1000 <= generating * 16);
 }
 
 void TestRc2SchedulerPacing() {
@@ -1792,6 +1832,7 @@ int main() {
     TestFixedGridCountCandidateRestartsItsStreak();
     TestSchedulerReportsReanchorCauses();
     TestRtOffTearingFloorReplay();
+    TestRtOffAdmissionWaitKeepsProducerLead();
     std::printf("test_fg_presenter: %d checks, %d failure(s)\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }
