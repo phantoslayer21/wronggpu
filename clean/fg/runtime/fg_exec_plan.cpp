@@ -2,6 +2,8 @@
 // Frame generation (issue #96, F7b): the D3D12 executor's CPU side. See fg_exec_plan.h.
 #include "fg_exec_plan.h"
 
+#include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 
@@ -466,6 +468,60 @@ void FgExecHost::EndFrame(std::vector<uint32_t>* pairs) {
         pairs->push_back(kRoleUmp);
     }
     in_frame_ = false;
+}
+
+bool FgParseUiCompositeEnv(const char* value) {
+    if (!value) return true;
+    std::string s;
+    for (const char* p = value; *p; ++p) {
+        const unsigned char c = static_cast<unsigned char>(*p);
+        if (!std::isspace(c)) s.push_back(static_cast<char>(std::tolower(c)));
+    }
+    if (s.empty()) return true;
+    return !(s == "off" || s == "0" || s == "false" || s == "no");
+}
+
+float FgUiPixelDiff(const float back_rgb[3], const float hudless_rgb[3]) {
+    for (int c = 0; c < 3; ++c)
+        if (!std::isfinite(back_rgb[c]) || !std::isfinite(hudless_rgb[c])) return 0.0f;
+    float mx = 0.0f, sb = 0.0f, sh = 0.0f;
+    for (int c = 0; c < 3; ++c) {
+        mx = std::max(mx, std::fabs(back_rgb[c] - hudless_rgb[c]));
+        sb = std::max(sb, std::fabs(back_rgb[c]));
+        sh = std::max(sh, std::fabs(hudless_rgb[c]));
+    }
+    const float scale = std::max(1.0f, std::max(sb, sh));
+    return mx / scale;
+}
+
+void FgUiMaskCpu(const float* back_rgb, const float* hudless_rgb, uint32_t w, uint32_t h,
+                 std::vector<float>* mask_out) {
+    if (!mask_out) return;
+    const size_t n = static_cast<size_t>(w) * h;
+    mask_out->assign(n, 0.0f);
+    if (!back_rgb || !hudless_rgb || w == 0 || h == 0) return;
+    std::vector<float> diff(n, 0.0f);
+    for (size_t i = 0; i < n; ++i) diff[i] = FgUiPixelDiff(back_rgb + 3 * i, hudless_rgb + 3 * i);
+    auto at = [&](int x, int y) -> float {
+        const uint32_t cx = static_cast<uint32_t>(std::clamp(x, 0, static_cast<int>(w) - 1));
+        const uint32_t cy = static_cast<uint32_t>(std::clamp(y, 0, static_cast<int>(h) - 1));
+        return diff[static_cast<size_t>(cy) * w + cx];
+    };
+    const float t_lo = 6.0f / 255.0f;
+    const float inv_span = 255.0f / 18.0f;
+    for (uint32_t y = 0; y < h; ++y) {
+        for (uint32_t x = 0; x < w; ++x) {
+            const int ix = static_cast<int>(x), iy = static_cast<int>(y);
+            const float d0 = at(ix, iy);
+            const float hv = std::max(std::min(at(ix - 1, iy), at(ix + 1, iy)),
+                                      std::min(at(ix, iy - 1), at(ix, iy + 1)));
+            const float dg = std::max(std::min(at(ix - 1, iy - 1), at(ix + 1, iy + 1)),
+                                      std::min(at(ix + 1, iy - 1), at(ix - 1, iy + 1)));
+            const float cl = std::max(d0, std::max(hv, dg));
+            const float t = std::clamp((cl - t_lo) * inv_span, 0.0f, 1.0f);
+            (*mask_out)[static_cast<size_t>(y) * w + x] = t * t * (3.0f - 2.0f * t);
+        }
+    }
 }
 
 }  // namespace wgfg
