@@ -141,10 +141,9 @@ public:
     const FgSchedulerConfig& Config() const { return config_; }
     // The arrival -> first generated target budget, changed while the timeline runs (a host that sees generated
     // images finish after their display time gives the GPU more of it). Clamped to [0, max_lead]. The next commit
-    // needs the new lead: a larger lead than the timeline has re-anchors once (one real-only interval), a smaller one
-    // is reached by the bounded lead correction.
+    // uses the new lead. Sustained shortfall can re-anchor and excess lead drains through bounded correction.
     void SetFirstImageBudget(FgTicks budget);
-    // Optional upper cap on scheduled generated count (O-A7: step down when misses persist at the 8 ms budget cap).
+    // Optional upper cap on scheduled generated count when producer misses persist.
     // 0 clears the override.
     void SetMaxGeneratedCap(std::uint32_t cap);
     std::uint32_t MaxGeneratedCap() const { return max_generated_cap_; }

@@ -38,9 +38,9 @@
 //    puts at the game present plus a first-image budget. A game whose GPU still renders the frame it just presented
 //    (GPU bound, frames queued) finishes most images after a fixed short budget, so they are dropped and only the game
 //    frames reach the display. The host therefore measures, every 60 generating frames, the share of generated images
-//    that missed (the presenter's late and no-slot drops) and raises the budget (4 ms at start, up to 30 ms) while
-//    more than 1 in 10 miss; after 16 windows with 1 in 50 or fewer it eases back by 0.5 ms. A larger budget adds the
-//    same latency to every frame; each change is logged. The presenter has 12 slots (three intervals in flight at 6x).
+//    that missed the producer deadline. The budget starts at 4 ms and adapts to producer readiness, up to a ceiling
+//    computed from GPU readiness and the game's latency limit. Clean windows ease it toward the recent slow tail
+//    and the last producer miss. Each change is logged. The presenter has 20 image slots.
 //  - PRESENT QUEUE. A chain created while FG is taken is created on a direct queue of the host's own (high priority,
 //    CreationQueue), not on the game's queue: the presenter's copies and presents (and the copy path's) then never wait
 //    behind the game's rendering of its next frame, which in a GPU-bound game would hold every generated image until

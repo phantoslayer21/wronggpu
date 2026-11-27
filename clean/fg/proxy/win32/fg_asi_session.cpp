@@ -275,10 +275,10 @@ struct FgAsiSessionHost::Impl {
     uint32_t window_frames = 0;
     bool window_first = true;
     wgfg::FgPresentStats window_base;
+    uint64_t generating_reanchors = 0;
+    uint32_t last_generating_count = 0;
     uint32_t quiet_windows = 0;
     wgfg::FgTicks budget_miss_floor = 0;
-    bool budget_probing = false;
-    uint32_t budget_ease_holdoff = 4;
     uint32_t budget_grace_frames = 0;
     uint32_t budget_lines = 0;
     bool have_last_preset = false;
@@ -419,6 +419,10 @@ struct FgAsiSessionHost::Impl {
 
     static void OnPlanThunk(void* ctx, const wgfg::FgIntervalPlan& plan) {
         Impl& m = *static_cast<Impl*>(ctx);
+        if (plan.generated_count > 0) {
+            m.last_generating_count = plan.generated_count;
+            if (plan.reanchored) ++m.generating_reanchors;
+        }
         IntervalTrace tr = m.next_trace;
         tr.frame_token = plan.real_frame_id;
         tr.interval_id = plan.interval_id;
@@ -1117,7 +1121,8 @@ struct FgAsiSessionHost::Impl {
             }
             reasons += "; back-pressure waits=" + std::to_string(back_pressure_waits) +
                        " credit_waits=" + std::to_string(cw) + " real_retires=" + std::to_string(ret) +
-                       " admission_timeouts=" + std::to_string(timeouts) + " latency_limit=" + std::to_string(lim);
+                       " admission_timeouts=" + std::to_string(timeouts) + " latency_limit=" + std::to_string(lim) +
+                       " generating_reanchors=" + std::to_string(generating_reanchors);
             Log(reasons);
         }
         const wgfg::FgSessionResult r = session->Destroy();
@@ -1131,12 +1136,12 @@ struct FgAsiSessionHost::Impl {
         window_frames = 0;
         window_first = true;
         window_base = wgfg::FgPresentStats{};
+        generating_reanchors = 0;
+        last_generating_count = 0;
         quiet_windows = 0;
         cap_miss_windows = 0;
         lateness_count_cap = 0;
         budget_miss_floor = 0;
-        budget_probing = false;
-        budget_ease_holdoff = 4;
         budget_grace_frames = 0;
         display_sample_at = 0;
         display_sample_frames = 0;
@@ -1183,7 +1188,7 @@ struct FgAsiSessionHost::Impl {
         const uint64_t late = st.dropped_late - window_base.dropped_late;
         const uint64_t pressure = st.dropped_pressure - window_base.dropped_pressure;
         const uint64_t skipped = st.display_skipped_generated - window_base.display_skipped_generated;
-        const uint64_t missed = late + pressure + skipped;
+        const uint64_t missed = st.generated_late_pre_queue - window_base.generated_late_pre_queue;
         const bool severe_storm = fast_probe && sched >= 6ull && missed * 5ull > sched;
         const bool clean_excess_check = excess_probe && !severe_storm && sched >= 8ull && missed == 0;
         if (!full_window && !severe_storm && !clean_excess_check) return;
@@ -1279,11 +1284,7 @@ struct FgAsiSessionHost::Impl {
         if (missed * 50 > sched) {  // > 2% of scheduled generated images missed
             quiet_windows = 0;
             const bool need_more_budget = d_origins.empty() || d_p95 + 2500 > budget;
-            if (need_more_budget) {
-                budget_miss_floor = budget_probing ? std::max(budget_miss_floor, budget) : budget;
-                budget_ease_holdoff = budget_probing ? std::min<uint32_t>(16u, budget_ease_holdoff * 2u) : 5u;
-            }
-            budget_probing = false;
+            if (need_more_budget) budget_miss_floor = std::min(b_cap, std::max(budget_miss_floor, budget));
             wgfg::FgTicks want = budget;
             if (need_more_budget && budget < b_cap) {
                 const wgfg::FgTicks measured_target =
@@ -1298,8 +1299,7 @@ struct FgAsiSessionHost::Impl {
                 // > 5% misses persist at the dynamic ceiling (or budget is no longer limiting): step count cap down
                 // only when requesting > 1 generated image (capping N=1 to 1 is a no-op that blocks easing).
                 cap_miss_windows = 0;
-                const uint32_t req_n = st_req_count.load();
-                const uint32_t cur_n = lateness_count_cap ? lateness_count_cap : req_n;
+                const uint32_t cur_n = last_generating_count;
                 if (cur_n > 1) {
                     const uint32_t target_cap = cur_n - 1;
                     if (lateness_count_cap == 0 || target_cap < lateness_count_cap) {
@@ -1317,14 +1317,13 @@ struct FgAsiSessionHost::Impl {
             }
         } else if (missed * 100 <= sched) {  // <= 1% missed: release count cap first, then ease latency back
             cap_miss_windows = 0;
-            budget_probing = false;
             const wgfg::FgTicks floor_b = FirstImageBudgetFloor(kBudgetBase, d_p95, budget_miss_floor);
             const bool far_above_miss = budget_miss_floor == 0 || budget > budget_miss_floor + 7500;
             const bool cadence_caught_up = p_med_pre == 0 || p_med_pre <= budget + 35000;
             const bool large_excess = !d_origins.empty() && d_p90 <= slack_threshold && cadence_caught_up &&
                                       budget > floor_b + 30000 &&
                                       (budget_miss_floor == 0 || budget > budget_miss_floor + 30000);
-            const uint32_t need_wins = large_excess ? 1u : (far_above_miss ? 2u : budget_ease_holdoff);
+            const uint32_t need_wins = large_excess ? 1u : (far_above_miss ? 2u : 5u);
             if (++quiet_windows >= need_wins) {
                 quiet_windows = 0;
                 if (lateness_count_cap > 0) {
@@ -1345,10 +1344,7 @@ struct FgAsiSessionHost::Impl {
                         large_excess ? std::min<wgfg::FgTicks>(excess_cap, std::max(kBudgetEaseFast, (budget - floor_b) / 2))
                                      : (far_above_miss ? kBudgetEaseFast : kBudgetEaseProbe);
                     const wgfg::FgTicks nxt = std::max(floor_b, budget - step);
-                    if (nxt + 500 < budget) {
-                        if (budget_miss_floor > 0 && nxt <= budget_miss_floor + 2000) budget_probing = true;
-                        next = nxt;
-                    }
+                    if (nxt + 500 < budget) next = nxt;
                 }
             }
         } else {
@@ -1357,17 +1353,19 @@ struct FgAsiSessionHost::Impl {
         }
         next = std::min(next, b_cap);
         if (next == budget || !session->SetFirstImageBudget(next)) return;
-        if (next > budget) budget_grace_frames = 2;
+        if (next > budget) budget_grace_frames = p_med >= 250000 ? 4u : 2u;
         if (budget_lines < 64) {
             ++budget_lines;
             char line[352];
             std::snprintf(line, sizeof line,
                           "fg host: generated on time %llu of %llu scheduled (disp %llu, late %llu, pressure %llu, "
-                          "skip %llu) in %u frames (p_med=%.1fms d_p50=%.1fms d_p90=%.1fms d_p95=%.1fms cap=%.1fms): "
+                          "skip %llu, producer_late %llu) in %u frames "
+                          "(p_med=%.1fms d_p50=%.1fms d_p90=%.1fms d_p95=%.1fms cap=%.1fms): "
                           "first-image budget %.1f -> %.1f ms%s",
                           static_cast<unsigned long long>(on_time), static_cast<unsigned long long>(sched),
                           static_cast<unsigned long long>(disp_g), static_cast<unsigned long long>(late),
                           static_cast<unsigned long long>(pressure), static_cast<unsigned long long>(skipped),
+                          static_cast<unsigned long long>(missed),
                           evaluated_frames, p_med / 10000.0, d_p50 / 10000.0, d_p90 / 10000.0, d_p95 / 10000.0,
                           b_cap / 10000.0, budget / 10000.0, next / 10000.0,
                           budget_lines == 64 ? " (the last budget line of this run)" : "");
@@ -1956,10 +1954,11 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
                     m.cap_miss_windows = 0;
                     m.quiet_windows = 0;
                     m.budget_miss_floor = 0;
-                    m.budget_probing = false;
-                    m.budget_ease_holdoff = 4;
                     m.budget_grace_frames = 0;
+                    m.window_first = true;
+                    m.window_frames = 0;
                     if (m.session) {
+                        if (const auto* presenter = m.session->Presenter()) m.window_base = presenter->Stats();
                         m.session->SetFirstImageBudget(m.budget);
                         m.session->SetMaxGeneratedCap(0);
                     }

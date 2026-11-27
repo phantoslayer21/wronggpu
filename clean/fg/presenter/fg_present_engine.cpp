@@ -191,7 +191,10 @@ void FgPresentEngine::Drop(std::uint32_t slot, FgDropReason reason, bool hold_le
             ++stats_.dropped_late;
             if (!s.real) {
                 if (post_queue) ++stats_.generated_dropped_post_queue;
-                else ++stats_.generated_dropped_pre_queue;
+                else {
+                    ++stats_.generated_dropped_pre_queue;
+                    ++stats_.generated_late_pre_queue;
+                }
             }
             break;
         case FgDropReason::Pressure:
@@ -329,6 +332,7 @@ FgStatus FgPresentEngine::BeginInterval(const FgIntervalPlan& plan, FgTicks now,
             if (trace_fn_) trace_fn_(trace_ctx_, plan.interval_id, plan.real_frame_id, t.index, false, 3u, now, t.target);
             ++stats_.dropped_late;
             ++stats_.generated_dropped_pre_queue;
+            ++stats_.generated_late_pre_queue;
             continue;
         }
         const int g = FreeSlots() > config_.real_reserve && pending_intervals < config_.max_pending_intervals
