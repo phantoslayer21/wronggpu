@@ -354,13 +354,14 @@ struct FgAsiSessionHost::Impl {
     void InitTraceCsv() {
         char env[4] = {};
         if (GetEnvironmentVariableA("WRONGGPU_FG_TRACE", env, sizeof(env)) == 1 && env[0] == '1') {
+            constexpr char name[] = "wronggpu-fg-trace.csv";
             trace_csv_enabled = true;
             char dir[MAX_PATH * 2] = {};
             const DWORD n = GetEnvironmentVariableA("WG_STATE_GAME_DIR", dir, static_cast<DWORD>(sizeof(dir)));
             if (n > 0 && n < sizeof(dir)) {
-                trace_csv_path = std::string(dir, n) + "\\wronggpu-fg-trace-r7.csv";
+                trace_csv_path = std::string(dir, n) + "\\" + name;
             } else {
-                trace_csv_path = "wronggpu-fg-trace-r7.csv";
+                trace_csv_path = name;
             }
         }
     }
@@ -382,6 +383,37 @@ struct FgAsiSessionHost::Impl {
         if (trace_worker.joinable()) trace_worker.join();
     }
 
+    FILE* OpenTraceCsv() {
+        constexpr char header[] =
+            "frame_token,interval_id,req_n,sched_n,in_flight,free_slots,t_arrival,wait_us,"
+            "record_us,first_gen_ready_us,first_gen_sub_us,real_ready_us,real_sub_us,"
+            "real_disp_us,max_slip_us,drops_pre,drops_post,skips_real,skips_generated,"
+            "display_time,reanchor_reason\n";
+        FILE* file = nullptr;
+        if (fopen_s(&file, trace_csv_path.c_str(), "a+b") != 0) return nullptr;
+        std::rewind(file);
+        char existing[sizeof(header)] = {};
+        bool has_header = std::fgets(existing, static_cast<int>(sizeof(existing)), file) != nullptr;
+        if (!has_header && !std::feof(file)) {
+            std::fclose(file);
+            return nullptr;
+        }
+        if (has_header && std::strcmp(existing, header) != 0) {
+            // Earlier builds used this path with fewer columns. Preserve those rows in their own file.
+            std::fclose(file);
+            const std::string archive = trace_csv_path.substr(0, trace_csv_path.size() - 4) + ".previous-" +
+                                        std::to_string(GetCurrentProcessId()) + "-" +
+                                        std::to_string(GetTickCount64()) + ".csv";
+            if (!MoveFileA(trace_csv_path.c_str(), archive.c_str()) ||
+                fopen_s(&file, trace_csv_path.c_str(), "ab") != 0)
+                return nullptr;
+            has_header = false;
+        }
+        if (std::fseek(file, 0, SEEK_END) == 0 && (has_header || std::fputs(header, file) != EOF)) return file;
+        std::fclose(file);
+        return nullptr;
+    }
+
     void RunTraceWorker() {
         FILE* csv = nullptr;
         for (;;) {
@@ -397,14 +429,7 @@ struct FgAsiSessionHost::Impl {
                 LogTraceSummary(job.summary_tag.c_str(), job.budget, job.rows);
                 continue;
             }
-            if (!csv && fopen_s(&csv, trace_csv_path.c_str(), "ab") == 0 && csv) {
-                if (std::fseek(csv, 0, SEEK_END) == 0 && std::ftell(csv) == 0)
-                    std::fprintf(csv,
-                                 "frame_token,interval_id,req_n,sched_n,in_flight,free_slots,t_arrival,wait_us,"
-                                 "record_us,first_gen_ready_us,first_gen_sub_us,real_ready_us,real_sub_us,"
-                                 "real_disp_us,max_slip_us,drops_pre,drops_post,skips_real,skips_generated,"
-                                 "display_time,reanchor_reason\n");
-            }
+            if (!csv) csv = OpenTraceCsv();
             if (csv) {
                 for (const IntervalTrace& row : job.rows) AppendTraceCsv(csv, row);
                 std::fflush(csv);
