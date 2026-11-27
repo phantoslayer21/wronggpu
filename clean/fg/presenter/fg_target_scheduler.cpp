@@ -234,6 +234,9 @@ void FgTargetScheduler::OnDeviceLost() {
 void FgTargetScheduler::SetFirstImageBudget(FgTicks budget) {
     if (budget < 0) budget = 0;
     if (budget > config_.max_lead) budget = config_.max_lead;
+    // A large bootstrap correction should not repeat a whole interval of misses at the old lead.
+    // Ordinary controller adjustments still need two consecutive shortfalls before they re-anchor.
+    if (budget - config_.first_image_budget >= 80000) shortfall_run_ = 1;
     config_.first_image_budget = budget;
 }
 

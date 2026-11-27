@@ -291,9 +291,9 @@ inline FgTearingPlanDecision FgPlanTearingImage(FgTicks target, bool real, FgTic
     if (real) return d;
     const FgTicks slot = has_next && next_target > target ? next_target - target : 0;
     FgTicks tol = base_late_tolerance;
+    const FgTicks slot_allow = slot - slot / 4;
     if (slot > 0) {
-        const FgTicks half = slot / 2;
-        const FgTicks scaled = half < 15000 ? 15000 : (half > 40000 ? 40000 : half);
+        const FgTicks scaled = slot_allow < 15000 ? 15000 : (slot_allow > 40000 ? 40000 : slot_allow);
         if (scaled > tol) tol = scaled;
     }
     if (now > target + tol) {
@@ -304,7 +304,6 @@ inline FgTearingPlanDecision FgPlanTearingImage(FgTicks target, bool real, FgTic
         const FgTicks issue = now > d.issue_at ? now : d.issue_at;
         const FgTicks gap = min_interval > 2500 ? min_interval : 2500;
         // Absorb submission jitter without reducing the physical minimum gap between issues.
-        const FgTicks slot_allow = slot - slot / 4;
         const FgTicks slip_allow = tol < slot_allow ? tol : slot_allow;
         if (issue + gap > next_target + slip_allow) d.drop_late = true;
     }
