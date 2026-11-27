@@ -494,7 +494,7 @@ if(WIN32)
 endif()
 
 # Targets that do not link wg_fsr_core but read Model K's state (the ASI plugin's header and its tests): the build's value.
-foreach(wg_k_target test_asi_thunk test_asi_status wronggpu_asi)
+foreach(wg_k_target test_asi_thunk test_asi_status test_asi_card wronggpu_asi)
   if(TARGET ${wg_k_target})
     target_compile_definitions(${wg_k_target} PRIVATE WRONGGPU_MODEL_K=${WG_MODEL_K_VALUE})
   endif()

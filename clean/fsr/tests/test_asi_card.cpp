@@ -168,9 +168,18 @@ int main(int argc, char** argv) {
     Sleep(1100);  // the card retries opening the block at most once a second
     showModel('K');
     DrawFrame();
+#if WRONGGPU_MODEL_K
     CHECK(HasText("Running: Model K (Fast)"));
-    CHECK(g_combos.size() == 3 && g_combos[0] == "Model K mode##wg_k_mode" && g_combos[1] == "Model M mode##wg_m_mode" &&
-          g_combos[2] == "Model L mode##wg_l_mode");
+    const std::vector<std::string> expectedOrder = {"Model K mode##wg_k_mode", "Model M mode##wg_m_mode",
+                                                    "Model L mode##wg_l_mode"};
+#else
+    // A report for an unavailable model leaves the active Model M and its saved mode in place.
+    CHECK(HasText("Running: Model M (Exact)"));
+    const std::vector<std::string> expectedOrder = {"Model M mode##wg_m_mode", "Model K mode##wg_k_mode",
+                                                    "Model L mode##wg_l_mode"};
+#endif
+    CHECK(g_combos == expectedOrder);
+    // The card also lets players set modes for models that are not running.
     DrawFrame("Model K mode##wg_k_mode", WG_SR_MODE_EXACT);
     wg::Snapshot snap;
     CHECK(block.snapshot(&snap));
