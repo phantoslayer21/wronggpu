@@ -1191,7 +1191,6 @@ struct FgAsiSessionHost::Impl {
         // Read recent base_dt and generating-interval readiness from trace_ring under the leaf lock.
         std::vector<int64_t> base_dts;
         std::vector<int64_t> d_origins;
-        std::vector<int64_t> d_arrivals;
         std::vector<int64_t> unthrottled_readiness;
         {
             std::lock_guard<std::mutex> lock(trace_mu);
@@ -1199,7 +1198,6 @@ struct FgAsiSessionHost::Impl {
             const uint32_t n_scan = trace_count < want_scan ? trace_count : want_scan;
             base_dts.reserve(n_scan);
             d_origins.reserve(n_scan);
-            d_arrivals.reserve(n_scan);
             wgfg::FgTicks prev_arr = 0;
             for (uint32_t k = 0; k < n_scan; ++k) {
                 const uint32_t idx = (trace_head + kTraceRingSize - n_scan + k) % kTraceRingSize;
@@ -1218,9 +1216,6 @@ struct FgAsiSessionHost::Impl {
                         const int64_t d = ready_ts - tr.t_after_wait;
                         if (d > 0 && d <= 1000000) {
                             d_origins.push_back(d);
-                            const int64_t d_arr =
-                                tr.t_arrival > 0 && ready_ts > tr.t_arrival ? ready_ts - tr.t_arrival : d;
-                            d_arrivals.push_back(d_arr <= 1000000 ? d_arr : d);
                             if (tr.t_arrival > 0 && tr.t_after_wait - tr.t_arrival <= 5000)
                                 unthrottled_readiness.push_back(d);
                         }
@@ -1229,14 +1224,15 @@ struct FgAsiSessionHost::Impl {
             }
         }
         // If this was only a mid-window excess-slack probe, proceed only when d_origin proves the GPU finished well
-        // before WaitForCreditRoom returned (d_p90 <= 1.8 ms) AND the newest 4 frames' cadence has caught up to the
+        // before WaitForCreditRoom returned (d_p90 is below the slack threshold) and the newest cadence caught up to the
         // current budget (p_med <= budget + 3.5 ms) so we never stack downward steps across phase lag.
         const wgfg::FgTicks d_orig_p90_pre = Percentile(d_origins, 0.90);
+        const wgfg::FgTicks slack_threshold = st_req_count.load() == 1 ? 35000 : 18000;
         std::vector<int64_t> tail_dts = base_dts;
         if (tail_dts.size() > 4) tail_dts.erase(tail_dts.begin(), tail_dts.end() - 4);
         const wgfg::FgTicks p_med_pre = Percentile(tail_dts, 0.50);
         if (clean_excess_check &&
-            (d_origins.empty() || d_orig_p90_pre > 18000 || budget <= kBudgetBase + 40000 ||
+            (d_origins.empty() || d_orig_p90_pre > slack_threshold || budget <= kBudgetBase + 40000 ||
              (p_med_pre > 0 && p_med_pre > budget + 35000) ||
              (budget_miss_floor > 0 && budget <= budget_miss_floor + 40000))) {
             return;
@@ -1263,39 +1259,26 @@ struct FgAsiSessionHost::Impl {
         if ((was_first || severe_storm) && recent_dts.size() > 6)
             recent_dts.erase(recent_dts.begin(), recent_dts.end() - 6);
         const wgfg::FgTicks p_med = Percentile(recent_dts, 0.50);
-        // When d_origin > 1.8 ms (GPU was still executing frame work after WaitForCreditRoom returned), ready_ts -
-        // t_arrival measures true GPU frame time (unmasked by wait_us). When d_origin <= 1.8 ms, the GPU finished
-        // during WaitForCreditRoom, so d_origin reflects genuine excess budget slack.
-        std::vector<int64_t> d_effs;
-        d_effs.reserve(d_origins.size());
-        for (size_t i = 0; i < d_origins.size(); ++i) {
-            const int64_t d_orig = d_origins[i];
-            if (d_orig > 18000) {
-                const int64_t capped_arr = p_med > 0 ? std::min<int64_t>(d_arrivals[i], p_med + 20000) : d_arrivals[i];
-                d_effs.push_back(std::max<int64_t>(d_orig, capped_arr));
-            } else {
-                d_effs.push_back(d_orig);
-            }
-        }
-        // Newest <= 8 generating samples for fast raise target so stale pre-transition frames do not skew the step.
-        std::vector<int64_t> d_eff_recent = d_effs;
-        if (d_eff_recent.size() > 8) d_eff_recent.erase(d_eff_recent.begin(), d_eff_recent.end() - 8);
-        const wgfg::FgTicks d_p50 = Percentile(d_eff_recent, 0.50);
-        const wgfg::FgTicks d_p75 = Percentile(d_eff_recent, 0.75);
+        // Targets use the post-wait origin. Use that same origin for both raising and easing the budget.
+        std::vector<int64_t> d_recent = d_origins;
+        if (d_recent.size() > 8) d_recent.erase(d_recent.begin(), d_recent.end() - 8);
+        const wgfg::FgTicks d_p50 = Percentile(d_recent, 0.50);
+        const wgfg::FgTicks d_recent_p95 = Percentile(d_recent, 0.95);
         const wgfg::FgTicks d_p90 = d_orig_p90_pre;
-        const wgfg::FgTicks d_eff_p90 = Percentile(d_effs, 0.90);
+        const wgfg::FgTicks d_p95 = Percentile(d_origins, 0.95);
         // A rate observed after admission blocked is paced by the budget itself. Use producer readiness from
         // intervals with at most 0.5 ms admission/slot wait, and leave the dynamic cap unknown without such data.
         if (unthrottled_readiness.size() > 8)
             unthrottled_readiness.erase(unthrottled_readiness.begin(), unthrottled_readiness.end() - 8);
         const wgfg::FgTicks b_cap = FirstImageBudgetCap(Percentile(unthrottled_readiness, 0.75),
                                                        st_latency_limit.load());
+        budget_miss_floor = std::min(budget_miss_floor, b_cap);
 
         const uint64_t on_time = sched > missed ? sched - missed : 0;
         wgfg::FgTicks next = budget;
         if (missed * 50 > sched) {  // > 2% of scheduled generated images missed
             quiet_windows = 0;
-            const bool need_more_budget = d_origins.empty() || (d_eff_p90 + 2500 > budget) || (d_p90 + 2500 > budget);
+            const bool need_more_budget = d_origins.empty() || d_p95 + 2500 > budget;
             if (need_more_budget) {
                 budget_miss_floor = budget_probing ? std::max(budget_miss_floor, budget) : budget;
                 budget_ease_holdoff = budget_probing ? std::min<uint32_t>(16u, budget_ease_holdoff * 2u) : 5u;
@@ -1304,7 +1287,7 @@ struct FgAsiSessionHost::Impl {
             wgfg::FgTicks want = budget;
             if (need_more_budget && budget < b_cap) {
                 const wgfg::FgTicks measured_target =
-                    !d_eff_recent.empty() ? ((was_first ? d_p50 : d_p75) + 12000) : 0;
+                    !d_recent.empty() ? ((was_first ? d_p50 : d_recent_p95) + 12000) : 0;
                 const wgfg::FgTicks min_step = severe_storm ? 10000 : kBudgetStepMin;
                 want = std::min(b_cap, std::max(budget + min_step, measured_target));
             }
@@ -1334,15 +1317,11 @@ struct FgAsiSessionHost::Impl {
             }
         } else if (missed * 100 <= sched) {  // <= 1% missed: release count cap first, then ease latency back
             cap_miss_windows = 0;
-            if (budget_probing) {
-                budget_probing = false;
-                budget_miss_floor = 0;
-                budget_ease_holdoff = 3;
-            }
-            const wgfg::FgTicks floor_b = !d_effs.empty() ? std::max(kBudgetBase, d_eff_p90 + 3000) : kBudgetBase;
+            budget_probing = false;
+            const wgfg::FgTicks floor_b = FirstImageBudgetFloor(kBudgetBase, d_p95, budget_miss_floor);
             const bool far_above_miss = budget_miss_floor == 0 || budget > budget_miss_floor + 7500;
             const bool cadence_caught_up = p_med_pre == 0 || p_med_pre <= budget + 35000;
-            const bool large_excess = !d_effs.empty() && d_p90 <= 18000 && cadence_caught_up &&
+            const bool large_excess = !d_origins.empty() && d_p90 <= slack_threshold && cadence_caught_up &&
                                       budget > floor_b + 30000 &&
                                       (budget_miss_floor == 0 || budget > budget_miss_floor + 30000);
             const uint32_t need_wins = large_excess ? 1u : (far_above_miss ? 2u : budget_ease_holdoff);
@@ -1361,7 +1340,7 @@ struct FgAsiSessionHost::Impl {
                     Log(line);
                 } else {
                     const wgfg::FgTicks excess_cap =
-                        budget > 225000 ? 55000 : (budget > 135000 ? 35000 : 20000);
+                        budget > 225000 ? 55000 : (budget > 165000 ? 35000 : (budget > 135000 ? 17000 : 10000));
                     const wgfg::FgTicks step =
                         large_excess ? std::min<wgfg::FgTicks>(excess_cap, std::max(kBudgetEaseFast, (budget - floor_b) / 2))
                                      : (far_above_miss ? kBudgetEaseFast : kBudgetEaseProbe);
@@ -1384,12 +1363,12 @@ struct FgAsiSessionHost::Impl {
             char line[352];
             std::snprintf(line, sizeof line,
                           "fg host: generated on time %llu of %llu scheduled (disp %llu, late %llu, pressure %llu, "
-                          "skip %llu) in %u frames (p_med=%.1fms d_p50=%.1fms d_p90=%.1fms eff=%.1fms cap=%.1fms): "
+                          "skip %llu) in %u frames (p_med=%.1fms d_p50=%.1fms d_p90=%.1fms d_p95=%.1fms cap=%.1fms): "
                           "first-image budget %.1f -> %.1f ms%s",
                           static_cast<unsigned long long>(on_time), static_cast<unsigned long long>(sched),
                           static_cast<unsigned long long>(disp_g), static_cast<unsigned long long>(late),
                           static_cast<unsigned long long>(pressure), static_cast<unsigned long long>(skipped),
-                          evaluated_frames, p_med / 10000.0, d_p50 / 10000.0, d_p90 / 10000.0, d_eff_p90 / 10000.0,
+                          evaluated_frames, p_med / 10000.0, d_p50 / 10000.0, d_p90 / 10000.0, d_p95 / 10000.0,
                           b_cap / 10000.0, budget / 10000.0, next / 10000.0,
                           budget_lines == 64 ? " (the last budget line of this run)" : "");
             Log(line);

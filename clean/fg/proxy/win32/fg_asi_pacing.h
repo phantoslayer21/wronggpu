@@ -23,4 +23,9 @@ constexpr int64_t FirstImageBudgetCap(int64_t ready_lag, uint32_t latency_limit)
     return std::clamp(depth * ready_lag + 35000, min_cap, max_cap);
 }
 
+constexpr int64_t FirstImageBudgetFloor(int64_t minimum, int64_t readiness_p95, int64_t miss_floor) {
+    const int64_t last_miss_with_margin = miss_floor > 0 ? miss_floor + 5000 : 0;
+    return std::max({minimum, readiness_p95 + 3000, last_miss_with_margin});
+}
+
 }  // namespace wgfgp::win32
