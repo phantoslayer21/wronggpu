@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Independent NumPy reference of spec 52 (RR preset F input stage): per-frame host constants (52.1.1, 52.8),
 camera maps (52.7.3), the 64 front-end inputs (52.3), the ordered-dither e4m3 quantisation (52.4), the front-end
 MLP (52.5), the IN0 block with the state-stream seed (52.6, through reference/stages.py) and the three motion

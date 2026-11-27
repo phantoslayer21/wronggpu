@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // CPU tests of the FG runtime groundwork (clean/fg/runtime): grid table, contract, model check, net1 plan / recorder /
 // packing against the generated parity tables, frame ingest, history, and the create-time worker's failure paths.
 // Synthetic values only: constructed float16 patterns, constructed model files, fake resources and a fake recorder.

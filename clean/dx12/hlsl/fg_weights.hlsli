@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96): the blend weight of one scatter-grid texel, shared by fg_lite_weights (which stores it) and
 // the blends that build their W tile in LDS (fg_lite_blend FG_WEIGHTS, fg_full_blend FGB_WEIGHTS): one definition, so
 // both produce the same packed float16 x 2 word (clean/fg/reference/stages_common.py blend_weights).

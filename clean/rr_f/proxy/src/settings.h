@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // RR settings owned by the proxy (spec 60.9): values, persistence, the contract table for WrongGPU.asi.
 #pragma once
 #include <stdint.h>

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Stage exposure (spec 07): reference vs a slow scalar version and the spec's examples; the real kernels
 (kernels/exposure.hip) in the host lane emulator vs the reference (07-T1 cases: black, uniform, HDR, NaN/Inf,
 negative values, odd sizes). Synthetic data only.

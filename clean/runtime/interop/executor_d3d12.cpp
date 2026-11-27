@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 executor (executor=dx12; executor.h): Model M on the native D3D12 device (clean/runtime/device_d3d12.h) made on
 // the GAME's D3D12 device, recorded into the game's command list. WrongGPU's own code.
 //

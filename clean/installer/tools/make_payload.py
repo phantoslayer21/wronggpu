@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Generates the installer's embedded resources (replaces build-installer.ps1 of the 0.2.0 installer).
 
     make_payload.py --payload <dir> --map <map.json> --version <x.y.z> [--manifest <setup.manifest>] [--hosted-only]

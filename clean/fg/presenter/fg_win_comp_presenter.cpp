@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Windows composition presenter (presentation manager + hardware flip queue): see fg_win_comp_presenter.h.
 #include "fg_win_comp_presenter.h"
 

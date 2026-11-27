@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Unit tests of the launcher's part of wg_core (build/launcher-design.md section 7.1) that need no game, no payload and
 // no GPU: settings validation and rendering (runtime_options as one line without spaces, enum rejection, the last value
 // wins, runtime keys on lines of their own), ini round trips that keep comments, order and unknown keys, outside-edit

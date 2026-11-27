@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU frame generation (issue #96, F8b): the DXGI swap-chain hook seam for FG presentation.
 //
 // A per-chain wrapper installed at swap-chain creation (FG-RUNTIME-DESIGN section 3, "Intercept at swap-chain creation

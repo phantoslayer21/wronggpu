@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher window: the theme tokens and the widgets (ui_shell.h) in option E, "Quiet": capsule buttons, pills,
 // switches, segmented controls, filter chips, selects, text fields, inset grouped lists with hairlines, covers, the
 // toolbar (the mark, Library | Settings, the status line), menus, dialogs, toasts, the floating capsule's blurred

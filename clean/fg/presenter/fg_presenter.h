@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Frame generation presentation boundary: the value types every presenter back end shares and the IFgPresenter
 // interface (one owner of presentation per swap chain and epoch).

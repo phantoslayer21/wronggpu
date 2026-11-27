@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96): the Full blend (presets A and B) with net2's input tensors, as
 // clean/fg/reference/stages_full.py g4_full_blend, bit for bit. Built only when --only names it.
 //

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Live-test harness driver (clean/rr-f-live2): builds the release hook ASI (--binding 2.7 or 2.14: the interface version the game ships), the
 stand-in interface and tests/test_live_harness.cpp, prepares the captured frames (CAPTURE.md) as .lvf files, stages
 per mode (rr_mode=exact / accurate / fast; clean/rr-f-s10-modes: ONE runtime library for all three modes, --rt; the older

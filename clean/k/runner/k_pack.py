@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model K weight packing (layouts: clean/k/FORMATS.md). The converter (spec 48) will produce the same bytes.
 
 All parameters are FP16. A weight matrix W [N, K] ("output index first", as spec 90) becomes WMMA A-operand tiles of

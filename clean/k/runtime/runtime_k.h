@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model K in the per-frame runtime (wronggpu_runtime.dll): one whole frame of spec 40 on the runtime's HIP stream,
 // the C++ port of clean/k/runner/k_frame.py KFrame with the default network variant "fused"
 // (clean/k/runner/k_net.py, k_launch.py) and the default fast input stage (k_io.co).

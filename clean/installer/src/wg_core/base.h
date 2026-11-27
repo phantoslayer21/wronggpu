@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core (wg_core): the common preamble of every wg_core file. Written for this project.
 //
 // wg_core is the engine of the installer and of the launcher that replaces it (build/launcher-design.md section 2):

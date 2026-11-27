@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Output mode D = O (runtime option recon = output; kernels/post.hip: post_recon2_r_out, post_decode_o16) in the host
 lane emulator: post_recon2_r_out is bit-identical to post_recon2_r + post_decode_o16 (reconstruction at D = O, then the
 identity output filter) on the cases of test_post_emu (taken with O = D), and the output is the decode of the

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (#96): the light path's schedule and blend (clean/fg/reference/pipeline.py, lite.py): grid sizes,
 the once-per-game-frame / per-call split for 2x to 6x, history and swaps on the last index only, resets, frozen flags,
 the generation-disabled word, the light blend's simple path, UI overlay (flag 1) and refined candidates (flag 2) against

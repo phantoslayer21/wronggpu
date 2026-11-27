@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Synthetic A/B for reset input specialization. Run under the shared GPU lock.
 
 Example: python -m clean.k.runner.k_reset_bench --build build --json results.json

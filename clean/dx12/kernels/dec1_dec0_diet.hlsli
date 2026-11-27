@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Instruction-diet helpers of dec1_dec0.hlsl (d1p12/swin_block_c64_add_dec0_nc). Each helper gives the bytes of the code
 // it replaces (HIP's bytes) for every input.
 #pragma once

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 ports of model K's narrow network stage kernels (clean/k/kernels/k_block.hip; HIP build: k_block.co). WrongGPU's
 // own code. The k_block template (hlsl/k_block.hlsli) with the instantiations of k_block.hip, FP32 accumulation (the
 // network's default "fused" plan, runtime_k.cpp KRuntime::network):

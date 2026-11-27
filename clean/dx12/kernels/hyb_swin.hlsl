@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The HYBRID form's Swin blocks of the shared stages (WG_L_FORM = hybrid; SW_HYB in swin_block.hlsl): swin_block.hlsl
 // instantiated with SW_HYB=1 at Model M's stage shapes, one window per wave in 256-lane workgroups (HIP's shape; grid =
 // ceil(windows / 8)), the plain schedule (swin_block.hlsl sets the hybrid knob set), unfused: the merges and expands are

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Synthetic inputs of the spec 52 input stage: symbol values, IN0 tensors, textures, temporal state, cameras.
 
 Every value here is our own synthetic choice (no converter output, no player data). Symbol values are plausible

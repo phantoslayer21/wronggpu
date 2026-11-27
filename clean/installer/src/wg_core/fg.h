@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: frame generation's per-game settings and its library (issue #96, F8c). Strictly off by default.
 //
 // The settings: four keys of the game's profile (profile.ini, `set <game> key=value`) that the launcher writes into the

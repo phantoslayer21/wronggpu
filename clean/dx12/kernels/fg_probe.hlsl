@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 port of frame generation's matrix probe (issue #96; clean/fg/kernels/fg_probe.hip, run by
 // clean/fg/runner/fg_wmma_probe.py): fg_probe_mma16 (v_wmma_f16_16x16x16_f16 through the driver channel, format F16 ->
 // F16) and fg_probe_mma32 (v_wmma_f32_16x16x16_f16, format F16 -> F32, with the float16 accumulator in between), the

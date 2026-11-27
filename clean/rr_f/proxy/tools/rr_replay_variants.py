@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Convention variants of the offline RR replay (quality investigation): runs tools/rr_capture_replay.py once per
 variant on the same capture, then writes a contact sheet per variant and one metric table.
 

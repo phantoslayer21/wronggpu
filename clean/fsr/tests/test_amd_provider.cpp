@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Unit test of the AMD provider chain (amd_provider.h): which AMD FidelityFX DLL gives a hosted WrongGPU AMD's
 // upscaler versions. No Windows code, no DLLs: the probe is simulated.
 #include <cstdio>

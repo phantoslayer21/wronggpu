@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 ports of Model L's two projections (issue #89): l_project_gather and l_dec_project of l_ops.co
 // (clean/l/kernels/l_ops.hip), byte for byte. Maps and blobs: clean/l/FORMATS.md.
 //

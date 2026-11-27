@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Names of the presentation boundary's status values, for logs and test output.
 #include "fg_presenter.h"
 

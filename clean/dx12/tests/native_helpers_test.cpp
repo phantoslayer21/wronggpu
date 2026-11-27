@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Original synthetic helper-kernel runner. Each invocation owns one HIP or native D3D12 device; the Python caller
 // compares raw FP32 bits from separate processes, keeping native module auditing independent of the HIP reference.
 #include "../../runtime/device.h"

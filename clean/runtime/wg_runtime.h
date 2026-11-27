@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 /* WrongGPU per-frame runtime, core part (spec/10-runtime.md section 0: HIP only, no D3D12).
  *
  * Owns the network's model data and state, and runs one whole frame (exposure, enc0, the ten Swin stages, dec0,

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The HDR phi argument is RN32(12 * maxNum(Y, 0) + 1), hence in [1, +inf].
 #pragma once
 

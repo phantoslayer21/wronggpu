@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model L's fast-mode decoder blocks (runtime option l_mode=fast, env WG_L_MODE=fast; native D3D12 only): the M-form
 // chain (SW_HYB 0, the WMMA / FP8 kernels of Model M's Swin stages) with Model L's decoder skip S. l_swin.hlsl's
 // l_swin_block_c32_dec_nc / _dec_coef12_nc read the decoder's projection map y and nothing else (SW_ADD 0): the M-form

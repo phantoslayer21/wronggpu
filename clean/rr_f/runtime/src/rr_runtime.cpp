@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU RR runtime (wronggpu_rr_runtime.dll): the owned adapter of clean/rr_f/proxy/include/wg_rr_adapter.h for the
 // preset-F ray reconstruction of specs 50-58 on D3D12 / RDNA 4. Original WrongGPU code.
 //

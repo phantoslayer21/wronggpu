@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96): the ten cell values of one net1 image pixel, for fg_mconv2_mid_cells (which builds net1_01's
 // staged cells in LDS, fg_mconv.hlsl FG_CELLS). It is fg_lite_net1_input's lane work (fg_lite_net1io.hlsl FG_K == 3, left as
 // it was so that its DXIL stays byte-identical), line for line: clean/fg/tests/test_fg_turbo_v2.py compares the two

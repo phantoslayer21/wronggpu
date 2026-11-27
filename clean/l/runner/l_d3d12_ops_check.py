@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L (issue #89): the D3D12 ports of the l_ops.co kernels, the halo input encoder and the reconstruction kernel
 against their HIP kernels on the same synthetic inputs, byte for byte (clean/l/kernels/l_ops.hip, l_post.hip; ports
 clean/dx12/kernels/l_ops_*.hlsl, l_post.hlsl).

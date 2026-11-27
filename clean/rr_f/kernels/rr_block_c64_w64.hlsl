@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // clean/rr-f-wave4b R4b.2: the spec 51 window block of the level-1 stages E1, D1-F and D1-R (C = 64, H = 2, MLP width
 // 256) in wave64, design D of rr_block_c32.hlsl (the wave64 form of the C = 32 stages): the relaxed body's stagee
 // kernels only (RR_B32, RR_VARL 1, step E, weights from memory, WMMA-interleaved chains), WG_BLOCK 128, WG_WAVE 64,

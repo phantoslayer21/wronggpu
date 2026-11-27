@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // clean/rr-f-wave4b R4b.1: D0-R of spec 55 in wave64 (design D of kernels/rr_block_c32.hlsl), the relaxed head of
 // head.fast.rx only: rr_d0r.hlsl with RR_HVARL 7, RR_S9 61, RR_OUT_PREP 1, RR_HSTM 1, RR_HQ8S 1, RR_HEAD18 1,
 // WG_BLOCK 128, WG_WAVE 64 (the file refuses any other configuration). Same arguments, buffer layouts and output bytes.

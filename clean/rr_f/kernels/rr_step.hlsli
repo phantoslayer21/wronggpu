@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The 51.1 matrix step of rr_block.hlsl as a header for the input-stage MLP (rr_input_mlp.hlsl): one 32-input step
 // on WMMA fragments with an f16 rounding. RR_STEP 0: variant E (two WMMAs on the f32 accumulator), 1: variant X
 // (exact under probe P1's model), 2: exact binary64 scalar step, 3: variant X with a fast path for exact sums (the

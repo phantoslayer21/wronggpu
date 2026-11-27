@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: what the launcher does on top of the installer's engine (build/launcher-design.md sections
 // 2, 3 and 6, milestone M1): where its data lives (installed per user or portable), its global settings, the game
 // list with a status per game, the per-game operations (install, repair, update, uninstall, roll back, apply

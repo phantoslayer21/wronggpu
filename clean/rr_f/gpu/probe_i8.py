@@ -1,4 +1,4 @@
-﻿# SPDX-License-Identifier: MIT
+﻿# SPDX-License-Identifier: GPL-3.0-only
 """Probes of the exact integer step "I" (kernels/rr_step_i.hlsli, lever L4 of results/2026-10-21-body-levers.md):
 
 H1'  v_wmma_i32_16x16x16_iu8 (driver channel op 0x28, format 0xC) returns A B + C exactly in int32 for signed int8 A,

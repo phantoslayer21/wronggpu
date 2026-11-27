@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """NumPy reference of the model K output stage (spec 43 draft 2) and its filter-shape table (spec 43 section 7).
 
 Every step follows the spec's order and rounding: FP32 (or FP16) operations rounded to nearest even, fma with one

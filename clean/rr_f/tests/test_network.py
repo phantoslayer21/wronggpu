@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Cross-team reference agreement and spec-50 stage wiring, synthetic inputs only."""
 import unittest
 from unittest.mock import patch

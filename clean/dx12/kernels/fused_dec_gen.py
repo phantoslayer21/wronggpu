@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Generates fused_dec.hlsl (this directory) from the live dec1_dec0.hlsl: d1p12/swin_block_c64_add_dec0_xd_nc, the
 fused dec1 + dec0 kernel launched WITHOUT the barrier after dec2's fused block (fusion xd, swin_block_c96_add_xe_xd_nc,
 fused_swin.hlsl), so that its workgroups start while dec2's last workgroups still write e1.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 port of model K's frame inputs and their fetch helpers (clean/k/kernels/k_io.hip: KFrameIn, KInParams,
 // KOutParams, KiHost, kio_*). WrongGPU's own code; the same operations and bits as the HIP helpers (k_fp.hlsli rules).
 //

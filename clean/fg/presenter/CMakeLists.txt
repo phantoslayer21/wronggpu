@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 # Frame generation presentation boundary (clean/fg/presenter): IFgPresenter, the target-time scheduler, the
 # deterministic fake presenter and the shared display-slot engine, with their CPU tests (no GPU, no window, no platform
 # SDK). On Windows also the production back ends (composition / hardware flip queue and DXGI flip-discard), the

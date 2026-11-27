@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The HYBRID form's bottleneck in one launch (WG_L_FORM = hybrid, native D3D12): b0 .. b5 as a persistent queue of
 // items, bneck.hlsl's schedule (items of 8 windows in block order; one claimed ahead; per-row counters of every block;
 // an item waits for the rows of the previous block it reads and overwrites; the bounded wait; the last workgroup resets

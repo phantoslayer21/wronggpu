@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Synthetic test inputs for spec 51: window-block constant sets, per-stage constants, logical weights and stage
 inputs. Converter-supplied constants and weights are test inputs (page 57 is not available); their ranges are our
 own choice except where spec 51 states one (attention constants: p of every clamped score in [1+1/32, 1+31/32);

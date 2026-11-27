@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L structure table (issue #89): the single source of Model L's shape for the oracle, the packers, the
 runtime and the tests.
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 port of model K's exact tiled input-stage kernels (clean/k/kernels/k_io.hip ki_tiled_body, HIP build
 // k_io_exact.co = WGK_IN_EXACT, wave64; spec 42 sections 3-8). WrongGPU's own code.
 //

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Unit tests of the converter search's ignore lists (wg_core/convert_ignore.h): the list format (version line, comments,
 // a path, a path with its SHA-256, quotes, UTF-8 / UTF-16 LE, CRLF; a hash alone, a folder and an undecodable list refused),
 // bad lines (warned, skipped, the rest read), path matching (case, '/' and '\', '.' and '..', a hard link, a junction, a

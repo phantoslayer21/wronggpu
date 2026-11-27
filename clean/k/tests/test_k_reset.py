@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Reset input specialization: exact old-kernel equivalence and no dependency on discarded inputs.
 
 Run with WG_K_GPU_BUILD under the shared GPU lock, or on the host lane emulator.

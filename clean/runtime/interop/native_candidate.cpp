@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #include "native_candidate.h"
 #include "../device_d3d12.h"
 #include "../runtime_core.h"

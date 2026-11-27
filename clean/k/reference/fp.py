@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Exact FP32 / FP16 arithmetic helpers for the model K input and output stages (specs 42, 43).
 
 Specs 42 and 43 define their results by FP32 (or FP16) operations in a given order, each rounded to nearest even,

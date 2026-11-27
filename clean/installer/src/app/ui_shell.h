@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher window (option E "Quiet", build/launcher/ui-options/E-quiet/index.html, light and dark): what the window's source files share. The window is
 // painted with Direct2D and DirectWrite (WIC for images, DWM for the title bar); widgets are drawn per frame and leave
 // "hits" (rectangle, id, role, name, state) that the mouse, the keyboard, UI Automation (ui_uia.cpp) and the ui-dump

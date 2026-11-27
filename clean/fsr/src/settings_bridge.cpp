@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The front end's side of WrongGPU's shared settings (settings_bridge.h). This translation unit holds the Win32 part of
 // clean/wgshared/include/wg_settings_io.h for every DLL that links wg_fsr_win.
 #include "log_win.h"

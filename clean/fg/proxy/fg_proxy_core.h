@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU frame generation (issue #96, F8a): the FG game-adapter core.
 //
 // The same split as the RR plugin (clean/rr_f/proxy: proxy_core = logic, hook_dll / proxy_dll = transport). This core

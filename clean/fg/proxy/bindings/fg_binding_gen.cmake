@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 # Frame generation title bindings (issue #96, F8b): reads a title-binding JSON (schema wronggpu.fg-proxy.title-binding.v1)
 # and the files it names (the RR binding for the interface's export names and shared GUIDs, the interface file name,
 # the FG feature-function names) and writes one C header of macros into the build tree. The names stay in the binding

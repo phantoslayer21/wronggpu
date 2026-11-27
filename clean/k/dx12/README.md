@@ -1,4 +1,4 @@
-<!-- SPDX-License-Identifier: MIT -->
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
 # Model K on Direct3D 12
 
 The D3D12 ports of Model K's HIP kernels (issue #15). Each port reproduces one HIP kernel of `clean/k/kernels` bit for

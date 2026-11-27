@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """GPU time of the spec 52 input-stage kernels at a render size (default 1440p Quality: render 1706 x 960 of a
 2560 x 1440 output), synthetic textures, one host call under the GPU lock.
 

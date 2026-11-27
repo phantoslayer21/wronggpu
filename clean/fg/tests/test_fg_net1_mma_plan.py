@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """net1's matrix fast path as planned on the CPU (clean/fg/runner/fg_net1_mma.py): the weight fragments, the fused
 plan's buffers and launches."""
 import os

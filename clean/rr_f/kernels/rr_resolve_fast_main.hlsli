@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #ifndef RFX_QLD
 #define RFX_QLD 0   // clean/rr-f-a14-tail D17: the Q texel as one aligned b64 + shifts (same words; measured +0.001 ms)
 #endif

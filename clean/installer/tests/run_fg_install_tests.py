@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation's files with an install (wg_core/fg.h, 0.7.0): a WRONGGPU_TESTING launcher built with WRONGGPU_FG and the
 generated frame generation stand-ins (tests/make_mock_fg.py) installs WrongGPU-FG.asi beside WrongGPU's plugin and its kernels in
 plugins\\wronggpu-setup\\fg-dxil (where the plugin reads them) only into a game with a frame generation library, each file an

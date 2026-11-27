@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: the per-game settings profile (build/launcher-design.md section 4, the Basic tier of M1).
 // The profile (<install dir>\wronggpu-setup\profile.ini) is the source of truth for a game's settings; the launcher
 // writes wronggpu.ini (front-end keys and runtime_options) and OptiScaler.ini from it, validating every value first

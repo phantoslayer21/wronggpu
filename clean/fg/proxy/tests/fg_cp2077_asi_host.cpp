@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU frame generation (issue #96, F8b): a test host built under the Cyberpunk 2077 exe's file name, so the
 // shipped plugin (WrongGPU-FG.asi) selects that title's binding. No game interface module is loaded in this process:
 //   fg_cp2077_asi_host <path of WrongGPU-FG.asi> on    fg=on: the binding is selected and logged; no FG model or

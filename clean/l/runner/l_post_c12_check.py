@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Q11 part C: bit-exact probe of the reconstruction's fused-rounding forms C1 and C2 (handoff
 preset-M/from-spec/PRESET-M-C1C2-machine-code.md) as l_post__morig.co compiles them, on adversarial inputs.
 

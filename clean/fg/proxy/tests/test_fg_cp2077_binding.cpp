@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU frame generation (issue #96, F8b): CPU tests of the Cyberpunk 2077 title binding (interface build 2.14.1)
 // and the 2.14 native codec, through the Win32 transport.
 //

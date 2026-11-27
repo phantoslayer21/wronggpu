@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (#96): the shared non-network stages of the light path (clean/fg/reference/stages_common.py)
 against plain scalar loop versions written separately here, on small synthetic grids; the menu-detection thresholds at
 their exact boundaries; the packed-depth round trip; the hole rule against brute force.

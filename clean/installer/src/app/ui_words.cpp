@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher window: an operation's result in plain words (SHIP-BAR 4): the game by its name, the action by the
 // button's word, a full stop, the cause and what to do; the core's own text (folders, file names, Windows' error text) goes
 // behind "Show details" and into the log. Split from launcher_ui.cpp (the window, its input and operations), which uses them

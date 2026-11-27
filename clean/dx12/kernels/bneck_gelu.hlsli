@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The exact q8(GELU) table lookup of hlsl/wg_gelu_lut.hlsli (same table, same slots, same entries, same fma and
 // conversion: the identical byte for every input) with fewer issued instructions per 8 values:
 //

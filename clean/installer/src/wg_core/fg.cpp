@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: frame generation's per-game settings and its library (fg.h). Written for this project.
 #include "fg.h"
 

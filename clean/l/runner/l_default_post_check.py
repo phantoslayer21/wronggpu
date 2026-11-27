@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L (issue #89): which reconstruction should Model L's native D3D12 frame use by default? Both candidates against
 Model L's post oracle (clean/l/reference/recon.py), on l_frame_check's frames and models (with --prepare --model: the
 converter's real-weight model.wgcm, the frames synthetic).

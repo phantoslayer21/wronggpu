@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Probes of the integer step "I" (rr_step_i.hlsli; gpu/probe_i8.py):
 //   rr_pi_wmma : H1', v_wmma_i32_16x16x16_iu8 (channel format 0xC) returns A B + C exactly in int32 (A, B signed int8).
 //   rr_pi_fin  : the one rounding R(c + N 2^G) of ri_fin (both regimes: |N| < 2^24 and the TwoSum path).

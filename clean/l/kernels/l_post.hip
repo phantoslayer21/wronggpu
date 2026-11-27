@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model L (issue #89): output reconstruction (stage "post", HDR) as Model M's post_recon (clean/kernels/post.hip,
 // included for its functions; its own kernels come along unused) with Model L's three changes
 // (clean/l/reference/recon.py, the oracle):

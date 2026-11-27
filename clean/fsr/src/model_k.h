@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model K in this build of the front end: CMake option WG_MODEL_K (default ON) defines WRONGGPU_MODEL_K as 1 or 0.
 // 0 (a release that ships Model M only): no Model K entry in the hosted version list, the Model K id is an unknown
 // override like any other id that was not listed (logged; WrongGPU upscales with Model M), model=K from wronggpu.ini

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher window: the Library page (ui_shell.h), the owner's "BE-wide" design (build/launcher/ui-options/BE-wide:
 // index.html ?v=a, notes.md): a large title and its line, Search, an icon-only Rescan and Add game at the right; a featured
 // banner (the game last played with WrongGPU on, else the first that needs a repair or an update: its hero art, logo, one

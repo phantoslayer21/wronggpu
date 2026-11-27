@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """0.6.1 coexistence fixes (another setup next to WrongGPU's: an OptiScaler that names WrongGPU, other plugins, a changed
 OptiScaler.ini, WrongGPU's files in another setup) and interrupted operations, run by run_coexist_tests.py.
 

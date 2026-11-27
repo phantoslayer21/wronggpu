@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Frame generation (issue #96): the session's create-time work (model check, weight packing, pipeline warm-up) on a
 // worker thread with a bounded wait, following PendingCreate in clean/fsr/src/async_create.h.

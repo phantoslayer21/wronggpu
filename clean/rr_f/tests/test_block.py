@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Spec 51.3 window block against the slow oracle, and the 51.6 grid / border rule."""
 import unittest
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Version resource of the test stand-in interface DLL: a synthetic file version (3.1) the transport's version gate reads.
 #include <winver.h>
 

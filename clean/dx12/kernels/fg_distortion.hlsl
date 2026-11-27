@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96): the optional distortion stages, as clean/fg/reference/stages_full.py r5_downsample and
 // r5_fields, bit for bit. Built only when --only names them.
 //

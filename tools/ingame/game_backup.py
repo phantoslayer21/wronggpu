@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Backups before an in-game run (copies, nothing moved or changed):
   - every file the game's WrongGPU install record names (copy entries), the record folder wronggpu-setup\\ (with its
     backup\\, which holds the owner's earlier OptiScaler dxgi.dll: copied as a file, never opened), OptiScaler.ini,

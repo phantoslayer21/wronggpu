@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Bit-for-bit comparison of the default post + filter path of two builds on the same synthetic frames (spec 06).
 
     python clean/runner/post_exact.py --rocm <ROCm> --a-repo <checkout A> --a-build <build A> \\

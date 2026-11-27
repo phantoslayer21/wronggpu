@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96, F7b): tests of the D3D12 executor (fg_d3d12_executor.h) and its CPU side
 // (fg_exec_plan.h). Every value is synthetic. Built with CI's flags (/W4 /WX /permissive-).
 //

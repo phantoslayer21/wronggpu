@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The runtime's model: a device image in the kernels' buffer layouts plus a name -> (offset, size) table and a
 // name -> 32-bit scalar table. Two sources:
 //   * the converter's output `model.wgcm` (clean/converter/OUTPUT-FORMAT.md, container version 2, map version 5:

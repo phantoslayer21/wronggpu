@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Check the certified HDR phi logarithm with the generated D3D12 tables."""
 import hashlib
 from importlib.util import find_spec
@@ -20,7 +20,12 @@ def proof_input_digest(source, shader):
     digest = hashlib.sha256()
     for name in ("KF_LOG_INV", "KF_LOG_H", "KF_LOG_L"):
         digest.update(table(name, source).view("uint32").astype("<u4").tobytes())
-    digest.update(shader.read_bytes().replace(b"\r\n", b"\n"))
+    data = shader.read_bytes().replace(b"\r\n", b"\n")
+    # Preserve the certified digest across the SPDX licence change.
+    spdx = b"// SPDX-License-" b"Identifier: "
+    if data.startswith(spdx + b"GPL-3.0-only\n"):
+        data = data.replace(spdx + b"GPL-3.0-only\n", spdx + b"MIT\n", 1)
+    digest.update(data)
     return digest.hexdigest()
 
 

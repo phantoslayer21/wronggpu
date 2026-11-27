@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Frame generation (issue #96, F7b): FgD3d12Executor, the production D3D12 implementation of IFgKernelExecutor
 // (fg_session.h). Windows only.

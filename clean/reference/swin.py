@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """NumPy reference ("oracle") for spec/02-swin-block.md.
 
 Everything is computed in float64; the only roundings are the ones the spec writes down (q8, f16). Feature maps

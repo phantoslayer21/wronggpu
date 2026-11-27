@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Exact scalar FP32 / FP16 helpers for the model K input and output stages (specs 42, 43).
 //
 // Specs 42 and 43 define every result by FP32 (or FP16) operations in a given order, each rounded to nearest even;

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Build, run and check the D3D12 D0-R kernel (rr_d0r.hlsl) against the spec-55 test vectors, and time it.
 
     python -m clean.rr_f.head.dx12.run_dx12 build   --work <dir>        # kernels (4 variants) + rr_host.exe + RGA stats

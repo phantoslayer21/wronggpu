@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The runtime's frame sequence on the CPU, without a GPU: the runtime (clean/runtime/runtime.cpp) runs whole frames on
 // a recording device (host memory; launches are recorded, not executed). For clean/tests/test_runtime_frame_trace.py
 // and clean/l/runtime/tests/test_l_runtime_frame.py.

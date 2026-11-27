@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 port of model K's wide block (clean/k/kernels/k_block_wide.hip, template k_block_wide<C, HEADS, KMIX_SOFTMAX,
 // IN, CIN, CNEXT, NG>, FP32 accumulation; HIP build: k_block_wide.co). WrongGPU's own code. Spec 41 block (spec 40 stage
 // table), exactly the HIP kernel's operations and orders:

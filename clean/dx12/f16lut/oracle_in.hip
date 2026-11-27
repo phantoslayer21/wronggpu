@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // HIP oracle of the encoder colour values the direct encoder's table replaces (clean/dx12/hlsl/wg_f16lut_in.hlsli), as the
 // HIP executor computes them from an FP16 colour channel: input_convert / color_divide ((float)c / pi, IEEE division,
 // only when pi != 1; frame.hip), then encoder.hip's U.e (expo[0] == 0 -> 1) and pixel_values' channel loop (lines

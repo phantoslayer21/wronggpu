@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Spec 52 input stage on D3D12 (kernels/rr_input.hlsl, rr_input_mlp.hlsl): host packing of the per-frame constant
 block, uploads, dispatches, readback and comparison with the NumPy reference (reference/input_stage.py).
 

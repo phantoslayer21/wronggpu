@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (issue #96): net1 (the 17-blob U-Net) end to end, as a CPU reference with the delivered arithmetic.
 
 Written for this project from the spec side's part 3 (net1 complete). Everything here is fixed; nothing is an argument:

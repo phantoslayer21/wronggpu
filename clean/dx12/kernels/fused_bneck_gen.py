@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Generates fused_bneck.hlsl (this directory) from bneck.hlsl: enc2's patch merge (patch_merge_c96) as a first phase of
 the persistent bottleneck kernel (merge items ahead of b0's in the queue, with their own row counters).
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96), light path: R3, downsample to the net1 grid with the UI estimate and the colour alpha
 // (clean/fg/reference/stages_common.py downsample_ui). One lane per d x d block (d = FG_D, 2 or 4) of the frame:
 // every frame pixel of the block writes Cc (and Uc in case U, Lc with Lite flag 2 in cases A / H); blocks inside the

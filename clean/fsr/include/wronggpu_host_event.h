@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-3.0-only */
 #pragma once
 /* The event a host (the WrongGPU edition of OptiScaler) sends WrongGPU's front end (amd_fidelityfx_dx12.dll in the
  * custom WrongGPU slot or next to the game) when the PLAYER selects one of the listed upscaler versions in its menu. The

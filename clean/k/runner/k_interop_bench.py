@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Alternating synthetic Model K full-interop benchmark; run under the shared GPU lock.
 
 Requires a locally built test_interop_d3d12.exe with hipbench and two runtime/kernel

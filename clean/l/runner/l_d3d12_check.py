@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L (issue #89): each D3D12 port against its HIP kernel on the same synthetic inputs, byte for byte.
 
     python clean/l/runner/l_d3d12_check.py --build <dir> --rocm "C:\\Program Files\\AMD\\ROCm\\7.2" --prepare

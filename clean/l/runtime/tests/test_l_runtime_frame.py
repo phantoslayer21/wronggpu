@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L's runtime frame on the CPU (#89): the runtime built with Model L (define WG_MODEL_L, clean/l/runtime) runs
 on the recording device of clean/tests/runtime_frame_trace.cpp (launches recorded with their arguments, not executed;
 no GPU, no HIP). The interface is clean/l/FORMATS.md.

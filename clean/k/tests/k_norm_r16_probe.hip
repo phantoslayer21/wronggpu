@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Exhaustive audit against original sqrt-then-divide using actual helper.
 #include "../kernels/k_norm.h"
 WG_KERNEL_N(k_norm_r16_original, 128)(unsigned short* out) {

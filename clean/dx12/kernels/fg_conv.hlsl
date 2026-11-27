@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 port of frame generation's net1 convolution (issue #96): fg_conv_f16 of fg_net1.co (clean/fg/kernels/fg_net1.hip),
 // byte for byte. The arithmetic is the shared integer code of clean/fg/kernels/fg_exact16.h (exact float16 chunk
 // accumulation, one nearest-even rounding per chunk, the leaky ReLU), so both back ends run the same operations; only

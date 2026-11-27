@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96): net2's 3 x 3 convolution on gfx12's matrix instructions (tier B of the fast path; the
 // exact kernels fg_net2_conv.hlsl / fg_net2_up2.hlsl stay the validation path). Launch interface of fg_net2_conv (channel
 // stride and offset of the input, channel range of the output, the post-ops) plus two fusions, with the arithmetic of

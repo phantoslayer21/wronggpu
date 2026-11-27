@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model K: the NG = 4 forms of the wide stages e3 and d3 (k_stagew4_e3, k_stagew4_d3) cannot be reached (host checks).
 
 The runtime launches a wide stage as k_stagew<NG>_<name> with NG from wide_ng (clean/k/runtime/runtime_k.cpp), in one

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Test kernels of the hybrid D3D12 device (device_test.cpp; not part of any runtime build).
 // @wg-kernel wg_test_add co=- block=64 wave=32 args=p,u,u
 // @wg-kernel tst/wg_test_shift co=- entry=wg_test_shift block=64 wave=32 args=p,p,b8,p

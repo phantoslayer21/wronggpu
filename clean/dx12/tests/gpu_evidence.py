@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Capture Windows GPU-engine evidence without treating missing counters as idle.
 
 Caller acquires the GPU lock (WG_GPU_LOCK, BUILDING.md) nonblocking before GPU commands. This wrapper

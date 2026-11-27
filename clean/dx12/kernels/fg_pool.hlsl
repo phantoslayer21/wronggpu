@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 port of frame generation's net1 max-pool (issue #96): fg_maxpool2_f16 of fg_net1.co
 // (clean/fg/kernels/fg_net1.hip), byte for byte. 2 x 2 window, stride 2, floor sizes; from the first tap (0, 0), then
 // (0, 1), (1, 0), (1, 1), the delivered step m <- (x > m) * x + (x <= m) * m in float16 (fg_pool_step16 of the shared

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Loader of the runtime's model (rr_model.h): the converter's model.wgcm (checked and packed by rr_pack.cpp) or the
 // runtime's own container WGRRMOD1 (layout: clean/rr_f/runtime/tools/pack_model.py). Checks of WGRRMOD1: magic,
 // version, table bounds, the whole-file SHA-256.

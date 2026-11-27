@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The frame generation choice of the launcher (#96, wg_core/fg.h; profile.cpp built with WRONGGPU_FG on, whatever the launcher
 // build's switch): the four settings fg, fg_preset, fg_multiplier and fg_presenter in their exact spellings and defaults (off,
 // A, 2, auto), profile.ini round trips beside the upscaler, RR and other keys, the job file, the global defaults, and the keys

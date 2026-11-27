@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Generates fused_swin.hlsl (this directory) from the live swin_block.hlsl: enc1's patch merge (patch_merge_c64) as the
 prologue of enc2's c96 block (SW_PM) and dec1's expand (expand_c96) as the epilogue of dec2's fused c96 block (SW_XE).
 

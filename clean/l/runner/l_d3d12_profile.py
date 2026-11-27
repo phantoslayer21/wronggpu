@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L (issue #89): per-kernel GPU time of the native D3D12 frame (runtime backend 3), synthetic models only, by
 the runtime's D3D12 operation profile (WG_D3D12_PROFILE, as clean/dx12/profile_frames.py), grouped by step: Model L's
 encoder (step 2), the ten Swin stages, Model L's decoder (step 4), the reconstruction / filter, the rest.

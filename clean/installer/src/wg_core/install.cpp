@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: the install engine: the routes, AMD's FSR 4 for the comparison key, the install itself.
 // Written for this project.
 #include "install.h"

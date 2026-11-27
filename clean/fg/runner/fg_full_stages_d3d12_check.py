@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (issue #96): the Full path's stage kernels (clean/dx12/kernels/fg_full_blend.hlsl, fg_out_pull.hlsl,
 fg_out_push.hlsl, fg_distortion.hlsl) against the CPU reference (clean/fg/reference/stages_full.py), byte for byte.
 

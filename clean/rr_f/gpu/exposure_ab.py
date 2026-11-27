@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """A/B of the exposure partial pass: RR_EX_WAVE 1 (one wave per 256-pixel block, f32 products under the no-underflow
 guard) against RR_EX_WAVE 0 (the 256-lane LDS tree, binary64 products), partial sums and the finish result bit for
 bit, on random and adversarial f32 colour buffers (zeros, tiny, subnormal, inf, NaN, huge, negative values; weights

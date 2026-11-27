@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Block decompression of spec 08 section 4.4 (the public LZ4 block format: no frame header, no checksum).
 // Written for this project from the seven steps of that section; the step numbers below are the spec's.
 #include "lz4block.h"

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96): net2's 3 x 3 convolution layer (clean/fg/reference/net2.py conv3 and its post-ops), exact,
 // one output element per lane. Tensors are float16 [H][W][C] (channel innermost) with a channel stride and offset, so a
 // launch can read one group of a wider tensor and write one channel range of a wider output.

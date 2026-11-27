@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Spec 51 window block (51.3) with its stage fronts (51.5) and tails (51.4) for the small, latency-bound levels: the
 // window's work spread over G x 4 waves (one workgroup of 128 G lanes per window) instead of 4. Same arguments, buffer
 // layouts, rounding points, step (rr_step.hlsli, RR_STEP) and Q8 / attention / activation forms as rr_block_fast.hlsl,

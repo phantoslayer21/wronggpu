@@ -1,4 +1,4 @@
-@rem SPDX-License-Identifier: MIT
+@rem SPDX-License-Identifier: GPL-3.0-only
 @echo off
 rem Plain build without CMake for Windows with MSVC. Run from a "x64 Native Tools Command Prompt
 rem for VS". Output in .\build-plain\.  Usage: build.bat [test]

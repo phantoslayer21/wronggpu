@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // WrongGPU.asi's card in OptiScaler's menu (the host's plugin interface, clean/wgshared/include/wg_host_menu_abi.h; the
 // same C ABI and registration pattern as the RR plugin's box, clean/rr_f/proxy/src/rr_panel.cpp): "WrongGPU Upscaler"

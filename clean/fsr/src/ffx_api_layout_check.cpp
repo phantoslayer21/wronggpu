@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Compile-time check (Windows builds) of the front end's view of the DX12 backend description against AMD's
 // FidelityFX SDK 1.1.4 header ffx_api/dx12/ffx_api_dx12.h. That header also defines two inline helper functions, so it
 // is included only here: this file belongs to the wg_sdk_layout_check object library, which is compiled with every

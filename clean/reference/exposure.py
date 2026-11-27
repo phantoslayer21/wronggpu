@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """NumPy reference of spec/07-auto-exposure.md (stage "exposure" of spec/90-test-interface.md): the clean team's oracle.
 
     e = exposure(color, pre_exposure=1.0, alpha=0.18)     # float, FP16-exact

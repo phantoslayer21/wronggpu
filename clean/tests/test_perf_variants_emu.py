@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Build variants of enc0 / dec0 (runner/perf_variants.py) that are meant to give identical outputs: built into the
 host emulator with their defines and compared bit for bit with the default build. Ablations (wrong on purpose) and
 the v1 baselines are not compared here (v1: see clean/PERF.md).

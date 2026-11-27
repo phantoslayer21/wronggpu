@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (issue #96): exact float16 chunk accumulation, as a CPU reference.
 
 Written for this project. net1's convolutions accumulate in float16, starting at the bias: each chunk of 16 products

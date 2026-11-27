@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // In-game overlay (overlay.h). Written for WrongGPU.
 #include "overlay.h"
 

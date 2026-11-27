@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Phase-split form of model K's wide stage m (deep-split lever, probe: stage m only). WrongGPU's own code. D3D12 only:
 // the same arithmetic as k_stagew4_m (kernels/k_block_wide.hlsl, hlsl/k_wide.hlsli; HIP: k_block_wide.co), whose one
 // workgroup per window runs every phase of the block (normalization, q / k / v, attention, Wo, MLP) in sequence on 16

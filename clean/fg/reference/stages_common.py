@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (issue #96): CPU reference of the shared non-network stages (both the light path, preset C, and
 the front half of the full path).
 

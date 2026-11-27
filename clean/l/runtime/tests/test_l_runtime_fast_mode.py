@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L's quality preset l_mode (runtime option l_mode=hybrid|fast, env WG_L_MODE) on the CPU: the runtime built with
 Model L on the recording device of clean/tests/runtime_frame_trace.cpp (launches recorded with their arguments, not
 executed; no GPU).

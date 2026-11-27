@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 port of the standalone output filter w64/post_filter_c1_s4 of post_w64.co (clean/kernels/post.hip
 // filter_strip_c1<4>, built with -mwavefrontsize64 and the analytic filter, WG_LZ_PROFILE = 0), byte for byte. The
 // runtime's default unbanded filter (kDefaultFilter): it runs after a reconstruction kernel that writes the display image

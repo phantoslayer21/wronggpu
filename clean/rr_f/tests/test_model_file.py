@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Loading converted preset-F model files (pages 56.4, 57.7; 57-T6 runtime round trip on synthetic data).
 
 Standard library only (the NumPy stage step runs only where NumPy is installed). The round-trip tests convert the

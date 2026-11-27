@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // The ONE definition of where WrongGPU's model entries are in the list of upscaler versions the front end gives a host
 // (FFX_API_QUERY_DESC_TYPE_GET_VERSIONS: frontend.cpp ListVersions, from the registry's SR model rows). A host such as

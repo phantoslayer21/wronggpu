@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Offline analysis of probe P1b (probe_p1b.py's npz): accuracy of v_wmma_f32_16x16x16_fp8_fp8 and
 v_wmma_f32_16x16x16_f16 against the exact sum of the 16 products and C.
 

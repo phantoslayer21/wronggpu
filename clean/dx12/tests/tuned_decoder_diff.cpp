@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Original synthetic fused decoder differential, adapted from clean dx12-m/dec/bench.
 // HIP and native D3D12 receive the same generated FP8 features, weights, motion and latent bytes.
 // Checks A (8 bytes/pixel), C (4 bytes/pixel) and latent (4 bytes/pixel); B is not written by pack12.

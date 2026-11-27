@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU frame generation (issue #96, F8a): the FG game-adapter core (fg_proxy_core.h). Written for this project.
 #include "fg_proxy_core.h"
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation's files in the payload step (tools/make_payload.py --fg, wg_core/fg.h): the release stage folder's layout
 (plugins\\WrongGPU-FG.asi, fg-dxil\\<name>.dxil and the kernel build's manifest.json) and the same kernels under wronggpu-setup\\
 or plugins\\wronggpu-setup\\ embed as plugins\\WrongGPU-FG.asi and fg-dxil\\<name>.dxil (kFgPayload, resource ids 2001 and up,

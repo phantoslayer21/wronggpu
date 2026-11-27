@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96): the presenter-slot packing shared by fg_exec_pack and the output kernels that write the
 // packed slot rows directly (fg_out_pull_pack, fg_out_push_fine_pack). fmt: 1 = R8G8B8A8_UNORM, 2 = B8G8R8A8_UNORM,
 // 3 = R10G10B10A2_UNORM; UNORM codes are floor(sat(v) * max + 0.5) with sat(NaN) = 0. v = the pixel as 4 x float16.

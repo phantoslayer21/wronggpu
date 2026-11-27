@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The exact input stage's scalar arithmetic and per-fine-position reprojection, shared by the tiled kernels (k_in.hlsl)
 // and the legacy kernels (k_in_legacy.hlsl). WrongGPU's own code. Include after the kernel's argument block,
 // k_fp.hlsli and k_frame.hlsli, and after kf_opq3 is defined.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Front-end side of the WrongGPU ASI plugin interface (clean/fsr/asi/asi_abi.h): find WrongGPU.asi if it is loaded
 // in the process and ask it which upscaler entry the player selected in OptiScaler's menu. No link to the plugin.

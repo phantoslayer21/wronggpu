@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (issue #96): net1's 32 steps (clean/fg/reference/net1.py NET1_WIRING) chained on the GPU, on HIP
 and on the native D3D12 device, against the CPU reference bit for bit.
 

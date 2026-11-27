@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Original, metadata-only support schema. No images, resource bytes or learned data.
 #include <array>

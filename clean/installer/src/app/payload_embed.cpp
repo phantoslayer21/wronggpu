@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU installer: what this executable embeds, for wg::Context::data. Written for this project.
 #include "app/payload_embed.h"
 

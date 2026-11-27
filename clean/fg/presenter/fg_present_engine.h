@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Platform-neutral display-slot engine shared by the Windows presenter back ends (fg_win_comp_presenter.h,
 // fg_dxgi_presenter.h): the slot pool, target-order admission, late drops with held leases, stale-suffix

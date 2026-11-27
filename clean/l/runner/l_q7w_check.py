@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L (issue #89): GPU check of the shared stages' FP16-form kernels (clean/l/kernels/l_q7w.hip; D3D12 ports
 clean/dx12/kernels/l_q7w.hlsl) against the oracle (clean/l/reference/oracle.py run_stage_q7's parts, FP8 op model
 "exact"), raw bytes.

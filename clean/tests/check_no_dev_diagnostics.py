@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """R1: a release build or a package never holds the developer diagnostics (executor=hip, the frame capture).
 
 The runtime library says which kind of build it is: the text "wg-build dev-diagnostics=0" (release) or

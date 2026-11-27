@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Throughput of the vector instructions the Swin kernels use (synthetic data only).
 
     python clean/runner/build.py --rocm <ROCm> --out build            # builds rates.co with the other code objects

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """CPU-only tests of run_wine_tests.py's hang probe and wine_env's --wine override, with fake wine, wineserver, compiler
 and xvfb-run scripts (no Wine, no GPU, no MinGW):  python3 -I clean/linux/test_run_wine_tests.py"""
 import contextlib

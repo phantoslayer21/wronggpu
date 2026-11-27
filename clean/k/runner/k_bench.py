@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model K timing harness (spec 40 task K4): the whole eleven-stage network with random parameters at the base sizes
 of spec 44 for 1080p, 1440p and 4K output, per-stage and per-kernel GPU times. Numbers only, no real data.
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The game's textures as the D3D12 paths read and write them (0.6.0 follow-up; a tester's CONTROL Resonant gives a
 // colour input with 11 mips): a single-sample, non-array Texture2D with any number of mips. Only mip 0 is read
 // (shader resource view: MostDetailedMip 0, MipLevels 1) or written (unordered access view: MipSlice 0); a copy uses

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher window: the window's own helpers (launcher_ui.cpp, namespace wg::app::win) that its offscreen frames
 // (ui_render.cpp, "WrongGPU.exe ui-render") use. Written for this project.
 #pragma once

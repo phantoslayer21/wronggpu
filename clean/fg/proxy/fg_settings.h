@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU frame generation (issue #96, F8a): the per-game FG settings keys.
 //
 // They live with the other per-game settings in <game folder>\wronggpu-setup\settings.ini (clean/wgshared/include/

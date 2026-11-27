@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 /*
  * WrongGPU upscaler interface (spec 20 "Boundary to the upscaler", spec 10 section 1).
  *

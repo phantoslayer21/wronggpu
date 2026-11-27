@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Byte comparison of two sequence body dumps (sequence.py --dump-body): every stage output of every frame, raw bytes
 (e4m3 codes and f16 bit patterns, zero signs included), plus the variant-Y fixup counts of the first dump.
 

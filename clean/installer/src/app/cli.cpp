@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher: the command line (build/launcher-design.md section 2 "CLI"). WrongGPU.exe <verb> [game] [options]:
 //   scan                          the games the launcher finds (store libraries, --library=<folder>, managed, added)
 //   status [game]                 one game or all: status, versions, last run, problems

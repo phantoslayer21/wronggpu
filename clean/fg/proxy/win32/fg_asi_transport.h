@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU frame generation (issue #96, F8b): the Win32 hook transport of the FG game adapter.
 //
 // The same delivery as the RR plugin's hook mode (clean/rr_f/proxy/HOOK-MODE.md): an ASI plugin that redirects, in the

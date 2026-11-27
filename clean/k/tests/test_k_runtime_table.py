@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The C++ model K layer table (clean/k/runtime/model_k.cpp) against the Python layout and packing, and the runtime's
 model selection (runtime option model=K accepted, unknown models refused; model M is unchanged; without a converted
 model K the runtime library's create fails with a plain message).

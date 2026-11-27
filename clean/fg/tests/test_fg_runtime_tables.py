@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The C++ FG runtime's generated headers (clean/fg/runtime/fg_map_table.h and tests/net1_plan_golden.h) are current:
 they match data/fg.v1.map.json and clean/fg/runner/fg_net1_mma.py's fused plan and weight fragments. The C++ tests
 (clean/fg/runtime, ctest fg_runtime) check the runtime against these headers, so together they tie the C++ plan to the

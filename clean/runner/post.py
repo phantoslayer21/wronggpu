@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Stages "post" (spec 06 output reconstruction) and "filter" (spec 06 output filter) for the spec 90 runner: weight
 packing, input conversion and launch plans; and the fused reconstruction + filter kernels (post_fused*), which are not
 a spec 90 stage: run_fused / time_fused below drive them through a Runner.

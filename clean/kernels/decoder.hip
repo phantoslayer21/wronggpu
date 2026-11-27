@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Coefficient decoder of spec/05-coefficient-decoder.md (stage dec0) for gfx1201 (RDNA4).
 //
 // One fused kernel. Projection (spec 05 section 1) on FP8 WMMA, then the per-pixel coefficients A, B, C and the gated

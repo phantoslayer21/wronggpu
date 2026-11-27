@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model file of WrongGPU's RR runtime (`wronggpu_rr_model.bin`, read by clean/rr_f/runtime/src/rr_model.cpp).
 
 The converter (page 57) emits the logical tensors of page 56.4 and the symbol table of 57.7.2; "how the runtime stores

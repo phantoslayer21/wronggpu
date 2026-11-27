@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 /* WrongGPU shared settings block, version 1 (i15). Owned by WrongGPU; clean/wgshared/include/wg_shared_settings.h.
  *
  * One process-local block that every WrongGPU DLL in a game process (SR front end, RR plugin, RR runtime, SR runtime)

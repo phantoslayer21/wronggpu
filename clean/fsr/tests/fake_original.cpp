@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Test double for AMD's amd_fidelityfx_dx12.dll, built as amd_fidelityfx_dx12.wronggpu-original.dll. It does no
 // GPU work: it hands out numbered contexts, answers the version queries and records every call, which the test
 // reads back through the extra export fakeLog. With WG_FAKE_AMD_MIB=N in the process environment (test_dll_d3d12

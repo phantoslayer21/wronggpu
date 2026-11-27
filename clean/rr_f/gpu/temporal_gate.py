@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Quality gate of a non-exact variant on the captured frames (owner's rule 2026-10-23; clean/rr-f-r8-head): per frame
 the tonemapped PSNR against the exact default and % of pixels over 1/2/4/8 (of 255), and the temporal metrics of both
 runs: the static-region frame-to-frame change (mean |O_t - O_t-1| over pixels whose motion is below 0.25 output

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The runtime's model selection (#89): clean/runtime/model_select.h and model_from_options in both runtime builds,
 with model K (clean/k/runtime/model_k.cpp) and without (clean/runtime/no_model_k.cpp, -DWG_NO_MODEL_K).
 

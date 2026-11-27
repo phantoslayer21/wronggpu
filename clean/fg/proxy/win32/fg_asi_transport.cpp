@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU frame generation (issue #96, F8b): the Win32 hook transport. See fg_asi_transport.h.
 // Written for this project.
 #include "fg_asi_transport.h"

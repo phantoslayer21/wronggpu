@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // The interface WrongGPU's front end (amd_fidelityfx_dx12.dll) uses to ask the WrongGPU ASI plugin which upscaler
 // entry the player selected in OptiScaler's menu. The front end finds the plugin by module (GetModuleHandle of the

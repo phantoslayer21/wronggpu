@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // D3D12 hooks of the FSR front end for same-frame execution (interface version 2, ANSWERS.md spec 20 item 16):
 // WrongGPU's own COM vtable patches, each chained to whatever the vtable entry held before (no hook library).

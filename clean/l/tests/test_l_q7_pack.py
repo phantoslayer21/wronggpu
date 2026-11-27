@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The FP16-form block kernels' blob and tables (clean/l/runner/l_pack.py pack_q7_block, q7_tables): layout, values
 and the agreement of the tables with the oracle's functions for every FP16 input.
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // ffx_fsr3upscaler_x64.dll replacement (spec 20, integration point 2): forwards every export to AMD's original,
 // ffx_fsr3upscaler_x64.wronggpu-original.dll, logs each call with its parameters and caller, and lets the stand-in take
 // over upscale dispatches (fsr30_hook.h). Exports: the FSR 3.0.x functions (SDK fsr3-v3.0.4 ffx_fsr3upscaler.h), the

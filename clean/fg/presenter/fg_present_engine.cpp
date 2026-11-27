@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Platform-neutral display-slot engine: see fg_present_engine.h.
 #include "fg_present_engine.h"
 

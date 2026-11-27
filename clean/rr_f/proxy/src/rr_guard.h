@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // RR guard: the coexistence guard of the hook-mode RR plugin (HOOK-MODE.md, "Another Ray Reconstruction
 // plugin"). Generic and read-only: it looks at where the game's RR calls lead (import slots, the first bytes of the
 // interface's RR exports, the host's continuation pointers), never at another plugin's files or internals.

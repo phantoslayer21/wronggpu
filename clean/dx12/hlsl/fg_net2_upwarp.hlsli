@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96): net2's head upsample + warp-merge of ONE pixel of the W x H grid (fg_net2_upwarp's lane work),
 // shared by fg_net2_upwarp (which stores y, U4, U1, U3) and fg_net2_mconv_m1b2_uw (which builds L14's input tile from it in
 // LDS, fg_net2_mconv.hlsl FG_UPWARP_STAGE): one definition, the same bits. The including file defines the argument block

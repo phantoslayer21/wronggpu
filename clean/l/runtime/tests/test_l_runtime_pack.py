@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L's runtime packer (clean/l/runtime/l_pack.cpp) against clean/l/runner/l_pack.py, byte for byte (#89):
 
 - every blob of pack_model_l for random parameters (clean/l/reference/oracle.py random_params), three seeds: the

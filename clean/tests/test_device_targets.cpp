@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Own HIP mock tests: exact architecture, device matching and fail-closed module selection.
 #include "../runtime/device.h"
 #include <cstdio>

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU RR runtime: objects retired while command lists recorded by the runtime may still use them (issue #63).
 // Original WrongGPU code.
 //

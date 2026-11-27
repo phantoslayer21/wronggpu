@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Library interface of the converter (spec 08). Written for this project.
 #include "api.h"
 

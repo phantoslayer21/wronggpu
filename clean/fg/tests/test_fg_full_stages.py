@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (issue #96): the Full path's per-call stages (clean/fg/reference/stages_full.py) on synthetic data:
 the Full blend with presets A and B and net2's input tensors, the output pull / pull-middle / push / push-fine pyramid,
 the hole rule, NaN and special values, and the distortion stages. Scalar re-computations (plain loops) check the

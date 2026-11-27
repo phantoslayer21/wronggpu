@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Stage "enc0" (spec 03 input encoder) for the spec 90 runner: weight packing, input conversion, launch plan.
 
 Layouts: clean/FORMATS.md, "Input encoder (enc0)". Kernel: clean/kernels/encoder.hip (`input_encoder`).

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Hook-mode delivery of the RR proxy (HOOK-MODE.md). Built as an OptiScaler ASI plugin
 // (WrongGPU-RR.asi release, WrongGPU-RR-probe.asi probe), loaded by OptiScaler from
 // bin\x64\plugins\. It does NOT replace the game's interface file. Instead it finds the already-loaded genuine

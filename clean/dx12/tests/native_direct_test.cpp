@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Original direct-texture versus staged supplied-device synthetic validation/timing.
 // Converter arithmetic is shared verbatim by both paths; reference network inputs
 // are downloaded AFTER GPU conversion, never regenerated with host float math.

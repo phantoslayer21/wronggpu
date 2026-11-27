@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96), light path: R4, motion and depth processing (clean/fg/reference/stages_common.py
 // mvec_process). One lane per scatter-grid pixel: the nearest-depth sample of five (centre and the four diagonal depth
 // texels, region reads with the -2^-23 bias), its 32-bit packed depth Zc, and the motion of that sample times the

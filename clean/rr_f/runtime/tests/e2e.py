@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """End-to-end test of WrongGPU's RR runtime (wronggpu_rr_runtime.dll) through its owned adapter.
 
     python -m clean.rr_f.runtime.tests.e2e [--out DIR] [--model synthetic|admission|wgcm] [--wgcm FILE] [--calls 61]

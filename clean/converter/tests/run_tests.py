@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """End-to-end tests of wronggpu-convert on synthetic files (spec 08 sections 4-9).
 
 Written for this project; Python standard library only. Never uses a real model file: every "DLL"

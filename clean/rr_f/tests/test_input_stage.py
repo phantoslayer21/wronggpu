@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Spec 52 (input stage) reference: scalar rules, exhaustive quantisation, sampler, per-frame constants, camera maps,
 per-token features against the independent slow oracle (tests/slow_input.py), front-end MLP, motion surfaces,
 reset independence and the stage call.

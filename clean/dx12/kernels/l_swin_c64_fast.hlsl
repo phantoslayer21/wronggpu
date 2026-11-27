@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model L's fast-mode middle Swin blocks at width 64 (runtime l_mode=fast, lever bit 8; native D3D12 only): the "_fast"
 // twins of swin_block_c64_nc (enc1) and swin_block_c64_add_ex_nc (dec1, the fused expand), launched in place of them with
 // the same arguments (runtime l_fast_alt). l_swin_c32_fast.hlsl's two-windows-per-wave body at C = 64 (the launch shape

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model M equivalence tools (clean/equiv/model_m.py): storage formats, chained dumps (full and tiles), stage-input
 files, isolated stage runs, replay with delete-after, input reader. CPU tests use stand-ins for spec 90's Pipeline and
 Runner with synthetic values; the GPU smoke test (real Pipeline / Runner, synthetic model and inputs) runs only when

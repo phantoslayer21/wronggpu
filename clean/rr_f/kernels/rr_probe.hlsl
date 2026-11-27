@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Spec 51 kernel probes (DESIGN-51.md section 9), D3D12, driver channel. One wave per 32 lanes, data per lane.
 //   rr_p1_wmma : P1, accumulation of v_wmma_f32_16x16x16_fp8_fp8: D1 = A1 B1 + C, D2 = A2 B2 + D1 (f32 results),
 //                and the 51.1 step as the kernels do it: f16 of D2 (v_cvt_f16_f32 through the driver conversion).

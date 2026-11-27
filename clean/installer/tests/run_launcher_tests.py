@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Tests of the WrongGPU launcher's verbs (build/launcher-design.md section 7.2 and 7.3).
 
 Written for this project; Python standard library only. Runs WrongGPU.exe (a WRONGGPU_TESTING build made with the

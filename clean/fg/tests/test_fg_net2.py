@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (#96): net2 with the delivered wiring and arithmetic (clean/fg/reference/net2.py), on synthetic
 weights and inputs, against versions written separately here: exact rationals for the float16 operations, one
 convolution and the warp sample; scalar loops for the upsample and the pool; a hand-composed 28-launch network whose

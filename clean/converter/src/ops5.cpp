@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The decode operations and value checks of spec 57 section 6. Written for this project.
 //
 // Exactness: binary16 and binary32 values are exact in binary64. Sums and products of two binary16 values, and

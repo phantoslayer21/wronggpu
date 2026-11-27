@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Fast exact helpers of the fast page-54b resolve (rr_resolve_fast.hlsl). Every function here returns, for every
 // f32 input, exactly the bits of its counterpart in rr_resolve_math.hlsli (the verified kernel's helpers), or sets a
 // flag that sends the caller to that counterpart. Proof: exhaustive GPU comparison over all 2^32 inputs

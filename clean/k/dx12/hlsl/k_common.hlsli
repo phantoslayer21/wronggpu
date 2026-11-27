@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model K network helpers for the D3D12 ports: the HLSL counterpart of clean/k/kernels/k_common.h (WrongGPU's own code),
 // with the same names (wgk_*) and the same bits as the HIP kernels built from it (gfx1201, k_block.co: WGK_PAIR_CVT = 1,
 // WGK_ASM_CLAMP = 1, FP32 accumulation; the FP16-accumulating KAcc<true> forms are not ported).

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Swin stages of spec/02-swin-block.md for gfx1201 (RDNA4): fused Swin block, patch merge, expand.
 //
 // Data layouts and weight packing are described in clean/FORMATS.md and produced by clean/runner/packing.py.

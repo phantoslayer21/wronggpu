@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L's HYBRID weight values in the runtime (clean/l/runtime/l_hyb_pack.h, through pack_stage_blob and
 l::pack_model) against clean/l/runner/l_hyb_stage_pack.py + the Python packers, byte for byte:
 

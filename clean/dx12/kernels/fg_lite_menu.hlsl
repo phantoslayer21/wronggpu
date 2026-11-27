@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96), light path: menu detection and the menu output stage (clean/fg/reference/
 // stages_common.py detect_* and menu_output). D3D12 only. Built only when --only names them.
 //

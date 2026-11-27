@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Summary of a run_all --json result: per stage kind and mode (Z mode / step variant / LDS staging), the number of
 cases, how many are identical to the reference, and the differing values (and, for variant E, the differences from
 its step model).

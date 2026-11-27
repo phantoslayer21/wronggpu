@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Run the Ray Reconstruction plugin's CPU test executables (CI, and locally), as clean/rr_f/proxy/tools/build.py runs
 them, after `python clean/rr_f/proxy/tools/build.py --out <dir> --no-tests`. That build still builds and runs the
 WARP-based probe and hook tests (build.py: the probe test's fake game host and the hook tests' WARP sequence); it skips

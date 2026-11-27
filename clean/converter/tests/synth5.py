@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Independent reference for spec 57 (map version 5, preset F) and builder of synthetic version-5 cases.
 
 Written for this project. Python standard library only, independent of the C++ converter: every decode operation

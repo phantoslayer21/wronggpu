@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Output filter with the weight set "original" (spec 06 draft 4, steps 2 to 5): clean/reference/post.py
 h_fma, filter_pass_original, encoded_filter_original, output_filter_original.
 

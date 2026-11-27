@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Decoding the tensors (spec 08 sections 4.3, 5.1, 6, 7) and checking the stage digests (7.3).
 // Written for this project.
 #pragma once

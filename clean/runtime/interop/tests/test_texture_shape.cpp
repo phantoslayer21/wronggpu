@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The game's textures as the D3D12 paths take them (interop/texture_shape.h, 0.6.0 follow-up: a tester's CONTROL
 // Resonant gives a colour input with 11 mips): on any host, no GPU, no device. WrongGPU's own code.
 //   cl /nologo /std:c++17 /EHsc test_texture_shape.cpp   (or clang++ -std=c++17), then run it

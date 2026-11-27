@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L (issue #89): the fallback route of l_post=own on native D3D12 (frames whose render footprint the pack12 kernels
 do not take, runtime.cpp recon2_supported false: the unpacked coefficient store l_coef, l_post_recon, then the filter
 w64/post_filter_c1_s4) against HIP, byte for byte, chained as the frame runs it.

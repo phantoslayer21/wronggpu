@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model L (issue #89): the shared stages (enc1, enc2, b0-b5, dec2, dec1) in their FP16 form, as Model L's own kernel
 // variants (Model M's kernels are not changed): clean/l/reference/oracle.py run_stage_q7 (table shared_form "q7").
 // The arithmetic of every step is l_q7.hip's (exact FP8 ops, exact FP16 additions, table rsqrt / rcp), here for the

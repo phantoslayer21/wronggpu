@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L: the shared stages in their FP16 form (oracle.run_stage_q7, table shared_form "q7"; Q8 Part B, Q10).
 
 Run: python -m unittest discover -s clean/l/tests -t .

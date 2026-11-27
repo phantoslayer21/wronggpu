@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """One GPU session for the spec 51 kernels: probes P1 (WMMA accumulation), P2-P4 (Q8, attention weight,
 activation, R(1/Z) for every f16 input) and every stage case of the vectors in the chosen Z modes, all in one arena and
 one host call (one GPU lock).

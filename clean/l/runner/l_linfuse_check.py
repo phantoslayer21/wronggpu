@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L (issue #89): the fused input linears l_linear_32_32_fused (D3D12 only; clean/dx12/kernels/l_ops_linear.hlsl)
 against the sequence it replaces, l_linear_32_32_relu -> l_linear_32_32_f16, byte for byte.
 

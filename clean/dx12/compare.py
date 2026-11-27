@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Byte-for-byte check of the D3D12 kernel ports: the same synthetic Model M frames through the pure HIP backend and
 through the hybrid D3D12 backend (runtime backend 2, default), or native D3D12 (backend 3, --backend d3d12), comparing every named buffer of the
 runtime (wg_rt_buffer: every stage output, every state image, the inputs and the output) after every frame, plus the

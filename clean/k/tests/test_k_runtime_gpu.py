@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model K in the per-frame runtime library (wronggpu_runtime.dll, runtime option model=K) on the GPU, through the
 external-I/O entry points the D3D12 interop's HIP executor uses (wg_rt_create_external, wg_rt_alloc, wg_rt_frame_io),
 against clean/k/runner/k_frame.py KFrame on the same inputs: the same kernels, so every frame's output must be the

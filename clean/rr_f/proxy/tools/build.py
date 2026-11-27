@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Build and test the RR proxy (CPU only: no game; the probe test uses the software D3D12 adapter, WARP).
 
     python clean/rr_f/proxy/tools/build.py [--out DIR] [--binding FILE [--probe] [--hook]] [--no-tests]

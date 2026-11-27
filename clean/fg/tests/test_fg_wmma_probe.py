@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The matrix probe's CPU parts (clean/fg/runner/fg_wmma_probe.py): the float16-midpoint test, the RN32 oracle and the
 case classes."""
 import os

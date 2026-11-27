@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 host of the ags-layout test (clean/linux/run_wine_tests.py): runs the wave32 and the wave64 entry point of
 // ags_layout.hlsl once each and writes the output slots. Root signature as the runtime's kernels bind the driver
 // channel: a descriptor table with one raw UAV at u0, space 0x7FFF0ADE, and a root UAV (u1) for the data.

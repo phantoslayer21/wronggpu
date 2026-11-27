@@ -1,5 +1,5 @@
 #!/bin/sh
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 # Cross-builds the launcher with MinGW-w64 (Linux): WrongGPU-Restore.exe (the per-game restorer), then WrongGPU.exe
 # with the restorer and the payload embedded. Usage:
 #   ./build-mingw.sh <payload dir> [map.json] [version] [out dir]

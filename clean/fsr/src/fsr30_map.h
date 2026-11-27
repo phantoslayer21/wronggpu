@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // FSR 3.0.x component structures (fsr30_types.h) -> the FFX API forms the front end already maps and logs. The FSR 3.0
 // upscale inputs are the same quantities as FSR 3.1's (AMD's documentation describes both alike), so an FSR 3.0

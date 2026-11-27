@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Frame generation (issue #96, F7a): the FG session, which joins the game adapter core (clean/fg/proxy), frame ingest
 // and history (fg_history.h), the multi-frame kernel executor seam (IFgKernelExecutor below) and the presentation

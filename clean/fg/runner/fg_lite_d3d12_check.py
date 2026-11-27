@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (issue #96): the light path (preset C) end to end on the D3D12 device against the CPU reference.
 
     python clean/fg/runner/fg_lite_d3d12_check.py --build <dir> --work <dir> --plan      (CPU: chains and inputs)

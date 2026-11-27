@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Native Model M correctness and fresh-process module gate. Run under the machine GPU lock.
 
     python clean/dx12/tests/native_qualification.py --build BUILD --models PRIVATE_SYNTHETIC_ROOT --out NEW_REPORT_DIR

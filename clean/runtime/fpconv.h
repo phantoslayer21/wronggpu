@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Number-format helpers of the runtime (host side): FP16 and FP8 E4M3FN conversions, written from the format
 // definitions (IEEE 754 binary16; E4M3FN as in spec 08 section 2). Round to nearest, ties to even.
 #pragma once

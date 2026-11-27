@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Vectorized exact f32 / binary16 arithmetic for the image-sized references of page 54b.
 
 Rules (54b.N, the f32 rule pages 54, 55 and 58 cite): binary32, every operation rounded to nearest even once,

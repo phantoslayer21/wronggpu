@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 /* WrongGPU RR proxy: our own declarations of the game-facing structures (spec 60.2, 60.4, 60.5, 60.6).
  *
  * Written from the sizes, offsets and values of spec page 60 only (functional description; no vendor header

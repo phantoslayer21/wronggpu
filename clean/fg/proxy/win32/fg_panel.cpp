@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU frame generation: WrongGPU-FG.asi's "WrongGPU Frame Generation" card in OptiScaler's menu. See fg_panel.h.
 // Written for this project.
 #include "fg_panel.h"

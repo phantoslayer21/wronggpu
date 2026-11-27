@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Minimal check macros shared by the proxy tests.
 #pragma once
 #include <stdio.h>

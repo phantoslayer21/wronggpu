@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Shared Windows pieces of the presenter back ends: see fg_win_common.h.
 #include "fg_win_common.h"
 

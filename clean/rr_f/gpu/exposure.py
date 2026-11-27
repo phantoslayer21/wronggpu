@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Synthetic D3D12 spec-58 qualification, independent CPU reference, no game/model data."""
 import argparse
 from dataclasses import fields, replace

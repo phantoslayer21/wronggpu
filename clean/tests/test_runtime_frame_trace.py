@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The runtime's frame sequence on the CPU (#89): clean/tests/runtime_frame_trace.cpp runs the runtime
 (clean/runtime/runtime.cpp) on a recording device, so whole frames run without a GPU and without HIP. Launches are
 recorded, not executed: the test checks the sequence (code objects loaded, kernels launched per frame with grid and

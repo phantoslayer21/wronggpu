@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The port check's NaN rule (clean/k/dx12/k_port_check.py nan_equivalent_differ): the only accepted difference between
 the D3D12 port and HIP is the SIGN of a NaN; the exponent, the quiet bit and the payload must be equal, and every other
 differing element counts as a difference. CPU only.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Unit tests of wg_core (the installer's / launcher's engine) that need no game, no payload and no GPU: strings and
 // paths, the install record, wronggpu.ini keys, the runtime options of a Model-M-only build, the Context's log file.
 // Written for this project. Run by ctest ("wg-core") in a WRONGGPU_TESTING build.

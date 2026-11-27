@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The runtime's own loading of the converter's model.wgcm (src/rr_model.cpp, src/rr_pack.cpp) against the Python packing
 (tools/pack_model.py pack() of model/model_file.py's logical model): the same device image (blob for blob), the same
 blob names and offsets, the same scalars; rho of page 55.3 against head/fp.py tanh32 (the binary64 path with its guard,

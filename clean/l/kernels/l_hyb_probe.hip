@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // HIP twin of clean/dx12/kernels/l_hyb_probe.hlsl (same buffer layout): the hybrid helpers of clean/kernels/wg_hyb.h
 // for every FP16 input, and the chain-end double rounding of nf float32 values (clean/l/runner/l_hyb_probe_check.py
 // --hip). Not used by the runtime.

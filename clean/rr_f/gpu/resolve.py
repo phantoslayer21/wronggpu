@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """D3D12 qualification of the page-54b kernels (kernels/rr_resolve.hlsl) against reference/resolve.py.
 
 Every comparison is bit-exact (NaN payloads and NaN signs excepted: any NaN equals any NaN). Synthetic data and

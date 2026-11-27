@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU RR for games that call the NGX interface directly (spec page 66; ngx_rr.h). Section numbers refer to spec page 66
 // (NGX RR provider), draft 2, 2026-11-04, as received from the spec team; the parameter keys are its annex 66.A (allowed in this
 // folder by the leak-scan allow-list, owner OK 2026-10-23).

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // The FidelityFX API front end (spec 20, integration point 1): routes the five exported calls. Upscaler contexts
 // are handled by a WrongGPU upscaler (stand-in or network) behind wronggpu_upscaler.h; every other context type and

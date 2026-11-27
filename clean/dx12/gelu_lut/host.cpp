@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Exhaustive GELU + FP8 table tool (clean/dx12/gelu_lut/run.py drives it).
 //   host oracle <oracle.co> <rle.bin>          HIP: run-length form of q8(GELU(u)) over all 2^32 bit patterns u
 //   host check  <oracle.co> <rle.bin>          HIP: recompute all 2^32 bytes, compare with rle.bin (must be 0)

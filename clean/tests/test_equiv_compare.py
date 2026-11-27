@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Comparison tool of the equivalence tests (clean/equiv/compare.py): synthetic pairs built to land in each verdict
 (equal, 1-step rounding noise, a biased rule, a wrong rule in one channel / border band / window class, a large
 difference), the first-difference finder, temporal trend, perturbation and sequence verdicts, and value-free printing.

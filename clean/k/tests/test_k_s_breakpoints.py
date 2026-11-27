@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Prove the production S transfer table with a CPU-only dump."""
 import os
 from pathlib import Path

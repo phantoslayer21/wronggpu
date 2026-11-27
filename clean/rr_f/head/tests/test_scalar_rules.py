@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Exhaustive / dense checks of the scalar rules of pages 55 and 51 used by the D0-R head reference.
 
 Run: python -m unittest clean.rr_f.head.tests.test_scalar_rules -v   (about a minute)

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Fast exact FP32 -> FP16 conversions of the post port (kernels/post.hlsl): the same bits as wg_f2h / wg_mul_f16
 // (wg_math.hlsli; HIP's v_cvt_f16_f32 and v_fma_mixlo_f16 a, b, 0) for the value ranges of that kernel, in fewer
 // instructions. Checked on the GPU against those helpers (2026-10-15): 6.5 million inputs each (the display range, the

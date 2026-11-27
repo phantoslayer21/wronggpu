@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // In-game overlay: shows the player whether WrongGPU's upscaler is running ("WrongGPU - model M: ACTIVE"), or why AMD's
 // FSR upscales instead, with the render and output sizes, the frame rate and the upscaler's GPU time per frame. WrongGPU's own code: the swap chain's

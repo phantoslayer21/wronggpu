@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Tests of clean/wgshared/tools/gen_registry.py.
 
     python clean/wgshared/tests/test_gen_registry.py

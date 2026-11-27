@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 ports of model K's wide stage kernels k_stagew<NG>_<name> (clean/k/kernels/k_block_wide.hip, FP32 accumulation;
 // HIP build: k_block_wide.co). WrongGPU's own code. Basis, operation orders and every deviation: hlsl/k_wide.hlsli.
 // The runtime (clean/k/runtime/runtime_k.cpp wide_ng) launches e3 / d3 with NG = 2, m with NG = 4, e4 / d4 with NG = 4

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU installer / uninstaller / log collector (spec 30). Native Win32, no runtime dependencies.
 //
 // Adapted from the audited WrongGPU 0.2.0 installer (imported/0.2.0-infra/installer/src/setup.cpp): the file helpers,

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Per-frame runtime (clean/runtime, spec 10 core) through clean/runner/pipeline.py, in the host lane emulator.
 Synthetic model and frames only.
 

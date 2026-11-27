@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU frame generation (issue #96, F8a): CPU tests of the FG game-adapter core and the FG settings keys, against
 // a fake game interface (super resolution, ray reconstruction, frame generation and the latency features in one
 // session), a fake host and a fake executor. Every value is synthetic. Built with CI's flags (/W4 /WX /permissive-).

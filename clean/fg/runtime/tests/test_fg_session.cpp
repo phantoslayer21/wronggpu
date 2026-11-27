@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96, F7a): end-to-end CPU tests of the FG session. A fake game drives the game adapter core
 // (clean/fg/proxy) on a fake game interface; the core hands assembled game frames to the session through its executor
 // hand-off; the session records into a fake kernel executor and presents through the deterministic fake presenter

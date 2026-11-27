@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L weight packing (issue #89): the device blobs of Model L's own launches, from the structure table
 (clean/l/reference/table.py) and the parameters of the oracle ({stage: tensors}, clean/l/reference/oracle.py).
 

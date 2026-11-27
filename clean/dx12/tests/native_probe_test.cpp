@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The driver-channel probe (runtime/wmma_probe.h) on the GPU, through the runtime's own borrowed-device path: creates a
 // D3D12 device and DIRECT queue on the first supported RX 9070 / 9060 adapter and hands them to
 // wgrt::make_d3d12_device_on, which runs native_driver_probe at create. WrongGPU's own code. No HIP runtime, no model.

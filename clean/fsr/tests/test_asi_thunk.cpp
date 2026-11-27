@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Unit tests of the WrongGPU ASI plugin thunk logic (clean/fsr/asi/asi_thunk.h), with function-pointer stand-ins for
 // ImGui::Selectable / ImGui::BeginCombo. No Windows, no ImGui: builds on any host.
 #include <cstdio>

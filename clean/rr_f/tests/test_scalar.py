@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Spec 51 scalar rules over every f16 input: attention weight (51.3 step 3), activation (step 8), reciprocal of the
 row sum (step 4), quarter of the merged hidden (51.4), sigmoid (51.4), and the converter checks of the attention
 constants."""

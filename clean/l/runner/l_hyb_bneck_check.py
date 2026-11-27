@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Byte check of the HYBRID bottleneck in one launch (speed lever 4): swin_bneck6_hyb (clean/dx12/kernels/hyb_bneck.hlsl,
 bneck.hlsl's persistent queue around swin_block_c128_hyb's body) against six swin_block_c128_hyb launches on the same
 input map and the same six random hybrid blobs, on native D3D12 (kernel_replay chains).

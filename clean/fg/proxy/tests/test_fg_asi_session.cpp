@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU frame generation (issue #96, F9): tests of the FG session host of WrongGPU-FG.asi (win32/fg_asi_session.h).
 // Every value is synthetic. Built with CI's flags (/W4 /WX /permissive-).
 //

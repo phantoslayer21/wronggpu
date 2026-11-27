@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 test host of WrongGPU's RR runtime: plays the proxy's role (clean/rr_f/proxy). It loads
 // wronggpu_rr_runtime.dll from a stage folder through the owned adapter (wg_rr_adapter.h), keeps the page-53 host
 // bookkeeping with the proxy's own Lifecycle (proxy/src/lifecycle.h), puts synthetic inputs into real D3D12 textures,

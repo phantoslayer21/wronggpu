@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Compile-time check (Windows builds) that the plain-type mirror in fsr30_types.h has exactly the layout of AMD's
 // FidelityFX SDK fsr3-v3.0.4 host headers. Nothing in this file is executed, and it is linked into no DLL: it belongs to
 // the wg_sdk_layout_check object library (AMD's ffx_types.h defines a static variable, s_FfxViewDescInit).

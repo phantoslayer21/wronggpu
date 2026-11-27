@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Deterministic fake presenter for CPU tests of the presentation boundary: a fake interrupt-time clock, fake GPU
 // fences signalled at chosen times, a fixed pool of display slots, a chain-ownership registry and a display that

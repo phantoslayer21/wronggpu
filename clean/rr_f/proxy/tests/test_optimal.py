@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """WrongGPU's optimal-settings rule (spec 61.5) checked against an independent oracle in exact rationals.
 
 The C++ implementation (src/optimal.cpp) is dumped by test_proxy_core.exe --dump-optimal for modes 0..7 and

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU installer: the wizard (app/app.h). Moved from setup.cpp. Written for this project.
 #ifndef UNICODE
 #define UNICODE

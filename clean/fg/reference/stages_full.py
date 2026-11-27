@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (issue #96): the Full path's per-call stages (presets A and B) outside the two networks, as a CPU
 reference: the Full blend with net2's three input tensors, the output pull / pull-middle / push / push-fine pyramid
 that makes the generated frame, and the optional distortion stages.

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Fast exact D0-R head (round 2): build, exactness sweep against the strict binary64 step, timing.
 
     python -m clean.rr_f.head.dx12.exact_head build  --work W [--variants S,X,...]

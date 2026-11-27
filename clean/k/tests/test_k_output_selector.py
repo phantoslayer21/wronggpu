@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Exhaustive GPU equality of production selector indices for every half input."""
 import ctypes
 import os

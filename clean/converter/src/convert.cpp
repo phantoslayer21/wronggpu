@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Decoding the tensors (spec 08 sections 4.3, 5.1, 6, 7; spec 48 sections 4, 6, 7) and checking the digests (08
 // section 7.3). Written for this project.
 #include "convert.h"

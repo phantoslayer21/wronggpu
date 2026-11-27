@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Presenter back-end selection: see fg_presenter_factory.h.
 #include "fg_presenter_factory.h"
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The proxy's game-interface logic (spec 60-63): answers feature 1001, records/copies what the RR path needs,
 // forwards everything else to the original unchanged. Platform-free: the DLL glue (proxy_dll.cpp) supplies the
 // original's function pointers, the runtime adapter, the clock and the log; tests supply fakes.

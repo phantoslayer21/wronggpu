@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (issue #96): net2 on gfx12's matrix instructions (tier B of the fast path, D3D12), with the exact
 path (clean/fg/runner/fg_net2_d3d12_check.py) selectable as the validation mode.
 

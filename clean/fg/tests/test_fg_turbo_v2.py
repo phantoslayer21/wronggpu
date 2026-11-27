@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """CPU proofs of the exactness arguments behind frame generation's Turbo v2 kernels (clean/dx12/kernels/fg_lite_p2c.hlsl,
 fg_lite_g.hlsl). Each class re-states what the old kernel computes and what the new kernel computes, step by step as the
 HLSL does, and compares them on random and edge inputs. The kernels themselves are checked on a GPU

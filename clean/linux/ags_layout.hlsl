@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU's driver-channel helpers (clean/dx12/hlsl/wg_ags.hlsli) on fixed register dwords, for the Linux test of
 // the D3D12 translation layer (clean/linux/run_wine_tests.py, test ags-layout). Under Proton the channel is translated
 // by vkd3d-proton's dxil-spirv; this checks that the results are the gfx12 register semantics the kernels rely on.

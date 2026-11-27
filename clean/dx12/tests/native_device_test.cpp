@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Original Device contract tests: native D3D12 allocations, copies, fill, events, binding and teardown.
 // Reuses our synthetic device_test.hlsl. No model weights, HIP API or third-party implementation.
 #include "../../runtime/device.h"

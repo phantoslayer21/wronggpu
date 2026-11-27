@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """A Wine prefix set up the way Proton runs a game, for WrongGPU's Linux tests (clean/linux/run_wine_tests.py).
 
 Proton puts vkd3d-proton (d3d12.dll, d3d12core.dll), DXVK's dxgi.dll and Wine's vkd3d libraries (vkd3d-utils,

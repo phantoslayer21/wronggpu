@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Developer builds (WG_DEV_DIAGNOSTICS): the 8-byte alignment premise of the D3D12 post_tf ports. WrongGPU's own code.
 // dx12/kernels/post.hlsl reads the history (hist_prev) and the A8 features with 8-byte loads whose address has its low 3
 // bits cleared (ld64_a8 / ld128_a8), which is the requested address only when both pointers are 8-byte aligned. The

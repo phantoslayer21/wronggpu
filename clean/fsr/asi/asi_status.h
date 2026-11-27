@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Original WrongGPU status bookkeeping. No host calls, resource exchange, or backend inference.
 #include <atomic>

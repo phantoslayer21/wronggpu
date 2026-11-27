@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Original CPU-only HIP metadata fixture. Never copied into a game/release payload.
 #include <atomic>
 static std::atomic<int> queries{0}, initializations{0};

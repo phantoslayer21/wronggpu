@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model K (issue #15): byte-for-byte check of a K kernel's D3D12 port against its HIP kernel, one family at a time.
 
     python clean/k/dx12/k_port_check.py --build <dir> --rocm "C:\\Program Files\\AMD\\ROCm\\7.2" --prepare [--family expo]

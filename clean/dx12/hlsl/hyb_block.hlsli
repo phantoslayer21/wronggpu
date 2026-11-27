@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The hybrid block form's norm and softmax row in the Swin block templates' register layout (SW_HYB=1; included by
 // kernels/swin_block.hlsl after its layout macros): lane (t, hh) of a wave holds token t's channels hh C/2 + 8 k + v in
 // v8f tiles k = 0 .. KC - 1, and the scores S(t, s) of keys s = 8 hh + v (gfx12 D rows, packing.resolve_d_row).

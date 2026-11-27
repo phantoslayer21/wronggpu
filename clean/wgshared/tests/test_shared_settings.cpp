@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Tests of the shared settings block and the settings I/O (clean/wgshared/include/wg_settings_io.h): create / open /
 // seed, magic published last, seqlock torn reads, writer election, version / size / slot_count refusals, text area,
 // unset slots, precedence, WG_DATA_DIR, comment-preserving ini persistence, the host-ini poll, the pure helpers.

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model M's code objects, base versus head: proof that a change to a shared kernel source (clean/kernels/*.hip, e.g.
 a template another model reuses) leaves every Model M code object byte for byte unchanged.
 

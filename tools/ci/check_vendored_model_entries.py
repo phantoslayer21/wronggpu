@@ -1,12 +1,12 @@
-# SPDX-License-Identifier: MIT
-"""Vendored-copy check (CI): OptiScaler WrongGPU edition holds a byte-identical copy of
+# SPDX-License-Identifier: GPL-3.0-only
+"""Vendored-copy check (CI): OptiScaler WrongGPU edition holds a copy of
 clean/wgshared/include/wg_model_entries.h (the order of WrongGPU's model entries in the version list its FFX DLL gives a
-host; OptiScaler stores the player's entry as a position in that list). The two must never differ.
+host; OptiScaler stores the player's entry as a position in that list). Only the SPDX licence line may differ.
 
 This check fails when
-  - clean/wgshared/include/wg_model_entries.h no longer has the SHA-256 pinned below (a change to the order needs the
-    fork's copy updated first, then FORK_COMMIT and HEADER_SHA256 here), or
-  - the fork's copy at FORK_COMMIT is not byte-identical to it (fetched from GitHub; --offline skips this part).
+  - the local header lacks its GPL-3.0-only SPDX line or differs from the pinned SHA-256 after restoring the fork's
+    SPDX line (a change to the order needs the fork's copy updated first, then FORK_COMMIT and HEADER_SHA256), or
+  - the fork's copy at FORK_COMMIT differs from that result (fetched from GitHub; --offline skips this part).
 Run from the repository root: python tools/ci/check_vendored_model_entries.py [--offline]
 """
 import hashlib
@@ -28,7 +28,12 @@ def sha256(data):
 
 def main(argv):
     root = Path(subprocess.check_output(['git', 'rev-parse', '--show-toplevel'], text=True).strip())
-    ours = (root / HEADER).read_bytes()
+    licence, newline, body = (root / HEADER).read_bytes().partition(b'\n')
+    spdx = b'// SPDX-License-' b'Identifier: '
+    if not newline or licence != spdx + b'GPL-3.0-only':
+        print('FAIL: %s must begin with its GPL-3.0-only SPDX licence line' % HEADER)
+        return 1
+    ours = spdx + b'MIT' + newline + body
     problems = []
 
     if sha256(ours) != HEADER_SHA256:

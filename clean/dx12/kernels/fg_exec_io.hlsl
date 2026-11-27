@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96, F7b): the executor's two input / output kernels around the light and Full path kernels
 // (clean/fg/runtime/fg_d3d12_executor.h). D3D12 only (no HIP counterpart). Built only when --only names them.
 //

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Writes src/wg_core/known_releases.h: the SHA-256 and size of every file WrongGPU's releases installed (the launcher
 recognises leftover WrongGPU files without an install record by these hashes only; build/launcher-design.md section 6).
 

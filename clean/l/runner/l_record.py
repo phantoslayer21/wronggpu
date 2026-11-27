@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L comparison records (issue #89): every record a Model L check writes against the oracle names the FP8
 matrix-op model the oracle used (clean/l/reference/table.py "mm8", oracle.MM8_MODELS), also when it is the default.
 Every such writer goes through write_l_record, which adds the effective model and refuses a record that names none or

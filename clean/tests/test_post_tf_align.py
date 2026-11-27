@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Developer builds refuse a post_tf launch whose A8 or history pointer is not 8-byte aligned.
 
 The D3D12 post_tf ports (clean/dx12/kernels/post.hlsl ld64_a8 / ld128_a8) clear the low 3 bits of every A8 and history

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model-keyed stage tables of the reference and the packers (#89): Model M's rows are exactly the tables that were
 hard-wired before, every function defaults to Model M, an unknown model is refused by name, and a second model's rows
 plug in without touching Model M's (a synthetic model "T" made of Model M's own stages, renamed).

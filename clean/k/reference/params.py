@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model K parameter tensors: the converter's names and shapes (spec 48 section 7.2) and the canonical form used by
 the reference and the packer.
 

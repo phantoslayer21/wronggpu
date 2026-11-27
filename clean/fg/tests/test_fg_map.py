@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (#96): the delivered converter map data/fg.v1.map.json against the layout table
 (clean/fg/layout.py) and the blob splitter (clean/fg/reference/blobs.py). Structure only: the map holds no weights.
 

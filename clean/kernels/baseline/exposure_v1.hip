@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // BASELINE COPY for timing comparisons only (perf_variants.py variant "v1"; not used by the runtime): clean/kernels/exposure.hip
 // as of commit 2ecfc32 (branch clean/runtime-core), i.e. the version in use before the performance milestone (the
 // spec team's timings 0.331 / 0.152 / 0.035 ms were taken on earlier commits of the same kernel). Unchanged except

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model K: the output alpha follows the colour input's alpha (issue #26). Host checks (no GPU, no HIP run).
 
 The rule (the spec side's answer, in our terms): the output alpha is purely spatial, from the current frame's colour

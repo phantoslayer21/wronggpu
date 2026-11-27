@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Runtime buffer layouts of the spec 51 D3D12 kernels (DESIGN-51.md section 3; spec 51.2: "how a runtime arranges
 them in its own buffers is its own choice"). Built by our loader from the logical tensors of 51.2.
 

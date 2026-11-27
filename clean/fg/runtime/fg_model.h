@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Frame generation (issue #96): checks a local FG model file (the converter's model.wgcm for the preset-FG map,
 // container version 1; clean/converter/OUTPUT-FORMAT.md) against data/fg.v1.map.json before anything is prepared from

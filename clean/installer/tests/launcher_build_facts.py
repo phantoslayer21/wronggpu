@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """What the launcher under test was built with, for run_launcher_tests.py: checks that follow the build instead of assuming
 a release build (a fresh clone's suite build differs from a release in its version, its payload and its direct route).
 Kept out of run_launcher_tests.py, which stays below the 256 KB source limit. Written for this project."""

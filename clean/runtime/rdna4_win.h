@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The system's sources for an adapter's identity (rdna4.h has the rule and the injectable lookup). R1, oversight
 // 2026-11-15; R1-AUDIT H8. WrongGPU's own code. Header only, Windows only: the interop backend's executor choice, the
 // native D3D12 device and the Ray Reconstruction runtime include it; nothing here needs an import library (the kernel-mode

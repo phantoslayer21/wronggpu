@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Synthetic, independently derived checks of published page 54 only."""
 from dataclasses import replace
 import itertools

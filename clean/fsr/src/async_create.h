@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // A WrongGPU upscaler's create on a worker thread, so that a game thread waits for it only a bounded time.
 //

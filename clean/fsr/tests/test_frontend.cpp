@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Unit tests of the FidelityFX front end without D3D12: API routing and forwarding (fake AMD DLL), the FSR ->
 // network parameter mapping, the fallback to AMD, the configuration file and the call log.
 // Builds on any host (Linux g++/clang, MinGW, MSVC): see clean/fsr/CMakeLists.txt and tests/run-tests.sh.

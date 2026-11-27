@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher window: "WrongGPU.exe ui-dump", the window's pages painted offscreen as JSON (every page's widgets,
 // the keyboard's paths the launcher tests check) and optional PNGs. Split from launcher_ui.cpp (the window, its input and
 // operations), whose helpers it uses (launcher_window.h). Written for this project.

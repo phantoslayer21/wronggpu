@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 # Offline tests of the runtime's D3D12 interop (spec 10 sections 1, 6, 8):
 #   1. MinGW-w64 cross build of wronggpu_runtime.dll (core runtime + interop) and of the test program;
 #   2. under Wine (vkd3d on a Vulkan driver such as Mesa lavapipe; an X display or xvfb-run): the D3D12 test with the

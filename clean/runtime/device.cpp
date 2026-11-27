@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Device backends (see device.h). The HIP function signatures below are written from the public HIP runtime API
 // documentation (hipInit, hipMalloc, hipMemcpyAsync, hipModuleLoadData, hipModuleLaunchKernel, events, streams).
 #include "device.h"

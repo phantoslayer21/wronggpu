@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // SetupAPI identity shim: the rules and the call wrappers (setupapi_identity.h). Written for this project.
 #include "setupapi_identity.h"
 

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 # WrongGPU FSR front end (spec 20): amd_fidelityfx_dx12.dll replacement (integration point 1), the FSR 3.0 component
 # forwarders ffx_fsr3_x64.dll and ffx_fsr3upscaler_x64.dll (integration point 2), and their tests.
 #

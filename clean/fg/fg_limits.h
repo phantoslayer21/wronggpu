@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Frame generation limits shared by the presenter (clean/fg/presenter) and the runtime (clean/fg/runtime), so one
 // translation unit can include both sides (the FG session, clean/fg/runtime/fg_session.h). Plain C++17.

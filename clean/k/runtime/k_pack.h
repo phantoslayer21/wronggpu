@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model K weight packing for the runtime: a stage's float32 tensors (the converter's spec 48 section 7.2 names and
 // shapes, as clean/k/runtime/model_k_load.h load_k_model returns them) -> the blob the stage kernels read
 // (clean/k/FORMATS.md "WMMA tile format", "Linear blob", "Block blob", "Stage blob").

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The FP16 form's exact arithmetic for the D3D12 ports of Model L's q7 kernels (clean/l/kernels/l_q7.hip, l_q7w.hip):
 // one rounding to FP16 (software, nearest even), exact FP16 additions (error-free sums, the tail picking the side at
 // an FP16 midpoint), and one FP8 op over 32 terms computed exactly. Porting notes: clean/dx12/kernels/l_q7.hlsl.

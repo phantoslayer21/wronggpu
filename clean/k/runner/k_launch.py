@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model K launch arguments and launch builders (kernels: clean/k/kernels/*.hip).
 
 A launch is (kernel, grid, threads, [ctypes args]) as in clean/runner/stage_runner.py. Kernel names are bare

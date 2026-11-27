@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: leftover WrongGPU files without an install record (leftovers.h). Written for this project.
 #include "leftovers.h"
 

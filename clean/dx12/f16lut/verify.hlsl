@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 side of the f16lut proof (run.py): for every FP16 bit pattern r (lane r of a 65536-lane grid, wave64 as the post
 // kernel) and one parameter set (root constants: dec_scale bits, pi bits, rne16):
 //   orig[r] = the direct post kernel's vertical-pass chain (kernels/post.hlsl POST_OUT 3, copied: clampf, exp2, the

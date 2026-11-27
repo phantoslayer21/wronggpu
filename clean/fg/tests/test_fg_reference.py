@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (#96): self-checks of the CPU reference's building blocks (clean/fg/reference/ops.py) on
 synthetic data, against plain loop implementations written separately here.
 

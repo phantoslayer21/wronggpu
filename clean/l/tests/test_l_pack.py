@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L weight packing (clean/l/runner/l_pack.py), CPU only, synthetic parameters.
 
 Run: python -m unittest discover -s clean/l/tests -t . -p test_l_pack.py

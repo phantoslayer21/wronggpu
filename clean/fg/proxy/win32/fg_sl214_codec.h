@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU frame generation (issue #96, F8b): the native codec of the 2.14 game interface's FG structures.
 //
 // What a qualified title binding on interface build 2.14.x (bindings/cp2077-2.14.1.json) hands the transport as its

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Original D3D12 per-frame helpers and native-device byte fill (2026-10-15).
 // color_divide / scale_rgb / timing_barrier reproduce clean/kernels/frame.hip as frame.co:
 // spec/10 (pre-exposure), plus our frame.co gfx1201 ISA. RGB division uses wg_div with a narrow normal-result

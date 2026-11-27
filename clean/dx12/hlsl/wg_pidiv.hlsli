@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The pre-exposure division of the staged native D3D12 route, done by the dedicated _pf kernels (input_encoder_pf,
 // emo/input_encoder_mo_pf, and the post_tf _pf buffer forms) when pi != 1 instead of a separate color_divide launch.
 // Include after wg_platform.hlsli.

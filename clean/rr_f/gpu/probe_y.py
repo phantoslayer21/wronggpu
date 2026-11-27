@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Probes of the two hardware facts behind the exact matrix step Y (kernels/rr_step_y.hlsli, results/2026-10-20-speed-body.md):
 
 H1  v_wmma_f32_16x16x16_fp8_fp8 returns the exact value when every one of its 16 products and its start value C is a

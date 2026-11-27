@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 port of w64/post_tf_f32_p12_diet_vsit (clean/kernels/post.hip, the runtime's default output kernel): true fusion
 // of the output reconstruction (stage "post") and the output filter (stage "filter") in one wave64 kernel of 512 lanes.
 // Build variant: post_w64__orig.co (post.hip with -mwavefrontsize64 -DWG_LZ_PROFILE=2), the code object the runtime loads

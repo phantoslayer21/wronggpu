@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: the model data (spec 30 "Model file", spec 08): the model file on this PC, the search for the
 // player's DLSS model file, the conversion and what replaces what. Written for this project.
 #include "model.h"

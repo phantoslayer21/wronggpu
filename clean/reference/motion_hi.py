@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """NumPy reference of "Motion at output resolution" (spec/03-input-encoder.md draft 4, spec/06-reconstruction-and-
 output.md section 3): the game's motion texture has the output size M and is read as points, one texel per render
 pixel in the input encoder and one per reconstruction (D) pixel in the reconstruction.

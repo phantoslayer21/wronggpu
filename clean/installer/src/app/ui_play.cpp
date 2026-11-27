@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher window: the running games (launcher_ui.cpp has Play, which starts a game on a worker): the running-game
 // watch, the games Play started (a store may start one again in a moment), a game shown running at Play's press and as it
 // was again when Windows didn't start it, with a note that says why. Split from launcher_ui.cpp (source size). Written for

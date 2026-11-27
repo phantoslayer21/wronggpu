@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L (issue #89): the folded decoder block l_swin_block_c32_dec_coef12_nc (D3D12 only; clean/dx12/kernels/l_swin.hlsl,
 swin_block.hlsl SW_OUT_COEF12) against the sequence it replaces, l_swin_block_c32_dec_nc -> l_coef_pack12, byte for byte.
 

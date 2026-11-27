@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher: the window (build/launcher-design.md section 3; the "Bench" look of build/launcher/ui-mockup2,
 // light and dark, following Windows' app mode unless Settings picks one): the Library of games as a rack of bays, a page per game (Install / Update / Repair / Uninstall / Roll back / Play, Clean up /
 // Adopt for leftover files, the Basic settings, the last run with its warnings, WrongGPU's OptiScaler setup and what

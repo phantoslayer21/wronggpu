@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Exercises the production asynchronous logger, not a replacement JSON writer.
 #include "../src/log_win.h"
 #include <fstream>

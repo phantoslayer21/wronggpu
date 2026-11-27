@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Direct-form (POST_OUT == 3) helpers of post.hlsl around its transcendentals (lev3 track "posttr"): the same values with
 // fewer vector instructions. Include after post.hlsl's enc_e / clampf.
 #pragma once

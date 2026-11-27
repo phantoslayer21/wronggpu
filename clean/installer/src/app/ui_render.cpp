@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher window: the offscreen frames of "WrongGPU.exe ui-render" (development screenshots of the window, light
 // and dark, at several sizes and scales) from a small fixture file of game records (tests/ui_fixture.ini): nothing is shown
 // and no game folder is read; art comes from this PC's Steam cache. Every page, state, dialog and motion the window has a

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Self-test of the hybrid D3D12 device (clean/runtime/device_dx12.cpp) with the test kernels of device_test.hlsl:
 // arena sub-allocation and pointer -> offset conversion, a null pointer and a by-value struct argument, a grid above
 // 65535 workgroups (split dispatches), consecutive D3D12 dispatches in one command list that read what the previous

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96), light path: G2 intermediate-time scatter and G3 blend weights (clean/fg/reference/
 // stages_common.py interm_scatter, interm_inputs, blend_weights). D3D12 only.
 //

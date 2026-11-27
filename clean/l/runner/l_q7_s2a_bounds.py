@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L (issue #89): candidate S2a acceptance tests on a local recorded run (design study, CPU only; only counts are output).
 
 The matrix instruction's float32 sum of a 32-wide FP8 chunk is exact when every partial sum is representable. With

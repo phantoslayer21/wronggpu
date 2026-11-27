@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Fused dec1 + dec0 (performance milestone, prototype; clean/PERF.md "dec1 + dec0 fusion"): the last Swin block of
 // stage dec1 (spec 02, C = 64, decoder block: input = expanded map + skip) and the coefficient decoder (spec 05) in one
 // kernel. The block's output q8(x2), the 64-channel FP8 map at F/2 that dec0 reads, never goes to memory: each wave's

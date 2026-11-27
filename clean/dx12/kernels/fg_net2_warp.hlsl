@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96): net2's warp-merge (clean/fg/reference/net2.py warp_merge / warp_sample), exact, one output
 // element per lane: y [H][W][18] float16 = Ib warped by (U4 0, U4 1), Ic warped by (U4 2, U4 3), U4 0..3, U1, Ia, U3 0..2,
 // h(f). The warp sample of pixel (x, y): px = fma(2, u, h(x)); X0 = floor(px), fx = h(px - X0); x0, x1 = X0, X0 + 1

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Exhaustively check the production CPU table for the tiled input's packed FP16 transfer.
 
 Run as a module from the repository root with the path written by ki_s_breakpoints_cpu.cpp.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // FakeOptiLoader (fake_opti_loader.h): our own OptiScaler-style loader of a custom FFX upscaler slot (spec 65).
 #include "fake_opti_loader.h"
 

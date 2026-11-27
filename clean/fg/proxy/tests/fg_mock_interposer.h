@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU frame generation (issue #96, F8b): the test stand-in for a game interface DLL (fg_mock_interposer.dll).
 // Synthetic export names, the game interface's call shapes (rr_proxy_abi.h), and a call record the tests read: every
 // call's arguments and the result it returned, so a forwarded call can be compared argument by argument.

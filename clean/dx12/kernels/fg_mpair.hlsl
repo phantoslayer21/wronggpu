@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 port of frame generation's fused 1 x 1 pairs (issue #96; tier B): fg_mpair<MODE, C1T, C2T, NT, LAZY> of
 // fg_net1_mma.co (clean/fg/kernels/fg_net1_mma.hip), byte-identical to HIP. Two chained 1 x 1 convolutions in registers
 // (the first's result fragment is the second's input fragment), each chunk one v_wmma_f32_16x16x16_f16 through the driver

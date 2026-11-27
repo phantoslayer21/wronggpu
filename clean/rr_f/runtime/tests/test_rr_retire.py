@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """CPU test of the RR runtime's per-list completion and retire list (clean/rr_f/runtime/src/rr_retire.h, issues #63
 and #82): an object that a command list recorded by the runtime may use (buffers, the shader-visible descriptor heap,
 the timestamp query heap) is released only when EVERY list that may use it has proved complete through its own marker

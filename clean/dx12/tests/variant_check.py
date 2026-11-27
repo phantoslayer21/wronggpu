@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Regression check of the hybrid device's code-object binding (manifest "co", clean/dx12/README.md): a synthetic model
 WITHOUT output taps makes the runtime load post_w64.co (not post_w64__orig.co, the build the w64 port reproduces) under
 the tag w64. The w64 port must then stay on HIP while the other ports run on D3D12, and the frames must match pure HIP

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Test-vector generator for spec 51 (RR preset F window block).
 
 For every stage kind of the 51.2 table (IN0, E1 with the 128 -> 64 adapter, E2-E5, fusion halves D4-F .. D0-F,

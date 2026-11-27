@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU network backend for the FidelityFX front end (spec 10 sections 1, 6 and 8): the runtime DLL's export
 // wgGetUpscalerBackend (clean/fsr/include/wronggpu_upscaler.h). WrongGPU's own code.
 //

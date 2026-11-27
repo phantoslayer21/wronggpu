@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model K output stage helpers (ko_*) for the D3D12 ports of k_out_color / k_out_pixel(_c) and their direct forms
 // (clean/k/dx12/kernels/k_out.hlsl). WrongGPU's own code: HLSL twins of our HIP output stage, clean/k/kernels/k_io.hip
 // (spec 43 sections 3 - 7 as that file implements them) and of the exact helpers it uses from clean/k/kernels/k_fp.h.

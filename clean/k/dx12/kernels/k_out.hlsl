@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 ports of model K's output stage (spec 43): k_out_color, k_out_pixel_c (compact pixel head, the default)
 // and k_out_pixel (k_head=full). The forms that read the game's textures and write its output texture (_direct,
 // rs=direct, WG_DIRECT_TEXTURES) are declared beside them (see k_in.hlsl). WrongGPU's own code.

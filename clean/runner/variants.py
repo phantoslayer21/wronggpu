@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Build variants of the Swin kernels (compile-time knobs of kernels/swin.hip, and of the second design
 kernels/swin_v2.hip: variants named "v2*") and their launch geometry.
 

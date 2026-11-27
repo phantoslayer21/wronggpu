@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Original bounded/offline support analysis regressions; synthetic logs only."""
 import hashlib
 import importlib.util

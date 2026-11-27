@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The in-game timing record of a run (e.g. Model L against Model M in one session), from the runtime's own timing
 lines in our front-end log only ("timing, last 300 dispatches: network GPU <mean> (max <max>) ms [enc0 .., Swin ..,
 dec0 .., post ..] (<n> frames); TOTAL(t3-t0) <mean> (max <max>) ms"): the runtime's D3D12 timestamps in the game's

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Runtime library without model K (clean/runner/build.py --no-model-k, define WG_NO_MODEL_K): this file takes the place
 // of clean/k/runtime in the build. Model selection stays (model=M and the default: model M, unchanged); model=K is
 // refused at create, so the front end falls back as for any other failed create (spec 10 section 8).

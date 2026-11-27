@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // The front end's side of WrongGPU's shared settings (clean/wgshared): where the data folder and wronggpu.ini are, the
 // shared settings block (opened or created at start, claimed as the single writer when OptiScaler hosts this DLL), the

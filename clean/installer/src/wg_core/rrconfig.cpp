@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: the engine setting Ray Reconstruction needs in Borderlands 4 and Hogwarts Legacy (rrconfig.h).
 // Written for this project.
 #include "rrconfig.h"

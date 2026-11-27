@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Weights of the HYBRID block kernels (SW_HYB / HYB = true): the Swin block section of the M-form kernels
 (clean/runner/packing.py pack_block, the layout their fragments load) filled with the original's values, as the oracle
 uses them (clean/l/reference/oracle.py _block_tokens_q7):

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Plain-text log file next to the DLL (wronggpu-fsr.log). Adapted from imported/0.2.0-infra/src/common/log.h
 // (audited original WrongGPU code): shared append-mode file, one atomic append per line, time and process id on

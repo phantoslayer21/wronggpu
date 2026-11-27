@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU frame generation (issue #96, F8b): the test stand-in game module. It imports the stand-in interface's
 // functions by name (built twice: a static import table, fg_mock_game.dll, and a delay-load table,
 // fg_mock_game_delay.dll) and calls them only through those import slots, as a game does.

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """R1: which executor runs a context, and who is an RDNA 4 GPU (clean/runtime/interop/executor_select.h, clean/runtime/rdna4.h).
 
 No GPU: clean/runtime/interop/tests/test_executor_select.cpp is built with the host C++ compiler (CXX, clang++ or g++; on

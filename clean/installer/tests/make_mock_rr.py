@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Generated stand-ins for the Ray Reconstruction files of a WRONGGPU_TESTING build (CMake runs this when no
 WRONGGPU_RR_DIR is given): plugins\\WrongGPU-RR.asi, one build for the game interfaces 2.7, 2.8 and 2.14 as the release has
 it since 0.6.0 (the RR runtime is part of wronggpu_runtime.dll since 0.6.0) as minimal PE files with a version resource and a marker (never OptiScaler: WrongGPU does not ship it; the launcher

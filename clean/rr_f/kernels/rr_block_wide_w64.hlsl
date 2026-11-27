@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // clean/rr-f-wave4c W4C.1: the spec 51 window block of the wide stages E2, E3, D2-F, D2-R, D3-F, D3-R, D4-F and D4-R (RR_G
 // groups of four token tiles, RR_B32 1) in wave64, design D of rr_block_c32.hlsl: the same operations as rr_block_wide.hlsl
 // (and so, value for value, the same output bits), arranged as rr_block_c64_w64.hlsl arranges the level-1 stages.

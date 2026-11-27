@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Page 54b.5 quarter pool (PH2) through two exact tables (speed form of rr_resolve.hlsl rr_resolve_pool, same values
 // bit for bit; the tables are built on the GPU with the same exact elementary functions, rr_resolve_math.hlsli).
 //

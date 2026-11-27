@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model K, one whole frame on one device: input stage (spec 42) -> the eleven network stages (spec 41 / 44) ->
 output stage (spec 43), with the history images kept between frames (spec 42 / 43 inputs Hc, Hh, L, double-buffered)
 and the frame index of spec 44 (0 on every reset frame, then +1 per frame; it selects the window offsets of m, e4, d4

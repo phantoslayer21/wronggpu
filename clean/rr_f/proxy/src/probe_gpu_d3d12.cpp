@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 side of the probe build (WG_RR_PROBE only). Records the probe's own compute passes on the game's command
 // list: the bilinear upscale into the output, the normal patch mean, copies of lifetime-0 inputs, and (capture option,
 // CAPTURE.md) copies of every tagged input into readback memory with a completion marker, written to files next to

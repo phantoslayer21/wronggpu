@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Banded two-kernel path (post_recon2_r_band + post_filter_c1_s<S>_band over n horizontal bands, runner/post.py:
 band_plan, prepare_banded) in the host lane emulator: bit-identical to post_recon2_r + post_filter_c1_s<S> for several
 band counts on the cases of test_post_emu; the band plan covers every tile once and launches each filter row only

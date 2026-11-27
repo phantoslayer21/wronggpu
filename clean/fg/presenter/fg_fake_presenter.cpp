@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Deterministic fake presenter: see fg_fake_presenter.h.
 #include "fg_fake_presenter.h"
 

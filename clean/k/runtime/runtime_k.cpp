@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model K in the per-frame runtime; see runtime_k.h. Port of clean/k/runner/k_frame.py (KFrame), k_net.py (KNet,
 // variant "fused"), k_launch.py (stage_fused_launch) and k_io.py (frame_in, out_uniforms, input / output launches).
 #include "runtime_k.h"

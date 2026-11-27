@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model of variant E's matrix step (DESIGN-51.md 7.2) for predicting its differences from the reference.
 
 Variant E computes a 51.1 step as two 16-deep WMMAs on an f32 accumulator: D1 = RN32(C + S0), D2 = RN32(D1 + S1),

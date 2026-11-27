@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model K input stage (spec 42) and output stage (spec 43): launch arguments, host-side scalars and launch plans.
 
 Kernels: clean/k/kernels/k_io.hip (code object k_io.co). Frame inputs (dicts as clean/k/reference/instage.py and

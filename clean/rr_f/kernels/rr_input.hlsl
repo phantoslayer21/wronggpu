@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Spec 52 input stage on RDNA 4 / D3D12: the 64 front-end inputs (52.3), their ordered-dither e4m3 codes (52.4),
 // the state-stream seed (52.6), the second vector m2 with the specular-motion reconstruction (52.7.1, 52.7.2) and
 // the three motion surfaces (52.7). One lane per tensor token (row-major [Ht][Wt]).

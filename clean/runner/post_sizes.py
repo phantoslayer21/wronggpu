@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Size-aware timing and output dumps of the DEFAULT post + filter path (spec 06), launched exactly as the runtime
 launches it (clean/runtime/runtime.cpp), at any render / output size. Synthetic data only.
 

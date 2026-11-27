@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """#219: the game's state folder (wronggpu-setup\\settings.ini, wg_state.h) for run_launcher_tests.py, which calls run() in
 its place in the suite (this file keeps that suite below the 256 KB source limit, as launcher_edition_cases.py does).
 wronggpu.ini and WrongGPU\\wronggpu.ini hold the install's defaults and are the player's: no launcher operation rewrites them

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (#96): the weight layout table (clean/fg/layout.py) against the totals the spec side gives for it.
 
     python -m unittest clean.fg.tests.test_fg_layout

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """GPU check of the hybrid block form's element-wise helpers on native D3D12 (kernels/l_hyb_probe.hlsl,
 hlsl/wg_hyb.hlsli) against the oracle, for every FP16 input of each single-input helper and an adversarial float32 set
 for the chain-end double rounding (float32 -> FP16 -> FP8). Runs with WG_L_FORM=hybrid so the device fills the tables.

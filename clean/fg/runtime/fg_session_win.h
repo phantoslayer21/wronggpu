@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Frame generation (issue #96, F7a): the Windows presenter source of an FG session. It creates the back end the
 // session's presenter mode names (fg_presenter_factory.h: Auto, the composition back end with the hardware flip queue,

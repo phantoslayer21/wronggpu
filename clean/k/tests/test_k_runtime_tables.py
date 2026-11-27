@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The runtime's C++ model K pieces against the Python reference:
 
 - the filter-shape table and level (clean/k/runtime/k_filter_table.cpp, spec 43 draft 2 section 7) against

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher window: UI Automation (ui_shell.h). The window paints its widgets itself, so it tells UI
 // Automation about them: a fragment root for the window and one element per widget of the current frame (its hit:
 // name, control type, place, enabled, focus, help text, heading level, place in its set), with Invoke for buttons, items,

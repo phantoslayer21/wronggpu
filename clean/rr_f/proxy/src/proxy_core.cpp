@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Spec 60-63 game-interface logic of the RR proxy. Section numbers refer to spec/60-63-rr-f-interface.md.
 #include "proxy_core.h"
 

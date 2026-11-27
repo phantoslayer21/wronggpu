@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The HYBRID form's shared-stage kernels (WG_L_FORM = hybrid): the HIP twins of the D3D12 ports in
 // clean/dx12/kernels/hyb_swin.hlsl (blocks, SW_HYB=1) and hyb_gemm.hlsl (merges, expands), the same bytes. swin.hip's
 // templates with HYB = true (swin_block: one window per wave, 256 lanes; patch_merge / expand: WG_GEMM_THREADS lanes,

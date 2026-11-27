@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Build a small host program from repository sources for a CPU test: the host C++ compiler (CXX, clang++ or g++; on
 Windows MSVC cl after them, from PATH or through vcvars64.bat). Raises unittest.SkipTest without a compiler."""
 import os

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Presenter back-end selection: an explicit choice (or Auto), a capability probe that reports exactly what the
 // system supports, and creation that refuses with a reason instead of falling back.

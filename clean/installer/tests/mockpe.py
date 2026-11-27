@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Minimal PE32+ DLL files with a version resource, for the installer tests (mock FSR DLLs, mock front end).
 
 Written for this project from Microsoft's public PE/COFF and VS_VERSIONINFO documentation. The files have one

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU RR for games that call the NGX interface directly (spec page 66, with page 64 for the direct path): the
 // provider the RR plugin registers with the host's plugin interface version 4 (wg_host_menu_abi.h, WgHostNgxRr). The
 // host hands the D3D12 RR feature's create / evaluate / release to it with read access to the game's parameter

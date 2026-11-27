@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 #include "k_fp.h"
 // Spec41 normalization consumes a half-rounded nonnegative sum of squares.

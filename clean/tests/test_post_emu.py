@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Stages post and filter (spec 06): the real kernel source (kernels/post.hip) run in the host lane emulator through
 the spec 90 runner, compared with the NumPy reference (reference/post.py). Synthetic data only.
 

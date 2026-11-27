@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation's files in an install (wg_core/fg.h, 0.7.0): WrongGPU-FG.asi is WrongGPU's own plugin, never another setup's
 // (coexist.h ForeignPlugins: it never keeps WrongGPU's Ray Reconstruction out, recorded or not), where an install puts the
 // plugin and its kernels (beside WrongGPU's plugin, the kernels in wronggpu-setup\fg-dxil there), the record's frame generation

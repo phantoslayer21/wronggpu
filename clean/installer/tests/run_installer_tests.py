@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """End-to-end tests of the installer (spec 30: 30-T1 and 30-T2 with synthetic model files).
 
 Written for this project; Python standard library only. Runs WrongGPU-Setup.exe in silent mode against THROWAWAY mock

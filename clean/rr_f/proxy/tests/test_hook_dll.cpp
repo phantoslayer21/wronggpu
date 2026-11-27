@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // End-to-end test of the hook-mode delivery (src/hook_dll.cpp, WrongGPU-RR.asi / WrongGPU-RR-probe.asi). The test
 // executable IS the fake game: it statically imports the RR path's functions by name from a stand-in interface DLL
 // (the game's interposer file name, the real export names, from tests/gen_fake_original.py), so the loader fills its

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 copy/convert passes of the interop (spec 10 section 6, spec 20 conversions), recorded into the game's
 // command list:
 //  - inputs:   the game's color, depth and motion textures (any typed format, active region) into the runtime's

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L (issue #89): GPU check of the reconstruction kernel l_post_recon (clean/l/kernels/l_post.hip, HDR) against
 the oracle (clean/l/reference/recon.py), synthetic data only.
 

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """ISA statistics of compiled body kernels (RGA, gfx1201): VGPRs, SGPRs, LDS, scratch, and static instruction counts
 (WMMA, VALU, VALU of the f16 / conversion kinds, SALU, VMEM, LDS, barriers, waitcnts), with a VGPR budget check.
 

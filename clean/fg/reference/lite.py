@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (issue #96): CPU reference of the light candidate blend (preset C), written for this project.
 
 One output pixel per frame pixel (x, y) < (Wo, Ho), u, v over Wo x Ho (approximate division):

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Fast path of the spec-54 output stage (included at the end of rr_output.hlsl; same argument block and helpers).
 // Packed head inputs only (packed_head bit 0). Three dispatches replace rr_output_main + rr_output_pool:
 //

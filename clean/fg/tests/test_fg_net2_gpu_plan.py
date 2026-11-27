@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (#96): net2's D3D12 check (clean/fg/runner/fg_net2_d3d12_check.py) as planned on the CPU: the chain's
 launches against the kernels' declarations, every buffer reference, the output sizes against the reference's buffers,
 the workgroup counts, and file names that stay distinct on a case-insensitive file system. No GPU.

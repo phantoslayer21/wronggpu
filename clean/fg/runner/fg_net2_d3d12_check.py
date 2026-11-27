@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (issue #96): net2's D3D12 kernels (clean/dx12/kernels/fg_net2_*.hlsl) against the CPU reference
 (clean/fg/reference/net2.py), byte for byte: every kernel on its own and the whole network chained on the device.
 

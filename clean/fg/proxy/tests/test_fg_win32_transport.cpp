@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU frame generation (issue #96, F8b): CPU tests of the Win32 hook transport and the swap-chain hook seam.
 //
 // The game side is a stand-in: fg_mock_interposer.dll (synthetic export names, a version resource, a call record) and

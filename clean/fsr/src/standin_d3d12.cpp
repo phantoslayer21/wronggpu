@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Stand-in upscaler: one compute dispatch per frame recorded into the game's command list (spec 20).
 #include "standin_d3d12.h"
 

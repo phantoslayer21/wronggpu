@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 hooks for the same-frame split (see d3d12_hooks.h). Written from Microsoft's public D3D12 documentation and
 // the Windows SDK / MinGW-w64 declarations of the interfaces (vtable positions in d3d12_vtbl.h, checked at build time).
 #include "d3d12_hooks.h"

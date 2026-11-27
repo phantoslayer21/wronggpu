@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The second Swin block design (kernels/swin_v2.hip, build variants "v2*") in the host lane emulator.
 
 Same checks as test_kernels_emu.py for the first design: the exact-GELU build against the NumPy reference with the

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Host-only lifecycle model from spec 53 draft 6 and 50.2, 2026-10-18.
 
 This is an original internal coordinator, not a game ABI or an executor. Plans

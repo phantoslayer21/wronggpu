@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Page 54b reference tests: vectorized NumPy reference vs the independent slow oracle (bit patterns), and the
 exact rules (variant choice, layer selection, creation resets, half-way jitter, history copies, stores).
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Windows composition presenter: IFgPresenter over the presentation manager (presentation.h) with one target time
 // per image, for the hardware flip queue.

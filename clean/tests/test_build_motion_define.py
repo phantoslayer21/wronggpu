@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Issue #55: `build.py --motion-outres-only --extra-archs ...` starts one child build per extra architecture; the
 child's command line must carry the parent's --define (and --report) like the ordinary branch's child does. No compiler
 and no GPU: the subprocess call and the parent's own kernel builds are stubs, nothing is executed and nothing is written."""

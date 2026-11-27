@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: the install record (v1), the "Apps & features" entry and the restore / uninstall engine.
 // Written for this project.
 #include "record.h"

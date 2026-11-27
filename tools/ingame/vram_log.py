@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Video memory over time during an in-game run: every <interval> s, the dedicated GPU memory of the game process and of the
 whole adapter (Windows performance counters, read with typeperf; no GPU work of our own).
 

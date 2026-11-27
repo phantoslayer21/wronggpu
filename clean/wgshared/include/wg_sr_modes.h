@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The SR models' modes (registry options sr_m_mode / sr_l_mode / sr_k_mode, slots 12..14: fast, the default, or exact)
 // and the words every WrongGPU program uses for them: the key in the game's state folder (<game>\wronggpu-setup\
 // settings.ini: m_mode / l_mode / k_mode, written by the launcher and by the in-game card of WrongGPU.asi) and the

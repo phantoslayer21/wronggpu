@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Original packaged-DLL proof, derived from native_game_test.cpp synthetic helpers.
 // The actual candidate is loaded from the requested DLL and used only through
 // its opaque C ABI. The linked C++ candidate is used only as a staged oracle.

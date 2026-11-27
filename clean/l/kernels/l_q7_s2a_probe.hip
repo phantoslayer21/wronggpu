@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model L (issue #89): measurement probe of the S2a primitive (clean/l/kernels/l_q7_op8.h: q7_tile_sum, q7_maxcode4,
 // q7_amax, q7_combine with the exact op8 as the fallback), not used by the runtime (clean/l/runner/l_q7_s2a_check.py).
 // 16 single-chunk ops per workgroup (one wave of 32 lanes) on the tile's diagonal: A row m = op base + m's weight row,

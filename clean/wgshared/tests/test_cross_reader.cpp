@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Cross-implementation test of the shared settings block (round i15 merge): the SR side's implementation
 // (clean/wgshared/include/wg_settings_io.h, namespace wg) and the RR side's independent reader
 // (clean/rr_f/proxy/include/wg_settings_reader.h, namespace wgss; used by the RR plugin and the RR runtime) must

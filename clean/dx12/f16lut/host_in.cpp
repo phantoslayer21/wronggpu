@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // f16lut encoder colour-table proof tool (clean/dx12/f16lut/run_in.py drives it; host.cpp's structure).
 //   host_in hip  <oracle_in.co> <params.bin> <hip.bin>     HIP oracle: per parameter set, (v, gc)[65536] then c / pi [65536]
 //   host_in dx12 <verify_in.dxil> <params.bin> <hip.bin>   D3D12: per set, orig (the encoder's chain) and gen (the table

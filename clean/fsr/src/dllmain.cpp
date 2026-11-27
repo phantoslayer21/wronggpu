@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // amd_fidelityfx_dx12.dll replacement (spec 20, integration point 1): the five public FidelityFX API exports,
 // AMD's original DLL loaded from amd_fidelityfx_dx12.wronggpu-original.dll next to this one (spec 30), the
 // upscaler implementation chosen by wronggpu.ini, and the call log wronggpu-fsr.log.

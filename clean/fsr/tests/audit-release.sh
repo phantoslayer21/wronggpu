@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 # Checks a MinGW-w64 build of the FSR front end against the owner's release rule (README.md): no third-party code in
 # WrongGPU's DLLs; AMD's FidelityFX headers only as declarations.
 #   clean/fsr/tests/audit-release.sh <build-dir>      (a build made by build-mingw.sh)

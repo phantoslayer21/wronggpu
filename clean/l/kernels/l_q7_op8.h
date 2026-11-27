@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model L (issue #89): one FP8 matrix op of the q7 kernels (up to 32 FP8 x FP8 products and an FP16 start, one FP16
 // result), computed exactly (clean/l/runner/l_mm8_f32_check.py op_kernel). Kept apart from the FP16 helpers
 // (l_q7_common.h) so that the FP8 op (S2a: the matrix instruction with a precomputed bound) and the FP16

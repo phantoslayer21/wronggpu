@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96): exact float16 arithmetic in integers, shared by the HIP kernels (clean/fg/kernels/*.hip)
 // and their D3D12 ports (clean/dx12/kernels/fg_*.hlsl), so both back ends compute the same bits by construction.
 //

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // RR guard: see rr_guard.h.
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>

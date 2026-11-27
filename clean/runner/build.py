@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Build the gfx1201 code objects (spec/90-test-interface.md) and, optionally, the host emulator.
 
     python clean/runner/build.py --rocm "C:\\Program Files\\AMD\\ROCm\\7.2" --out build

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Weight packing for the Swin kernels (layouts documented in clean/FORMATS.md).
 
 The kernels read every matrix as ready-made WMMA operand fragments: fragment = 32 lanes x 8 bytes, lane l holds row

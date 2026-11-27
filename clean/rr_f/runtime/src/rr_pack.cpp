@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Packing of the converter's preset-F model (model.wgcm, logical tensors of page 56.4, symbols of 57.7.2) into the
 // kernels' buffer layouts: the same device image, blob names and scalars as clean/rr_f/runtime/tools/pack_model.py
 // pack() of the same logical model (checked by tests/test_model_pack.py through the WrongGPU_RrModelDumpV1 hook).

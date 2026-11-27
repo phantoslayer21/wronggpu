@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L NumPy oracle (issue #89): float64 arithmetic with only the prescribed roundings (q8, f16), as Model M's
 oracle in clean/reference. Model L's structure comes from clean/l/reference/table.py; nothing here hard-codes it.
 

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """ISA statistics (RGA, gfx1201) of the output-stage and resolve kernels: VGPRs, LDS, scratch, static VALU / VOPD /
 memory counts (isa_stats.counts), for the default build or extra defines.
 

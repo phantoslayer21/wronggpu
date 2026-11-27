@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96): exact float16 operations of net2's fast-path kernels (fg_net2_mconv.hlsl,
 // fg_net2_upwarp.hlsl) on 8 values at once, with the bits of fg_net2.hlsli's one-value operations (fg2_mul, fg2_fma,
 // fg2_add, fg2_leaky). Values are float16 bits, 8 packed in a uint4 (element i in dword i / 2, low half first).

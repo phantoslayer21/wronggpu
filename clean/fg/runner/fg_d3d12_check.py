@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (issue #96): net1's GPU kernels (clean/fg/kernels/fg_net1.hip) against their D3D12 ports
 (clean/dx12/kernels/fg_*.hlsl) byte for byte, and against the CPU reference (clean/fg/reference/net1.py) bit for bit.
 

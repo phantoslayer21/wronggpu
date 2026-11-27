@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Builds and runs the hybrid D3D12 device self-test (device_test.cpp with the kernels of device_test.hlsl).
 
     python clean/dx12/tests/run_device_test.py --out <work dir>

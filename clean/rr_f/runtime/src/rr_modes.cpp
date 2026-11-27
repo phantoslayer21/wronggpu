@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // RR modes from the registry (rr_modes.h). The checks below tie the registry's mode table to the runtime's variants.
 #include "rr_modes.h"
 

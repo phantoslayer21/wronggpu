@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model K layer table of the per-frame runtime; see model_k.h.
 #include "model_k.h"
 

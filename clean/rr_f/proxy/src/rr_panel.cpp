@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The RR plugin's box in OptiScaler's menu (rr_panel.h).
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>

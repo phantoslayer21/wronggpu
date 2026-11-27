@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96), light path: R7 hole mask, R8 quality image and R9 net1 input packer / output unpacker
 // (clean/fg/reference/stages_common.py hole_mask, quality_init, net1_input, net1_output). D3D12 only.
 //

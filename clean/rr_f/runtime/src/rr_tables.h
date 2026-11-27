@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model-independent tables the converter's model file does not carry, generated at build time by
 // clean/rr_f/runtime/tools/build.py from the clean reference (the same arrays tools/pack_model.py packs):
 //   kRrSigTable  binary16 sigmoid of 51.4 for every binary16 bit pattern (reference/scalar.py sig_tables()[0])

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Runtime with external inputs and output (the path the D3D12 interop's HIP executor uses), in the host lane
 emulator: frames on external device buffers give exactly the same output as the runtime's own buffers, the exposure
 read from an external float equals the same value given directly, and the own-buffer test path is disabled."""

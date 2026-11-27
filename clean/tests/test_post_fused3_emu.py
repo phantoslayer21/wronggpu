@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """post_fused3* (fused reconstruction + output filter scheduled for latency, kernels/post.hip) in the host lane
 emulator: the exact variants are bit-identical to the two-kernel path (post_recon + post_filter; the _o16 output is its
 FP16 rounding) on the cases of test_post_emu; the approximations give finite outputs on every case and stay above

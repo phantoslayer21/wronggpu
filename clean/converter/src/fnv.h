@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // FNV-1a-64 of spec 08 section 4.1 (public FNV definition by Fowler, Noll and Vo).
 #pragma once
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Original spec-58 exposure pass. API-decoded f32 RGB(A) input; explicit synthetic/model symbols.
 // Two-level binary64 reduction satisfies the published nonnegative-mean accuracy bound.
 // RR_EX_SRV=1 (opt-in; WrongGPU's RR runtime, clean/rr_f/runtime): color == 0 reads the colour from the game's

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Regression test (RR bluefix, 2026-10-21): an all-grey frame through a colour-symmetric network keeps the three colour
 channels of every hidden state equal - IN0 / E1..E5 hnew, hmerged, the Hc each recurrent half reads, D4-R..D1-R hnew
 and Cnet - on the CPU reference and (with WG_RR_GPU_TESTS=1; gpu/build.run takes the GPU lock (WG_GPU_LOCK, BUILDING.md) itself) on the GPU body + head.

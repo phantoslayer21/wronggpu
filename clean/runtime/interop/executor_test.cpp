@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 test executor (see executor.h): stands in for the network in offline tests of the interop. On its own
 // compute queue it waits for `ready`, writes a nearest-neighbour upscale of one converted input into the slot's
 // `out`, and signals `done`. view 0: color times the exposure (so the exposure plumbing is visible); 1: depth (d, d,

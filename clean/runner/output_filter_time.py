@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Whole-frame GPU time of model M per output filter (runtime option output_filter), interleaved (A B C A B C ...),
 on a synthetic frame: Pipeline.time_frame at 1706x960 -> 2560x1440 by default.
 

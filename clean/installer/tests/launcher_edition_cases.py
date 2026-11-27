@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The download of WrongGPU's edition of OptiScaler, for run_launcher_tests.py (which calls run() in its place in the suite;
 this file keeps that suite below the 256 KB source limit, as launcher_ignore_cases.py does). run()'s arguments are the
 suite's own helpers it used as module names. Written for this project."""

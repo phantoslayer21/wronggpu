@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // CPU tests of the frame generation presentation boundary: the target scheduler (fg_target_scheduler.h) driving the
 // deterministic fake presenter (fg_fake_presenter.h). Synthetic cadences only; no GPU, no window.
 //

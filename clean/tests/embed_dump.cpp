@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Test harness for the runtime library's built-in file table (clean/runtime/embedded.cpp + a generated
 // embedded_files.cpp, clean/tests/test_embedded_table.py): walks the table and reads every file through the runtime's
 // own lookup, wg_read_file, from a folder without that file (so the built-in copy is returned), and writes the bytes to

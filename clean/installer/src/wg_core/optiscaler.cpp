@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: the player's OptiScaler: its package, the OptiScaler.ini keys for WrongGPU, the proxy name,
 // WrongGPU's OptiScaler plugin (WrongGPU.asi). Written for this project.
 #include "optiscaler.h"

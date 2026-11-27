@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (#96): splitting weight blobs (clean/fg/reference/blobs.py), on synthetic blobs only.
 
     python -m unittest clean.fg.tests.test_fg_blobs

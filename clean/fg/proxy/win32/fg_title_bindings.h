@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU frame generation (issue #96, F8b): the qualified title bindings this build carries.
 //
 // A title binding is data (bindings/<id>.json): the game exe it is for, the game interface's file name, version gate and

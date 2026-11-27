@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // GPU regression for the production statistics adder, including carries and
 // unsigned 64-bit overflow. All inputs are original synthetic integers.
 #define main existing_integration_main

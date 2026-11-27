@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96): cheap float16 helpers of the fast path with the same bits as the exact ones of
 // fg_exact16.h, shared by HIP (fg_net1_mma.hip) and the D3D12 ports. The including file defines FG_FN, FG_F2H(float) ->
 // float16 bits (nearest even), FG_H2F(bits) -> float (exact), FG_SEL(c, a, b), and includes fg_exact16.h first.

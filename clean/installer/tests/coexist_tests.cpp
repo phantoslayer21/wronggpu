@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Unit tests of the launcher's coexistence part of wg_core (build/launcher-design.md sections 5 and 7.1, milestone M2):
 // the marker scan and fingerprints on synthetic bytes (never a third-party file), the proxy picker on a generated
 // folder, byte-exact OptiScaler.ini value edits and the inikey journal (revert, outside edits, replay onto a new ini),

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Environment cleanup of clean/runner/hip.py for HIP / clang processes (no GPU)."""
 import os
 import unittest

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The matrix helpers of wave64 kernels (WG_WAVE 64; wg_platform.hlsli defines its own only for wave32): "design D" of the
 // wave64 ports (clean/rr_f: rr_block_c32.hlsl, rr_block_c64_w64.hlsl), one wave64 = the work of two wave32 waves, tile t (0, 1)
 // = one wave32 wave's 16 tokens. Wave64 lane L = l + 32 hh holds, for each tile, half hh of wave32 lane l's fragment: FP8 A / B

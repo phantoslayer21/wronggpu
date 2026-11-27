@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model K's softmax rounding probe cases (clean/k/dx12/k_mix_cases.py) and the runtime's table (clean/k/runtime/
 k_mix_probe.h): CPU only.
 - the committed header is exactly gen_k_mix_probe.py's output;

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (#96): the natural weight order from the converter map (clean/fg/reference/natural.py), on
 synthetic blobs: natural weights scattered into stored blobs through the map's own gather indices come back unchanged
 through blobs.split_all and the natural view, for every layer.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Probe build only (WG_RR_PROBE): the plain bilinear upscale the probe writes into the game's output, and the
 // 16 x 16 mean of the normal input. Compiled by tools/build.py with fxc (cs_5_1; the root signature is embedded).
 // Constants: rect0 = source rectangle (x, y, w, h), rect1 = destination rectangle (upscale) or patch origin

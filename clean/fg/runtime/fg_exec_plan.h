@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Frame generation (issue #96, F7b): the CPU side of the D3D12 executor (fg_d3d12_executor.h), plain C++17 with no
 // platform headers so that it is tested on its own:

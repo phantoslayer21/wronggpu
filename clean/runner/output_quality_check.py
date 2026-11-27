@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Original synthetic detail/phase/alias checks; no learned parameters or vendor outputs.
 
 python -m clean.runner.output_quality_check --profile baseline|quality9 --json <result>

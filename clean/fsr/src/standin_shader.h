@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // HLSL source of the stand-in upscaler (compiled at run time with D3DCompile, target cs_5_0). Written for WrongGPU
 // from the definitions in spec 20 and clean/FORMATS.md; the root constants match StandInConstants in

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Constants of the fast resolve's correctly rounded f32 exp2 (kernels/rr_resolve_fast_math.hlsli).
 
 Mathematical constants only, computed exactly (80-digit decimals and fractions); every f32 is the nearest one (ties

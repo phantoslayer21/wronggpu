@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Stages post and filter (spec 06): GPU timing at the in-game size and a small correctness check against the NumPy
 reference, with synthetic data only (no model data needed).
 

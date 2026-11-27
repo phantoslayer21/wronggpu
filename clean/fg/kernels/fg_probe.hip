@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96): probe of gfx12's 16 x 16 x 16 matrix instructions against net1's chunk arithmetic
 // (clean/fg/runner/fg_wmma_probe.py). A spec chunk is acc' = RN16(acc + sum of 16 float16 products), one rounding. One
 // WMMA has K = 16 and adds C in the same instruction, so each of its 256 outputs is one chunk when C is the accumulator.

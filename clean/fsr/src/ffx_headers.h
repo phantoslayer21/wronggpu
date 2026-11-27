@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // AMD FidelityFX API headers (SDK 1.1.4, MIT, vendored in clean/third_party) without any D3D12 dependency, plus
 // D3D12/DXGI enum values the front end needs as plain numbers. The Windows build checks every mirrored value

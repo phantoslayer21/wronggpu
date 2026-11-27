@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // FSR 3.0 component DLL forwarders (spec 20, integration point 2): ffx_fsr3upscaler_x64.dll and ffx_fsr3_x64.dll.
 // Every export is forwarded to AMD's original DLL, kept next to ours as <name>.wronggpu-original.dll, and logged with

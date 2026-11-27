@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Original provider truth regression, no GPU/device/third-party host implementation.
 #include "overlay.h"
 #include "hosted_badge_win.h"

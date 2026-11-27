@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU-Restore.exe: the small per-game restorer (build/launcher-design.md section 2). The launcher writes it into
 // every game it installs as <install folder>\wronggpu-setup\uninstall.exe. It is wg_core without the payload, the
 // converter data or the UI: it reads the install record (v1 of the 0.5.x setup and v2 of the launcher), puts the

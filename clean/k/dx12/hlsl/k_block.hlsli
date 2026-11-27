@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model K block of spec 41 with its fused stage neighbours, for the D3D12 ports: the HLSL counterpart of the k_block
 // template of clean/k/kernels/k_block.hip (WrongGPU's own code), FP32 accumulation only (template parameter F16 = 0:
 // the network's default exact path; the FP16-accumulating k_stageh_* / k_stage2h_* forms and the FP8 forms are not

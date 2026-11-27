@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 port of frame generation's net1 upscale (issue #96): fg_upscale_f16 of fg_net1.co (clean/fg/kernels/fg_net1.hip),
 // byte for byte. Bilinear, align corners, x [C][hi][wi] -> y [C][ho][wo] float16. rx, ry: the ratios (wi - 1) / (wo - 1)
 // and (hi - 1) / (ho - 1) as single-precision bits (0 for an extent of 1), from the caller, so no division runs here.

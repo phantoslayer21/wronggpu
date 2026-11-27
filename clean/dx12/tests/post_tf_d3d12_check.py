@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The analytic-filter D3D12 ports of Model M's fused output kernels (clean/dx12/kernels/post.hlsl, WG_LZ_ANALYTIC)
 against HIP's post_w64.co on the same synthetic inputs, byte for byte; the original-filter port (post_w64__orig.co,
 already proven on whole frames by clean/dx12/compare.py) as the Model M control on the same harness.

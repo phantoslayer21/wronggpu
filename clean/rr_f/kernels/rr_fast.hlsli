@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Helpers of the specialised window-block kernels (rr_block_c32.hlsl, rr_block_fast.hlsl): the same operations as
 // rr_common.hlsli / rr_block.hlsl, arranged for fewer instructions; every result has the bits of the rr_block.hlsl
 // form for every input (argued at each helper). Needs rr_common.hlsli and the kernel's static rr_lane.

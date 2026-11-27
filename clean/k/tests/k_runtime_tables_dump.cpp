@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Test aid for clean/k/tests/test_k_runtime_tables.py and test_k_runtime_pack.py: runs the runtime's C++ model K table
 // generator (clean/k/runtime/k_filter_table.cpp), loader (clean/k/runtime/model_k_load.cpp) and weight packer
 // (clean/k/runtime/k_pack.cpp) and writes what they produce.

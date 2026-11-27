@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (issue #96): net2 (the 50-blob network, sub-nets A and B) end to end, as a CPU reference with the
 delivered arithmetic.
 

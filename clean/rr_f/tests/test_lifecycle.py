@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Original synthetic host traces derived from spec 53.12(4), not GPU tests."""
 
 import math

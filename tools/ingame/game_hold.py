@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The GPU flag for ONE game run (a session flag must never outlive the game). Started by run.py launch after it
 took the flag: waits up to --start-s for the game process, holds while it runs, and
 releases the flag in `finally` on every path (game exit, start timeout, exception, Ctrl-C, kill of the game). The flag

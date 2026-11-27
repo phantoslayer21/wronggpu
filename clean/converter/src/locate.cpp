@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Locating the sources in the DLL (spec 08 section 4.2). Written for this project.
 //
 // Block sources: every offset is a candidate; the search tries offsets that are multiples of 16

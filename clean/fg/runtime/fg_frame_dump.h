@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Frame generation (issue #96, F9 developer diagnostics): the CPU side of the executor's frame dumps. A presenter
 // slot's bytes (rows of `pitch`, one of the four slot formats the executor writes) become 8-bit RGB, written as a

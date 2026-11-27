@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 <#
 .SYNOPSIS
   Installs or removes WrongGPU's FSR DLLs (spec 20) in one game folder, for tests 20-T0 to 20-T3.

@@ -1,4 +1,4 @@
-; SPDX-License-Identifier: MIT
+; SPDX-License-Identifier: GPL-3.0-only
 LIBRARY ffx_fsr3upscaler_x64
 EXPORTS
     ffxFsr3UpscalerContextCreate

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """R1: WG_DEV_DIAGNOSTICS (executor=hip and the frame capture in a game) is off in every release build and package.
 
 No GPU, no compiler needed: the build script's runtime command, the CI and release files, and the library check are read.

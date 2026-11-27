@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Build WrongGPU's RR runtime: the kernel library (DXIL, exact arithmetic mode of clean/dx12/build_dx12.py), the
 model-independent tables, the runtime library wronggpu_rr_runtime.dll, the D3D12 test host rr_test_host.exe;
 optionally a stage folder with the runtime and a model file (the proxy's directory layout).

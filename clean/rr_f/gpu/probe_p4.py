@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Probes P2-P4 (DESIGN-51.md section 9; spec tests 51.8 items 2 and 3): the kernels' Q8, attention weight,
 activation and r = R(1 / Z) for every f16 input on the GPU, against the reference tables.
 

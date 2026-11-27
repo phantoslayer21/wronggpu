@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The converted model file each model resolves to (clean/runtime/model_select.h model_wgcm_path, used by every
 // executor's create check in interop/backend.cpp): Model M unchanged, Model L in its own folder. CPU only.
 // Run by test_model_path.py. WrongGPU's own code.

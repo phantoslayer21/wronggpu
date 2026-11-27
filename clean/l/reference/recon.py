@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L's output reconstruction (stage "post"), NumPy float64 oracle (issue #89).
 
 Model L's reconstruction is Model M's (clean/reference/post.py reconstruct, spec 06) with three changes, selected by

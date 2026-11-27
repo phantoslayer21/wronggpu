@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 # WrongGPU installer (spec 30). Windows only: MSVC or MinGW-w64.
 #   cmake -S . -B build -DWRONGGPU_PAYLOAD_DIR=<release payload folder> [-DWRONGGPU_MAP=<map.json>] [-DWRONGGPU_VERSION=x.y.z]
 #   cmake --build build --config Release

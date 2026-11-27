@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (issue #96): the per-call schedule of the light path (preset C) and its CPU executor, written for
 this project.
 

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Loading a converted preset-F model file (the converter's `model.wgcm`, container version 2).
 
 Authority: spec 56 (logical tensors 56.4), spec 57 (output groups 57.7.1, symbol table 57.7.2, digests and the

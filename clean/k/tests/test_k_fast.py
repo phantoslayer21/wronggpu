@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Runtime option k_fast=1 (opt-in, not bit-exact): the "_f" variants of the input and output stage kernels
 (clean/k/kernels/k_io.hip, FAST / KIO_FAST forms: hardware reciprocal estimates instead of correctly rounded
 divisions, the luma history cubics and clamps as packed FP16, the weight sum instead of the largest exponent for the

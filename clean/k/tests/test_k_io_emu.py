@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model K input stage (spec 42) and output stage (spec 43): emulated kernels vs the NumPy references, bit for bit,
 all eight flag variants, on frames built to reach the rare branches (very bright pixels: the encode branch Y >= 1000;
 luma history above 0.999: the decode branch; resets; history inside and outside the frame; blend logits beyond +-3;

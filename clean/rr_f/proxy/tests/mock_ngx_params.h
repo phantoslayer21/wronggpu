@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // A mock of the game's NGX parameter block as the host hands it to the RR provider (wg_host_menu_abi.h,
 // WgHostNgxParams): typed values by key. Getters follow the host's documented rules: false when the key is not set
 // (output unchanged); an unsigned getter also answers an int key and the other way round (unless `strict`: then each

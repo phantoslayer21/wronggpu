@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #include "asi_bridge.h"
 
 #define WIN32_LEAN_AND_MEAN

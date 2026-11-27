@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #include "../kernels/k_io.hip"
 WG_KERNEL_N(k_selector_native,128)(u32* out) {
  const u32 i=wg_block_id()*128u+wg_lane_id();if(i>=65536u)return;

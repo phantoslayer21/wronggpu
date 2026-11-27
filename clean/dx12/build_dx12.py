@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Builds the D3D12 ports of the HIP kernels (clean/dx12/kernels/*.hlsl) for the hybrid device backend (runtime backend 2,
 clean/runtime/device_dx12.cpp): <out>/dx12/<tag>__<kernel>.dxil (or <kernel>.dxil without a tag) + <out>/dx12/manifest.json.
 

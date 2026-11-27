@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Fail on the measured complete-frame native/HIP gap; never infer idle from unknown telemetry.
 
 Consumes one warmed matched time_frames JSON and its activity capture. It gates synchronized streamed wall

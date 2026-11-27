@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Tiled input producer: complete-plan fallbacks and exact legacy/reference equality.
 
 Standalone input plans remain canonical. GPU tests opt into fusion explicitly;

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Probe P1 (DESIGN-51.md 7.2): how v_wmma_f32_16x16x16_fp8_fp8 accumulates, and how often the 51.1 matrix step done
 as two WMMAs + one f16 conversion differs from the exact step R(C + sum of 32 products).
 

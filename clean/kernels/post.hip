@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Output reconstruction (stage "post") and output filter (stage "filter") of spec/06-reconstruction-and-output.md
 // for gfx1201 (RDNA4). Data layouts: clean/FORMATS.md, "Output reconstruction and output filter"; launch plans and
 // input conversion: clean/runner/post.py. Reference: clean/reference/post.py.

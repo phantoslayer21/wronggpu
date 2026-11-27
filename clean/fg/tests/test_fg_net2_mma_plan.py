@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (#96): net2's fast path (clean/fg/runner/fg_net2_mma.py, clean/dx12/kernels/fg_net2_mconv.hlsl) as
 planned on the CPU: the weight swizzle and padded bias, the kernel variant per layer, the fast chain's launches against
 the kernel declarations and buffers, and a CPU model of the kernel's addressing (A fragments read back from the swizzled

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model L's own post on the direct-resource route (runtime option l_post=own, native D3D12): the D3D12-only colour step
 // before l_post_recon_p12, which reads its colour from a buffer (no direct form). With it the direct frame gives the
 // staged route's bytes: the staged route converts the game's textures into dense buffers (the Converter's input pass,

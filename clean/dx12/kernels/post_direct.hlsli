@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Direct-form (POST_OUT == 3) helpers of post.hlsl: the same values as native_direct.hlsli's colour fetch and output
 // scale, with less vector work. Include after native_direct.hlsli and post.hlsl's g_z.
 //

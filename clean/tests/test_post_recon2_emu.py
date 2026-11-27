@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """post_recon2* (drop-in replacements of post_recon, kernels/post.hip) in the host lane emulator: bit-identical to
 post_recon on every case of test_post_emu (NaN/inf inputs, reset, reprojection on the borders, highlights, ties, odd
 and tiny sizes, 3x ratio).

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (issue #96): the weight layout of its two convolution networks, as structure only.
 
 Written for this project from the spec side's frame-generation scoping (parts 1 and 2). No weights, no file bytes:

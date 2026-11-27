@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """CPU proofs of the exactness arguments behind frame generation's Wave 2 kernels (the fuse2 bits 64 .. 1024):
 A15 fg_lite_fill16_p2, A16 the bilinear row loads (FG_BIL128), A17 the light blend's 32 x 8 tiles with pair stores
 (FG_TILE) and the output pull's division skip (FGP_POW2), A18 the z-sliced net2 convolutions (FG_ZB). Each class restates

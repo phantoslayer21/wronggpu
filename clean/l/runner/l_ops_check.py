@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L (issue #89): GPU check of the matrix kernels of clean/l/kernels/l_ops.hip against the oracle steps
 (clean/l/reference/oracle.py), synthetic data only.
 

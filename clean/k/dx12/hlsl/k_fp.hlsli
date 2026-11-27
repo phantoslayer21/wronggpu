@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 port of model K's exact scalar FP32 / FP16 / FP64 helpers (clean/k/kernels/k_fp.h; specs 42, 43). WrongGPU's own
 // code. Same names and the same bits as the HIP helpers on gfx1201, in the exact arithmetic mode of build_dx12.py
 // (clean/dx12/hlsl/wg_math.hlsli: one IEEE operation per written operation, mad() = one v_fma_f32, rcp() = v_rcp_f32,

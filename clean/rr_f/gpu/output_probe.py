@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Exactness probes of the fast output-stage arithmetic (kernels/rr_output_probe.hlsl) on the GPU.
 
   mode 0: X (exp2), L (log2), H (f32 -> f16 RNE) candidates against rr_output.hlsl's helpers for all 2^32 f32 inputs;

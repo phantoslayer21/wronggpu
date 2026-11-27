@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 ports of Model L's input linears (issue #89): l_linear_32_32_relu and l_linear_32_32_f16 of l_ops.co
 // (clean/l/kernels/l_ops.hip, linear_32_32<RELU>), byte for byte. Maps and blobs: clean/l/FORMATS.md.
 //

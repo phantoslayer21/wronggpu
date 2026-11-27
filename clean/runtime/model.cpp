@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model data loading and packing (see model.h). Layouts: clean/FORMATS.md.
 #include "model.h"
 #include "embedded.h"

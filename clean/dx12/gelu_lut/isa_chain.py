@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """GELU chains of a HIP ISA listing (llvm-objdump -d): from every fmaak with the literal 0xc013b8ed, the producer of its
 VGPR operand and the first reader of each result, as one signature line per chain. The oracle's code object must show
 exactly the chain kinds of the runtime's kernels (run.py checks it).

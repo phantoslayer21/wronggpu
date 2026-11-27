@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Exhaustive probe of the hybrid block form's element-wise helpers (hlsl/wg_hyb.hlsli), not used by the runtime:
 // every thread takes 8 consecutive FP16 bit patterns i = 8 t .. 8 t + 7 (t = global thread, 8192 threads = all 65,536)
 // and writes, at byte offsets of `dst` (the expected bytes come from clean/l/reference/hyb_tables.py and oracle.py;

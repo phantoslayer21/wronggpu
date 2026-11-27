@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Shared by the DLL tests (test_proxy_dll, test_probe_dll): the built proxy's VERSIONINFO read back through
 // GetFileVersionInfoW / VerQueryValueW, a stand-in hook on the proxy's init export (what another module in the game
 // does to it) for the load diagnostics, and log helpers. Include after test_util.h and the generated wg_binding.inc.

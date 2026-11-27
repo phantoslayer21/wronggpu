@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 /*
  * Positions of the D3D12 methods WrongGPU's own vtable hooks patch (d3d12_hooks.cpp), counted from the start of each
  * interface's vtable: IUnknown (3 methods), ID3D12Object (4), ID3D12DeviceChild (1), then the interface chain in

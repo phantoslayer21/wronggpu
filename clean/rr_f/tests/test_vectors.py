@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The spec 51 vectors: the generator reproduces the committed manifest and SHA256SUMS byte for byte (line endings
 normalised), and the reference reproduces every stored output when the files are read back."""
 import os

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Offline, metadata-only triage of WrongGPU support ZIPs. Never extracts or runs files."""
 import argparse
 import hashlib

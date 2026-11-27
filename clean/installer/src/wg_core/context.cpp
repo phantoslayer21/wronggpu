@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: the Context, the log file, the model data folder and the embedded converter map. Written for
 // this project.
 #include "context.h"

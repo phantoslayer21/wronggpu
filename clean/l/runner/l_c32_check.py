@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L (issue #89): GPU check of the C = 32 Swin block kernel (clean/l/kernels/l_swin.hip), synthetic data only.
 
     python clean/l/runner/l_c32_check.py --build <dir> --rocm "C:\\Program Files\\AMD\\ROCm\\7.2" [--compile]

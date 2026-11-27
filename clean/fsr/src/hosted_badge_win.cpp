@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Own implementation from public Windows layered-window/GDI API declarations.
 #include "hosted_badge_win.h"
 #include "overlay.h"

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Writing the converter output (spec 08 sections 8 and 10). Written for this project.
 // The container format is described in clean/converter/OUTPUT-FORMAT.md.
 #pragma once

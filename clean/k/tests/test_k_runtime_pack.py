@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The runtime's C++ model K weight packer (clean/k/runtime/k_pack.cpp k_pack_stage) against clean/k/runner/k_pack.py
 pack_stage (d_row "gfx12"), byte for byte, all eleven stages:
 

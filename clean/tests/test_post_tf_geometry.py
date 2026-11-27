@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Geometry of the true-fusion kernels post_tf* (kernels/post.hip, post_tf_body), simulated on the host (no GPU):
 for many output sizes and chunk choices, every D pixel's full history is written by exactly one workgroup and every
 reduced-history code by exactly one lane; every row a vertical pass reads (3p - 2 ... 3p + 4, clamped) was

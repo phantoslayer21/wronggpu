@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 port of input_encoder (clean/kernels/encoder.hip; HIP build encoder.co = the base variant: no -D flags, so
 // WG_ENC_FRAG_GLOBAL=1 (A fragments straight from global memory), WG_ENC_PIN=1, every other switch 0, motion at render
 // resolution (EncMoOff), hardware FP8 conversion). HIP ISA: <build>\dx12-m\isa\input_encoder.s (build_dx12.py --isa).

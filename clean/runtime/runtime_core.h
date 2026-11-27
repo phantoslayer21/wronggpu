@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // C++ entry points of the core runtime for code in the same library (the D3D12 interop, spec 10 sections 1, 6, 8).
 // The C API in wg_runtime.h wraps the same functions.
 #pragma once

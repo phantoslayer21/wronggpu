@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Build and run helpers of the spec 51 D3D12 kernels (clean/rr_f/kernels) and their test host (rr_host.cpp).
 
 Kernels are compiled with clean/dx12/build_dx12.py's exact arithmetic mode (DXC -Gis, intrinsics rewritten, dxv).

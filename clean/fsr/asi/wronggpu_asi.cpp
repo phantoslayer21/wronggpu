@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU.asi: an OptiScaler plugin (its own DLL, our own code only) that makes WrongGPU appear as its own entry
 // ("WrongGPU"; with Model K and/or L: "WrongGPU Model M", "WrongGPU Model K", "WrongGPU Model L") in OptiScaler's MAIN
 // DX12 upscaler dropdown, leaving OptiScaler's "FSR 3.X(/4)" entry to mean AMD's upscaler again. WrongGPU is the default

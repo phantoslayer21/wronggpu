@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """CPU-only regressions for the synthetic D3D12 output validator; never launches GPU."""
 import unittest
 from unittest.mock import patch

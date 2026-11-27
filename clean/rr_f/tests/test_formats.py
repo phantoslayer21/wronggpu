@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Spec 51.1: e4m3 decode (all 256 codes), Q8 (all 65536 f16 inputs and random / edge f32 inputs), f16 rounding,
 fma16, the matrix step.
 

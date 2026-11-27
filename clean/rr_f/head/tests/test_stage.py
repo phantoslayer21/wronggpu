@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """D0-R stage / head: the committed test vectors against (a) the vectorised reference recomputed from the vectors'
 inputs, (b) the slow element-by-element oracle, (c) the stated properties of page 55.
 

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Exhaustive proof of the direct post kernel's output table (clean/dx12/hlsl/wg_f16lut.hlsli).
 
     python clean/dx12/f16lut/run.py --work build/lev-f16lut/proof

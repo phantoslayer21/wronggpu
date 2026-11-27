@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Minimal JSON reader (RFC 8259) for the converter map. Written for this project.
 #pragma once
 

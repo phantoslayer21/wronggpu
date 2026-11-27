@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Runs the spec 51 D3D12 window-block kernel (clean/rr_f/kernels/rr_block.hlsl) on the reference vectors
 (clean/rr_f/tests/vectors) and compares every output with the stated tolerance (manifest 'tolerance_classes').
 

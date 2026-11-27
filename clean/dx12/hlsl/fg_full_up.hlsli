@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96): the output pyramid's 9/3/3/1 upsample on four already-loaded taps, for the kernels whose taps
 // do not come from the arena (fg_out_push.hlsl FGU_TAIL: LDS; FGU_L1: texels pushed on the fly). It is the second half of
 // fgf_up (fg_full.hlsli), line for line: clean/fg/tests/test_fg_turbo_v2.py compares the two texts. Include after

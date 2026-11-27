@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Generated stand-ins for the frame generation files of a WRONGGPU_TESTING build with WRONGGPU_FG (CMake runs this when no
 WRONGGPU_FG_DIR is given): plugins\\WrongGPU-FG.asi as a minimal PE file with a version resource and a marker, and two kernel
 files in the release stage folder's layout (fg-dxil\\mock.dxil, fg-dxil\\mock_b.dxil) with the kernel build's list beside them

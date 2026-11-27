@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Whole stage calls of spec 51 (fronts, block, merge, hidden-state rules, borders) against the slow per-token
 implementation, for every stage kind, on small tensors (one window, borders reflected, also repeated reflection)."""
 import os

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model K's player-visible option text (host check, no GPU).
 
 The create note of the opt-in k_approx option (clean/k/runtime/runtime_k.cpp, approx_note_), its a1 legacy-input line

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Stage enc0 (spec 03): the real kernel source (kernels/encoder.hip) run in the host lane emulator through the
 spec 90 runner, compared with the NumPy reference (reference/encoder.py). Synthetic data only.
 

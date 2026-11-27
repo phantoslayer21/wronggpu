@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (issue #96): CPU reference of both networks' forward pass, as far as it is delivered.
 
 Written for this project. The layers are settled: their shapes (clean/fg/layout.py), the weights in natural order and

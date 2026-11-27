@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Unit tests of the proxy's game-interface logic (spec 60-63) against a fake original and a fake runtime:
 // return codes and their precedence, forwarding of every other feature, proxy answers for feature 1001,
 // creation / reset decisions, rejections, routing of 62.2, formats of 62.5, settings of 60.9, the ASI view.

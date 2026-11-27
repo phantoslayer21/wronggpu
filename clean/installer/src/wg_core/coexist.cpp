@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: other mods, tools and older installs next to a game (coexist.h): the installer's conflict
 // rules, the launcher's rules table (build/launcher-design.md section 5) and the proxy picker. Written for this project.
 #include "coexist.h"

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96): the Full path's output pull and middle pull, as clean/fg/reference/stages_full.py
 // g6_output_pull and g6_output_pull_mid, bit for bit. Built only when --only names them.
 //

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Spec 51 window block for the full-resolution stages IN0 and D0-F (C = 32, H = 2; DESIGN-51.md), specialised from
 // rr_block.hlsl with the same arguments, buffer layouts, rounding points and step (rr_step.hlsli, RR_STEP), and the
 // same output bits for every input. One workgroup = one 8 x 8 window, 4 waves of 32 lanes; wave wv owns tokens

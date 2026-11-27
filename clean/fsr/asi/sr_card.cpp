@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU.asi's "WrongGPU Upscaler" card in OptiScaler's menu (sr_card.h).
 #define WIN32_LEAN_AND_MEAN
 #ifndef NOMINMAX

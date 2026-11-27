@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Synthetic stand-ins for the files other tools put next to a game, for the launcher's coexistence tests (M2).
 
 Written for this project with mockpe.py: every file is generated here (a version resource, exports, imports or a few

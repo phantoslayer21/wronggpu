@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96): HIP kernels of net1's operations (clean/fg/reference/net1.py), bit for bit against the
 // CPU reference. D3D12 ports: clean/dx12/kernels/fg_*.hlsl. Tensors are float16, channel-first [c][h][w]; weights are
 // natural [out][in][k][k] float16; biases [out] float16. 1-D grid of 256-lane workgroups, one output element per lane.

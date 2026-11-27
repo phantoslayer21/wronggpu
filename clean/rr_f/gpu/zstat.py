@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Fast-path rates of variant Z on one steady bench frame (diagnostics; the frame's results are not checked or used).
 
 Builds the frame of `sequence --bench` with step Z and the kernels' RR_ZSTAT build, runs it once without the fixup

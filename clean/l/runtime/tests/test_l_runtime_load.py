@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L's raw model loading in the runtime (clean/l/runtime/l_model.cpp) on the CPU (#89):
 
 - the tensor list against the preset-L map (data/preset-L.v1.map.json: stages, names, shapes, types, in order),

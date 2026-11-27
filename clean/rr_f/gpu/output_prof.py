@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Shader-clock profile of rr_output_fast's sections (OF_PROF=1; lane 0 of each wave adds the clock deltas of
 sections 1-7 to trace words 1-7; diagnostics off). Profiling build only (the trace words are not outputs).
 

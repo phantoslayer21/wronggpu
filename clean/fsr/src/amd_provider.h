@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Which AMD FidelityFX DLL gives a hosted WrongGPU (OptiScaler's FidelityFX upscaler library) AMD's upscaler
 // versions: the list the host and the game see after WrongGPU's own entries, and the DLL that runs a context when the

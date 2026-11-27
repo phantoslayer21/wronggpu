@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // GELU table T5 of the D3D12 MLP kernels (clean/dx12/hlsl/wg_gelu_t5.hlsli): the exact q8(GELU) table of
 // gelu_lut_table.h (T16, 2048 entries indexed by f16_rtz(w) >> 5) re-indexed by the FP32 encoding of w = fma(h, S, B):
 // entry j = asuint(w) >> 18 (sign, 8 exponent bits, the top 5 mantissa bits), 16384 entries (a, b) of two 32-bit words.

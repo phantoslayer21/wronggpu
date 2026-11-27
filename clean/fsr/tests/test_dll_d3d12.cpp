@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // End-to-end test of the built amd_fidelityfx_dx12.dll through its exports, with a real D3D12 device (Windows, or
 // Wine with vkd3d and a Vulkan driver such as lavapipe). AMD's DLL is replaced by the test double
 // amd_fidelityfx_dx12.wronggpu-original.dll (tests/fake_original.cpp).

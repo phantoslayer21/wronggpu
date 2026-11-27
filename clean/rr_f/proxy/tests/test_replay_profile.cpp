@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Replay of a game profile (tests/data/<game>-<version>-traffic.json, written by tools/probe_log_to_profile.py from
 // an in-game probe log) into the release proxy core (src/proxy_core.*) with the fake runtime (tests/fake_runtime.h).
 //

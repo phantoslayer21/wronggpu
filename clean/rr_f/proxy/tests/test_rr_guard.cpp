@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // RR guard: CPU unit test of the coexistence guard's pieces without process state (src/rr_guard.h).
 //   - safe reads: a readable buffer; a PAGE_NOACCESS page, a reserved page, a guard page (the guard flag must survive the
 //     check, with no other thread changing the page meanwhile); a read across a readable / unreadable boundary; the

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Fused dec1 + dec0 (kernels/dec1_dec0.hip) against the separate kernels, in the host emulator: bit-identical A, B, C
 and latent. Also checks that the composite base stage equals running stage dec1 and then stage dec0 through the runner.
 

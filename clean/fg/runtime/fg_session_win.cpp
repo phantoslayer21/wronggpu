@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96, F7a): the Windows presenter source of an FG session. See fg_session_win.h.
 #include "fg_session_win.h"
 

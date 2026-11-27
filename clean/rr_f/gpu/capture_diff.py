@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Image difference of two captured-frame replays (proxy/tools/rr_capture_replay.py output folders): per frame the
 raw-byte equality of the RR output, PSNR (dB) of the tonemapped 8-bit output (the replay tool's tonemap: Reinhard,
 sRGB), the largest absolute difference of the tonemapped values (0..255) and of the raw f16 output, and the worst frame.

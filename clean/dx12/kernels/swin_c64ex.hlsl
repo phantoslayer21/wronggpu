@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 port of swin_block_c64_add_ex_nc (clean/kernels/swin.hip WG_FUSED_KERNEL(swin_block_c64_add_ex, 64, 2, 256,
 // true, 0, 96)): dec1's Swin block with its expand fused in, as a kernel of its own (dec1's map written out). Model M's
 // D3D12 route runs dec1 fused with the pack12 decoder (d1p12/swin_block_c64_add_dec0*), so this kernel had no port;

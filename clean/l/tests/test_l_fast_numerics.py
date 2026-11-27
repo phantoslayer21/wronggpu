@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """CPU accuracy checks of the arithmetic choices of Model L's l_mode=fast kernels (no GPU).
 
     python -m unittest clean.l.tests.test_l_fast_numerics

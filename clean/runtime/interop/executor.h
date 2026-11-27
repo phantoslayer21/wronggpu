@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The part of the interop that runs the network on a frame whose inputs are already in the runtime's shared
 // buffers (spec 10 section 6). Swappable:
 //  - the HIP executor: the core runtime (clean/runtime) on a HIP stream, with the shared D3D12 buffers imported as

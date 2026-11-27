@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Unit tests of the SetupAPI identity shim (src/setupapi_identity.h; clean/rr-sm2-shim). Synthetic IDs through fake
 // SetupAPI functions: match / no match, multi-strings with several entries, the buffer-too-small path untouched, other
 // classes / devices / properties untouched, spoof inactive -> no rewrite, the decision (made lazily at the first calls,

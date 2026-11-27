@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Motion vectors at output resolution (spec 03 draft 4 "Motion at output resolution", spec 06 section 3): the raw motion
 // texel both the input encoder (encoder.hlsl, WG_ENC_MO) and the reconstruction (post.hlsl, WG_POST_MO) read. HLSL
 // counterpart of clean/kernels/wg_motion_hi.h. Written for WrongGPU.

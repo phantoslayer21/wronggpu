@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (issue #96): the natural order of the weights, taken from the converter map itself.
 
 Written for this project. The preset-FG map (data/fg.v1.map.json, revision v1.1) gives every weight tensor `W` in

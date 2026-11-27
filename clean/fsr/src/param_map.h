@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // FidelityFX (FSR 3.1 API) parameters -> WrongGPU upscaler interface (wronggpu_upscaler.h). Pure functions, no
 // D3D12 calls: everything the mapping needs to know about a D3D12 resource comes through ResourceInfoFn.

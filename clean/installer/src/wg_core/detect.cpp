@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: game discovery (Steam, Epic, GOG), the game executable and its folders, the FidelityFX DLLs
 // WrongGPU replaces (the game's, ours or another mod's) and the inspection of one game. Written for this project.
 #include "detect.h"

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """CI (R1): the package gate, run on the REAL runtime library built from this tree, not on made-up files.
 
     python tools/ci/check_release_runtime.py --out <folder> --cxx <clang++>

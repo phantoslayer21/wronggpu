@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 # Frame generation game adapter groundwork (issue #96, F8a): the host-neutral adapter contract, the adapter core
 # (install-off gate, feature-scoped routing, capability, tag-to-packet assembly, single present owner) and the per-game
 # FG settings keys. CPU only: tests run against a fake game interface, a fake host and a fake executor.

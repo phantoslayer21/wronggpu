@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Shared Windows pieces of the presenter back ends: explicit refusal reasons, the interrupt-time clock, the
 // high-resolution waitable timer, the presenter worker thread, the D3D12 producer-fence table and the read-only

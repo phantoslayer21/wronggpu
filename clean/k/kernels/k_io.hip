@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model K input stage (spec 42) and output stage (spec 43) for gfx1201: one lane per position, FP32 / FP16 steps in
 // the spec's order (contraction off, fma explicit, k_fp.h). NumPy references: clean/k/reference/instage.py and
 // outstage.py; bilinear sampling and the other choices noted there (QUESTIONS.md K-Q8).

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Kernel replay on the native D3D12 Device (issue #89): runs single kernels by their launch names on synthetic inputs
 // given in files, so that a D3D12 port can be compared byte for byte with its HIP kernel on the same inputs (driver:
 // clean/l/runner/l_d3d12_check.py). Uses only the project's Device API (clean/runtime/device.h).

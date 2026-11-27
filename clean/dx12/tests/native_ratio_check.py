@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Brief 15 hardware checks of the native D3D12 backend (backend 3) at native AA and ratios between 1.0 and 1.5:
 the output kernel post_tf4_dl_* against the cap-352 kernel and against clean/reference/post.py. Synthetic model and
 frames only; no HIP (backend 3 loads no HIP runtime). Run each mode under the GPU lock (WG_GPU_LOCK, BUILDING.md) (and a no-progress watchdog;

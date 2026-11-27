@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (issue #96): constructed inputs for the light path's tests and GPU check. Every value is
 synthetic: a gradient-and-noise background panning with the camera, a nearer block moving on its own, a static UI
 panel (or a full-screen menu) blended over the hudless colour, a depth plane with the block in front, and the two

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L: the q7 checks' NaN-sign exception (clean/l/runner/l_q7_check.py mask_nan) masks ONLY a NaN's sign bit.
 
 Run: python -m unittest discover -s clean/l/tests -t .

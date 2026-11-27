@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L (issue #89): adversarial probe of the S2a primitive (clean/l/kernels/l_q7_op8.h and its
 D3D12 twin clean/dx12/hlsl/l_q7_op8.hlsli): one 32-wide FP8 chunk summed by two matrix instructions started from 0,
 used only while wsum x amax < 63 (wsum = sum |w| of the row's chunk, as the packers store it; amax = max |a| over the

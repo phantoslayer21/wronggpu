@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Executor choice (interop/executor_select.h) and the GPU identity rule it stands on (rdna4.h): the default rule, the
 // forcing options and the refusal paths, on any host (no GPU, no D3D12). WrongGPU's own code.
 //   clang++ -std=c++17 test_executor_select.cpp -o test_executor_select.exe && test_executor_select.exe

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model K: FP8 forms of the level-0/1 stage kernels (opt-in network variant "fused8"; not bit-exact, a speed
 // approximation beyond "fused16"). Included by k_block.hip after k_block; GPU only (gfx12 FP8 WMMA).
 //

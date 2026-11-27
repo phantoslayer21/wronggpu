@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Offline test of the runtime DLL's D3D12 interop (spec 10 sections 1, 6, 8) through its exported backend
 // (wronggpu_upscaler.h, interface version 2), on any D3D12 device (Wine's vkd3d with Mesa lavapipe, WARP, a GPU).
 // The network is replaced by the DLL's "d3d12-test" executor (nearest-neighbour upscale of one converted input), and

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #include "../src/wizard_policy.h"
 #include <iostream>
 #include <stdexcept>

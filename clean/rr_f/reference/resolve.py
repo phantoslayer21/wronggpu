@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """NumPy reference of page 54b (final review copy, with errata 50-53): output resolve, transparency layer
 (colour-before-particles rule of the erratum), alpha upscaling, quarter pooled history, clears.
 

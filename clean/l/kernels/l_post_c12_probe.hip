@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Q11 part C: probe of the reconstruction's two fused-rounding forms, bit for bit (clean/l/runner/l_post_c12_check.py).
 // Built as l_post_c12_probe.co (WG_LP_C1 = 1, WG_CR_C2 = 1: the forms of l_post__morig.co) and
 // l_post_c12_probe__mut.co (WG_LP_C1 = 0: item 3's exponent, Model L's kernel; WG_CR_C2 = 2: w1 with 2.5 f2 fused):

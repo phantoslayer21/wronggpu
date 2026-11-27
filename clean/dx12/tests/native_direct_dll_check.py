@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Build or prove the packaged native DLL through its real opaque C ABI.
 
 --prepare is CPU-only. Run mode must be invoked under the GPU lock (WG_GPU_LOCK, BUILDING.md) and the

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The launcher's words never claim WrongGPU's output is the same as the original (owner 2026-11-01, rr-notes.md: "It
 CANNOT say bit for bit identical"). Every string literal of the launcher's sources (src/app, src/wg_core: the window, the
 CLI's words, the notes and logs players read) is checked for the phrases below; modes are described only relative to each

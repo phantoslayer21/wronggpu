@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: Ray Reconstruction in the games that use it (rr.h). Written for this project.
 #include "rr.h"
 

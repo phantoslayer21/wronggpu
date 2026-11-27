@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The Model K port check's launch-plan bridge (clean/k/dx12/k_plan_bridge.py), CPU only: pointer fields of the manifest's
 struct argument token, the pointers' buffer and offset, and the kernel_replay chain steps made from a stage launch.
 

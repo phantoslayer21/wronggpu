@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96, F7b): the D3D12 executor's CPU side. See fg_exec_plan.h.
 #include "fg_exec_plan.h"
 

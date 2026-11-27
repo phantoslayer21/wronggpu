@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Offline RR on captured game frames: feeds a capture of the probe build (CAPTURE.md) through WrongGPU's RR runtime
 and writes PNGs of the input colour and of our RR output, so the image quality can be judged without a game run.
 

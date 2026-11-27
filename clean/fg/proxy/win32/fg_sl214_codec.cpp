@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU frame generation (issue #96, F8b): the native codec of the 2.14 game interface's FG structures. See
 // fg_sl214_codec.h. Written for this project.
 #include "fg_sl214_codec.h"

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Own ABI mock, no GPU operations. Used only by test_device_targets.cpp.
 #include <cstdlib>
 #include <cstring>

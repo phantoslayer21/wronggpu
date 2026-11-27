@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model data of the runtime (spec 10 section 7): loads the converter's raw tensors (spec 08 sections 7 and 10:
 // raw/<stage>/<name>.bin, row-major little-endian float32, uint8 for T) and packs every stage into the kernels'
 // formats (clean/FORMATS.md). The packers are C++ ports of clean/runner/packing.py, enc0.py and dec0.py and must give

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Synthetic D3D12 spec-54 qualification through CH/Q/PH1; no game resolve.
 
 Two explicit boundaries: API-decoded values widened to f32, or packed head

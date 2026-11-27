@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96): float16 operations of net2's D3D12 kernels (clean/dx12/kernels/fg_net2_*.hlsl), with the
 // bits of the CPU reference clean/fg/reference/net2.py. Values are float16 bits in the low half of a uint.
 //

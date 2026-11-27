@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (issue #96): NumPy CPU reference of the building blocks of its two convolution networks.
 
 Written for this project. float64 arithmetic with only the prescribed float16 roundings, like the other oracles here.

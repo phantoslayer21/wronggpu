@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Tables and exhaustive facts behind the fast hybrid kernels' element-wise steps (WG_L_FORM=hybrid, SW_HYB): every
 step whose input is one FP16 value is checked here for ALL 65,536 inputs against the oracle forms of
 clean/l/reference/oracle.py (norm_q7, softmax_q7, gelu_q7).

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 /* WrongGPU settings I/O: the ONE implementation of the shared settings block, wronggpu.ini, the data folder rule and
  * the settings log words, used by every WrongGPU DLL (SR front end, RR plugin, RR runtime). clean/wgshared.
  *

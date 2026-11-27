@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Time every build variant of the Swin stages at the in-game sizes, with synthetic data (timing does not depend on
 the values), and check that all variants produce bit-identical outputs.
 

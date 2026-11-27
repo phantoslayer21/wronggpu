@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (issue #96): run net1 (clean/fg/reference/net1.py) on the weights of a converter output file and
 record a digest of its output for a fixed synthetic input.
 

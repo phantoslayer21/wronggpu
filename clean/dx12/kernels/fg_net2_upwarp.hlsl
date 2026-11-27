@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96): net2's head upsample (launch 15) and warp-merge (launch 16) in one launch for the fast
 // path, exact: the bits of fg_net2_up2 on A4 / A1 / A3 and of fg_net2_warp, one pixel of the W x H grid per lane.
 // - The three heads are 8 channels per half-resolution pixel (A4 0..3, A1, A3 0..2), upsampled together (fg_up8 of

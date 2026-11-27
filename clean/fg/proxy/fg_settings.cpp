@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU frame generation (issue #96, F8a): the per-game FG settings keys (fg_settings.h). Written for this project.
 #include "fg_settings.h"
 

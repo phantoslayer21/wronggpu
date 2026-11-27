@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 <#
 .SYNOPSIS
   Tests install\install-wronggpu-fsr.ps1 on mock game folders (no real game, no real DLLs needed).

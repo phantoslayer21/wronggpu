@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // The FidelityFX SDK FSR 3.0.x component ABI (ffx_fsr3_x64.dll, ffx_fsr3upscaler_x64.dll; spec 20 integration
 // point 2), written out with plain types in the Windows x64 layout so that the front end and its unit tests compile on

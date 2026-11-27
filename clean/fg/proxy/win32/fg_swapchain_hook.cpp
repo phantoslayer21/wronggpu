@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU frame generation (issue #96, F8b): the DXGI swap-chain hook seam. See fg_swapchain_hook.h.
 // Written for this project.
 #include "fg_swapchain_hook.h"

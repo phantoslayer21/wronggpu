@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Host-side lane emulator for the kernels (test-only; never shipped).
 //
 // Every GPU lane of a workgroup runs the real kernel code as a cooperative coroutine (ucontext). Cross-lane

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model L's true-fusion output kernel in its fast-mode form (runtime l_mode=fast, native D3D12 only, no HIP kernel):
 // w64_lc12/l_post_tf_p12_fast and _pf_fast. The same workgroup / chunk plan, staging, ring and filter as
 // l_post_tf.hlsl (read its header: one wave64 kernel of 512 lanes, the reconstruction of a D pixel from the staged FP16

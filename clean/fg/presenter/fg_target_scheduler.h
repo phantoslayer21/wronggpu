@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Target-time scheduler for frame generation presentation: game-frame interval estimate, the exact per-interval target
 // times for 2x..6x, the variable-refresh window guard, deadline admission and the interval / epoch state machine.

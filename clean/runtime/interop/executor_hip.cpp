@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // HIP executor (see executor.h): the core runtime on the shared D3D12 resources. WrongGPU's own code.
 #include <cstdio>
 #include <cstring>

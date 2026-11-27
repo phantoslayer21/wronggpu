@@ -1,7 +1,7 @@
 WrongGPU: third-party notices
 =============================
 
-WrongGPU's own code is under the MIT licence (LICENSE). This file lists every third-party component in this
+WrongGPU's own code is under GPL-3.0-only from 0.7.0 onward (LICENSE). This file lists every third-party component in this
 repository or used to build or test it, with its version, licence and where it is used.
 
 No file, code, kernel or model data of the upscaler WrongGPU re-implements (named in README.md) is included in this

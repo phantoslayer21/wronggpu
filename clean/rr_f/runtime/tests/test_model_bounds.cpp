@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Bounds checks of the RR runtime's model loaders (src/rr_model.cpp), CPU only, no GPU and no model data: crafted files with
 // a correct whole-file SHA-256 (the hash is unkeyed, so it only catches accidents) whose offsets, sizes and shapes wrap
 // around 2^64. Driven by test_model_bounds.py, one case per run:

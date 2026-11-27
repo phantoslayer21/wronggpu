@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Version resource shared by WrongGPU's DLLs: identifies each file as WrongGPU's (not AMD's) in Explorer, in bug
 // reports and for the install script. Included by version.rc, version_fsr3.rc and version_fsr3upscaler.rc after they
 // define WG_RC_DESCRIPTION and WG_RC_FILENAME.

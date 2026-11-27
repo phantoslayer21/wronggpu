@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The host menu interface WrongGPU's OptiScaler plugins use to add their own box to OptiScaler's menu (OptiScaler builds
 // with the plugin interface: an ASI that exports OptiPluginInit is handed a table of plain C functions). One C ABI for
 // both plugins: the RR plugin (clean/rr_f/proxy, its include/wg_host_menu_abi.h includes this file) and WrongGPU.asi's

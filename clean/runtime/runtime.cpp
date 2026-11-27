@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Per-frame runtime, core part (spec 10 sections 0, 2-5, 7, 8). See wg_runtime.h and clean/FORMATS.md.
 #include <algorithm>
 #include <cctype>

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: data locations, global settings, the game list, the per-game operations, the elevated
 // worker's job file, the launcher's own install, Play and the opt-in update check (launcher.h). Written for this
 // project.

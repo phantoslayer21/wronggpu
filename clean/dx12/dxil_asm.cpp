@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Assembles a DXIL text listing (LLVM IR, as written by dxc -Fc) into an unsigned DXIL container, with the DXC
 // compiler library's assembler (IDxcAssembler). build_dx12.py uses it for the exact-arithmetic rewrite of
 // clean/dx12/README.md ("Arithmetic mode"); dxv.exe validates and signs the result.

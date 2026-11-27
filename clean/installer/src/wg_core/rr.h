@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: Ray Reconstruction (RR) in the games that use it (build/launcher/ui-options/BE-wide/rr-notes.md).
 // A game "uses Ray Reconstruction" when it ships the DLSS Ray Reconstruction files (the game interface's RR plugin or the
 // RR model file), or is one of the few games known to call it directly. For those games a WrongGPU install also places

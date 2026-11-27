@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: "Last run" from wronggpu-fsr.log (logtail.h). Written for this project.
 #include "logtail.h"
 

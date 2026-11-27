@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The optional model group filter / output_taps [5] (spec 08 draft 2 section 7.2; spec 06 draft 4): the runtime's
 loaders (clean/runtime/model.cpp, raw layout and model.wgcm) and the synthetic model writer.
 

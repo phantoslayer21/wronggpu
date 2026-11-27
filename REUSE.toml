@@ -1,6 +1,6 @@
 version = 1
 # Licence information in the REUSE format (https://reuse.software). Own source files also carry
-# "SPDX-License-Identifier: MIT" in their first lines. The licence text is in LICENSES/MIT.txt (= LICENSE).
+# "SPDX-License-Identifier: GPL-3.0-only" in their first lines. The licence text is in LICENSES/GPL-3.0-only.txt (= LICENSE).
 # Later annotations take precedence over earlier ones for the files they match.
 
 # Everything of WrongGPU itself, including documents, data, test vectors and fixtures, generated sources, the logo and
@@ -9,7 +9,7 @@ version = 1
 path = "**"
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 phantoslayer21"
-SPDX-License-Identifier = "MIT"
+SPDX-License-Identifier = "GPL-3.0-only"
 
 # The files below are listed explicitly as well (they cannot carry a header): generated sources and data.
 # Documents, data, test vectors and fixtures, generated sources and project assets of WrongGPU itself.
@@ -46,7 +46,7 @@ path = [
 ]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 phantoslayer21"
-SPDX-License-Identifier = "MIT"
+SPDX-License-Identifier = "GPL-3.0-only"
 
 # AMD FidelityFX SDK 1.1.4: FidelityFX API headers (unmodified)
 [[annotations]]
@@ -67,11 +67,11 @@ SPDX-License-Identifier = "MIT"
 path = ["clean/third_party/fidelityfx-sdk-1.1.4/README.md", "clean/third_party/fidelityfx-sdk-fsr3-v3.0.4/README.md"]
 precedence = "override"
 SPDX-FileCopyrightText = "2026 phantoslayer21"
-SPDX-License-Identifier = "MIT"
+SPDX-License-Identifier = "GPL-3.0-only"
 
 # The Linux test runner (clean/linux): its author's copyright line as well as the project's
 [[annotations]]
 path = "clean/linux/**"
 precedence = "aggregate"
 SPDX-FileCopyrightText = ["2026 phantoslayer21", "2026 j0nsh1n"]
-SPDX-License-Identifier = "MIT"
+SPDX-License-Identifier = "GPL-3.0-only"

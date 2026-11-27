@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model L's true-fusion output kernel (D3D12 only, no HIP kernel of its own; runtime WG_L_POST_TF, default on): the
 // reconstruction (l_post_recon_p12, the lc12 form: l_post.hlsl) and the output filter (w64/post_filter_c1_s4: the analytic
 // Lanczos, Dec, times dec_scale) and the staged route's scale_rgb in ONE wave64 kernel of 512 lanes, the display image never

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher window: a game's page (ui_shell.h) in option E, "Quiet": "< Library", then the game's header (its
 // portrait cover from the player's Steam cache or a generated plate, the title, the status in words with its dot, the
 // line under it, Play as the one filled capsule and More as a grey one with its menu). Once the actions scroll away a

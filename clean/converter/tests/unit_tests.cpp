@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Unit tests for the converter's building blocks. Written for this project.
 // Hash test vectors: FIPS 180-4 examples (NIST CSRC "Example Values") and the FNV reference values
 // for FNV-1a 64. Numeric tests compare against the hardware's binary32 conversion (round to nearest

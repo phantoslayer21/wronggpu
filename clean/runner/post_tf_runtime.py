@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Whole-frame check of the runtime's true-fusion path (post_tf*) on the GPU, synthetic model and inputs only.
 
 Two runtimes of the same build per output path, one with the runtime option post_tf=1 (the default: one post_tf launch

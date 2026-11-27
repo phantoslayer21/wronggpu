@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96): shared helpers of the Full path's stage kernels (clean/dx12/kernels/fg_full_blend.hlsl,
 // fg_out_pull.hlsl, fg_out_push.hlsl, fg_distortion.hlsl), with the bits of clean/fg/reference/stages_full.py.
 //

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher window: what a click, Enter or Space on a widget does (ActivateWidget; Activate in launcher_ui.cpp calls
 // it): the Library, a game's page, Settings, the first-run summary, menus and dialogs. Split from launcher_ui.cpp (the spec
 // side's 256 KB scan limit) with no change in behaviour. Written for this project.

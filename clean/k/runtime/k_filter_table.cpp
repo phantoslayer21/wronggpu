@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model K filter-shape table (spec 43 draft 2 section 7); see k_filter_table.h.
 #include "k_filter_table.h"
 

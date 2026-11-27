@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Small plain-text log for WrongGPU.asi, written as wronggpu-asi.log into PluginDataDir(), in the same line format as
 // the front end's wronggpu-fsr.log ([hh:mm:ss.mmm pid] [tag] text). The plugin logs only at load time, so this is a

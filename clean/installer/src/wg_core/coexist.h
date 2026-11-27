@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: other mods, tools and older installs next to a game (build/launcher-design.md section 5,
 // milestone M2): the installer's conflict rules (FindConflicts: what an install moves aside with the player's OK), the
 // rules table of the launcher (AssessCoexistence: every tool recognised by its fingerprint, with a decision) and the

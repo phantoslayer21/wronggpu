@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU installer: the state the wizard (app/wizard.cpp) and the command line (app/main.cpp) share. The engine is
 // wg_core (its wg::Context is App::ctx), the widgets are wg_ui. Moved from setup.cpp. Written for this project.
 #pragma once

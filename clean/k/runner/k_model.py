@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model K parameters from the converter's output (spec 48 section 10 / spec 08 section 10: with --raw, every tensor as
 `<dir>/raw/<stage>/<name>.bin`, row-major little-endian float32), with the names and shapes of the preset-K map
 (`data/preset-K.v1.map.json`, version 3: the eleven stages and the group "net" with the window-offset table of

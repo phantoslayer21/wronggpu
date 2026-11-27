@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Supported formats (spec 62.5, WrongGPU's choice). DXGI format numbers are the public Windows SDK enum values.
 #pragma once
 #include <stdint.h>

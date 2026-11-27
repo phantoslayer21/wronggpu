@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Differential check of the fast output path (prep / fast / fallback / pool) against rr_output_main + pool.
 
 Both run on the same packed inputs in one arena; every output byte is compared (linear f32, CH, Q, PH1, trace),

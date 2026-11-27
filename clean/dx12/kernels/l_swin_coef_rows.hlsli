@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 ports of the Swin block kernels of clean/kernels/swin.hip as built into swin.co (default knobs: 256 lanes, one
 // window per wave, WG_MLP_GROUP 2, WG_UNIT_BYTES 16384, GELU mode 2, WG_AV8 0, WG_SMAX16 0, WG_NORM_DOT4 0) - the
 // template swin_block<C, HEADS, MLP, WPW = 1, ADD, GROUP = 2, SAFE, THREADS = 256, MCO = 0, ECL> once, instantiated per

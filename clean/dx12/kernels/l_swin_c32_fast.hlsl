@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model L's fast-mode width-32 Swin blocks with TWO windows per wave (runtime l_mode=fast, native D3D12 only; launched in
 // place of a base kernel with the same arguments, runtime l_fast_alt; the base kernels, their "_fast" twins and every
 // kernel l_mode=hybrid runs are not touched). The launch shape of swin_c64w2.hlsl: the launch keeps HIP's geometry

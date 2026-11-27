@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Synthetic spec-58 tests; scalar oracle shares no exposure arithmetic helpers."""
 from dataclasses import replace
 from decimal import Decimal, localcontext

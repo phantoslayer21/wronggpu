@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The SR front end as OptiScaler 10's custom FFX upscaler (DESIGN-i15 8, spec 65), end to end on WARP, driven by our
 // own OptiScaler-style loader (fake_opti_loader.h). The game folder is this test's own folder:
 //   <exe dir>\OptiScaler.ini                                   [WrongGPU] UpscalerIndex

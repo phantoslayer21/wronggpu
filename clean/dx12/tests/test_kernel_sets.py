@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The D3D12 kernel sets, from the sources' declarations (clean/dx12/build_dx12.py kernel_set; nothing is compiled):
 the cheap check before a build, in seconds. kernel_sets.json lists them: "model_m" = what a build without --model-l
 compiles (Model M's kernel set; Model L's and Model K's kernels never enter it), "model_l" = what --model-l adds

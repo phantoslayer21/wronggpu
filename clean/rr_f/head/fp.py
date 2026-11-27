@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Vectorised number formats and rounding points for the spec-55 reference (NumPy).
 
 Representation: every f16 quantity is held as a float64 array whose values are exactly binary16 values (or +-inf /

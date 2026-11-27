@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The float-float log2 / exp2 model (gpu/ffmath.py) of the input kernel's fast path: unflagged results equal the
 correctly rounded reference, and the pair's relative error stays below the flag threshold EPS_REL."""
 import unittest

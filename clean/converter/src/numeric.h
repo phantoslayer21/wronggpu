@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Number formats and exact roundings of spec 08 section 2 and the decode operations of section 6.
 // Written for this project from the IEEE 754 format definitions and the spec text.
 #pragma once

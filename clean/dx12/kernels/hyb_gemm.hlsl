@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The HYBRID form's patch merges and expands (WG_L_FORM = hybrid; the unfused shared stages, hyb_swin.hlsl's blocks):
 // the M-form kernels' WMMA chains (swin_gemm.hlsl: the bias as the first accumulator, the K groups in order, the same
 // fragments of the same packed section) with the hybrid FP8 points (oracle run_stage_q7):

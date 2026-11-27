@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU UI kit (wg_ui): the owner-drawn widgets. Moved from setup.cpp. Written for this project.
 #include "wg_ui/kit.h"
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model M on the FP16-form (q7) kernels of Model L's shared stages (WG_M_FORM=q7, runtime.cpp): the blobs of Model M's
 // ten shared stages for l_q7.co / l_q7w.co, packed from Model M's own tensors with the q7 packers of Model L
 // (clean/l/runtime/l_q7_pack.h, byte for byte clean/l/runner/l_pack.py pack_q7_block / pack_q7_linear / q7_tables).

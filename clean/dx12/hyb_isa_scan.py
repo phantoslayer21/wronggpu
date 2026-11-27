@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """ISA rules of the hybrid kernels' D3D12 code (the hybrid check design: the byte legs and these rules catch a driver that
 contracts an FP16 product into an add, or folds the FP16 rounding before an FP8 point into the FP8 conversion).
 

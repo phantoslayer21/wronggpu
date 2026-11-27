@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Fused reconstruction + output filter (post_fused*) against the two-kernel path (post_recon + post_filter):
 GPU timing at the in-game size and correctness checks, synthetic data only (no model data needed).
 

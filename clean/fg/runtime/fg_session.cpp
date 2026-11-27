@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96, F7a): the FG session. See fg_session.h for the rules.
 #include "fg_session.h"
 

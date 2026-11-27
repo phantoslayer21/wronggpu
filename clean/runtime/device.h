@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Device layer of the runtime: memory, code objects, kernel launches and events on one in-order stream.
 //
 // Four backends:

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (issue #96): splitting the networks' weight blobs into their parts, as a CPU reference.
 
 Written for this project from the blob layout in clean/fg/layout.py. Input: the bytes of one blob (float16, little

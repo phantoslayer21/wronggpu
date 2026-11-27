@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The D3D12 kernel ports' struct arguments (clean/runtime/struct_args.h): the token s<N>:<fields> and the packing of a
 HIP struct with pointers into root constants. No GPU: clean/tests/test_struct_args.cpp is built with the host C++
 compiler (CXX, clang++ or g++; on Windows MSVC cl after them; skipped without one) and run.

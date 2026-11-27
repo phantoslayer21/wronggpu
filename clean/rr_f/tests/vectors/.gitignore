@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 # generated binaries are not committed (see manifest.json 'files')
 *
 !.gitignore

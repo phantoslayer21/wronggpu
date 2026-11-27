@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model L's raw model loading (clean/l/runtime/l_model.cpp) on the CPU, for test_l_runtime_load.py:
 //
 //   l_load_dump specs

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L comparison records (clean/l/runner/l_frame_check.py): every record names the FP8 op model its oracle used,
 and a recorded run's capture-time identity is verified against the files a check loads.
 

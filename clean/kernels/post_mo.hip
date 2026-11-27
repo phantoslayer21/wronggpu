@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Reconstruction (and true fusion with the output filter) for motion vectors at output resolution (spec/06-
 // reconstruction-and-output.md section 3, "Motion at output resolution"): the kernels below, in their own code
 // objects (post_mo_w64*.co) so that the post code objects stay the files they were. The whole of post.hip is included

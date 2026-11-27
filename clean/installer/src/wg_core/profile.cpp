@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: the per-game settings profile (profile.h). Written for this project.
 #include "profile.h"
 

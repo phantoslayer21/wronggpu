@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU frame generation (issue #96, F8a): the adapter contract (fg_adapter_abi.h) to the FG runtime contract
 // (clean/fg/runtime/fg_contract.h, namespace wgfg). Header-only; include it only where fg_contract.h is on the include
 // path. The two contracts carry the same fields in the same order; this file converts field by field and checks at

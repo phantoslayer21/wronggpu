@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Prepare a private native Model M bundle with no HIP code objects or HIP runtime DLLs.
 
 The runtime still offers explicit HIP/hybrid backends when reference assets are supplied

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Enumerate every finite FP32 log2 argument in [1, +inf) for tiled HDR phi.
 
 Pass the generated dx12/gen/k_fp_tables.hlsli and, optionally, the number of

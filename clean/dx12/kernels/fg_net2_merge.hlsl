@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96): net2's input merge (clean/fg/reference/net2.py merge_in), one output element per lane:
 // x [npx][10] float16 = Ib [npx][4], Ic [npx][4], Ia [npx][1], then the single-precision scalar f (bits fbits) rounded to
 // float16 (nearest even, wg_f2h). Built only when --only names it.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU frame generation (issue #96, F8b): the qualified title bindings this build carries. See fg_title_bindings.h.
 // Written for this project.
 #include "fg_title_bindings.h"

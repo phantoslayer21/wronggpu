@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 port of d1p12/swin_block_c64_add_dec0_nc (clean/kernels/dec1_dec0.hip built with the decoder's pack12 flags,
 // dec1_dec0__pack12.co: WG_DEC_PACK12=1, defaults otherwise; HIP ISA isa/swin_block_c64_add_dec0_nc.s).
 // The last Swin block of dec1 (C = 64, 2 heads, MLP 256, decoder block: input = expanded map + skip, every inner FP8

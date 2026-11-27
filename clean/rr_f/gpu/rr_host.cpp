@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Small D3D12 executor for the spec 51 kernels and probes (no HIP): one default-heap "arena" buffer bound as root UAVs
 // u0 and u1 (the kernel convention of clean/dx12/README.md), root constants b0 = (group base, grid, kernel arguments),
 // the driver-channel table at u0 space 0x7FFF0ADE (clean/dx12/hlsl/wg_ags.hlsli).

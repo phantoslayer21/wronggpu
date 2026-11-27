@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Scalar rules of spec 51: attention weight (51.3 step 3), activation (step 8), reciprocal of the row sum (step 4),
 sigmoid (51.4), and the converter-side checks of the window-block constants that spec 51 requires (51.3 step 3/4).
 

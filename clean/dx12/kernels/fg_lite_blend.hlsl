@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96), light path: the light candidate blend of preset C (clean/fg/reference/lite.py
 // lite_blend). One lane per frame pixel; writes (r, g, b, 1) as float16 x 4 at the output's base offset. flag2: the
 // refined candidates (detail transfer from the reference images Lp / Lc where a candidate's source sits on UI and both

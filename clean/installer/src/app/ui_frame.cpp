@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher window: its frame (launcher_ui.cpp has the window itself): the title bar's colours as DWM draws what is
 // left of it, the window's icon drawn from the mark, its place between runs (launcher.ini), and the offscreen frames of the
 // ui-dump and ui-render. Written for this project.

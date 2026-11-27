@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The addressing of the hybrid decoder blocks with their expand fused in (swin_block.hlsl, SW_HYB with SW_ECL:
 swin_block_c96_add_ex_hyb, swin_block_c64_add_ex_hyb), checked exhaustively on the CPU against the unfused route.
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Shared helpers of the spec 51 kernels (DESIGN-51.md): number formats of 51.1 on the gfx1201 D3D12 path.
 // Arithmetic mode and driver rules: clean/dx12/README.md, hlsl/wg_math.hlsli (compile only with clean/rr_f/gpu/build.py,
 // which uses clean/dx12/build_dx12.py's exact mode).

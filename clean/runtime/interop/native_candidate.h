@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Private, explicit-queue Model M integration candidate. Original WrongGPU implementation.
 // This is not the installed frontend backend and accepts no caller command list.
 #pragma once

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU.asi's "WrongGPU Upscaler" card (asi/sr_card.h) through the host's plugin interface, CPU only: the built plugin is
 // loaded, OptiPluginInit gets a stand-in for OptiScaler's table (clean/wgshared/include/wg_host_menu_abi.h), and a draw
 // with a combo change must write the shared settings block's owned slot (live, next frame) AND the game's state folder

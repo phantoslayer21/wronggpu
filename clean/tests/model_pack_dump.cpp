@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The runtime's C++ packers (clean/runtime/model.cpp) on the CPU, for clean/tests/test_model_pack_cpp.py:
 //
 //   model_pack_dump stages <model dir> <out dir>

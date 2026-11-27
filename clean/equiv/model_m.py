@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model M tools of the equivalence tests (Brief 5; clean/EQUIVALENCE-PROTOCOL.md part 1, "Tools" item 1).
 
 Our side's values, written in the specification's storage formats, for the spec team to compare with the original.

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Raw-byte comparison of a D3D12 result against HIP's, with a distinct sentinel per backend (model K's D3D12 tests).
 
 Before a frame every output and intermediate buffer is filled with a sentinel byte: 0xA5 on HIP, 0x5A on D3D12. After

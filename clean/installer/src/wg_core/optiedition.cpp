@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: WrongGPU's edition of OptiScaler, downloaded from its own project's release (optiedition.h).
 // Written for this project. Windows' own WinHTTP and the core's SHA-256 only.
 #include "optiedition.h"

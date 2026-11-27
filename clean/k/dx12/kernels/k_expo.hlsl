@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 port of model K's k_expo_scalars (clean/k/kernels/k_io.hip; HIP build: k_io.co). WrongGPU's own code.
 // Spec 42 draft 3 section 4 / spec 43 section 3.7, exactly the HIP kernel's operations: the state st = [E_cur, E_prev,
 // E_aux, E_cur kept for the next frame] (raw values), each read as FP16 (nearest even, wg_f2h; the plain f32tof16

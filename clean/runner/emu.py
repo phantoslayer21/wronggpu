@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Backend with the same interface as hip.Hip that runs the kernels in the host lane emulator (test-only).
 
 The emulator library is built by `build.py --emu` from the same kernel sources as the GPU code object.

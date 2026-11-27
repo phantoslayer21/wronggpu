@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Original WrongGPU publication gate: keep our code/state resident before a host can call it.
 // Pin is supplied by the platform adapter; tests inject it without loading or patching a host.

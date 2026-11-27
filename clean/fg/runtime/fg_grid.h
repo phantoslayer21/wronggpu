@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Frame generation (issue #96): the network grid sizes of both networks, from the frame (output) size Wo x Ho.
 // One create-time size table; all divisions are integer divisions.

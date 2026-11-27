@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // AMD D3D12 driver intrinsic channel: native matrix instructions (v_wmma_*) and matrix element conversions from an
 // ordinary SM 6.6 compute shader, without any AMD library. Written for WrongGPU from the channel's interface facts:
 //  - The driver watches a raw UAV bound at register space 0x7FFF0ADE (2147420894). An InterlockedCompareExchange on it

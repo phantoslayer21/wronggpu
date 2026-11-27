@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // swin_block_c64_nc (enc1's Swin block) with TWO windows per wave in 128-lane workgroups (tracks lev3-swin, r3-c64w2).
 //
 // @wg-kernel swin_block_c64_nc co=swin.co block=256 group=128 gscale=1 wave=32 args=p,p,p,p,u,u,u,u defines=SW_C=64,SW_HEADS=2,SW_MLP=256,SW_ADD=0,SW_SAFE=1,SW_ECL=0,SW_W2=1,WG_LD_A16=1

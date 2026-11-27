@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """WrongGPU's D3D12 tests on Linux, under Wine with the D3D12 stack of a Proton install (vkd3d-proton, DXVK's dxgi,
 vkd3d-shader), the stack a game runs on in Steam.
 

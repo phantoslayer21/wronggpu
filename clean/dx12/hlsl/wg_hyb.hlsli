@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Element-wise steps of Model L's / Model M's HYBRID block form (WG_L_FORM=hybrid; the block templates with SW_HYB=1):
 // the original's FP16 forms (PRESET-L-P3-Q7, clean/l/reference/oracle.py norm_q7, softmax_q7, gelu_q7) around FP8
 // matrix chains that accumulate in float32 over the whole chain with ONE FP16 rounding at its end.

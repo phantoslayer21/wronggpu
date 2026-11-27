@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model L's C = 32 blocks in the HYBRID form (WG_L_FORM=hybrid; swin_block<..., HYB = true>, clean/kernels/wg_hyb.h):
 // the HIP twins of the D3D12 ports l_swin_block_c32_enc_hyb / _dec_hyb (clean/dx12/kernels/l_swin.hlsl, SW_HYB=1), the
 // same bytes. Shapes of l_swin_block_c32_enc_nc / _dec_nc (clean/l/kernels/l_swin.hip). Its own code object

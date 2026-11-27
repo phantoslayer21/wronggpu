@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Complete-frame tiled color ownership, fallback planning, and GPU equality."""
 import ctypes
 import os

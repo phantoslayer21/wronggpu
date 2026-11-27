@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96): net2's 2x bilinear upsample with half-pixel centres (clean/fg/reference/net2.py up2),
 // exact, one output element per lane. x [hi][wi][C] float16 -> y [2 hi][2 wi][C]. Per axis (single precision, exact here):
 // s = (o - 0.5) * 0.5, i0 = trunc(s), i1 = trunc(s + 1), both n - 1 when i1 >= n, both 0 when s < 0, w1 = h(s - i0),

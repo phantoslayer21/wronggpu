@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Seeded probe generator of the equivalence tests (clean/EQUIVALENCE-PROTOCOL.md, part 3; part "Tools", item 2).
 
 Writes synthetic game inputs, one directory per probe case, the same bytes on every machine for the same parameters:

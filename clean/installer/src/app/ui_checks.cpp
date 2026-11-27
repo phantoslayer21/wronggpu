@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher window: the first run's checks, on a worker (launcher_ui.cpp's StartFirstRun starts them; the sheet is
 // ui_settings.cpp's). They only read: nothing on this PC changes before the player chooses and presses Continue. Written
 // for this project.

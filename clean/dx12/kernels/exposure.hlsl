@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 port of exposure_auto_diet (clean/kernels/exposure.hip; HIP build: exposure.co, ISA isa/exposure_auto_diet.s).
 // Auto-exposure in one launch: every workgroup sums the log luminance of 4 rows of the sample grid, the workgroup that
 // finishes last (a counter at `sync`, zero before and after the launch) sums the partials and writes the exposure pair.

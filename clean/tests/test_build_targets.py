@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Packaging completeness uses tiny own fixtures, no GPU or model data."""
 import tempfile
 import unittest

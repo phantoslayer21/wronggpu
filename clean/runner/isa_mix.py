@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Dynamic instruction mix per window of the Swin block kernels, from the compiled ISA (no GPU needed).
 
     python clean/runner/isa_mix.py --co build/swin.co [--llvm-objdump llvm-objdump]

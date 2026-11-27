@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The extension path, registry half: a new RR mode and a new game-interface family through the tables only.
 
     python clean/wgshared/tests/test_dummy_extension.py

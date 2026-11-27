@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Block-level check of the HYBRID C32 kernels (the first leg of the hybrid check design; the per-stage check with the
 SW_HYB_DUMP variant follows): random parameters in the hybrid values (l_hyb_pack.py), the encoder (FP16 halo map in)
 and decoder (FP8 map in, FP16 out) blocks on the L block grids, with special values in every other case.

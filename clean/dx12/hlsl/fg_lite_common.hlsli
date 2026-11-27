@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96): shared helpers of the light path's D3D12 kernels (clean/dx12/kernels/fg_lite_*.hlsl).
 // They compute the bits of the CPU reference clean/fg/reference/stages_common.py (its module text lists the
 // conventions): rcp = the correctly rounded 1 / x (wg_div), the approximate division a * rcp(b), the own deterministic

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Reconstruction with motion vectors at output resolution (spec/06-reconstruction-and-output.md section 3, "Motion at
 // output resolution"; create flag WG_CREATE_MOTION_OUTPUT_RES). Included by post.hip after post_core_s; the kernels
 // that use it are in post_mo.hip. Written for WrongGPU from spec 06 (and spec 03 draft 4 for s and b_mv).

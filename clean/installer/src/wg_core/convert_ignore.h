@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: the ignore lists of the converter's file search (README "Ignore lists"). WrongGPU converts only
 // the vendor DLL files that came with the player's own games, never a copy another program's installer placed in a game.
 // Such an installer names the files it placed in a list the search always reads (the well-known lists below); the command

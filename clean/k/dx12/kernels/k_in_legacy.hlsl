@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 ports of model K's legacy exact input-stage kernels (clean/k/kernels/k_io.hip k_in_color, k_in_reset, k_in_base;
 // HIP build k_io_exact.co = WGK_IN_EXACT, wave64, 128 lanes per workgroup; spec 42). WrongGPU's own code. The runtime
 // takes them when the tiled input stage does not apply: a render size above 0.68 x the output (native AA, DLAA-like

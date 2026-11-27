@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L's default route from a deployed runtime library alone (review P2: the embedded objects): the built
 wronggpu_runtime.dll copied into an empty folder (no code object, no DXIL, no manifest next to it), and a Model L
 context created there with no form variable set, then two frames:

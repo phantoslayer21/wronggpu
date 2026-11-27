@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Unit tests of the forwarding-table generator (tools/gen_forwarding.py) on the real tables of annex A9
 (spec 60.1 / 60.3 / 60.9, A9.1-A9.5, A10), the names files of binding/ and the probe build's generation."""
 import copy

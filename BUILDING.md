@@ -100,7 +100,7 @@ out\payload\amd_fidelityfx_dx12.dll          from out\frontend
 out\payload\plugins\WrongGPU.asi             from out\frontend
 out\payload\wronggpu_runtime.dll             from out\runtime
 out\payload\wronggpu_runtime.build.json      from out\runtime (read by the packager, not shipped)
-out\payload\wronggpu-license.txt             LICENSE (the MIT licence; official builds ship it as their licence)
+out\payload\wronggpu-license.txt             LICENSE (GPL-3.0-only for official builds of 0.7.0 and later)
 out\payload\wronggpu-notices.txt             clean\fsr\NOTICES.txt
 out\rr\plugins\WrongGPU-RR.asi               from out\rr-proxy\hook
 out\rr\interposer.json                       clean\rr_f\proxy\binding\interposer.json

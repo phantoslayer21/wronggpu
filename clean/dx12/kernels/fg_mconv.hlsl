@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 port of frame generation's matrix convolution (issue #96; tier B of the net1 fast path): fg_mconv<MT> of
 // fg_net1_mma.co (clean/fg/kernels/fg_net1_mma.hip), byte-identical to HIP: the same fragments and chunk order,
 // v_wmma_f32_16x16x16_f16 through the driver channel (wg_wmma_f16) with the float16 accumulator as C, its result rounded

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Stage "dec0" (spec 05 coefficient decoder) for the spec 90 runner: weight packing, input conversion, launch plan.
 
 Layouts: clean/FORMATS.md, "Coefficient decoder (dec0)". Kernel: clean/kernels/decoder.hip (`coef_decoder`).

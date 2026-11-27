@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #include "config.h"
 #include "runtime_keys.h"
 #include "wg_registry_ini_gen.h"  // kWgDefaultIniText: the generated [wronggpu] section

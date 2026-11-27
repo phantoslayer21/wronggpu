@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU frame generation (issue #96, F9): the FG session host of WrongGPU-FG.asi. It joins the Win32 transport
 // (fg_asi_transport.h) to the FG session (clean/fg/runtime/fg_session.h), the D3D12 executor (fg_d3d12_executor.h) and
 // the Windows presenters (clean/fg/presenter), for a qualified title binding with fg=on.

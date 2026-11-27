@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The arena tables of the HYBRID block form (hlsl/wg_hyb.hlsli): devices that run SW_HYB kernels reserve arena bytes
 // [kHybBase, kHybBase + kHybBytes) and fill them with hyb_fill(). The same values as clean/l/reference/hyb_tables.py
 // (checked by clean/l/tests/test_hyb_tables_cpp.py through clean/tests/hyb_dump.cpp: identical bytes):

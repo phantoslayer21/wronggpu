@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D0-R of spec 55 on RDNA 4 / D3D12: the window block of spec 51.3 at level 0 (C = 32, H = 2, MLP width 128) fused
 // with the network's output head (55.2 Cnet, 55.3 HID / GATES / PREC / CANDW; channel numbers per the page 55 erratum,
 // RR_P55_ERRATUM below). Design and measurements: ../DESIGN-55.md.

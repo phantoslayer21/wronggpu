@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU frame generation (issue #96, F8b): the test stand-in for a game interface DLL. See fg_mock_interposer.h.
 // Written for this project.
 #define FG_MOCK_INTERPOSER_BUILD 1

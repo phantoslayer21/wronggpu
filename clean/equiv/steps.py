@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Steps: one representable value of a stage's storage format (clean/EQUIVALENCE-PROTOCOL.md, "Wording").
 
 Every supported format is mapped to an ordinal: an integer per stored value such that two neighbouring representable

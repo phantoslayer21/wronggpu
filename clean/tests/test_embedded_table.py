@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The runtime library's built-in file table (clean/runner/build.py write_embedded -> embedded_files.cpp, read by
 clean/runtime/embedded.cpp): every file the runtime's own lookup (wg_read_file) returns has the SHA-256 of its source
 file. A host harness (clean/tests/embed_dump.cpp) walks the compiled table and writes each file back out.

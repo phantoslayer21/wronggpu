@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Original spec51.1 exact arithmetic; proof and standalone tests in rr_exact_dot.
 // IEEE binary64 -> binary16 RNE directly from significand bits. No f32 narrowing.

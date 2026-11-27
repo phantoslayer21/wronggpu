@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The RR plugin's box in OptiScaler's menu (OptiScaler builds with the plugin interface, wg_host_menu_abi.h): a
 // "WrongGPU" card in the Custom tab whose Ray reconstruction box chooses the RR mode while the game runs RR (owner
 // 2026-10-31: RR mode is a box of its own, not an entry of the host's version list; the box is there only while RR

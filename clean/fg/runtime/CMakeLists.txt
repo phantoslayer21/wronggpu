@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 # Frame generation runtime groundwork (issue #96, F3a + F4a): the versioned FG contract, the network grid table, the
 # local model check against data/fg.v1.map.json, net1's fused D3D12 plan and recorder, frame ingest and the history
 # state machine, and the create-time worker. CPU only: the recorder is checked through a fake command recorder.

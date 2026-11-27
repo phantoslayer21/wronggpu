@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Adversarial differential of rr_resolve_fast (+ fixup) against the verified rr_resolve_main (independent check of
 the resolve speed track): game sizes (many tiles per persistent workgroup, the cross-tile prefetch), odd / strip /
 tiny sizes, resources smaller than the render size (the outside rule of the RF_SPEC loader), NaN / Inf / subnormal

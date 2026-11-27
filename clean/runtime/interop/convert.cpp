@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // D3D12 copy/convert passes (see convert.h). WrongGPU's own code.
 #include "convert.h"
 #include "descriptor_publish.h"

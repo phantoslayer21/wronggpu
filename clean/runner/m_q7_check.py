@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model M on Model L's FP16-form shared-stage kernels (runtime WG_M_FORM=q7): the runtime's Model M frame on HIP
 with its ten shared stages (enc1, enc2, b0 ... b5, dec2, dec1) on the q7 kernels and Model M's weights, checked stage by
 stage against the FP16-form oracle (clean/l/reference/oracle.py run_stage_q7) on the runtime's own stage inputs.

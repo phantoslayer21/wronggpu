@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (#96): the forward-pass reference (clean/fg/reference/forward.py) on synthetic weights, against
 direct NumPy versions written separately here. The wirings used are stand-ins (the real one is not delivered); they
 only show that a wiring runs the layers unchanged.

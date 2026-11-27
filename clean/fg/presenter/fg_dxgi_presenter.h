@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // DXGI flip-discard presenter: IFgPresenter over the game's IDXGISwapChain4 (DXGI_SWAP_EFFECT_FLIP_DISCARD with a
 // frame-latency waitable object) on Direct3D 12, paced by the presenter's own high-resolution timer.

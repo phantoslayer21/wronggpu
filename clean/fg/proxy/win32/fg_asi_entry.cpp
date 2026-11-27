@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU frame generation (issue #96, F8b): the ASI plugin entry (WrongGPU-FG.asi).
 //
 // OptiScaler's ASI convention, as the RR hook plugin and WrongGPU.asi use it: the host calls the exported

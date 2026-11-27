@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Runtime model loading from the converter's model.wgcm (spec 10 section 7; clean/converter/OUTPUT-FORMAT.md).
 
 The real converter (clean/converter) is built and run on a synthetic "DLL" with the layout of the shipped preset-M

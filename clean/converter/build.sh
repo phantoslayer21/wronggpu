@@ -1,5 +1,5 @@
 #!/bin/sh
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 # Plain build without CMake (Linux, macOS, MinGW). Output in ./build-plain/.
 # Usage: ./build.sh            build wronggpu-convert and the unit tests
 #        ./build.sh test       also run the unit tests and the synthetic end-to-end tests

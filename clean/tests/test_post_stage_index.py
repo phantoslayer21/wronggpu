@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Exactness checks for the 32-bit / 24-bit index arithmetic of post_recon2_body (kernels/post.hip):
 
 1. Staging row r = (int)((i + 0.5f) * (1.0f / ncol)) equals i / ncol (integer division) for every ncol the kernel can

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: WrongGPU's edition of OptiScaler, downloaded by the launcher from its own project's release page.
 // Written for this project.
 //

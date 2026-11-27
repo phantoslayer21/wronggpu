@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Original standalone D3D12 device for Model M, 2026-10-15.
 // Basis: this project's Device interface, HLSL arena ABI and hybrid root signature; public Microsoft D3D12 APIs.
 // No HIP object, imported memory, external semaphore or order_mark is used. Module paths select arithmetic variants

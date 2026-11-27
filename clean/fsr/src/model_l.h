@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model L in this build of the front end (#89): CMake option WG_MODEL_L (default OFF) defines WRONGGPU_MODEL_L as 1 or
 // 0. 1: the entry "WrongGPU Model L" in the hosted version list, its id, sr_model=L and model=L reach the runtime as its
 // create option (the runtime must be built with Model L, WG_MODEL_L), the model lookup looks for <place>\L\model.wgcm,

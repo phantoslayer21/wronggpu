@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: the OptiScaler tab and the inikey journal (optikeys.h). Written for this project.
 #include "optikeys.h"
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Own synthetic audit; include the actual production helper and predicate.
 #include "../kernels/k_block.hip"
 #pragma clang fp contract(off)

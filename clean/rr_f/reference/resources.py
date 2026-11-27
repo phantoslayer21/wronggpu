@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Owned CPU resource scaffold for published specs 50/53/54/54b/55/58.
 
 NumPy storage, not a full evaluate implementation. Input commits accept

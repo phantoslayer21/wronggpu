@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Frame generation (issue #96), light path: buffer fills and 4-channel copies (clean/fg/reference/pipeline.py "clear",
 // "fill64", "prefill", "final_copy"). D3D12 only (no HIP counterpart). Built only when --only names them.
 //

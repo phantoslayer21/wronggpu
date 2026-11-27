@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // clean/rr-f-s12-dflow: the body as a dataflow (RR_DFLOW 1, kernels staged.*; opt-in WG_RR_DFLOW=1). The runtime drops
 // the UAV barriers after the body stages in its drop set; instead every window of such a stage counts itself done in
 // cnt[stage][window row] after its last store, and every window of a later stage that reads such a stage's tensors

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Tests of the Windows presenter back ends (clean/fg/presenter): the shared display-slot engine, the pacing
 // arithmetic, the back-end selector and its refusals, the worker thread and the timer, all on the CPU with synthetic
 // values. Nothing here opens a window.

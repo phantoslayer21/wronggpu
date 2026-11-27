@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model L (issue #89): negative control of the oracle's FP16 block form. One recorded run of l_frame_check (HIP, every
 kernel separate: lframe_L_stages.pkl) is checked twice in one process, frame by frame on the run's own stage inputs
 (l_frame_check.compare_model):

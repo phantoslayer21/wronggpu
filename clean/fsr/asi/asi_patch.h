@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Original WrongGPU bounded call-patch transaction. Synthetic-memory testable; no host discovery.
 // This supplies failure rollback, NOT exclusion or atomicity with respect to executing foreign threads.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 // Frame generation (issue #96): net1's fused tier B D3D12 plan (11 launches) for an in-game recorder.
 //

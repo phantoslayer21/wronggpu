@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Target-time scheduler: see fg_target_scheduler.h.
 #include "fg_target_scheduler.h"
 

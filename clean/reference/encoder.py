@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """NumPy reference of spec/03-input-encoder.md (stage "enc0" of spec/90-test-interface.md): the clean team's oracle.
 
 All arithmetic is float64 except where the spec prescribes a rounding (FP16 values, FP16 running sums, FP8 results).

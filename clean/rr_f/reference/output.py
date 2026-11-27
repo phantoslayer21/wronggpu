@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Original CPU oracle for published spec 54, through CH, Q and PH1 only.
 
 Q is an internal output-gated image, NOT the game output: resolve/PH2 (missing

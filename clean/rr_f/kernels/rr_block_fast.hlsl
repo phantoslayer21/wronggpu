@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Spec 51 window block (51.3) with its stage fronts (51.5) and tails (51.4): the kernel of rr_block.hlsl with the
 // instruction diet of rr_block_c32.hlsl (rr_fast.hlsli), for any stage kind; same arguments, buffer layouts, rounding
 // points and step (rr_step.hlsli, RR_STEP), and the same output bits as rr_block.hlsl for every input. Used for the

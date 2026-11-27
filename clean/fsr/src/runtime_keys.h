@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Keys of the network runtime's options (runtime_options in wronggpu.ini, WG_RUNTIME_OPTIONS), for the .ini reader: a
 // line "network = fused" in [fsr] is a runtime option written on its own line, not a front-end setting (config.cpp
 // ParseConfig appends it to runtime_options with a warning). The list follows the runtime 0.5.1: the D3D12 interop's

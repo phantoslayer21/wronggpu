@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Whole-frame test interface of spec/90-test-interface.md ("Whole frame (spec 10 core)") over the C++ per-frame
 runtime (clean/runtime, built by clean/runner/build.py as libwg_runtime.so / wronggpu_runtime.dll on Windows, which also holds the D3D12 interop).
 

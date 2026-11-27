@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Frame generation (issue #96): the Full path stage check (clean/fg/runner/fg_full_stages_d3d12_check.py) as planned on
 the CPU: every launch's arguments against its kernel's declaration, grids against the outputs, the chain lines, the
 probe's mutants against its expected buffer, and that the CPU reference does not depend on its row bands. No GPU."""

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // clean/runtime/post_tf_align.h: an A8 or history pointer that is not 8-byte aligned is refused naming it; null, 8- and
 // 256-byte aligned pointers pass. Built and run by clean/tests/test_post_tf_align.py with the host compiler (no GPU).
 #include <cstdio>

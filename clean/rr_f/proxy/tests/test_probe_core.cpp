@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Unit tests of the probe build's logic (src/probe.*, src/probe_log.*; build flag WG_RR_PROBE) against a fake
 // original and a fake GPU: the log rules (full first frames, then changes only, size cap), the RR claims of 60.8 and
 // the 61.5 rule, forwarding of everything else, the evaluate that writes the upscale and returns 0 (and touches no

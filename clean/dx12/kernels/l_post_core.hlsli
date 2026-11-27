@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // The per-pixel reconstruction of Model L (l_post.hlsl: the staged-texel loads, the FP16 4 x 4 gather, the history candidates,
 // steps 3 to 5 of one D pixel) shared by l_post.hlsl (the kernel that writes the display image) and l_post_tf.hlsl (the
 // true-fusion kernel). The including kernel declares WG_ARGS (the names color, A, B, C, hist_prev, m_near, m_center, m_far,

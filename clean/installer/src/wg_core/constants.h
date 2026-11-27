@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: constants shared by the modules (names, the FidelityFX DLLs WrongGPU replaces, other
 // mods, anti-cheat, exit codes). Moved unchanged from setup.cpp. Written for this project.
 #pragma once

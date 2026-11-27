@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Variants of the spec 06 kernels: GPU bit-identity checks and timing at the in-game size (synthetic data).
 
     python clean/runner/post_variants.py --build build --rocm "C:\\Program Files\\AMD\\ROCm\\7.2" --rounds 3 [--json f]

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Test-vector generator and reader for the D0-R stage / output head (spec 55, with the page-51 block).
 
     python -m clean.rr_f.head.vectors [--out DIR] [--check]

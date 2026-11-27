@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The hybrid kernels' ISA rules (clean/dx12/hyb_isa_scan.py) on constructed gfx12 ISA: each rule finds what it must
 (the negative controls: a square fused through a copied register, an FP8 conversion of a float32 value whose RN16 was
 removed) and passes what it must not flag. No GPU, no RGA.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Spec 52.5 front-end MLP on RDNA 4 / D3D12: x0 = Q8(MM(A_1; W2_1; MM(A_0; W2_0; b2))), A_br = Q8(act(MM(f; W1_br; b1_br))),
 // for every tensor token. One workgroup = 64 consecutive tokens of the row-major [Ht][Wt] tensor, 4 waves of 16 tokens;
 // lane l = 16 hf + n: token n of the wave's tile, half hf of every 16-wide fragment (layouts: gpu/layout.py).

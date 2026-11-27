@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """The direct (in-game, texture) forms of model K's input and output stages apply the motion scale and offset as the
 buffer forms and the reference do (issue #26). Host checks (no GPU):
 

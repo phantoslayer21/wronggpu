@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: DLL fingerprints and the graphics API of an executable (fingerprint.h). Written for this
 // project from Microsoft's public PE/COFF and VS_VERSIONINFO documentation and the tools' public descriptions (product
 // names, the text their files carry); no third-party file is read here except the player's own, on the player's PC.

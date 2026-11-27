@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Reproducible synthetic six-Swin-kernel differential and arithmetic mutation checks.
 
 Build privately without GPU access:

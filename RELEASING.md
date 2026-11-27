@@ -58,5 +58,5 @@ release page and the entries in `SHA256SUMS.txt`.
 
 ## Licence of releases
 
-From the source of this repository onward, official builds are under the MIT licence, the same as the source
-([LICENSE](LICENSE)); the package carries the licence text and the third-party notices.
+Official builds of 0.7.0 and later are under GPL-3.0-only, the same as the source ([LICENSE](LICENSE)).
+The package carries the licence text and the third-party notices. Releases up to 0.6.5 remain available under MIT.

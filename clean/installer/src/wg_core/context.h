@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: the Context that the modules get instead of globals (what were setup.cpp's g_logFile,
 // g_presetK, g_map, g_opti, g_noLibraryScan and the embedded payload table), the Ui callbacks of a long operation, the
 // log file and the model data folder. Written for this project.

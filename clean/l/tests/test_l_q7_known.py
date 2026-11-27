@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Known answers for the FP16 block form of Model L's oracle (clean/l/reference/oracle.py, form "q7"), with nonzero
 weights. The expected values are worked out here independently of the oracle: by hand (the block scenario) or with an
 exact rational reference (fractions.Fraction with its own round-to-nearest-even to FP16 and FP8). Every check has

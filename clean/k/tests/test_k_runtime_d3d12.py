@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Model K's per-frame runtime on the D3D12 devices against the HIP backend, frame by frame, byte for byte (issue #15).
 
 The same frames (a synthetic model K, random FP16 parameters; clean/k/tests/test_k_runtime_gpu.py) go through two

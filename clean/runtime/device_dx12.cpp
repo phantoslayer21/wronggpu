@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Hybrid D3D12 device (runtime backend 2; see device.h and clean/dx12/README.md).
 //
 // Memory: one D3D12 committed buffer (default heap, shared, unordered access) imported into HIP, so the same memory has

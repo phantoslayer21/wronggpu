@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 # wronggpu-convert: the install-time model converter (spec 08). C++17, standard library only.
 cmake_minimum_required(VERSION 3.16)
 project(wronggpu_convert LANGUAGES CXX)

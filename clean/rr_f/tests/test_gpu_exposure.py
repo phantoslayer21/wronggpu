@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """CPU-only tests of the exposure result validator; fabricated readbacks, no GPU."""
 from dataclasses import replace
 from fractions import Fraction

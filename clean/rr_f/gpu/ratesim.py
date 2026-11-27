@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-only
 """Diagnostics (results/2026-10-20-speed-body.md): how often could a 51.1 step of the body be taken on ONE exact fp8
 WMMA chain, and how often would a certify-and-fix scheme have to fix? NumPy, on a sequence body dump
 (`sequence.py --dump-body`): the stage inputs are rebuilt from the dumped stage outputs (shift (0, 0); IN0 is skipped,

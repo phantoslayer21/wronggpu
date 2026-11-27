@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // Model K filter-shape table (spec 43 draft 2 section 7): the table T the output stage reads (spec 43 section 5.1),
 // computed at initialisation, and the level the frame selects. C++ mirror of clean/k/reference/outstage.py
 // filter_level / filter_table (clean/k/tests/test_k_runtime_tables.py checks that both give the same bits).

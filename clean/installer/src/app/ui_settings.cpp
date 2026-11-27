@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher window: the Settings page and the first-run sheet (option E, "Quiet": build/launcher/ui-options/E-quiet,
 // ?screen=settings and ?screen=firstrun). Settings is a short section index on the left (Model and runtime, Games,
 // Launcher; the version and how the launcher runs under it) and one column of inset grouped lists. Every row has the same
