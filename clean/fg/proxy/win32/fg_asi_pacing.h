@@ -19,7 +19,9 @@ inline int64_t Percentile(std::vector<int64_t> v, double pct) {
 template <std::size_t Capacity>
 class PacingSamples {
 public:
-    void Append(int64_t sample) { samples_[size_++] = sample; }
+    void Append(int64_t sample) {
+        if (size_ < Capacity) samples_[size_++] = sample;
+    }
     bool Empty() const { return size_ == 0; }
     std::size_t Size() const { return size_; }
 

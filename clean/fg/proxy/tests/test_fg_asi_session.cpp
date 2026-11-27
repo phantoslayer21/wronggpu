@@ -2432,6 +2432,14 @@ void TestPacingPercentileKeepsFrameOrder() {
     CHECK(origins == chronological);
 }
 
+void TestPacingSamplesRemainBounded() {
+    g_case = "pacing-sample-capacity";
+    PacingSamples<2> samples;
+    for (const int64_t value : {100, 200, 1}) samples.Append(value);
+    CHECK(samples.Size() == 2);
+    if (samples.Size() == 2) CHECK(samples.Percentile(1.0) == 200);
+}
+
 void TestReadyBudgetCapAfterSpeedup() {
     g_case = "pacing-budget-cap";
     CHECK(FirstImageBudgetCap(250000, 1) == 285000);
@@ -2482,6 +2490,7 @@ int main(int argc, char** argv) {
     TestFlags();
     TestPanel(scratch);
     TestPacingPercentileKeepsFrameOrder();
+    TestPacingSamplesRemainBounded();
     TestReadyBudgetCapAfterSpeedup();
     TestFirstImageBudgetEasingFloor();
     TestBudgetCapNeedsReliableSamplesAndPreservesFloors();
