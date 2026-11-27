@@ -1741,9 +1741,10 @@ FgAsiSessionHost::FgAsiSessionHost(const FgAsiSessionConfig& cfg, std::unique_pt
     const DWORD mode_length = GetEnvironmentVariableA("WG_FG_ADMISSION", admission, sizeof(admission));
     if (mode_length == 7 && std::strcmp(admission, "present") == 0) {
         impl_->admission_mode = AdmissionMode::Present;
-    } else if (mode_length != 0 &&
-               !(mode_length == 8 && std::strcmp(admission, "consumed") == 0) &&
-               !(mode_length == 6 && std::strcmp(admission, "policy") == 0)) {
+    } else if (mode_length == 6 && std::strcmp(admission, "policy") == 0) {
+        static std::once_flag alias_logged;
+        if (cfg.log) std::call_once(alias_logged, [this]() { impl_->Log("fg host: WG_FG_ADMISSION=policy selects consumed"); });
+    } else if (mode_length != 0 && !(mode_length == 8 && std::strcmp(admission, "consumed") == 0)) {
         impl_->Log("fg host: unknown WG_FG_ADMISSION value, using consumed");
     }
     impl_->weights = std::move(weights);

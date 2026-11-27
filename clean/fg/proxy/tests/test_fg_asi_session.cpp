@@ -2647,6 +2647,20 @@ void TestBudgetControllerUsesProducerMissesAndResetsItsBaseline() {
     CHECK(!ProducerWindow(now, base).NeedsBudgetReview() && ProducerWindow(now, base).ReducedCount(5) == 0);
 }
 
+void TestAdmissionPolicyAliasLogsOnce() {
+    g_case = "admission-policy-alias";
+    unsigned alias_logs = 0;
+    FgAsiSessionConfig config;
+    config.log_ctx = &alias_logs;
+    config.log = [](void* ctx, const char* line) {
+        if (line && std::strstr(line, "WG_FG_ADMISSION=policy selects consumed"))
+            ++*static_cast<unsigned*>(ctx);
+    };
+    FgAsiSessionHost first(config, {});
+    FgAsiSessionHost second(config, {});
+    CHECK(alias_logs == 1);
+}
+
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     bool gpu = false;
@@ -2674,6 +2688,7 @@ int main(int argc, char** argv) {
     TestHighCountPresentBudgetEasesInSmallSteps();
     TestOneImageCleanBudgetCanEaseWithMeasuredHeadroom();
     TestBudgetControllerUsesProducerMissesAndResetsItsBaseline();
+    if (only == "admission-alias") TestAdmissionPolicyAliasLogsOnce();
     TestMissFloorDecaysAfterCleanWindows();
     TestBudgetNeedsTwoMissesToRaise();
     TestBudgetCapExpiresAfterMissesAndRaises();
