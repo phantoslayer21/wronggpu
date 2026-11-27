@@ -219,6 +219,7 @@ FgStatus FgTargetScheduler::BeginEpoch(std::uint64_t epoch) {
     good_run_ = 0;
     shortfall_run_ = 0;
     vrr_floor_run_ = 0;
+    over_lead_last_interval_ = false;
     last_reduction_reason_ = FgRealOnlyReason::None;
     return FgStatus::Ok;
 }
@@ -418,11 +419,15 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
         if (FgCheckedAdd(last_real_target_, period_estimate, &end) != FgStatus::Ok ||
             FgCheckedAdd(end, -origin, &lead) != FgStatus::Ok)
             return FgStatus::Overflow;
+        const bool over_lead = lead > config_.max_lead;
+        const bool sustained_excess = over_lead && over_lead_last_interval_;
+        over_lead_last_interval_ = over_lead;
         if (lead < config_.real_min_lead) {
             reanchor = true;  // behind: the real endpoint cannot be met on this timeline
             shortfall_run_ = 0;
-        } else if (lead > config_.max_lead) {
-            // Playout lead exceeded max_lead (e.g. abrupt speedup after slow startup frames or a hitch).
+        } else if (lead - config_.max_lead > period_estimate / 4 || sustained_excess) {
+            // A small, isolated overrun can be ordinary jitter when the interpolation span is near the limit.
+            // Act immediately on a large overrun and drain a small one only if it persists.
             // Re-anchor real-only to drain the excess lead and reset the cadence estimator so an L=1
             // frame-start-waitable caller cannot lock into an alternating LatencyCap limit cycle.
             reanchor = true;
@@ -462,6 +467,7 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
     FgTicks t_base = 0;
     FgTicks period = 0;
     if (reanchor) {
+        over_lead_last_interval_ = false;
         for (;;) {
             FgTicks target = 0;
             FgTicks spacing = 0;

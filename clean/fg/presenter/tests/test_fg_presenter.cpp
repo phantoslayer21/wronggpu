@@ -1264,6 +1264,25 @@ void TestTearingPlanHeadNearCeiling() {
 void TestRc2SchedulerPacing() {
     g_case = "rc2 scheduler pacing";
     {
+        // At 30 fps, a 21 ms budget plus the 6x interpolation span needs 48.8 ms of lead.
+        FgSchedulerConfig sc = DefaultScheduler();
+        sc.first_image_budget = 210000;
+        sc.bridge_and_submit_margin = 2500;
+        sc.max_lead = 500000;
+        sc.display.min_interval = 28619;
+        Rig r(sc, DefaultFake());
+        FgTicks t = kSecond;
+        for (int i = 0; i < 120; ++i) {
+            t += 333333;
+            r.Frame(t - (i >= 12 && i % 4 == 0 ? 22000 : 0), 5);
+        }
+        r.RunUntil(t + 700000);
+        CHECK(AllOk(r));
+        CHECK(r.CountReason(FgRealOnlyReason::LatencyCap) == 0);
+        CHECK(r.Generating() >= 114);
+        CHECK(r.presenter.Stats().dropped_late == 0);
+    }
+    {
         // N-B2: +-2.5 ms jitter at 6x / 60 fps on 360 Hz panel -> 0 reanchors after warm-up, 0 late drops
         FgSchedulerConfig sc = DefaultScheduler();
         sc.first_image_budget = 40000;        // 4.0 ms
