@@ -158,6 +158,7 @@ public:
     void Wake();
     bool Running() const { return running_.load(); }
     bool Joinable() const { return thread_.joinable(); }
+    DWORD ThreadId() const { return thread_id_.load(); }
 
 private:
     static void Entry(FgWorkerThread* self);
@@ -167,6 +168,7 @@ private:
     IFgWorkerBody* body_ = nullptr;
     const wchar_t* name_ = nullptr;
     std::atomic<bool> running_{false};
+    std::atomic<DWORD> thread_id_{0};
     std::thread thread_;
 };
 

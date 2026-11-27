@@ -116,6 +116,8 @@ struct FgAsiSessionStats {
     // the executor's counters (fg_d3d12_executor.h FgExecCounters), 0 before the first session
     uint64_t exec_shared = 0, exec_indices = 0, exec_copies = 0, exec_game_colour_copies = 0, exec_net2_fast = 0,
              exec_net2_exact = 0;
+    // A2 / N-B3 / N-S3 diagnostics
+    uint64_t back_pressure_waits = 0, credit_waits = 0, real_retires = 0, noop_fullscreen_ignored = 0;
 };
 
 // What the host's last game present did (FgAsiSessionHost::LiveStatus), for a menu. Plain values.
@@ -125,6 +127,14 @@ enum FgAsiPhase : uint32_t {
     kFgPhaseRealOnly = 2,    // the last game frame was shown without generated images (reason / real_only say why)
     kFgPhaseStopped = 3,     // the host stopped trying for this run (session failures)
 };
+enum FgCountCapReason : uint32_t {
+    kFgCapNone = 0,
+    kFgCapDisplayVrr = 1,
+    kFgCapLatencyCap = 2,
+    kFgCapPressure = 3,
+    kFgCapRoute = 4,
+};
+
 struct FgAsiLiveStatus {
     uint32_t phase = kFgPhaseWaiting;
     uint32_t reason = 0;      // WgFgReason of the last real-only / refused present
@@ -134,6 +144,16 @@ struct FgAsiLiveStatus {
     uint32_t presenter = 0;   // wgfg::FgPresenterChoice of the session's presenter (0: none yet)
     uint64_t presents = 0;    // game presents the host saw
     bool host_overlay = false;
+    // M1 / A4 / A2 extensions (appended so existing fields stay ABI/source compatible for Track B's menu card):
+    uint32_t multiplier_source = 0;      // FgMultiplierSource: 0 = manual, 1 = game
+    bool game_has_mfg_selector = false;  // from qualified title binding
+    uint32_t requested_count = 0;        // N the game asked for (0..5)
+    uint32_t scheduled_count = 0;        // N scheduled after display/VRR and latency caps (0..5)
+    uint32_t count_cap_reason = kFgCapNone;
+    uint32_t display_refresh_hz = 0;     // active display refresh rate in Hz (0 if unreadable)
+    uint32_t sustained_mult_x100 = 100;  // sustained effective multiplier * 100 (e.g. 396 = 3.96x)
+    uint32_t latency_limit = 0;          // active game frame-latency limit (1..16)
+    uint32_t in_flight_real = 0;         // current real frames in flight to the presenter
 };
 
 class FgAsiSessionHost final : public IFgPresentCallback {
@@ -175,8 +195,11 @@ public:
     bool GetBuffer(UINT buffer, REFIID riid, void** out, HRESULT* hr) override;
     bool CurrentBackBufferIndex(UINT* index) override;
     bool FrameLatencyWaitableObject(HANDLE* handle) override;
+    bool SetMaximumFrameLatency(UINT latency, HRESULT* hr) override;
+    bool GetMaximumFrameLatency(UINT* latency, HRESULT* hr) override;
     void Detached() override;
     void Attached(IDXGISwapChain4* inner, IUnknown* queue) override;
+    void SetGameWaitable(bool requested) override;
     UINT ExtraSwapChainFlags(const DXGI_SWAP_CHAIN_DESC1& desc) override;
     IUnknown* CreationQueue(IUnknown* game_queue, const DXGI_SWAP_CHAIN_DESC1& desc) override;
     void AttachedPresentQueue(IUnknown* queue) override;

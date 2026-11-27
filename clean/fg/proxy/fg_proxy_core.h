@@ -72,6 +72,14 @@ struct FgBinding {
     std::vector<std::string> fn_names; // the FG feature-function names <get-function> hands out
     uint32_t ui_max_generated = 1;     // the highest N the game's own UI offers
     uint32_t presets_mask = WG_FG_PRESETS_ALL;
+    // M1: true when the qualified title exposes its own multi-frame-generation selector (e.g. Cyberpunk 2077 2x/3x/4x).
+    // When true, the game's requested count controls the multiplier (never clamped by settings.multiplier).
+    bool has_mfg_selector = false;
+};
+
+enum FgMultiplierSource : uint32_t {
+    kFgMultSourceManual = 0,
+    kFgMultSourceGame = 1,
 };
 
 struct FgProxyConfig {
@@ -152,6 +160,9 @@ public:
     bool owns_feature(uint32_t feature) const { return is_fg_feature(feature) && fg_taken(); }
     WgFgCapability capability() const;
     uint32_t advertised_max_generated() const;
+    bool has_mfg_selector() const { return cfg_.binding.has_mfg_selector; }
+    uint32_t multiplier_source() const;  // FgMultiplierSource (game | manual)
+    uint32_t requested_count() const;    // last valid count requested by the game (0 if none)
 
     // ---- interposer calls (game -> transport -> here). Feature-scoped calls go to the next link unless the feature
     // is FG and FG is taken; the result is then the core's (0, or a game-interface result code). ----
@@ -240,6 +251,7 @@ private:
     uint32_t session_vp_ = 0;
     bool has_vp_ = false;
     uint32_t effective_preset_ = 0, effective_count_ = 0;
+    uint32_t multiplier_source_ = kFgMultSourceManual;
     bool latched_ = false;            // a present latched chain, window and epochs
     uint64_t swapchain_id_ = 0, window_id_ = 0, queue_epoch_ = 0, swapchain_epoch_ = 0;
     bool any_present_ = false;

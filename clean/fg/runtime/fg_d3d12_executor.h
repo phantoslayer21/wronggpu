@@ -196,6 +196,9 @@ struct FgD3d12ExecutorDesc {
     //    off whatever the mask says). The default mask is 593 = 17 + 64 + 512 (paired ABBA at 1440p: 128 and 256 regress, 1024
     //    is neutral); 2001 is 17 + all of Wave 2 and 2047 is every lever.
     int batch = -1, hoist = -1, dualq = -1, fuse = -1, fuse2 = -1;
+    // N-B1: per-index fence completion for RecordGeneratedBatch (true: each index signals its own producer fence so
+    // index 1 can present immediately without waiting for indices 2..N; false: single-submission interleaved batch).
+    bool per_index_fences = true;
     // Developer frame dumps (off while dump_dir is empty; the ASI sets it only in a developer build): of the game
     // frames that generate, every dump_every-th one (at most dump_max), the game frame's slot image (game_<n>.ppm) and
     // each generated slot image (gen_<n>_<i>.ppm) are copied to a readback buffer after the slot write, and written as

@@ -64,8 +64,10 @@ FgWinResult FgDxgiPresenter::Create(const FgDxgiPresenterDesc& d, std::unique_pt
     FgEngineConfig cfg;
     cfg.probe = FgPresenterProbe{FgPresenterBackend::DxgiFlip, true, true, d.max_generated, FgStatus::Ok};
     cfg.slot_count = slots;
+    cfg.max_pending_intervals = d.max_pending_intervals >= 1 ? d.max_pending_intervals : 2u;
     cfg.refresh_period = d.refresh_period;
     std::unique_ptr<FgDxgiPresenter> p(new FgDxgiPresenter(d, cfg));
+    p->engine_.SetDisplayTimeMeasured(false);  // A4: DXGI records submit / intended vblank estimate, not scan-out time
     p->info_.tearing_supported = tearing != FALSE;
     const FgWinResult r = p->Initialize();
     if (!r.Ok()) return r;
@@ -76,9 +78,10 @@ FgWinResult FgDxgiPresenter::Create(const FgDxgiPresenterDesc& d, std::unique_pt
 FgWinResult FgDxgiPresenter::Initialize() {
     if (!timer_.Valid()) return FgWinFail(FgStatus::Unsupported, FgWinRefusal::TimerUnavailable);
     copy_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    alloc_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     fence_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     drain_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    if (!copy_event_ || !fence_event_ || !drain_event_)
+    if (!copy_event_ || !alloc_event_ || !fence_event_ || !drain_event_)
         return FgWinFail(FgStatus::Unsupported, FgWinRefusal::ResourceCreation);
     latency_ = swap_->GetFrameLatencyWaitableObject();
     if (!latency_) return FgWinFail(FgStatus::Unsupported, FgWinRefusal::SwapChainNoWaitable);
@@ -114,7 +117,7 @@ FgWinResult FgDxgiPresenter::AcquireChain() {
         const FgWinResult r = CreateSlots();
         if (!r.Ok()) return r;
     }
-    const std::size_t ring = static_cast<std::size_t>(sd.BufferCount) + 1;
+    const std::size_t ring = (static_cast<std::size_t>(sd.BufferCount) + 2) < 8 ? 8u : static_cast<std::size_t>(sd.BufferCount) + 2;
     if (allocators_.size() != ring) {
         allocators_.clear();
         allocators_.resize(ring);
@@ -168,8 +171,19 @@ FgDxgiPresenter::~FgDxgiPresenter() {
     back_buffers_.clear();
     if (latency_) CloseHandle(latency_);
     if (copy_event_) CloseHandle(copy_event_);
+    if (alloc_event_) CloseHandle(alloc_event_);
     if (fence_event_) CloseHandle(fence_event_);
     if (drain_event_) CloseHandle(drain_event_);
+}
+
+void FgDxgiPresenter::SetRealRetireCallback(FgRealRetireFn fn, void* ctx) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    engine_.SetRealRetireCallback(fn, ctx);
+}
+
+void FgDxgiPresenter::SetTraceCallback(FgPresentTraceFn fn, void* ctx) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    engine_.SetTraceCallback(fn, ctx);
 }
 
 std::uint32_t FgDxgiPresenter::RegisterFence(ID3D12Fence* fence, FgWinResult* why) {
@@ -235,11 +249,7 @@ std::uint64_t FgDxgiPresenter::FirstQueuedPresentId() const {
 
 FgStatus FgDxgiPresenter::Attach(std::uint64_t chain_id, std::uint64_t epoch) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (claimed_) return engine_.Refuse(FgStatus::WrongState);
-    if (back_buffers_.empty()) {
-        const FgWinResult r = AcquireChain();
-        if (!r.Ok() || back_buffers_.empty()) return engine_.Refuse(FgStatus::WrongState);
-    }
+    if (claimed_ || back_buffers_.empty()) return engine_.Refuse(FgStatus::WrongState);
     if (!FgChainRegistry::Process().Claim(chain_id, this)) return engine_.Refuse(FgStatus::Refused);
     const FgStatus s = engine_.Attach(epoch);
     if (s != FgStatus::Ok) {
@@ -321,7 +331,7 @@ FgStatus FgDxgiPresenter::Quiesce() {
 
 FgStatus FgDxgiPresenter::CompleteResize(bool resize_ok, std::uint64_t new_epoch) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!CopiesIdleLocked()) return engine_.Refuse(FgStatus::Busy);
+    if (presenting_ || !CopiesIdleLocked()) return engine_.Refuse(FgStatus::Busy);
     const FgStatus s = engine_.CompleteResize(resize_ok, new_epoch);
     if (s != FgStatus::Ok) return s;
     const FgWinResult r = AcquireChain();  // the resized chain's buffers (and new slots when size / format changed)
@@ -346,7 +356,7 @@ FgStatus FgDxgiPresenter::Detach() {
     std::lock_guard<std::mutex> lock(mutex_);
     std::uint64_t from = 0;
     if (engine_.State() != FgPresenterState::Lost && engine_.State() != FgPresenterState::Detached &&
-        !CopiesIdleLocked()) {
+        (presenting_ || !CopiesIdleLocked())) {
         if (engine_.State() == FgPresenterState::Attached) {
             engine_.Quiesce(FgInterruptNow(), &from);
             CancelLocalLocked(from);
@@ -377,7 +387,7 @@ bool FgDxgiPresenter::WaitIdle(DWORD timeout_ms) {
             const FgPresenterState st = engine_.State();
             const bool drained = engine_.Drained() || st == FgPresenterState::Lost;
             const bool chain_free = st == FgPresenterState::Attached || back_buffers_.empty();
-            if (drained && CopiesIdleLocked() && chain_free) return true;
+            if (!presenting_ && drained && CopiesIdleLocked() && chain_free) return true;
         }
         if (GetTickCount64() >= until) return false;
         worker_.Wake();
@@ -455,8 +465,8 @@ void FgDxgiPresenter::StepLocked(FgTicks now) {
     std::vector<FgEnginePresent> out;
     engine_.TakeOutbox(&out);
     for (const FgEnginePresent& p : out) local_.push_back(p);
-    // not attached any more: once the copies finished, the swap chain's buffers are let go so the game can resize
-    if (engine_.State() != FgPresenterState::Attached && CopiesIdleLocked()) back_buffers_.clear();
+    // not attached any more: once the copies and any in-flight present finished, release swap chain buffers for resize
+    if (engine_.State() != FgPresenterState::Attached && !presenting_ && CopiesIdleLocked()) back_buffers_.clear();
 }
 
 bool FgDxgiPresenter::PlanHeadLocked(FgTicks now, Planned* out) {
@@ -493,10 +503,21 @@ bool FgDxgiPresenter::PlanHeadLocked(FgTicks now, Planned* out) {
             pl.shown_at = p.target;
         }
         if (!p.real) {
-            bool late = vsync ? now > pl.shown_at : now > pl.shown_at + desc_.late_tolerance;
+            // N-S1: scale late_tolerance with slot spacing (clamp(slot/2, 1.5 ms, 4.0 ms)) so an already-rendered
+            // image is not discarded for minor timer jitter, while still dropping before colliding with the next image.
+            FgTicks tol = desc_.late_tolerance;
+            if (!vsync && local_.size() > 1) {
+                const FgTicks gap = local_[1].target - p.target;
+                if (gap > 0) {
+                    const FgTicks half = gap / 2;
+                    const FgTicks scaled = half < 15000 ? 15000 : (half > 40000 ? 40000 : half);
+                    if (scaled > tol) tol = scaled;
+                }
+            }
+            bool late = vsync ? now > pl.shown_at : now > pl.shown_at + tol;
             if (!late && !vsync && local_.size() > 1) {
                 const FgEnginePresent& next = local_[1];
-                late = engine_.SlotPresentId(next.slot) == next.present_id && now >= next.target;
+                late = engine_.SlotPresentId(next.slot) == next.present_id && now >= next.target - 2500;
             }
             if (late) {  // it would be on screen for (almost) no time: drop it, the lease is free at once
                 engine_.OnPresentDropped(p.present_id, FgDropReason::Late);
@@ -510,88 +531,10 @@ bool FgDxgiPresenter::PlanHeadLocked(FgTicks now, Planned* out) {
     return false;
 }
 
-bool FgDxgiPresenter::RecordCopyAndPresentLocked(const Planned& pl) {
-    const FgEnginePresent& p = pl.present;
-    const UINT bbi = swap_->GetCurrentBackBufferIndex();
-    if (bbi >= back_buffers_.size() || !back_buffers_[bbi] || p.slot >= slots_.size()) {
-        engine_.MarkFailed();
-        local_.clear();
-        return false;
-    }
-    const std::size_t a = ring_ % allocators_.size();
-    if (copy_fence_->GetCompletedValue() < allocator_value_[a]) {
-        // the allocator's previous copy is still running; with the frame-latency wait this is rare and short. The
-        // event is shared with the worker's copy wakeups, so the fence value itself decides.
-        if (SUCCEEDED(copy_fence_->SetEventOnCompletion(allocator_value_[a], copy_event_)))
-            WaitForSingleObject(copy_event_, 50);
-        if (copy_fence_->GetCompletedValue() < allocator_value_[a]) return false;  // retried on the next wakeup
-    }
-    HRESULT hr = allocators_[a]->Reset();
-    if (SUCCEEDED(hr)) hr = list_->Reset(allocators_[a].Get(), nullptr);
-    if (FAILED(hr)) {
-        if (FgIsDeviceLostHr(hr)) LoseLocked();
-        else engine_.MarkFailed();
-        return false;
-    }
-    ID3D12Resource* bb = back_buffers_[bbi].Get();
-    ID3D12Resource* src = slots_[p.slot].Get();
-    D3D12_RESOURCE_BARRIER b[2] = {};
-    b[0].Type = b[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    b[0].Transition = {bb, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_PRESENT,
-                       D3D12_RESOURCE_STATE_COPY_DEST};
-    b[1].Transition = {src, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_COMMON,
-                       D3D12_RESOURCE_STATE_COPY_SOURCE};
-    list_->ResourceBarrier(2, b);
-    list_->CopyResource(bb, src);
-    for (D3D12_RESOURCE_BARRIER& x : b) {
-        const D3D12_RESOURCE_STATES t = x.Transition.StateBefore;
-        x.Transition.StateBefore = x.Transition.StateAfter;
-        x.Transition.StateAfter = t;
-    }
-    list_->ResourceBarrier(2, b);
-    hr = list_->Close();
-    if (FAILED(hr)) {
-        engine_.MarkFailed();
-        return false;
-    }
-    // the GPU copy starts only after the producer finished the image
-    ID3D12Fence* producer = fences_.Get(p.fence.fence);
-    if (producer) queue_->Wait(producer, p.fence.value);
-    ID3D12CommandList* lists[] = {list_.Get()};
-    queue_->ExecuteCommandLists(1, lists);
-    queue_->Signal(copy_fence_.Get(), ++copy_value_);
-    allocator_value_[a] = copy_value_;
-    slot_copy_value_[p.slot] = copy_value_;
-    ++ring_;
-    const bool tearing = desc_.pacing == FgDxgiPacing::Tearing;
-    hr = swap_->Present(tearing ? 0 : 1, tearing ? DXGI_PRESENT_ALLOW_TEARING : 0);
-    if (tearing && hr == DXGI_ERROR_INVALID_CALL) {
-        // DXGI_PRESENT_ALLOW_TEARING is invalid in exclusive fullscreen; retry without the tearing flag.
-        hr = swap_->Present(0, 0);
-    }
-    if (FAILED(hr)) {
-        if (FgIsDeviceLostHr(hr)) {
-            LoseLocked();
-        } else {
-            engine_.MarkFailed();  // a failed present is a hard failure: refuse until Detach, no fallback
-            local_.clear();
-        }
-        return false;
-    }
-    ++info_.presents;
-    if (!tearing) {
-        have_vblank_ = true;
-        last_vblank_ = pl.shown_at;
-    }
-    // DXGI reports no per-present scan-out time here: tearing records the Present call time, VSync the vblank the
-    // present was issued for
-    engine_.OnPresentDisplayed(p.present_id, tearing ? FgInterruptNow() : pl.shown_at);
-    return true;
-}
-
-// Called without the lock: waits for a frame-latency count (bounded, together with the stop event), then presents
-// the head under the lock. A count that was taken but not used stays as a credit for the next present, so the
-// latency object's count never drifts.
+// Called without the lock: waits for a frame-latency count (bounded, together with the stop event), snapshots the
+// copy/present objects under mutex_, then runs the allocator wait, CopyResource, ExecuteCommandLists and
+// swap_->Present() OUTSIDE mutex_ (N-S1: avoids blocking game-thread BeginInterval/SubmitInterval and avoids any
+// lock-ordering conflict with OptiScaler's wrapper mutex during overlay rendering or resize).
 bool FgDxgiPresenter::PresentHead(HANDLE stop) {
     bool have_credit = false;
     {
@@ -616,15 +559,123 @@ bool FgDxgiPresenter::PresentHead(HANDLE stop) {
         std::lock_guard<std::mutex> lock(mutex_);
         latency_credit_ = true;
     }
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!latency_credit_) return true;
-    const FgTicks now = FgInterruptNow();
     Planned head;
-    if (engine_.State() != FgPresenterState::Attached || !PlanHeadLocked(now, &head)) return true;
-    if (now + desc_.timer_lead < head.issue_at) return true;  // a new head with a later time: keep the credit
-    if (!RecordCopyAndPresentLocked(head)) return true;
+    ComPtr<ID3D12Resource> bb;
+    ComPtr<ID3D12Resource> src;
+    ComPtr<ID3D12CommandAllocator> alloc;
+    ComPtr<ID3D12GraphicsCommandList> list;
+    ComPtr<ID3D12CommandQueue> queue;
+    ComPtr<ID3D12Fence> copy_fence;
+    ComPtr<ID3D12Fence> producer;
+    ComPtr<IDXGISwapChain4> swap;
+    std::size_t a = 0;
+    std::uint64_t alloc_wait_val = 0;
+    std::uint64_t copy_val = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!latency_credit_) return true;
+        const FgTicks now = FgInterruptNow();
+        if (engine_.State() != FgPresenterState::Attached || !PlanHeadLocked(now, &head)) return true;
+        if (now + desc_.timer_lead < head.issue_at) return true;  // a new head with a later time: keep the credit
+        const UINT bbi = swap_->GetCurrentBackBufferIndex();
+        if (bbi >= back_buffers_.size() || !back_buffers_[bbi] || head.present.slot >= slots_.size() ||
+            allocators_.empty()) {
+            engine_.MarkFailed();
+            local_.clear();
+            return true;
+        }
+        a = ring_ % allocators_.size();
+        alloc = allocators_[a];
+        alloc_wait_val = allocator_value_[a];
+        bb = back_buffers_[bbi];
+        src = slots_[head.present.slot];
+        list = list_;
+        queue = queue_;
+        copy_fence = copy_fence_;
+        producer = fences_.Get(head.present.fence.fence);
+        swap = swap_;
+        copy_val = ++copy_value_;
+        ++ring_;
+        presenting_ = true;
+    }
+
+    // ---- Unlocked GPU copy + Present ----
+    HRESULT hr = S_OK;
+    bool alloc_busy = false;
+    if (copy_fence->GetCompletedValue() < alloc_wait_val) {
+        if (SUCCEEDED(copy_fence->SetEventOnCompletion(alloc_wait_val, alloc_event_)))
+            WaitForSingleObject(alloc_event_, 50);
+        if (copy_fence->GetCompletedValue() < alloc_wait_val) alloc_busy = true;
+    }
+    if (!alloc_busy) {
+        hr = alloc->Reset();
+        if (SUCCEEDED(hr)) hr = list->Reset(alloc.Get(), nullptr);
+        if (SUCCEEDED(hr)) {
+            D3D12_RESOURCE_BARRIER b[2] = {};
+            b[0].Type = b[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            b[0].Transition = {bb.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_PRESENT,
+                               D3D12_RESOURCE_STATE_COPY_DEST};
+            b[1].Transition = {src.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_COMMON,
+                               D3D12_RESOURCE_STATE_COPY_SOURCE};
+            list->ResourceBarrier(2, b);
+            list->CopyResource(bb.Get(), src.Get());
+            for (D3D12_RESOURCE_BARRIER& x : b) {
+                const D3D12_RESOURCE_STATES t = x.Transition.StateBefore;
+                x.Transition.StateBefore = x.Transition.StateAfter;
+                x.Transition.StateAfter = t;
+            }
+            list->ResourceBarrier(2, b);
+            hr = list->Close();
+        }
+        if (SUCCEEDED(hr)) {
+            if (producer) queue->Wait(producer.Get(), head.present.fence.value);
+            ID3D12CommandList* lists[] = {list.Get()};
+            queue->ExecuteCommandLists(1, lists);
+            queue->Signal(copy_fence.Get(), copy_val);
+            const bool tearing = desc_.pacing == FgDxgiPacing::Tearing;
+            hr = swap->Present(tearing ? 0 : 1, tearing ? DXGI_PRESENT_ALLOW_TEARING : 0);
+            if (tearing && hr == DXGI_ERROR_INVALID_CALL) {
+                // DXGI_PRESENT_ALLOW_TEARING is invalid in exclusive fullscreen; retry without the tearing flag.
+                hr = swap->Present(0, 0);
+            }
+        }
+    }
+    const FgTicks present_done = FgInterruptNow();
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    presenting_ = false;
+    if (alloc_busy) {
+        // Did not submit on this wake: signal copy_val on fence if needed? No — rewind copy_value_ if untouched.
+        if (copy_value_ == copy_val) --copy_value_;
+        return true;
+    }
+    if (FAILED(hr)) {
+        if (copy_value_ == copy_val && copy_fence_->GetCompletedValue() < copy_val) {
+            // If we failed before ExecuteCommandLists/Signal, avoid stalling CopiesIdleLocked forever.
+            queue_->Signal(copy_fence_.Get(), copy_val);
+        }
+        if (FgIsDeviceLostHr(hr)) {
+            LoseLocked();
+        } else {
+            engine_.MarkFailed();  // a failed present is a hard failure: refuse until Detach, no fallback
+            local_.clear();
+        }
+        return true;
+    }
+    if (a < allocator_value_.size()) allocator_value_[a] = copy_val;
+    if (head.present.slot < slot_copy_value_.size()) slot_copy_value_[head.present.slot] = copy_val;
+    ++info_.presents;
+    const bool tearing = desc_.pacing == FgDxgiPacing::Tearing;
+    if (!tearing) {
+        have_vblank_ = true;
+        last_vblank_ = head.shown_at;
+    }
+    // DXGI reports no per-present scan-out time here: tearing records the Present call time, VSync the vblank the
+    // present was issued for (stats_.display_time_measured == false).
+    engine_.OnPresentSubmitted(head.present.present_id, present_done);
+    engine_.OnPresentDisplayed(head.present.present_id, tearing ? present_done : head.shown_at);
     latency_credit_ = false;
-    local_.pop_front();
+    if (!local_.empty() && local_.front().present_id == head.present.present_id) local_.pop_front();
     return true;
 }
 

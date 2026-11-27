@@ -1039,6 +1039,94 @@ void TestMutations() {
     CHECK(r.Present(after, a + 200000) == FgStatus::Ok);
 }
 
+// RC2 (N-B2 / O-A4 / O-A7 / M1): 2-3 ms steady jitter at 6x/60 fps produces 0 reanchors; LatencyCap steps N down
+// instead of dropping straight to 0; SetMaxGeneratedCap clamps & restores cleanly; 360 Hz VRR ceiling (~349 Hz)
+// prevents above-refresh targets while 80 fps 4x runs cleanly.
+void TestRc2SchedulerPacing() {
+    g_case = "rc2 scheduler pacing";
+    {
+        // N-B2: +-2.5 ms jitter at 6x / 60 fps on 360 Hz panel -> 0 reanchors after warm-up, 0 late drops
+        FgSchedulerConfig sc = DefaultScheduler();
+        sc.first_image_budget = 40000;        // 4.0 ms
+        sc.bridge_and_submit_margin = 2500;   // 0.25 ms (DXGI tearing)
+        sc.max_lead = 280000;                 // 28 ms (O-A7)
+        sc.display.min_interval = 27778;      // 360 Hz
+        sc.display.margin = 0;                // 6x at 60 fps = 27778 ticks exactly
+        sc.adaptive_count = true;
+        Rig r(sc, DefaultFake());
+        const FgTicks jitter[8] = {25000, -25000, 20000, -20000, 15000, -15000, 22000, -22000};
+        FgTicks t = kSecond;
+        for (int i = 0; i < 120; ++i) {
+            t += 166667 + (i >= 10 ? jitter[i % 8] : 0);
+            r.Frame(t, 5);
+        }
+        r.RunUntil(t + 400000);
+        CHECK(AllOk(r));
+        std::uint32_t reanchors_steady = 0;
+        for (std::size_t i = 10; i < r.plans.size(); ++i)
+            if (r.plans[i].reanchored) ++reanchors_steady;
+        CHECK(reanchors_steady == 0);
+        CHECK(r.Generating() >= 110);
+        CHECK(r.presenter.Stats().dropped_late == 0);
+    }
+    {
+        // N-B2: LatencyCap step-down (N=5 at 60 fps needs 178.9 ms/10 -> 17.89 ms; max_lead=14 ms steps N down to 1,
+        // NOT straight to 0!)
+        FgSchedulerConfig sc = DefaultScheduler();
+        sc.first_image_budget = 40000;  // 4.0 ms
+        sc.max_lead = 140000;           // 14.0 ms: N=5 needs 17.89 ms, N=2 needs 15.11 ms, N=1 needs 12.33 ms
+        sc.adaptive_count = true;
+        Rig r(sc, DefaultFake());
+        for (int i = 0; i < 30; ++i) r.Frame(At(kSecond, static_cast<std::uint64_t>(i), 60), 5);
+        r.RunUntil(At(kSecond, 30, 60) + 400000);
+        CHECK(AllOk(r));
+        CHECK(r.Generating() >= 24);
+        CHECK(r.plans.back().generated_count == 1 && r.plans.back().requested_count == 5);
+        CHECK(r.scheduler.LastReductionReason() == FgRealOnlyReason::LatencyCap);
+        CHECK(r.CountReason(FgRealOnlyReason::LatencyCap) == 0);  // never dropped to real-only!
+    }
+    {
+        // O-A7: SetMaxGeneratedCap steps down and restores cleanly
+        FgSchedulerConfig sc = DefaultScheduler();
+        sc.first_image_budget = 40000;
+        sc.max_lead = 280000;
+        sc.adaptive_count = true;
+        Rig r(sc, DefaultFake());
+        for (int i = 0; i < 15; ++i) r.Frame(At(kSecond, static_cast<std::uint64_t>(i), 60), 3);
+        CHECK(r.plans.back().generated_count == 3);
+        r.scheduler.SetMaxGeneratedCap(2);
+        for (int i = 15; i < 25; ++i) r.Frame(At(kSecond, static_cast<std::uint64_t>(i), 60), 3);
+        CHECK(r.plans.back().generated_count == 2);
+        CHECK(r.scheduler.LastReductionReason() == FgRealOnlyReason::LatencyCap);
+        r.scheduler.SetMaxGeneratedCap(0);
+        for (int i = 25; i < 35; ++i) r.Frame(At(kSecond, static_cast<std::uint64_t>(i), 60), 3);
+        CHECK(r.plans.back().generated_count == 3);
+    }
+    {
+        // O-A4 / M1: 360 Hz panel with +3% VRR ceiling (~349 Hz): 90 fps 4x (360 Hz) steps down to 3x (270 Hz);
+        // 80 fps 4x (320 Hz) runs full 4x with 0 slip.
+        FgSchedulerConfig sc = DefaultScheduler();
+        sc.display.min_interval = 27778 + 27778 / 33;  // ~28620 ticks (~349 Hz ceiling)
+        sc.display.margin = 500;
+        sc.display.max_interval = 208333;              // 48 Hz floor
+        sc.adaptive_count = true;
+        Rig r90(sc, DefaultFake());
+        for (int i = 0; i < 30; ++i) r90.Frame(At(kSecond, static_cast<std::uint64_t>(i), 90), 3);
+        r90.RunUntil(At(kSecond, 30, 90) + 400000);
+        CHECK(AllOk(r90));
+        CHECK(r90.plans.back().generated_count == 2);  // stepped down from 4x to 3x
+        CHECK(r90.scheduler.LastReductionReason() == FgRealOnlyReason::OutOfVrrWindow);
+        CHECK(r90.presenter.Stats().max_slip == 0);
+
+        Rig r80(sc, DefaultFake());
+        for (int i = 0; i < 30; ++i) r80.Frame(At(kSecond, static_cast<std::uint64_t>(i), 80), 3);
+        r80.RunUntil(At(kSecond, 30, 80) + 400000);
+        CHECK(AllOk(r80));
+        CHECK(r80.plans.back().generated_count == 3);  // full 4x (320 Hz <= 349 Hz)
+        CHECK(r80.presenter.Stats().max_slip == 0);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -1053,6 +1141,7 @@ int main() {
     TestResizeAndDeviceLoss();
     TestRefusal();
     TestMutations();
+    TestRc2SchedulerPacing();
     std::printf("test_fg_presenter: %d checks, %d failure(s)\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

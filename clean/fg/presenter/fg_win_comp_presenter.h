@@ -57,6 +57,7 @@ struct FgCompPresenterDesc {
     FgTicks refresh_period = 0;     // fixed refresh: the scan-out period (0: measured from the compositor)
     std::uint32_t max_generated = kFgMaxGenerated;  // 1..5
     std::uint32_t slot_count = 0;   // 0: max_generated + 4; below max_generated + 3 is refused
+    std::uint32_t max_pending_intervals = 2;
     bool force_vsync_interrupt = false;
     bool require_hw_flip_queue = true;  // refuse unless D3DKMT reports HwFlipQueueEnabled for the adapter
 };
@@ -102,6 +103,9 @@ public:
     bool WaitIdle(DWORD timeout_ms);
     FgCompPresenterInfo Info() const;
     std::uint32_t FreeSlots() const;
+    DWORD WorkerThreadId() const { return worker_.ThreadId(); }
+    void SetRealRetireCallback(FgRealRetireFn fn, void* ctx);
+    void SetTraceCallback(FgPresentTraceFn fn, void* ctx);
 
     FgPresenterProbe Probe() const override;
     FgStatus Attach(std::uint64_t chain_id, std::uint64_t epoch) override;
@@ -127,6 +131,8 @@ private:
         std::uint64_t engine_id;
         std::uint64_t platform_id;
         std::uint32_t slot;
+        FgTicks target;
+        bool real;
     };
 
     explicit FgWinCompPresenter(const FgCompPresenterDesc& desc, const FgEngineConfig& engine);

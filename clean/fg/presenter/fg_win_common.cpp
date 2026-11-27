@@ -206,8 +206,25 @@ FgWorkerThread::~FgWorkerThread() {
 }
 
 void FgWorkerThread::Entry(FgWorkerThread* self) {
+    self->thread_id_.store(GetCurrentThreadId());
     if (self->name_) SetThreadDescription(GetCurrentThread(), self->name_);
+    // N-S1: elevate presenter worker priority so timer wakes and present copies are not delayed behind game CPU work.
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+    HANDLE mmcss = nullptr;
+    using AvSetFn = HANDLE(WINAPI*)(LPCWSTR, LPDWORD);
+    using AvRevFn = BOOL(WINAPI*)(HANDLE);
+    AvRevFn av_revert = nullptr;
+    if (HMODULE avrt = LoadLibraryExW(L"avrt.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)) {
+        auto av_set = reinterpret_cast<AvSetFn>(reinterpret_cast<void*>(GetProcAddress(avrt, "AvSetMmThreadCharacteristicsW")));
+        av_revert = reinterpret_cast<AvRevFn>(reinterpret_cast<void*>(GetProcAddress(avrt, "AvRevertMmThreadCharacteristics")));
+        if (av_set) {
+            DWORD task_index = 0;
+            mmcss = av_set(L"Games", &task_index);
+        }
+    }
     self->body_->Run(self->stop_, self->wake_);
+    if (mmcss && av_revert) av_revert(mmcss);
+    self->thread_id_.store(0);
     self->running_.store(false);
 }
 

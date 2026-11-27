@@ -134,6 +134,8 @@ public:
     bool Anchored() const { return anchored_; }
     FgTicks LastRealTarget() const { return last_real_target_; }
     std::uint32_t EffectiveCount() const { return effective_; }
+    // Why the last Commit reduced generated_count below requested_count (None when full requested count ran).
+    FgRealOnlyReason LastReductionReason() const { return last_reduction_reason_; }
     const FgIntervalEstimator& Estimator() const { return estimator_; }
     const FgSchedulerConfig& Config() const { return config_; }
     // The arrival -> first generated target budget, changed while the timeline runs (a host that sees generated
@@ -141,6 +143,10 @@ public:
     // needs the new lead: a larger lead than the timeline has re-anchors once (one real-only interval), a smaller one
     // is reached by the bounded lead correction.
     void SetFirstImageBudget(FgTicks budget);
+    // Optional upper cap on scheduled generated count (O-A7: step down when misses persist at the 8 ms budget cap).
+    // 0 clears the override.
+    void SetMaxGeneratedCap(std::uint32_t cap);
+    std::uint32_t MaxGeneratedCap() const { return max_generated_cap_; }
 
 private:
     FgStatus CommitImpl(const FgGameFrame& frame, FgIntervalPlan* out);
@@ -167,6 +173,9 @@ private:
     std::uint32_t effective_ = 0;
     std::uint32_t bad_run_ = 0;
     std::uint32_t good_run_ = 0;
+    std::uint32_t shortfall_run_ = 0;
+    std::uint32_t max_generated_cap_ = 0;
+    FgRealOnlyReason last_reduction_reason_ = FgRealOnlyReason::None;
 };
 
 }  // namespace wgfg

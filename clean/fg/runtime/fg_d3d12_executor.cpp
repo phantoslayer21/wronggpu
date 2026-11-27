@@ -3082,9 +3082,13 @@ FgExecResult FgD3d12Executor::Configure(const FgCreateDesc& cd, uint32_t /*histo
     if (m.list_type == D3D12_COMMAND_LIST_TYPE_DIRECT && !async_off) {
         D3D12_COMMAND_QUEUE_DESC compute_desc = {};
         compute_desc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+        compute_desc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_HIGH;  // O-A6: avoid starving FG behind game graphics
         compute_desc.NodeMask = queue_desc.NodeMask;
-        if (FAILED(dev->CreateCommandQueue(&compute_desc, IID_PPV_ARGS(&m.compute_queue))))
-            return m.Fail(FgExecRefusal::AllocationFailed, "compute queue");
+        if (FAILED(dev->CreateCommandQueue(&compute_desc, IID_PPV_ARGS(&m.compute_queue)))) {
+            compute_desc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
+            if (FAILED(dev->CreateCommandQueue(&compute_desc, IID_PPV_ARGS(&m.compute_queue))))
+                return m.Fail(FgExecRefusal::AllocationFailed, "compute queue");
+        }
         if (FAILED(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m.handoff_fence))))
             return m.Fail(FgExecRefusal::FenceFailed, "game queue handoff fence");
     }
@@ -3096,9 +3100,13 @@ FgExecResult FgD3d12Executor::Configure(const FgCreateDesc& cd, uint32_t /*histo
     if (m.want_hoist) {
         D3D12_COMMAND_QUEUE_DESC aux_desc = {};
         aux_desc.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+        aux_desc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
         aux_desc.NodeMask = queue_desc.NodeMask;
-        if (FAILED(dev->CreateCommandQueue(&aux_desc, IID_PPV_ARGS(&m.aux_queue))) ||
-            FAILED(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m.aux_fence)))) {
+        if (FAILED(dev->CreateCommandQueue(&aux_desc, IID_PPV_ARGS(&m.aux_queue)))) {
+            aux_desc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
+            dev->CreateCommandQueue(&aux_desc, IID_PPV_ARGS(&m.aux_queue));
+        }
+        if (!m.aux_queue || FAILED(dev->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m.aux_fence)))) {
             m.aux_queue.Reset();
             m.aux_fence.Reset();
         }
@@ -3493,6 +3501,15 @@ FgExecResult FgD3d12Executor::RecordGeneratedBatch(const FgIndexDispatchDesc* de
         if (done) *done = r == FgExecResult::Ok ? i : i - 1;
         return r;
     };
+    // N-B1: when per_index_fences is enabled (default), submit each generated index with its own fence value so
+    // index 1 completes and presents immediately without waiting for indices 2..N of the same interval. An explicit
+    // batch=1 override (benchmarks / batch-exactness tests) keeps single-submission layer interleaving.
+    char single_fence_env[2] = {};
+    const bool single_fence =
+        !m.desc.per_index_fences || m.desc.batch == 1 ||
+        (GetEnvironmentVariableA("WG_FG_BATCH_SINGLE_FENCE", single_fence_env, sizeof(single_fence_env)) == 1 &&
+         single_fence_env[0] == '1');
+    if (!single_fence) return one_by_one();
     // Anything that is not the plain case goes one index at a time (which also reports every refusal).
     bool plain = m.batch_on && m.configured && n >= 2 && n <= m.sc_banks && n <= kMaxWrittenSlots && m.target &&
                  m.frame.valid && m.host.InFrame() && m.host.Frame().history;

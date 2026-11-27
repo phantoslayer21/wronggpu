@@ -151,6 +151,12 @@ bool FgSession::SetFirstImageBudget(FgTicks budget) {
     return true;
 }
 
+bool FgSession::SetMaxGeneratedCap(uint32_t cap) {
+    if (!scheduler_) return false;
+    scheduler_->SetMaxGeneratedCap(cap);
+    return true;
+}
+
 FgSessionResult FgSession::Lose(FgSessionResult r) {
     if (presenter_ && presenter_->State() != FgPresenterState::Detached && presenter_->State() != FgPresenterState::Lost)
         presenter_->OnDeviceLost();
@@ -637,6 +643,14 @@ FgSessionResult FgSession::RunInterval(const FgFramePacket& packet, const FgInge
     return Finish(r);
 }
 
+FgTicks FgSession::TakeArrival() {
+    if (has_next_arrival_) {
+        has_next_arrival_ = false;
+        return next_arrival_;
+    }
+    return Now();
+}
+
 FgSessionResult FgSession::OnPresent(const FgFramePacket& packet) {
     FgSessionResult r = Gate();
     r.frame_token = packet.frame_token;
@@ -666,7 +680,7 @@ FgSessionResult FgSession::OnPresent(const FgFramePacket& packet) {
         last_preset_ = packet.preset;
         last_count_ = packet.generated_count;
 
-        const FgTicks now = Now();
+        const FgTicks arrival = TakeArrival();
         const FgIngestResult ingest = history_->Accept(packet, desc_.executor->CompletedComputeValue());
         r.history_real_only = ingest.real_only;
         r.frame = ingest.status;
@@ -674,7 +688,7 @@ FgSessionResult FgSession::OnPresent(const FgFramePacket& packet) {
         FgGameFrame gf;
         gf.epoch = present_epoch_;
         gf.frame_id = packet.frame_token;
-        gf.arrival = now;
+        gf.arrival = arrival;
         gf.requested_count = packet.generated_count;
         gf.generation_enabled = ingest.status != FgFrameStatus::Refused && ingest.current_bank >= 0;
         gf.reset = (packet.flags & kFgFlagReset) != 0;
@@ -769,7 +783,7 @@ FgSessionResult FgSession::OnGameFrameOnly(uint64_t frame_token, uint32_t adapte
     FgGameFrame gf;
     gf.epoch = present_epoch_;
     gf.frame_id = frame_token;
-    gf.arrival = Now();
+    gf.arrival = TakeArrival();
     gf.requested_count = adapter_real_only == WG_FG_REAL_ONLY_DISABLED ? 0u : last_count_;
     gf.generation_enabled = false;
     gf.reset = adapter_real_only == WG_FG_REAL_ONLY_RESET;

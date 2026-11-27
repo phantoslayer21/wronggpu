@@ -45,5 +45,6 @@
  },
  "tag_lifetimes": [0, 1],
  "min_size": 100,
- "dynamic_supported": false
+ "dynamic_supported": false,
+ "has_mfg_selector": false
 }

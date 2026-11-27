@@ -2079,6 +2079,92 @@ void TestTurboExact(Gpu& gpu, const std::string& dxil, const FgExecWeights& weig
     if (errors >= 0) CHECK(errors == 0);
 }
 
+// RC2 (N-B1): verify RecordGeneratedBatch emits strictly increasing per-index fences for N = 2..5 so frame #1 is
+// released to the presenter as soon as it finishes instead of waiting behind the whole batch.
+void TestPerIndexFences(Gpu& gpu, const std::string& dxil, const FgExecWeights& weights) {
+    g_case = "gpu-per-index-fences";
+    Game game;
+    const DXGI_FORMAT fmt = DXGI_FORMAT_B8G8R8A8_UNORM;
+    CHECK(game.Init(&gpu, fmt, kW, kH) && game.Upload(0, false, true));
+    ExecutorSlots slots;
+    for (uint32_t i = 0; i <= kFgMaxGenerated; ++i) slots.textures[i] = game.Tex(fmt);
+    FgD3d12ExecutorDesc ed;
+    ed.dxil_dir = dxil;
+    ed.weights = &weights;
+    ed.enable_full = false;
+    FgD3d12Executor exec(ed);
+    FgCreateDesc create = CpuCreate(kW, kH);
+    create.device = gpu.device.Get();
+    create.queue = gpu.queue.Get();
+    create.preset = FgPreset::C;
+    create.max_generated = kFgMaxGenerated;
+    CHECK(exec.Configure(create, 3) == FgExecResult::Ok && exec.BindSlotTarget(&slots));
+    FgFramePacket packet = game.Packet();
+    uint64_t tok = 1;
+    // prime frame 1
+    {
+        packet.frame_token = tok++;
+        FgSharedDispatchDesc sh;
+        sh.frame_token = packet.frame_token;
+        sh.preset = FgPreset::C;
+        sh.has_previous = false;
+        sh.generated_count = 1;
+        sh.generates = true;
+        sh.packet = &packet;
+        FgSharedResult sr;
+        CHECK(exec.RecordSharedGameFrame(sh, &sr) == FgExecResult::Ok);
+        FgRealDispatchDesc rd;
+        rd.frame_token = packet.frame_token;
+        rd.slot.slot = kFgMaxGenerated;
+        rd.slot.reserved = true;
+        FgReadyFence rf;
+        CHECK(exec.RecordRealEndpoint(rd, &rf) == FgExecResult::Ok);
+    }
+    for (uint32_t n = 2; n <= kFgMaxGenerated; ++n) {
+        packet.frame_token = tok++;
+        FgSharedDispatchDesc sh;
+        sh.frame_token = packet.frame_token;
+        sh.preset = FgPreset::C;
+        sh.has_previous = true;
+        sh.generated_count = n;
+        sh.generates = true;
+        sh.packet = &packet;
+        FgSharedResult sr;
+        CHECK(exec.RecordSharedGameFrame(sh, &sr) == FgExecResult::Ok);
+        FgIndexDispatchDesc gens[kFgMaxGenerated];
+        FgReadyFence ready[kFgMaxGenerated];
+        for (uint32_t k = 0; k < n; ++k) {
+            gens[k].frame_token = packet.frame_token;
+            gens[k].index = k + 1;
+            gens[k].generated_count = n;
+            gens[k].is_last_index = (k + 1 == n);
+            gens[k].preset = FgPreset::C;
+            gens[k].t = FgIndexTime(k + 1, n);
+            gens[k].slot.slot = k;
+            gens[k].slot.reserved = true;
+        }
+        uint32_t done = 0;
+        CHECK(exec.RecordGeneratedBatch(gens, n, ready, &done) == FgExecResult::Ok && done == n);
+        bool strictly_increasing = true;
+        for (uint32_t k = 1; k < n; ++k)
+            strictly_increasing = strictly_increasing && ready[k].fence == ready[0].fence &&
+                                  ready[k].value > ready[k - 1].value;
+        CHECK(strictly_increasing);
+        std::printf("  per-index fences N=%u: first=%llu last=%llu (strictly increasing=%d)\n", n,
+                    static_cast<unsigned long long>(ready[0].value),
+                    static_cast<unsigned long long>(ready[n - 1].value), strictly_increasing ? 1 : 0);
+        FgRealDispatchDesc rd;
+        rd.frame_token = packet.frame_token;
+        rd.slot.slot = kFgMaxGenerated;
+        rd.slot.reserved = true;
+        FgReadyFence rf;
+        CHECK(exec.RecordRealEndpoint(rd, &rf) == FgExecResult::Ok);
+    }
+    CHECK(exec.WaitIdle(15000));
+    const int64_t errs = gpu.DebugErrors();
+    if (errs >= 0) CHECK(errs == 0);
+}
+
 struct BenchOptions {
     uint32_t gen = 1, warmup = 8, timed = 30;
     std::string presets = "AC";
@@ -2342,6 +2428,8 @@ int main(int argc, char** argv) {
                 TestTurboExact(g, dxil, weights);
                 TestTurboExact(g, dxil, weights, true);
             }
+            if (only.empty() || only.find("per-index") != std::string::npos)
+                TestPerIndexFences(g, dxil, weights);
             if (only.empty()) TestBrokenKernels(g, dxil, weights, scratch);
         }
     }

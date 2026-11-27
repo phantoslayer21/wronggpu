@@ -189,6 +189,16 @@ struct FgPresentStats {
     FgTicks max_slip = 0;                    // largest (actual - target) of a displayed image
     std::uint64_t display_skipped = 0;       // queued presents the display path itself skipped (a newer one was ready)
     std::uint64_t display_collisions = 0;    // displayed less than half a refresh after the previous displayed image
+    // Non-overlapping per-stage funnel counters (A4): requested -> scheduled -> reserved -> queued -> submitted ->
+    // displayed / skipped. dropped_pre_queue + dropped_post_queue == dropped_late + dropped_pressure with no overlap.
+    std::uint64_t generated_requested = 0;         // sum of plan.requested_count across accepted intervals
+    std::uint64_t generated_scheduled = 0;         // sum of plan.generated_count across accepted intervals
+    std::uint64_t generated_reserved = 0;          // generated slots reserved in BeginInterval
+    std::uint64_t generated_submitted = 0;         // generated images handed to the OS present call
+    std::uint64_t generated_dropped_pre_queue = 0; // dropped before reaching the outbox (reserve / submit / pump)
+    std::uint64_t generated_dropped_post_queue = 0;// dropped after reaching the outbox (presenter worker)
+    std::uint64_t real_submitted = 0;              // real images handed to the OS present call
+    bool display_time_measured = false;            // true: compositor/display feedback; false: submit/vblank estimate
 };
 
 // The presentation boundary. Calls come from the game's present thread; a back end's own worker (or, in the fake,

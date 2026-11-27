@@ -537,6 +537,7 @@ void TestBindingData() {
     CHECK(!b.imports.fn_options.empty() && !b.imports.fn_state.empty() && b.imports.fn_options != b.imports.fn_state);
     CHECK(b.core.fn_names.size() == 2 && b.core.fn_names[0] == b.imports.fn_options && b.core.fn_names[1] == b.imports.fn_state);
     CHECK(b.imports.abi_max_generated == 5 && b.core.ui_max_generated == 5 && b.core.presets_mask == WG_FG_PRESETS_ALL);
+    CHECK(b.core.has_mfg_selector);
     // the FG inputs the game can tag: depth 0, motion vectors 1, HUD-less colour 2; the backbuffer comes from the chain
     CHECK(b.core.native_type[WG_FG_ROLE_DEPTH] == 0 && b.core.native_type[WG_FG_ROLE_MOTION] == 1 &&
           b.core.native_type[WG_FG_ROLE_HUDLESS] == 2);
@@ -578,6 +579,7 @@ void TestGenericBinding() {
     const FgTitleBinding g = FgSl2GenericBinding();
     const FgTitleBinding cp = FgCp2077Binding();
     CHECK(g.valid && g.imports.qualified && g.core.qualified && g.id == "sl2-generic" && g.exe_leaf == "*");
+    CHECK(!g.core.has_mfg_selector);
     CHECK(g.imports.version_major == 2 && g.imports.version_minor == 4 && g.imports.version_minor_max == 99);
     CHECK(g.core.version_major == 2 && g.core.version_minor == 4 && g.core.version_minor_max == 99);
     CHECK(cp.imports.version_minor_max == 0 && cp.core.version_minor_max == 0);  // the title binding: exactly 2.14
@@ -1162,7 +1164,8 @@ void TestCp2077Session(const GameModule& game) {
     FakeSwapChain* inner = factory.made[0];
     CHECK(owners.owner_of(w->Id()) == WG_FG_OWNER_SWAPCHAIN_WRAPPER);
     ps = t.present_stats();
-    CHECK(ps.chains_created == 1 && ps.chains_attached == 1);
+    CHECK(ps.chains_created == 1 && ps.chains_attached == 1 && ps.proxy_refusals == 0);
+    CHECK(w->Stats().worker_reentries == 0);
 
     // state before any options; then the options checks; then accepted
     const auto set_options = reinterpret_cast<FgOptionsFn>(fn_opt);

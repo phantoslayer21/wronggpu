@@ -70,11 +70,16 @@ bool FgParseSetting(const std::string& key, const std::string& value, FgSettings
         return true;
     }
     if (key == kFgKeyMultiplier) {
+        if (value == "auto") {
+            s->follow_game_multiplier = true;
+            return true;
+        }
         if (!Lookup(kMultipliers, value, &v)) {
-            Say(why, "fg_multiplier takes 2, 3, 4, 5 or 6");
+            Say(why, "fg_multiplier takes auto, 2, 3, 4, 5 or 6");
             return false;
         }
         s->multiplier = v;
+        s->follow_game_multiplier = false;
         return true;
     }
     if (key == kFgKeyPresenter) {
@@ -101,6 +106,7 @@ FgSettings FgSettingsFromKeyValues(const FgKeyValues& kv, std::vector<FgSettings
             if (!FgParseSetting(p.first, p.second, &s, &why) && issues) issues->push_back({p.first, p.second, why});
         }
     }
+    if (!seen[2]) s.follow_game_multiplier = true;
     return s;
 }
 

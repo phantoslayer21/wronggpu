@@ -60,8 +60,10 @@ FgWinResult FgWinCompPresenter::Create(const FgCompPresenterDesc& d, std::unique
     FgEngineConfig cfg;
     cfg.probe = FgPresenterProbe{FgPresenterBackend::WindowsComposition, true, true, d.max_generated, FgStatus::Ok};
     cfg.slot_count = slots;
+    cfg.max_pending_intervals = d.max_pending_intervals >= 1 ? d.max_pending_intervals : 2u;
     cfg.refresh_period = d.refresh_period;
     std::unique_ptr<FgWinCompPresenter> p(new FgWinCompPresenter(d, cfg));
+    p->engine_.SetDisplayTimeMeasured(true);  // A4: compositor / independent-flip statistics report display time
     const FgWinResult r = p->Initialize();
     if (!r.Ok()) return r;
     *out = std::move(p);
@@ -213,6 +215,16 @@ FgWinCompPresenter::~FgWinCompPresenter() {
     if (lost_event_) CloseHandle(lost_event_);
     if (fence_event_) CloseHandle(fence_event_);
     if (surface_handle_) CloseHandle(surface_handle_);
+}
+
+void FgWinCompPresenter::SetRealRetireCallback(FgRealRetireFn fn, void* ctx) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    engine_.SetRealRetireCallback(fn, ctx);
+}
+
+void FgWinCompPresenter::SetTraceCallback(FgPresentTraceFn fn, void* ctx) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    engine_.SetTraceCallback(fn, ctx);
 }
 
 std::uint32_t FgWinCompPresenter::RegisterFence(ID3D12Fence* fence, FgWinResult* why) {
@@ -582,18 +594,25 @@ void FgWinCompPresenter::DrainStatisticsLocked() {
 }
 
 void FgWinCompPresenter::ReleaseSlotsLocked() {
+    const FgTicks now = FgInterruptNow();
     scratch_slots_.clear();
     engine_.SlotsAwaitingRelease(&scratch_slots_);
     for (const std::uint32_t slot : scratch_slots_) {
         if (slot >= buffers_.size()) continue;
-        if (engine_.SlotState(slot) == FgEngineSlotState::Queued && last_displayed_platform_ != 0) {
-            // a present older than one already displayed whose buffer is free again was consumed without a statistic
-            // reaching us (statistics are a bounded queue): count it as skipped so its slot is not lost
+        if (engine_.SlotState(slot) == FgEngineSlotState::Queued) {
             const std::uint64_t eid = engine_.SlotPresentId(slot);
             for (std::size_t i = 0; i < submitted_.size(); ++i) {
-                if (submitted_[i].engine_id != eid || submitted_[i].platform_id >= last_displayed_platform_) continue;
+                if (submitted_[i].engine_id != eid) continue;
+                const bool older_available =
+                    last_displayed_platform_ != 0 && submitted_[i].platform_id < last_displayed_platform_;
+                // A2 occlusion watchdog (windowed only; never triggers in headless bind_window==false validation):
+                // if DWM stops emitting statistics while occluded/minimized, retire stale queued presents after 250 ms
+                // so the game's frame-latency credit contract never deadlocks.
+                const bool occluded_timeout = desc_.bind_window && submitted_[i].target > 0 &&
+                                              now > submitted_[i].target + 2500000;
                 boolean available = 0;
-                if (SUCCEEDED(buffers_[slot].buffer->IsAvailable(&available)) && available) {
+                if ((older_available && SUCCEEDED(buffers_[slot].buffer->IsAvailable(&available)) && available) ||
+                    occluded_timeout) {
                     submitted_.erase(submitted_.begin() + static_cast<std::ptrdiff_t>(i));
                     engine_.OnPresentSkipped(eid);
                 }
@@ -609,6 +628,7 @@ void FgWinCompPresenter::ReleaseSlotsLocked() {
 
 void FgWinCompPresenter::SubmitOutboxLocked() {
     engine_.TakeOutbox(&deferred_);
+    const FgTicks now = FgInterruptNow();
     std::size_t i = 0;
     for (; i < deferred_.size(); ++i) {
         const FgEnginePresent& p = deferred_[i];
@@ -636,12 +656,23 @@ void FgWinCompPresenter::SubmitOutboxLocked() {
                 vblank = last_vblank_ + info_.grid.period;
                 when = vblank - info_.grid.period / 2;
             }
-        } else if (have_vblank_ && when <= last_vblank_) {
-            if (!p.real) {
-                engine_.OnPresentDropped(p.present_id, FgDropReason::Pressure);
+        } else {
+            // A3: avoid HWFQ VRR target collisions / compositor skips when an earlier generated image is already
+            // superseded by the next queued image or collides with the previous effective target.
+            if (!p.real && i + 1 < deferred_.size() && now >= deferred_[i + 1].target - 2500) {
+                engine_.OnPresentDropped(p.present_id, FgDropReason::Late);
                 continue;
             }
-            when = vblank = last_vblank_ + 1;
+            const FgTicks eff = when > now ? when : now;
+            if (have_vblank_ && eff <= last_vblank_) {
+                if (!p.real) {
+                    engine_.OnPresentDropped(p.present_id, FgDropReason::Pressure);
+                    continue;
+                }
+                when = vblank = last_vblank_ + 1;
+            } else {
+                vblank = eff;
+            }
         }
         // GPU-side order: the presentation device waits for the producer fence before the present (already complete
         // on the CPU; this keeps the order explicit on the GPU timeline too).
@@ -661,7 +692,8 @@ void FgWinCompPresenter::SubmitOutboxLocked() {
             }
             return;
         }
-        submitted_.push_back(Submitted{p.present_id, pid, p.slot});
+        engine_.OnPresentSubmitted(p.present_id, FgInterruptNow());
+        submitted_.push_back(Submitted{p.present_id, pid, p.slot, vblank, p.real});
         if (submitted_.size() > kMaxSubmitted) submitted_.erase(submitted_.begin());
         have_vblank_ = true;
         last_vblank_ = vblank;

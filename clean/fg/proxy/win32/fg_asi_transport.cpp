@@ -74,6 +74,7 @@ static_assert(sizeof(std::atomic<void*>) == sizeof(void*) && std::atomic<void*>:
 std::atomic<void*> g_genuine_options{nullptr}, g_genuine_state{nullptr};  // resolved lazily through get-function
 using FgGetNativeInterfaceFn = WgResultCode (*)(void* proxyInterface, void** baseInterface);
 std::atomic<FgGetNativeInterfaceFn> g_get_native_interface{nullptr};
+std::atomic<HMODULE> g_iface_module{nullptr};
 std::atomic<bool> g_early_dxgi_active{false};
 std::atomic<bool> g_early_hooked_factory{false};
 std::atomic<FgLogFn> g_early_log{nullptr};
@@ -91,8 +92,8 @@ Counters g_ctr;
 
 // the present bridge's view (FgPresentBridgeStats)
 struct BridgeCounters {
-    std::atomic<uint64_t> factories{0}, factory_hooked{0}, chains_created{0}, chains_attached{0}, submits{0},
-        generate{0}, real_only{0}, forwarded{0}, refused{0}, failures{0};
+    std::atomic<uint64_t> factories{0}, factory_hooked{0}, chains_created{0}, chains_attached{0}, proxy_refusals{0},
+        submits{0}, generate{0}, real_only{0}, forwarded{0}, refused{0}, failures{0};
     std::mutex mu;
     WgFgPresentResult last = {};
     WgFgPresentDesc last_desc = {};
@@ -104,6 +105,7 @@ void ResetBridgeCounters() {
     g_bridge_ctr.factory_hooked = 0;
     g_bridge_ctr.chains_created = 0;
     g_bridge_ctr.chains_attached = 0;
+    g_bridge_ctr.proxy_refusals = 0;
     g_bridge_ctr.submits = 0;
     g_bridge_ctr.generate = 0;
     g_bridge_ctr.real_only = 0;
@@ -779,6 +781,16 @@ public:
         FgAsiTransport::Impl* r = g_route.load();
         return r && r->presenter && r->presenter->FrameLatencyWaitableObject(h);
     }
+    bool SetMaximumFrameLatency(UINT latency, HRESULT* hr) override {
+        InFlight in;
+        FgAsiTransport::Impl* r = g_route.load();
+        return r && r->presenter && r->presenter->SetMaximumFrameLatency(latency, hr);
+    }
+    bool GetMaximumFrameLatency(UINT* latency, HRESULT* hr) override {
+        InFlight in;
+        FgAsiTransport::Impl* r = g_route.load();
+        return r && r->presenter && r->presenter->GetMaximumFrameLatency(latency, hr);
+    }
     void Detached() override {
         InFlight in;
         FgAsiTransport::Impl* r = g_route.load();
@@ -871,6 +883,10 @@ bool IsOverlayProbeWindow(HWND hwnd) {
     return n > 0 && std::wcscmp(cls, L"WrongGPUOverlayProbe") == 0;
 }
 
+// Forward declarations for module inspection used by A1 proxy verification below.
+std::string ModuleLeaf(HMODULE m);
+HMODULE ModuleContaining(void* p);
+
 // Each chain created through the hooked factory: claimed for the bridge while FG is taken, else a pass-through.
 class ChainSink final : public IFgSwapChainSink {
 public:
@@ -879,6 +895,34 @@ public:
         g_bridge_ctr.chains_created.fetch_add(1);
         FgAsiTransport::Impl* r = g_route.load();
         if (!r || !chain || IsOverlayProbeWindow(hwnd)) return;
+        // A1: prove the wrapped chain's inner pointer sits BELOW the interposer (never an interposer proxy).
+        IDXGISwapChain4* inner = chain->Inner();
+        void* present_fn = nullptr;
+        if (inner) {
+            void** vt = *reinterpret_cast<void***>(inner);
+            if (vt) present_fn = vt[8];  // IDXGISwapChain::Present
+        }
+        const HMODULE present_mod = ModuleContaining(present_fn);
+        const HMODULE iface_mod = g_iface_module.load();
+        const bool unwrapped_diff = inner && FgAsiTransport::unwrap_native(inner) != inner;
+        const bool in_iface = iface_mod != nullptr && present_mod == iface_mod;
+        const bool is_proxy = unwrapped_diff || in_iface;
+        if (r->log) {
+            const std::string line =
+                "fg swap chain: created chain inner->Present module=" +
+                (present_mod ? ModuleLeaf(present_mod) : std::string("(unknown)")) +
+                ", interposer_proxy=" + (is_proxy ? "yes" : "no") +
+                " (unwrapped_diff=" + (unwrapped_diff ? "1" : "0") +
+                ", in_iface=" + (in_iface ? "1" : "0") + ")";
+            r->log(r->log_ctx, line.c_str());
+        }
+        if (is_proxy) {
+            g_bridge_ctr.proxy_refusals.fetch_add(1);
+            if (r->log)
+                r->log(r->log_ctx,
+                       "fg swap chain: REFUSED FG attach -- inner swap chain is an interposer proxy; chain stays pass-through");
+            return;
+        }
         // Only one live swap chain may drive g_present_bridge / r->presenter at a time:
         // detach any earlier wrapper first so create-before-release recreation leaves the old chain pass-through.
         if (!r->core || r->core->fg_taken()) FgSwapChain::DetachCallback(&g_present_bridge);
@@ -886,6 +930,7 @@ public:
             g_bridge_ctr.chains_attached.fetch_add(1);
             if (r->presenter) {
                 if (chain->PresentQueue()) r->presenter->AttachedPresentQueue(chain->PresentQueue());
+                r->presenter->SetGameWaitable(chain->GameRequestedWaitable());
                 r->presenter->Attached(chain->Inner(), chain->Queue());
             }
         }
@@ -912,6 +957,7 @@ ChainSink g_chain_sink;
 // Unwraps a Streamline factory proxy first so FgSwapChain sits BELOW sl::DXGISwapChain: the interposer then sees
 // Present() exactly once per real game frame (synchronously on the game thread) instead of once per generated frame
 // from the presenter worker, preventing mid-frame tag invalidation (e.g. kBufferTypeScalingInputColor).
+// A1: never fall back silently to wrapping an interposer factory proxy.
 void HookFactory(FgAsiTransport::Impl* r, IUnknown* unknown) {
 #if WG_FG_CP2077_MUTANT == 6
     (void)r;
@@ -919,23 +965,47 @@ void HookFactory(FgAsiTransport::Impl* r, IUnknown* unknown) {
     return;
 #else
     if (FgSwapChainHook::Installed()) return;
+    FgLogFn log = r ? r->log : g_early_log.load();
+    void* log_ctx = r ? r->log_ctx : g_early_log_ctx.load();
+    const bool have_unwrap = g_get_native_interface.load() != nullptr;
     void* unwrapped = FgAsiTransport::unwrap_native(unknown);
     IUnknown* target = unwrapped ? static_cast<IUnknown*>(unwrapped) : unknown;
     const bool was_proxy = target != unknown;
     IDXGIFactory2* f2 = nullptr;
     if (FAILED(target->QueryInterface(__uuidof(IDXGIFactory2), reinterpret_cast<void**>(&f2))) || !f2) {
-        if (!was_proxy || FAILED(unknown->QueryInterface(__uuidof(IDXGIFactory2), reinterpret_cast<void**>(&f2))) || !f2)
-            return;
-        target = unknown;
+        if (was_proxy) {
+            g_bridge_ctr.proxy_refusals.fetch_add(1);
+            if (log)
+                log(log_ctx,
+                    "fg swap chain: REFUSED factory hook -- unwrapped factory lacks IDXGIFactory2 (will not fall back to interposer proxy)");
+        }
+        return;
     }
-    FgLogFn log = r ? r->log : g_early_log.load();
-    void* log_ctx = r ? r->log_ctx : g_early_log_ctx.load();
+    void** vt = *reinterpret_cast<void***>(f2);
+    void* create_fn = vt ? vt[FgSwapChainHook::kCreateForHwndSlot] : nullptr;
+    const HMODULE target_mod = ModuleContaining(create_fn);
+    const HMODULE iface_mod = g_iface_module.load();
+    if (iface_mod != nullptr && target_mod == iface_mod) {
+        g_bridge_ctr.proxy_refusals.fetch_add(1);
+        if (log) {
+            const std::string line = "fg swap chain: REFUSED factory hook -- factory vtable still lives in interposer module " +
+                                     ModuleLeaf(iface_mod) + " (slGetNativeInterface=" + (have_unwrap ? "yes" : "no") + ")";
+            log(log_ctx, line.c_str());
+        }
+        f2->Release();
+        return;
+    }
     if (FgSwapChainHook::Install(f2, &g_chain_sink, log, log_ctx)) {
         if (r) r->hooked_factory.store(true);
         else g_early_hooked_factory.store(true);
         g_bridge_ctr.factory_hooked = 1;
-        if (log && target != unknown)
-            log(log_ctx, "fg swap chain: unwrapped interposer factory proxy; creation hook sits below the interposer");
+        if (log) {
+            const std::string line =
+                std::string("fg swap chain: factory hook placed (slGetNativeInterface=") + (have_unwrap ? "yes" : "no") +
+                ", factory_unwrapped=" + (was_proxy ? "yes" : "no") + ", target_vtable_module=" +
+                (target_mod ? ModuleLeaf(target_mod) : std::string("(unknown)")) + ")";
+            log(log_ctx, line.c_str());
+        }
     }
     f2->Release();
 #endif
@@ -1212,6 +1282,7 @@ FgPresentBridgeStats FgAsiTransport::present_stats() const {
     s.factory_hooked = g_bridge_ctr.factory_hooked.load();
     s.chains_created = g_bridge_ctr.chains_created.load();
     s.chains_attached = g_bridge_ctr.chains_attached.load();
+    s.proxy_refusals = g_bridge_ctr.proxy_refusals.load();
     s.submits = g_bridge_ctr.submits.load();
     s.generate = g_bridge_ctr.generate.load();
     s.real_only = g_bridge_ctr.real_only.load();
@@ -1280,8 +1351,12 @@ uint32_t FgAsiTransport::attach_core(const FgAsiConfig& cfg, HMODULE iface, uint
     if (!early_dxgi_) {
         for (uint32_t i = kFgSlotDxgiFactory; i <= kFgSlotDxgiFactory2; ++i) g_genuine[i].store(nullptr);
     }
-    g_get_native_interface.store(reinterpret_cast<FgGetNativeInterfaceFn>(
-        reinterpret_cast<void*>(GetProcAddress(iface, "slGetNativeInterface"))));
+    g_iface_module.store(iface);
+    auto native_fn = reinterpret_cast<FgGetNativeInterfaceFn>(
+        reinterpret_cast<void*>(GetProcAddress(iface, "slGetNativeInterface")));
+    g_get_native_interface.store(native_fn);
+    log(std::string("fg transport: slGetNativeInterface resolved=") + (native_fn ? "yes" : "no") + " (" +
+        ModuleLeaf(iface) + ")");
     ResetBridgeCounters();
     g_genuine_options.store(nullptr);
     g_genuine_state.store(nullptr);
@@ -1684,6 +1759,7 @@ void FgAsiTransport::restore() {
     early_dxgi_ = false;
     if (g_route.load() == impl_.get() && impl_) g_route.store(nullptr);
     g_get_native_interface.store(nullptr);
+    g_iface_module.store(nullptr);
     for (auto it = patches_.rbegin(); it != patches_.rend(); ++it) {
         void* now = nullptr;
         if (g::safe_get(it->slot, &now) && now == it->handler && WG_FG_WIN32_MUTANT != 7)

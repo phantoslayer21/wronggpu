@@ -39,6 +39,9 @@ struct FgSettings {
     uint32_t preset = 0;           // fg_preset: WgFgPreset (A = 0, B = 1, C = 2)
     uint32_t multiplier = 2;       // fg_multiplier: 2..6
     FgPresenterChoice presenter = FgPresenterChoice::Auto;  // fg_presenter
+    // true when fg_multiplier was omitted from settings.ini (M1/N-B7: unknown titles honour a valid game count by
+    // default until the player picks a manual multiplier). Default false preserves direct C++ struct callers / tests.
+    bool follow_game_multiplier = false;
 };
 
 struct FgSettingsIssue {

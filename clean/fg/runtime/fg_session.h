@@ -321,9 +321,19 @@ public:
     const FgHistory* History() const { return history_.get(); }
     const FgTargetScheduler* Scheduler() const { return scheduler_.get(); }
     IFgPresenter* Presenter() const { return presenter_.get(); }
+    // Sets the arrival timestamp for the next OnPresent / OnGameFrameOnly call (A3: sampled before any host wait so
+    // host throttling never perturbs the scheduler's cadence estimate). Consumed once.
+    void SetNextArrival(FgTicks arrival) {
+        has_next_arrival_ = true;
+        next_arrival_ = arrival;
+    }
+    FgRealOnlyReason LastReductionReason() const {
+        return scheduler_ ? scheduler_->LastReductionReason() : FgRealOnlyReason::None;
+    }
     // The scheduler's first-image budget while the session runs (FgTargetScheduler::SetFirstImageBudget), kept for a
     // scheduler made again after a resize. false: no session.
     bool SetFirstImageBudget(FgTicks budget);
+    bool SetMaxGeneratedCap(uint32_t cap);
     uint64_t PresentEpoch() const { return present_epoch_; }
     bool MenuLatchPending() const { return menu_latch_; }
     const FgCreateDesc& CreateDesc() const { return desc_.create; }
@@ -337,6 +347,7 @@ private:
     FgSessionResult Lose(FgSessionResult r);
     void Log(const std::string& line);
     FgTicks Now() const;
+    FgTicks TakeArrival();
     FgSessionResult PresentRealOnlyPlan(const FgIntervalPlan& plan, FgSessionResult r,
                                         const FgTextureRef* game_colour = nullptr);
     FgSessionResult RunInterval(const FgFramePacket& packet, const FgIngestResult& ingest, const FgIntervalPlan& plan,
@@ -360,6 +371,8 @@ private:
     std::string last_log_;
     FgSessionResult last_;
     FgSessionCounters counters_;
+    bool has_next_arrival_ = false;
+    FgTicks next_arrival_ = 0;
 };
 
 // ---- transport glue ----------------------------------------------------------------------------------------------

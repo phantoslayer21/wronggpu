@@ -46,6 +46,7 @@ struct BindingData {
     uint32_t tag_lifetime_mask;
     uint32_t min_size;
     uint32_t dynamic_supported;
+    uint32_t has_mfg_selector;
     uint32_t qualified;
 };
 
@@ -71,7 +72,7 @@ struct BindingData {
             {WG_FG_TB_##P##_DECL_HUDLESS, WG_FG_TB_##P##_DECL_UI_ALPHA, WG_FG_TB_##P##_DECL_DISTORTION,                \
              WG_FG_TB_##P##_DECL_NO_WARP},                                                                             \
             WG_FG_TB_##P##_TAG_LIFETIME_MASK, WG_FG_TB_##P##_MIN_SIZE, WG_FG_TB_##P##_DYNAMIC_SUPPORTED,               \
-            WG_FG_TB_##P##_QUALIFIED                                                                                   \
+            WG_FG_TB_##P##_HAS_MFG_SELECTOR, WG_FG_TB_##P##_QUALIFIED                                                  \
     }
 
 FgTitleBinding Build(const BindingData& d) {
@@ -101,6 +102,7 @@ FgTitleBinding Build(const BindingData& d) {
     co.fn_names = {im.fn_options, im.fn_state};
     co.ui_max_generated = d.ui_max_generated;
     co.presets_mask = d.presets_mask;
+    co.has_mfg_selector = d.has_mfg_selector != 0;
 
     FgSl214Layout& l = b.layout;
     bool ok = Guid(d.guid_options, &l.options_guid) && Guid(d.guid_state, &l.state_guid) &&

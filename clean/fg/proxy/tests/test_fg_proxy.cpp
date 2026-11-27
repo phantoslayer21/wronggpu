@@ -1336,6 +1336,73 @@ void TestRuntimeContractBridge() {
 }
 #endif
 
+// RC2 (M1 / N-B7): title-binding has_mfg_selector controls whether the game owns the multiplier (Cyberpunk: game
+// controls 2x/3x/4x/6x and fg_multiplier never clamps it); generic titles follow the game by default when fg_multiplier
+// is omitted or set to "auto", and switch to manual when overridden via settings or update_live_settings.
+void TestRc2MultiplierCapability() {
+    {
+        std::vector<FgSettingsIssue> issues;
+        const FgSettings omitted = FgSettingsFromKeyValues({{"fg", "on"}}, &issues);
+        CHECK(issues.empty() && omitted.enabled && omitted.follow_game_multiplier);
+        const FgSettings auto_kv = FgSettingsFromKeyValues({{"fg", "on"}, {"fg_multiplier", "auto"}}, &issues);
+        CHECK(issues.empty() && auto_kv.enabled && auto_kv.follow_game_multiplier && FgSettingsValid(auto_kv));
+        const FgSettings manual = FgSettingsFromKeyValues({{"fg", "on"}, {"fg_multiplier", "4"}}, &issues);
+        CHECK(issues.empty() && !manual.follow_game_multiplier && manual.multiplier == 4);
+    }
+    {
+        // Cyberpunk capability (has_mfg_selector = true): even with settings.multiplier = 2, game's 2x/3x/4x/6x are
+        // honoured unclamped and multiplier_source reports kFgMultSourceGame.
+        FgProxyConfig cfg = QualifiedConfig();
+        cfg.binding.has_mfg_selector = true;
+        cfg.settings.multiplier = 2;
+        cfg.settings.follow_game_multiplier = false;
+        Rig rig(cfg);
+        CHECK(rig.proxy.has_mfg_selector());
+        CHECK(rig.proxy.multiplier_source() == kFgMultSourceGame);
+        CHECK(rig.proxy.advertised_max_generated() == 5);
+        CHECK(rig.proxy.claim_present(kChain, WG_FG_OWNER_NATIVE_ADAPTER) == WG_FG_REASON_NONE);
+        uint64_t tok = 1;
+        for (uint32_t want : {1u, 2u, 3u, 5u, 1u}) {
+            WgFgOptions o = Options(want);
+            CHECK(rig.proxy.set_options(kFeatFg, 1, &o, nullptr) == WG_OK);
+            rig.feed(tok);
+            const WgFgPresentResult r = rig.present(tok++);
+            CHECK(r.status == WG_FG_PRESENT_GENERATE && r.effective_count == want && r.requested_count == want);
+            CHECK(rig.proxy.requested_count() == want);
+        }
+        // update_live_settings changes preset on has_mfg_selector title without clamping the game's multiplier
+        CHECK(rig.proxy.update_live_settings(2, 2));
+        CHECK(rig.proxy.multiplier_source() == kFgMultSourceGame);
+        WgFgOptions o4 = Options(3);
+        CHECK(rig.proxy.set_options(kFeatFg, 1, &o4, nullptr) == WG_OK);
+        rig.feed(tok);
+        const WgFgPresentResult r = rig.present(tok);
+        CHECK(r.status == WG_FG_PRESENT_GENERATE && r.effective_count == 3 && r.effective_preset == 2);
+    }
+    {
+        // Generic title (has_mfg_selector = false) with follow_game_multiplier = true: honours valid game count 3 (4x),
+        // then switches to manual cap when update_live_settings is called.
+        FgProxyConfig cfg = QualifiedConfig();
+        cfg.binding.has_mfg_selector = false;
+        cfg.settings.multiplier = 2;
+        cfg.settings.follow_game_multiplier = true;
+        Rig rig(cfg);
+        CHECK(!rig.proxy.has_mfg_selector());
+        CHECK(rig.proxy.multiplier_source() == kFgMultSourceGame);
+        CHECK(rig.proxy.claim_present(kChain, WG_FG_OWNER_NATIVE_ADAPTER) == WG_FG_REASON_NONE);
+        WgFgOptions o = Options(3);
+        CHECK(rig.proxy.set_options(kFeatFg, 1, &o, nullptr) == WG_OK);
+        rig.feed(1);
+        WgFgPresentResult r = rig.present(1);
+        CHECK(r.status == WG_FG_PRESENT_GENERATE && r.effective_count == 3);
+        CHECK(rig.proxy.update_live_settings(0, 2));
+        CHECK(rig.proxy.multiplier_source() == kFgMultSourceManual);
+        rig.feed(2);
+        r = rig.present(2);
+        CHECK(r.status == WG_FG_PRESENT_GENERATE && r.effective_count == 1);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -1352,6 +1419,7 @@ int main() {
     TestAssemblyFailures();
     TestEntries();
     TestLiveSettings();
+    TestRc2MultiplierCapability();
 #if defined(WG_FG_HAVE_RUNTIME_CONTRACT)
     TestRuntimeContractBridge();
     std::printf("runtime contract bridge: checked\n");

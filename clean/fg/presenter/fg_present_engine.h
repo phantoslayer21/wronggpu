@@ -32,6 +32,15 @@ public:
     virtual std::uint64_t FenceCompleted(std::uint32_t fence) const = 0;
 };
 
+// Called exactly once per accepted real frame when it retires from the presenter (displayed, skipped, cancelled by
+// quiesce/detach/device-loss, or dropped by epoch — never on a CancelSuffix re-present). Must not re-enter the engine.
+using FgRealRetireFn = void (*)(void* ctx, std::uint64_t frame_id, std::uint64_t interval_id, bool displayed);
+
+// Lightweight per-image trace event (A3). event_kind: 0=queued(fence_done), 1=submitted, 2=displayed, 3=dropped_pre,
+// 4=dropped_post, 5=skipped. Must not re-enter the engine.
+using FgPresentTraceFn = void (*)(void* ctx, std::uint64_t interval_id, std::uint32_t index, bool real,
+                                  std::uint8_t event_kind, FgTicks ts, FgTicks target);
+
 struct FgEngineConfig {
     FgPresenterProbe probe;
     std::uint32_t slot_count = kFgMaxGenerated + 4;  // >= N + 3: displayed, one per target, one being released
@@ -77,6 +86,15 @@ public:
     FgPresenterState State() const { return state_; }
     const FgPresentStats& Stats() const { return stats_; }
     std::uint64_t Epoch() const { return epoch_; }
+    void SetRealRetireCallback(FgRealRetireFn fn, void* ctx) {
+        real_retire_fn_ = fn;
+        real_retire_ctx_ = ctx;
+    }
+    void SetTraceCallback(FgPresentTraceFn fn, void* ctx) {
+        trace_fn_ = fn;
+        trace_ctx_ = ctx;
+    }
+    void SetDisplayTimeMeasured(bool measured) { stats_.display_time_measured = measured; }
 
     // IFgPresenter semantics (fg_presenter.h), with the caller's time.
     FgStatus Attach(std::uint64_t epoch);
@@ -112,6 +130,7 @@ public:
     bool OutboxEmpty() const { return outbox_.empty(); }
 
     // Display-path feedback, by engine present id. Unknown or stale ids are ignored (returns false).
+    bool OnPresentSubmitted(std::uint64_t present_id, FgTicks when);  // handed to the OS present call
     bool OnPresentDisplayed(std::uint64_t present_id, FgTicks actual);
     bool OnPresentSkipped(std::uint64_t present_id);    // the display path skipped it (a newer present was ready)
     bool OnPresentDropped(std::uint64_t present_id, FgDropReason reason);  // the back end did not present it
@@ -155,8 +174,11 @@ private:
         FgReadyFence fence;
         std::uint64_t present_id = 0;
         bool represent = false;
+        bool real_credit_active = false;
     };
 
+    void RetireReal(Slot& s, bool displayed);
+    void EmitTrace(const Slot& s, std::uint8_t event_kind, FgTicks ts) const;
     FgStatus CheckAccepting() const;
     FgStatus CheckPlan(const FgIntervalPlan& plan) const;
     void CommitTimeline(const FgIntervalPlan& plan);
@@ -192,6 +214,10 @@ private:
     bool have_display_ = false;
     FgTicks last_display_ = 0;
     FgPresentStats stats_;
+    FgRealRetireFn real_retire_fn_ = nullptr;
+    void* real_retire_ctx_ = nullptr;
+    FgPresentTraceFn trace_fn_ = nullptr;
+    void* trace_ctx_ = nullptr;
 };
 
 // One visible owner per chain, process-wide and thread-safe (the Windows back ends share it).

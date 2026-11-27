@@ -248,6 +248,7 @@ struct FgPresentBridgeStats {
     uint64_t factory_hooked = 0;     // 1: the swap-chain creation hook went on a returned factory
     uint64_t chains_created = 0;     // chains created through the hooked factory
     uint64_t chains_attached = 0;    // ... claimed for the bridge (FG taken at creation)
+    uint64_t proxy_refusals = 0;     // A1: chains/factories refused because they remained an interposer proxy
     uint64_t submits = 0;            // game intervals handed to the core
     uint64_t generate = 0, real_only = 0, forwarded = 0, refused = 0;  // the core's present status, per interval
     uint64_t failures = 0;           // a submit that threw (the interval is still presented)

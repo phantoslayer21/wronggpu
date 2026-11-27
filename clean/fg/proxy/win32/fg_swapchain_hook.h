@@ -96,10 +96,14 @@ public:
     virtual bool GetBuffer(UINT, REFIID, void**, HRESULT*) { return false; }
     virtual bool CurrentBackBufferIndex(UINT*) { return false; }
     virtual bool FrameLatencyWaitableObject(HANDLE*) { return false; }
+    virtual bool SetMaximumFrameLatency(UINT, HRESULT*) { return false; }
+    virtual bool GetMaximumFrameLatency(UINT*, HRESULT*) { return false; }
     // the callback will not be called again (detach, a fault, or the chain's last release)
     virtual void Detached() {}
     // F9: a chain was just attached to this callback (the real chain, its creation queue; no references added)
     virtual void Attached(IDXGISwapChain4*, IUnknown*) {}
+    // Called right before Attached: whether the game itself requested FRAME_LATENCY_WAITABLE_OBJECT at creation.
+    virtual void SetGameWaitable(bool) {}
     // F9: swap-chain flags the callback needs on a chain created while it would attach (for example the frame-latency
     // waitable object of a DXGI flip presenter); the hook ORs them into the creation and every resize. Default none.
     virtual UINT ExtraSwapChainFlags(const DXGI_SWAP_CHAIN_DESC1&) { return 0; }
@@ -118,6 +122,7 @@ struct FgSwapChainStats {
     uint64_t retries = 0;            // presents that continued an open interval
     uint64_t inner_presents = 0;     // presents that reached the real chain (every path)
     uint64_t bypass_presents = 0;    // re-entrant presents sent straight through
+    uint64_t worker_reentries = 0;   // A1 guard: presenter worker threads that ever re-entered wrapped Present (must be 0)
     uint64_t callback_faults = 0;
     uint64_t resizes = 0;
 };
@@ -134,6 +139,11 @@ public:
     // the number detached. A wrapper being destroyed meanwhile is skipped (no reference is taken on one whose count
     // already reached 0). No lock is held while a wrapper detaches.
     static size_t DetachCallback(IFgPresentCallback* callback);
+    // A1 guard: register / unregister presenter worker thread IDs so any accidental re-entry into wrapped Present
+    // from a presenter worker thread is immediately detected, counted (worker_reentries) and logged without deadlock.
+    static void RegisterWorkerThread(DWORD tid);
+    static void UnregisterWorkerThread(DWORD tid);
+    static uint64_t TotalWorkerReentries();
 
     // Claims the chain for `owner` and routes intervals to `callback` (not owned). core null: the registry `owners`
     // (null: the process registry). WG_FG_REASON_NONE, or the refusal (the wrapper then stays pass-through).
@@ -156,6 +166,8 @@ public:
     // ResizeBuffers / ResizeBuffers1 so the chain keeps them.
     void SetExtraFlags(UINT flags) { extra_flags_.store(flags); }
     UINT ExtraFlags() const { return extra_flags_.load(); }
+    void SetGameRequestedWaitable(bool v) { game_requested_waitable_.store(v); }
+    bool GameRequestedWaitable() const { return game_requested_waitable_.load(); }
     ULONG RefCount() const { return static_cast<ULONG>(refs_.load()); }
 
     // ---- IUnknown ----
@@ -232,6 +244,9 @@ private:
     void* log_ctx_;
     std::atomic<long> refs_{1};
     std::atomic<UINT> extra_flags_{0};
+    std::atomic<bool> game_requested_waitable_{false};
+    std::atomic<bool> first_present_logged_{false};
+    std::atomic<uint64_t> worker_reentries_{0};
 
     mutable std::recursive_mutex mu_;
     IFgPresentCallback* callback_ = nullptr;

@@ -171,6 +171,7 @@ FgWinResult FgCreatePresenter(const FgPresenterFactoryDesc& desc, FgCreatedPrese
         cd.refresh_period = desc.display.refresh_period;
         cd.max_generated = desc.max_generated;
         cd.slot_count = desc.slot_count;
+        cd.max_pending_intervals = desc.max_pending_intervals;
         std::unique_ptr<FgWinCompPresenter> p;
         const FgWinResult r = FgWinCompPresenter::Create(cd, &p);
         if (!r.Ok()) return r;  // no other back end is tried
@@ -185,8 +186,11 @@ FgWinResult FgCreatePresenter(const FgPresenterFactoryDesc& desc, FgCreatedPrese
     dd.pacing = out->selection.chosen == FgPresenterChoice::DxgiFlipTearing ? FgDxgiPacing::Tearing
                                                                              : FgDxgiPacing::Vsync;
     dd.refresh_period = desc.display.refresh_period;
+    dd.timer_lead = desc.dxgi_timer_lead;
+    dd.late_tolerance = desc.dxgi_late_tolerance;
     dd.max_generated = desc.max_generated;
     dd.slot_count = desc.slot_count;
+    dd.max_pending_intervals = desc.max_pending_intervals;
     std::unique_ptr<FgDxgiPresenter> p;
     const FgWinResult r = FgDxgiPresenter::Create(dd, &p);
     if (!r.Ok()) return r;  // no other back end is tried

@@ -3,6 +3,8 @@
 // Written for this project.
 #include "fg_swapchain_hook.h"
 
+#include <intrin.h>
+
 #include <map>
 #include <new>
 #include <vector>
@@ -21,6 +23,35 @@ namespace {
 
 thread_local int t_callback_depth = 0;  // > 0: this thread is inside a callback (its presents bypass the hook)
 thread_local int t_creating = 0;        // > 0: inside the original CreateSwapChainForHwnd (no second wrap)
+
+// A1: presenter worker thread registry (lock-free fixed array, never blocks on Present)
+constexpr size_t kMaxWorkerTids = 8;
+std::atomic<DWORD> g_worker_tids[kMaxWorkerTids] = {};
+std::atomic<uint64_t> g_total_worker_reentries{0};
+
+bool IsRegisteredWorkerThread(DWORD tid) {
+    if (tid == 0) return false;
+    for (size_t i = 0; i < kMaxWorkerTids; ++i)
+        if (g_worker_tids[i].load(std::memory_order_acquire) == tid) return true;
+    return false;
+}
+
+std::string ModuleLeafOfAddr(void* addr) {
+    if (!addr) return "(null)";
+    HMODULE m = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(addr), &m) || !m)
+        return "(unknown)";
+    wchar_t buf[MAX_PATH];
+    const DWORD n = GetModuleFileNameW(m, buf, MAX_PATH);
+    if (!n || n >= MAX_PATH) return "(?)";
+    std::wstring w(buf, n);
+    const size_t slash = w.find_last_of(L"\\/");
+    std::wstring leaf = slash == std::wstring::npos ? w : w.substr(slash + 1);
+    std::string out;
+    for (wchar_t c : leaf) out.push_back(c < 128 ? static_cast<char>(c) : '?');
+    return out;
+}
 
 std::mutex& RegistryMutex() {
     static std::mutex* m = new std::mutex();  // intentional immortal singleton: wrappers may release after DLL_PROCESS_DETACH
@@ -174,6 +205,26 @@ size_t FgSwapChain::DetachCallback(IFgPresentCallback* callback) {
     return detached;
 }
 
+void FgSwapChain::RegisterWorkerThread(DWORD tid) {
+    if (tid == 0) return;
+    for (size_t i = 0; i < kMaxWorkerTids; ++i)
+        if (g_worker_tids[i].load(std::memory_order_acquire) == tid) return;
+    for (size_t i = 0; i < kMaxWorkerTids; ++i) {
+        DWORD expected = 0;
+        if (g_worker_tids[i].compare_exchange_strong(expected, tid, std::memory_order_acq_rel)) return;
+    }
+}
+
+void FgSwapChain::UnregisterWorkerThread(DWORD tid) {
+    if (tid == 0) return;
+    for (size_t i = 0; i < kMaxWorkerTids; ++i) {
+        DWORD expected = tid;
+        g_worker_tids[i].compare_exchange_strong(expected, 0, std::memory_order_acq_rel);
+    }
+}
+
+uint64_t FgSwapChain::TotalWorkerReentries() { return g_total_worker_reentries.load(std::memory_order_acquire); }
+
 void FgSwapChain::Log(const std::string& line) const {
     if (log_) log_(log_ctx_, line.c_str());
 }
@@ -238,7 +289,9 @@ uint64_t FgSwapChain::Epoch() const {
 
 FgSwapChainStats FgSwapChain::Stats() const {
     std::lock_guard<std::recursive_mutex> lock(mu_);
-    return stats_;
+    FgSwapChainStats s = stats_;
+    s.worker_reentries = worker_reentries_.load(std::memory_order_acquire);
+    return s;
 }
 
 void FgSwapChain::Fault(const char* where) {
@@ -299,10 +352,27 @@ HRESULT FgSwapChain::RawPresent(bool present1, UINT sync_interval, UINT flags, c
 }
 
 HRESULT FgSwapChain::PresentCommon(bool present1, UINT sync_interval, UINT flags, const DXGI_PRESENT_PARAMETERS* params) {
+    if (IsRegisteredWorkerThread(GetCurrentThreadId())) {
+        // A1 invariant breach: a presenter worker thread should present directly on inner_, never re-enter FgSwapChain.
+        const uint64_t cnt = worker_reentries_.fetch_add(1, std::memory_order_acq_rel) + 1;
+        g_total_worker_reentries.fetch_add(1, std::memory_order_acq_rel);
+        if (cnt <= 3)
+            Log("fg swap chain: ERROR presenter worker thread re-entered wrapped Present (count " +
+                std::to_string(cnt) + "); bypassing directly to inner");
+        return present1 ? inner_->Present1(sync_interval, flags, params) : inner_->Present(sync_interval, flags);
+    }
     if (t_callback_depth > 0) {
         // an internal presenter's present re-entering through the game-facing pointer: the lock is this thread's
         ++stats_.bypass_presents;
         return RawPresent(present1, sync_interval, flags, params);
+    }
+    if (!(flags & DXGI_PRESENT_TEST) && !first_present_logged_.exchange(true)) {
+        void* caller = _ReturnAddress();
+        void** ivt = *reinterpret_cast<void***>(inner_);
+        void* inner_present = ivt ? ivt[8] : nullptr;
+        Log("fg swap chain: first game Present boundary: caller=" + ModuleLeafOfAddr(caller) +
+            ", inner->Present=" + ModuleLeafOfAddr(inner_present) +
+            ", worker_reentries=" + std::to_string(worker_reentries_.load(std::memory_order_acquire)));
     }
     std::lock_guard<std::recursive_mutex> lock(mu_);
     if ((flags & DXGI_PRESENT_TEST) && WG_FG_WIN32_MUTANT != 5) {  // occlusion test: no interval, no history, no callback
@@ -533,7 +603,11 @@ HRESULT STDMETHODCALLTYPE FgSwapChain::GetDevice(REFIID riid, void** device) { r
 HRESULT STDMETHODCALLTYPE FgSwapChain::GetFullscreenState(BOOL* fullscreen, IDXGIOutput** target) {
     return inner_->GetFullscreenState(fullscreen, target);
 }
-HRESULT STDMETHODCALLTYPE FgSwapChain::GetDesc(DXGI_SWAP_CHAIN_DESC* desc) { return inner_->GetDesc(desc); }
+HRESULT STDMETHODCALLTYPE FgSwapChain::GetDesc(DXGI_SWAP_CHAIN_DESC* desc) {
+    const HRESULT hr = inner_->GetDesc(desc);
+    if (SUCCEEDED(hr) && desc && t_callback_depth == 0) desc->Flags &= ~extra_flags_.load();
+    return hr;
+}
 HRESULT STDMETHODCALLTYPE FgSwapChain::ResizeTarget(const DXGI_MODE_DESC* params) { return inner_->ResizeTarget(params); }
 HRESULT STDMETHODCALLTYPE FgSwapChain::GetContainingOutput(IDXGIOutput** output) {
     return inner_->GetContainingOutput(output);
@@ -542,7 +616,11 @@ HRESULT STDMETHODCALLTYPE FgSwapChain::GetFrameStatistics(DXGI_FRAME_STATISTICS*
     return inner_->GetFrameStatistics(stats);
 }
 HRESULT STDMETHODCALLTYPE FgSwapChain::GetLastPresentCount(UINT* count) { return inner_->GetLastPresentCount(count); }
-HRESULT STDMETHODCALLTYPE FgSwapChain::GetDesc1(DXGI_SWAP_CHAIN_DESC1* desc) { return inner_->GetDesc1(desc); }
+HRESULT STDMETHODCALLTYPE FgSwapChain::GetDesc1(DXGI_SWAP_CHAIN_DESC1* desc) {
+    const HRESULT hr = inner_->GetDesc1(desc);
+    if (SUCCEEDED(hr) && desc && t_callback_depth == 0) desc->Flags &= ~extra_flags_.load();
+    return hr;
+}
 HRESULT STDMETHODCALLTYPE FgSwapChain::GetFullscreenDesc(DXGI_SWAP_CHAIN_FULLSCREEN_DESC* desc) {
     return inner_->GetFullscreenDesc(desc);
 }
@@ -563,9 +641,29 @@ HRESULT STDMETHODCALLTYPE FgSwapChain::GetSourceSize(UINT* width, UINT* height) 
     return inner_->GetSourceSize(width, height);
 }
 HRESULT STDMETHODCALLTYPE FgSwapChain::SetMaximumFrameLatency(UINT latency) {
+    if (t_callback_depth > 0) return inner_->SetMaximumFrameLatency(latency);
+    std::lock_guard<std::recursive_mutex> lock(mu_);
+    if (callback_) {
+        IFgPresentCallback* cb = callback_;
+        HRESULT hr = S_OK;
+        bool served = false;
+        DepthScope depth;
+        if (Guard("SetMaximumFrameLatency", [&]() { served = cb->SetMaximumFrameLatency(latency, &hr); }) && served)
+            return hr;
+    }
     return inner_->SetMaximumFrameLatency(latency);
 }
 HRESULT STDMETHODCALLTYPE FgSwapChain::GetMaximumFrameLatency(UINT* latency) {
+    if (t_callback_depth > 0) return inner_->GetMaximumFrameLatency(latency);
+    std::lock_guard<std::recursive_mutex> lock(mu_);
+    if (callback_) {
+        IFgPresentCallback* cb = callback_;
+        HRESULT hr = S_OK;
+        bool served = false;
+        DepthScope depth;
+        if (Guard("GetMaximumFrameLatency", [&]() { served = cb->GetMaximumFrameLatency(latency, &hr); }) && served)
+            return hr;
+    }
     return inner_->GetMaximumFrameLatency(latency);
 }
 HRESULT STDMETHODCALLTYPE FgSwapChain::SetMatrixTransform(const DXGI_MATRIX_3X2_F* matrix) {
@@ -740,6 +838,7 @@ HRESULT STDMETHODCALLTYPE FgSwapChainHook::CreateSwapChain(IDXGIFactory* self, I
     }
     raw->Release();  // FgSwapChain took over sc1; release the caller's original IDXGISwapChain reference
     w->SetExtraFlags(extra);
+    w->SetGameRequestedWaitable(desc && (desc->Flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT) != 0);
     if (present_queue) w->SetPresentQueue(present_queue);
     *out = static_cast<IDXGISwapChain*>(w);
     g_wrapped.fetch_add(1);
@@ -804,6 +903,7 @@ HRESULT STDMETHODCALLTYPE FgSwapChainHook::CreateForHwnd(IDXGIFactory2* self, IU
     if (FAILED(FgSwapChain::Create(*out, device, g_hook_log.load(), g_hook_log_ctx.load(), &w)) || !w)
         return hr;  // not an IDXGISwapChain4: the game keeps the real chain
     w->SetExtraFlags(extra);
+    w->SetGameRequestedWaitable(desc && (desc->Flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT) != 0);
     if (present_queue) w->SetPresentQueue(present_queue);
     *out = static_cast<IDXGISwapChain1*>(w);
     g_wrapped.fetch_add(1);

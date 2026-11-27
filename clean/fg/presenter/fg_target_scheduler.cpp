@@ -217,6 +217,8 @@ FgStatus FgTargetScheduler::BeginEpoch(std::uint64_t epoch) {
     effective_ = 0;
     bad_run_ = 0;
     good_run_ = 0;
+    shortfall_run_ = 0;
+    last_reduction_reason_ = FgRealOnlyReason::None;
     return FgStatus::Ok;
 }
 
@@ -231,6 +233,11 @@ void FgTargetScheduler::SetFirstImageBudget(FgTicks budget) {
     if (budget < 0) budget = 0;
     if (budget > config_.max_lead) budget = config_.max_lead;
     config_.first_image_budget = budget;
+}
+
+void FgTargetScheduler::SetMaxGeneratedCap(std::uint32_t cap) {
+    if (cap > config_.max_generated) cap = config_.max_generated;
+    max_generated_cap_ = cap;
 }
 
 FgTicks FgTargetScheduler::RequiredLead(FgTicks period, std::uint32_t n) const {
@@ -378,15 +385,28 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
         else if (effective == 0) reason = FgRealOnlyReason::OutOfVrrWindow;
     }
     std::uint32_t n = reason == FgRealOnlyReason::None ? effective : 0;
+    last_reduction_reason_ = (n < frame.requested_count && reason == FgRealOnlyReason::None)
+                                 ? FgRealOnlyReason::OutOfVrrWindow
+                                 : reason;
+    if (n > 0 && max_generated_cap_ > 0 && n > max_generated_cap_) {
+        n = max_generated_cap_;
+        last_reduction_reason_ = FgRealOnlyReason::LatencyCap;
+    }
 
     // Playout lead: what this count needs (a real-only interval keeps the lead of the count it would resume with).
+    // N-B2: when lead_need exceeds max_lead, step N down (N-1, ..., 1) instead of dropping straight to 0.
     FgTicks lead_need = RequiredLead(period_estimate, n > 0 ? n : effective);
     if (lead_need > config_.max_lead) {
         if (n > 0) {
-            n = 0;
-            reason = FgRealOnlyReason::LatencyCap;
+            while (n > 0 && RequiredLead(period_estimate, n) > config_.max_lead) --n;
+            last_reduction_reason_ = FgRealOnlyReason::LatencyCap;
+            if (n == 0) reason = FgRealOnlyReason::LatencyCap;
+            lead_need = RequiredLead(period_estimate, n);
+        } else {
+            std::uint32_t eff_cap = effective;
+            while (eff_cap > 0 && RequiredLead(period_estimate, eff_cap) > config_.max_lead) --eff_cap;
+            lead_need = RequiredLead(period_estimate, eff_cap);
         }
-        lead_need = RequiredLead(period_estimate, 0);
     }
 
     bool reanchor = !anchored_ || period_estimate == 0;
@@ -398,15 +418,39 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
             return FgStatus::Overflow;
         if (lead < config_.real_min_lead) {
             reanchor = true;  // behind: the real endpoint cannot be met on this timeline
+            shortfall_run_ = 0;
         } else if (lead > config_.max_lead) {
+            shortfall_run_ = 0;
             if (n > 0) {  // too much queued latency: drain it real-only (the target never moves backwards)
                 n = 0;
                 reason = FgRealOnlyReason::LatencyCap;
+                last_reduction_reason_ = FgRealOnlyReason::LatencyCap;
             }
         } else if (n > 0) {
+            // N-B2: avoid hair-trigger reanchors on normal 2-3 ms jitter. Only reanchor immediately if index 1's
+            // target would already fall inside bridge_and_submit_margin; for moderate lead shortfall beyond slack,
+            // require 2 consecutive intervals so transient jitter slews cleanly via bounded lead correction.
             const FgTicks slot = period_estimate / (static_cast<FgTicks>(n) + 1);
-            if (lead + slot / 2 < lead_need) reanchor = true;  // too little lead for this count
+            const FgTicks gen_span = lead_need - config_.first_image_budget;
+            const FgTicks first_gen_lead = lead - gen_span;
+            const FgTicks min_slack = period_estimate / 4 < 35000 ? period_estimate / 4 : 35000;
+            const FgTicks slack = slot / 2 > min_slack ? slot / 2 : min_slack;
+            if (first_gen_lead < config_.bridge_and_submit_margin) {
+                reanchor = true;
+                shortfall_run_ = 0;
+            } else if (lead + slack < lead_need) {
+                if (++shortfall_run_ >= 2) {
+                    reanchor = true;
+                    shortfall_run_ = 0;
+                }
+            } else {
+                shortfall_run_ = 0;
+            }
+        } else {
+            shortfall_run_ = 0;
         }
+    } else {
+        shortfall_run_ = 0;
     }
 
     FgTicks t_base = 0;

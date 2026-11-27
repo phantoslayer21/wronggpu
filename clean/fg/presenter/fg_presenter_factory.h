@@ -78,6 +78,9 @@ struct FgPresenterFactoryDesc {
     IDXGISwapChain4* swap_chain = nullptr;
     std::uint32_t max_generated = kFgMaxGenerated;
     std::uint32_t slot_count = 0;
+    std::uint32_t max_pending_intervals = 2;
+    FgTicks dxgi_timer_lead = 0;
+    FgTicks dxgi_late_tolerance = 10000;
 };
 
 struct FgCreatedPresenter {

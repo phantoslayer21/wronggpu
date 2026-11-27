@@ -1358,6 +1358,178 @@ void TestGpuDxgi(Gpu& gpu) {
     CHECK(p->Attach(0xBEEF, 3) == FgStatus::WrongState);  // buffers released: CompleteResize would have to retake them
 }
 
+// RC2 (A2 / A4 / N-B3): real-retire callback fires strictly once per real frame (displayed, skipped, cancelled by
+// quiesce, NOT on CancelSuffix re-present); truthful funnel counters never double-count; 20 slots + 3 pending
+// intervals sustain steady 2-interval 6x pipeline with 0 pressure drops.
+void TestRc2EngineContracts() {
+    g_case = "rc2-engine-contracts";
+    {
+        struct RetireLog {
+            int count = 0;
+            int displayed = 0;
+            std::vector<std::uint64_t> frames;
+            static void Fn(void* ctx, std::uint64_t frame_id, std::uint64_t, bool disp) {
+                RetireLog* l = static_cast<RetireLog*>(ctx);
+                ++l->count;
+                if (disp) ++l->displayed;
+                l->frames.push_back(frame_id);
+            }
+        } log;
+        ScriptFences fences;
+        const std::uint32_t f = fences.Create();
+        fences.Set(f, 100);
+        FgPresentEngine e(EngineConfig(12), &fences);
+        e.SetRealRetireCallback(&RetireLog::Fn, &log);
+        CHECK(e.Attach(1) == FgStatus::Ok);
+        const FgTicks t0 = 100 * kMs;
+        // 1) displayed real frame -> retires once (displayed=true)
+        FgIntervalPlan p1 = MakePlan(1, 1, 101, t0, 166667, 0);
+        CHECK(e.PresentRealOnly(p1, FgRealImage{1, 101, {f, 1}}) == FgStatus::Ok);
+        e.Pump(t0);
+        std::vector<FgEnginePresent> out;
+        e.TakeOutbox(&out);
+        CHECK(out.size() == 1 && log.count == 0);
+        CHECK(e.OnPresentDisplayed(out[0].present_id, out[0].target));
+        CHECK(log.count == 1 && log.displayed == 1 && log.frames.back() == 101);
+        CHECK(e.OnSlotReleased(out[0].slot, true));
+        CHECK(log.count == 1);  // releasing the slot does NOT retire again!
+
+        // 2) skipped real frame -> retires once (displayed=false)
+        FgIntervalPlan p2 = MakePlan(1, 2, 102, p1.targets[0].target, 166667, 0);
+        CHECK(e.PresentRealOnly(p2, FgRealImage{1, 102, {f, 2}}) == FgStatus::Ok);
+        e.Pump(t0);
+        out.clear();
+        e.TakeOutbox(&out);
+        CHECK(out.size() == 1);
+        CHECK(e.OnPresentSkipped(out[0].present_id));
+        CHECK(log.count == 2 && log.displayed == 1 && log.frames.back() == 102);
+        CHECK(e.OnSlotReleased(out[0].slot, false));
+        CHECK(log.count == 2);
+
+        // 3) CancelSuffix re-presents the real frame -> must NOT retire until the re-presented real frame displays
+        FgIntervalPlan p3 = MakePlan(1, 3, 103, p2.targets[0].target, 166667, 1);
+        FgIntervalReservation res;
+        CHECK(e.BeginInterval(p3, t0, &res) == FgStatus::Ok);
+        FgIntervalSubmission sub;
+        sub.epoch = 1;
+        sub.interval_id = 3;
+        sub.count = 2;
+        sub.produced[0] = sub.produced[1] = true;
+        sub.ready[0] = FgReadyFence{f, 3};
+        sub.ready[1] = FgReadyFence{f, 4};
+        CHECK(e.SubmitInterval(sub, t0) == FgStatus::Ok);
+        out.clear();
+        e.TakeOutbox(&out);
+        CHECK(out.size() == 2);
+        std::uint64_t cancel_from = 0;
+        CHECK(e.CancelPresentsFrom(out[0].present_id, t0, &cancel_from) == 2);
+        CHECK(log.count == 2);  // NOT retired by CancelSuffix!
+        out.clear();
+        e.TakeOutbox(&out);
+        CHECK(out.size() == 1 && out[0].real);
+        CHECK(e.OnPresentDisplayed(out[0].present_id, out[0].target));
+        CHECK(log.count == 3 && log.displayed == 2 && log.frames.back() == 103);
+
+        // 4) Quiesce cancels a queued real frame -> retires once
+        FgIntervalPlan p4 = MakePlan(1, 4, 104, p3.targets[1].target, 166667, 0);
+        CHECK(e.PresentRealOnly(p4, FgRealImage{1, 104, {f, 5}}) == FgStatus::Ok);
+        e.Pump(t0);
+        out.clear();
+        e.TakeOutbox(&out);
+        CHECK(out.size() == 1);
+        CHECK(e.Quiesce(t0, &cancel_from) == FgStatus::Ok);
+        CHECK(log.count == 4 && log.displayed == 2 && log.frames.back() == 104);
+        CHECK(e.OnSlotReleased(out[0].slot, false));
+        CHECK(log.count == 4);
+    }
+    {
+        // A4: truthful funnel counters never double-count pre-queue vs post-queue drops
+        ScriptFences fences;
+        const std::uint32_t f = fences.Create();
+        FgPresentEngine e(EngineConfig(12), &fences);
+        CHECK(e.Attach(1) == FgStatus::Ok);
+        const FgTicks t0 = 500 * kMs;
+        // interval 1: index 1 past deadline at reservation (pre-queue late), index 2 expires post-queue
+        FgIntervalPlan p = MakePlan(1, 1, 1, t0, 166667, 2);
+        FgIntervalReservation res;
+        CHECK(e.BeginInterval(p, p.targets[0].deadline + 1, &res) == FgStatus::Ok);
+        CHECK(!res.slots[0].reserved && res.slots[1].reserved && res.slots[2].reserved);
+        FgIntervalSubmission sub;
+        sub.epoch = 1;
+        sub.interval_id = 1;
+        sub.count = 3;
+        sub.produced[1] = sub.produced[2] = true;
+        sub.ready[1] = FgReadyFence{f, 2};
+        sub.ready[2] = FgReadyFence{f, 3};
+        CHECK(e.SubmitInterval(sub, p.targets[0].deadline + 1) == FgStatus::Ok);
+        fences.Set(f, 3);
+        e.Pump(p.targets[1].deadline + 1);  // index 2 expires post-queue; real goes out
+        std::vector<FgEnginePresent> out;
+        e.TakeOutbox(&out);
+        CHECK(out.size() == 1 && out[0].real);
+        CHECK(e.OnPresentSubmitted(out[0].present_id, p.targets[2].target));
+        const FgPresentStats st = e.Stats();
+        CHECK(st.generated_requested == 2 && st.generated_scheduled == 2 && st.generated_reserved == 1);
+        CHECK(st.generated_dropped_pre_queue == 1 && st.generated_dropped_post_queue == 1);
+        CHECK(st.dropped_late == 2 && st.dropped_pressure == 0);
+        CHECK(st.dropped_late + st.dropped_pressure == st.generated_dropped_pre_queue + st.generated_dropped_post_queue);
+        CHECK(st.real_submitted == 1 && st.generated_submitted == 0);
+    }
+    {
+        // N-B3: steady 2-interval pipeline at 6x (N=5) with 20 slots and max_pending_intervals=3 -> 0 dropped_pressure
+        ScriptFences fences;
+        const std::uint32_t f = fences.Create();
+        FgEngineConfig ec = EngineConfig(20);
+        ec.max_pending_intervals = 3;
+        FgPresentEngine e(ec, &fences);
+        CHECK(e.Attach(1) == FgStatus::Ok);
+        const FgTicks period = 166667;
+        FgTicks t = 100 * kMs;
+        std::uint64_t fv = 0;
+        std::vector<FgEnginePresent> out;
+        for (std::uint64_t j = 1; j <= 30; ++j) {
+            // In a 2-interval playout pipeline, interval j (t_base = t) arrives at ~t - period (before interval j-1's
+            // generated deadlines, since interval j-1 has t_base = t - period).
+            const FgTicks arrival = t - period;
+            FgIntervalPlan p = MakePlan(1, j, j, t, period, 5);
+            FgIntervalReservation res;
+            CHECK(e.BeginInterval(p, arrival, &res) == FgStatus::Ok);
+            FgIntervalSubmission sub;
+            sub.epoch = 1;
+            sub.interval_id = j;
+            sub.count = res.count;
+            for (std::uint32_t i = 0; i < res.count; ++i) {
+                CHECK(res.slots[i].reserved);
+                sub.produced[i] = true;
+                sub.ready[i] = FgReadyFence{f, ++fv};
+            }
+            CHECK(e.SubmitInterval(sub, arrival) == FgStatus::Ok);
+            // keep 2 intervals pending simultaneously: retire interval j-1 while j remains pending
+            if (j >= 2) {
+                fences.Set(f, (j - 1) * 6);
+                e.Pump(arrival);
+                e.TakeOutbox(&out);
+                for (const FgEnginePresent& pr : out) {
+                    CHECK(e.OnPresentDisplayed(pr.present_id, pr.target));
+                    CHECK(e.OnSlotReleased(pr.slot, true));
+                }
+                out.clear();
+            }
+            t = p.targets[5].target;
+        }
+        fences.Set(f, fv);
+        e.Pump(t - period);
+        e.TakeOutbox(&out);
+        for (const FgEnginePresent& pr : out) {
+            CHECK(e.OnPresentDisplayed(pr.present_id, pr.target));
+            CHECK(e.OnSlotReleased(pr.slot, true));
+        }
+        const FgPresentStats st = e.Stats();
+        CHECK(st.dropped_pressure == 0 && st.dropped_late == 0);
+        CHECK(st.displayed_real == 30 && st.displayed_generated == 150);
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1373,6 +1545,7 @@ int main(int argc, char** argv) {
     TestEngineCancelAndRevoke();
     TestEngineFeedback();
     TestEngineLifecycle();
+    TestRc2EngineContracts();
     TestCadenceMatrix();
     TestSelection();
     TestCreationRefusals();

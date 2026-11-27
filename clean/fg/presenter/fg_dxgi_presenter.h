@@ -50,6 +50,7 @@ struct FgDxgiPresenterDesc {
     FgTicks late_tolerance = 10000;  // a generated image later than this past its target is dropped
     std::uint32_t max_generated = kFgMaxGenerated;  // 1..5
     std::uint32_t slot_count = 0;  // 0: max_generated + 3; below that is refused
+    std::uint32_t max_pending_intervals = 2;  // intervals with generated images pending in the engine
     bool allow_unordered_access = false;  // also create the slots with D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS
 };
 
@@ -84,6 +85,9 @@ public:
     bool HoldsSwapChainBuffers() const;
     FgDxgiPresenterInfo Info() const;
     std::uint32_t FreeSlots() const;
+    DWORD WorkerThreadId() const { return worker_.ThreadId(); }
+    void SetRealRetireCallback(FgRealRetireFn fn, void* ctx);
+    void SetTraceCallback(FgPresentTraceFn fn, void* ctx);
 
     FgPresenterProbe Probe() const override;
     FgStatus Attach(std::uint64_t chain_id, std::uint64_t epoch) override;
@@ -113,7 +117,6 @@ private:
     void StepLocked(FgTicks now);
     bool PlanHeadLocked(FgTicks now, Planned* out);
     bool PresentHead(HANDLE stop);  // false when the worker must stop
-    bool RecordCopyAndPresentLocked(const Planned& p);
     void ReleaseCopiedSlotsLocked();
     void CancelLocalLocked(std::uint64_t engine_from);
     void LoseLocked();
@@ -138,8 +141,9 @@ private:
     std::uint32_t ring_ = 0;
     HANDLE latency_ = nullptr;
     HANDLE copy_event_ = nullptr;
+    HANDLE alloc_event_ = nullptr;
     HANDLE fence_event_ = nullptr;
-    HANDLE drain_event_ = nullptr;  // DrainQueueLocked only (the worker owns copy_event_)
+    HANDLE drain_event_ = nullptr;  // DrainQueueLocked only (the worker owns copy_event_ / alloc_event_)
     FgD3D12FenceTable fences_;
     FgClockMap clock_map_;
     FgHighResTimer timer_;
@@ -148,6 +152,7 @@ private:
     FgPresentEngine engine_;
     std::deque<FgEnginePresent> local_;  // queued on the engine, not yet presented (present-id order)
     bool latency_credit_ = false;        // a frame-latency count taken but not yet used by a Present
+    bool presenting_ = false;            // true while the worker is executing Present outside mutex_
     bool have_vblank_ = false;
     FgTicks last_vblank_ = 0;
     FgTicks grid_updated_at_ = 0;

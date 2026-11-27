@@ -1304,6 +1304,9 @@ public:
     const DXGI_PRESENT_PARAMETERS* last_params = nullptr;
     HRESULT resize_result = S_OK, fullscreen_result = S_OK, colorspace_result = S_OK;
     UINT backbuffer_index = 2;
+    UINT desc_flags = 0;
+    UINT max_latency = 1;
+    uint32_t set_latencies = 0;
     HANDLE waitable = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(4242));
 
     HRESULT Next() {
@@ -1360,7 +1363,13 @@ public:
         if (t) *t = nullptr;
         return S_OK;
     }
-    HRESULT STDMETHODCALLTYPE GetDesc(DXGI_SWAP_CHAIN_DESC*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE GetDesc(DXGI_SWAP_CHAIN_DESC* d) override {
+        if (d) {
+            std::memset(d, 0, sizeof(*d));
+            d->Flags = desc_flags;
+        }
+        return S_OK;
+    }
     HRESULT STDMETHODCALLTYPE ResizeBuffers(UINT, UINT, UINT, DXGI_FORMAT, UINT) override {
         ++resizes;
         return resize_result;
@@ -1372,7 +1381,13 @@ public:
         if (c) *c = presents;
         return S_OK;
     }
-    HRESULT STDMETHODCALLTYPE GetDesc1(DXGI_SWAP_CHAIN_DESC1*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE GetDesc1(DXGI_SWAP_CHAIN_DESC1* d) override {
+        if (d) {
+            std::memset(d, 0, sizeof(*d));
+            d->Flags = desc_flags;
+        }
+        return S_OK;
+    }
     HRESULT STDMETHODCALLTYPE GetFullscreenDesc(DXGI_SWAP_CHAIN_FULLSCREEN_DESC*) override { return S_OK; }
     HRESULT STDMETHODCALLTYPE GetHwnd(HWND* h) override {
         if (h) *h = nullptr;
@@ -1401,8 +1416,15 @@ public:
     HRESULT STDMETHODCALLTYPE GetRotation(DXGI_MODE_ROTATION*) override { return S_OK; }
     HRESULT STDMETHODCALLTYPE SetSourceSize(UINT, UINT) override { return S_OK; }
     HRESULT STDMETHODCALLTYPE GetSourceSize(UINT*, UINT*) override { return S_OK; }
-    HRESULT STDMETHODCALLTYPE SetMaximumFrameLatency(UINT) override { return S_OK; }
-    HRESULT STDMETHODCALLTYPE GetMaximumFrameLatency(UINT*) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE SetMaximumFrameLatency(UINT l) override {
+        ++set_latencies;
+        max_latency = l;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetMaximumFrameLatency(UINT* l) override {
+        if (l) *l = max_latency;
+        return S_OK;
+    }
     HANDLE STDMETHODCALLTYPE GetFrameLatencyWaitableObject() override {
         ++waitables;
         return waitable;
@@ -1439,6 +1461,8 @@ public:
     bool throw_in_begin = false, throw_before_present = false, throw_after_present = false;
     IDXGISwapChain4* reenter = nullptr;  // present through the game-facing pointer from inside the callback
     bool serve_facade = false;
+    UINT cb_latency = 1;
+    uint32_t cb_set_latencies = 0;
     FgPresentCall last_call;
 
     void BeginInterval(const FgPresentCall& call) override {
@@ -1481,6 +1505,19 @@ public:
     bool CurrentBackBufferIndex(UINT* i) override {
         if (!serve_facade) return false;
         *i = 7;
+        return true;
+    }
+    bool SetMaximumFrameLatency(UINT l, HRESULT* hr) override {
+        if (!serve_facade) return false;
+        ++cb_set_latencies;
+        cb_latency = l;
+        *hr = S_OK;
+        return true;
+    }
+    bool GetMaximumFrameLatency(UINT* l, HRESULT* hr) override {
+        if (!serve_facade) return false;
+        if (l) *l = cb_latency;
+        *hr = S_OK;
         return true;
     }
     void Detached() override { ++detached; }
@@ -1818,6 +1855,51 @@ void TestCreationHook() {
     if (sc4) sc4->Release();
 }
 
+// RC2 (A1 / O-A11 / A2): worker-thread re-entry into FgSwapChain::Present is detected and bypassed without deadlock;
+// GetDesc/GetDesc1 hides injected extra flags from the game; SetMaximumFrameLatency routes to the facade callback.
+void TestRc2SwapChainGuards() {
+    FakeSwapChain fake;
+    const UINT injected = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+    fake.desc_flags = injected | DXGI_SWAP_CHAIN_FLAG_DISPLAY_ONLY;
+    FgSwapChain* w = MakeWrapper(&fake);
+    IDXGISwapChain4* game = static_cast<IDXGISwapChain4*>(w);
+    w->SetExtraFlags(injected);
+    FgPresentOwners owners;
+    TestCallback cb;
+    cb.serve_facade = true;
+    CHECK(w->Attach(&cb, nullptr, &owners) == WG_FG_REASON_NONE);
+
+    // O-A11: extra flags hidden from game GetDesc / GetDesc1, kept on Inner()
+    DXGI_SWAP_CHAIN_DESC d0 = {};
+    DXGI_SWAP_CHAIN_DESC1 d1 = {};
+    DXGI_SWAP_CHAIN_DESC1 inner_d1 = {};
+    CHECK(game->GetDesc(&d0) == S_OK && d0.Flags == DXGI_SWAP_CHAIN_FLAG_DISPLAY_ONLY);
+    CHECK(game->GetDesc1(&d1) == S_OK && d1.Flags == DXGI_SWAP_CHAIN_FLAG_DISPLAY_ONLY);
+    CHECK(w->Inner()->GetDesc1(&inner_d1) == S_OK && inner_d1.Flags == fake.desc_flags);
+
+    // A2 / O-A3: SetMaximumFrameLatency intercepted by facade callback (inner untouched)
+    UINT got = 0;
+    CHECK(game->SetMaximumFrameLatency(3) == S_OK);
+    CHECK(cb.cb_set_latencies == 1 && cb.cb_latency == 3 && fake.set_latencies == 0);
+    CHECK(game->GetMaximumFrameLatency(&got) == S_OK && got == 3);
+
+    // A1: worker thread re-entry detected & bypassed cleanly
+    const uint64_t total_before = FgSwapChain::TotalWorkerReentries();
+    const DWORD tid = GetCurrentThreadId();
+    FgSwapChain::RegisterWorkerThread(tid);
+    const uint32_t p_before = fake.presents;
+    const uint32_t b_before = cb.begins;
+    CHECK(game->Present(0, 0) == S_OK);
+    CHECK(cb.begins == b_before);  // callback never re-entered
+    CHECK(fake.presents == p_before + 1);
+    CHECK(w->Stats().worker_reentries == 1);
+    CHECK(FgSwapChain::TotalWorkerReentries() == total_before + 1);
+    FgSwapChain::UnregisterWorkerThread(tid);
+    // Normal game thread present resumes cleanly
+    CHECK(game->Present(0, 0) == S_OK && cb.begins == b_before + 1);
+    CHECK(game->Release() == 0 && fake.destroyed);
+}
+
 // ---- the shipped plugin in its own process --------------------------------------------------------------------------
 
 struct WgFgAsiStatus {
@@ -1958,6 +2040,7 @@ int main(int argc, char** argv) {
     TestPresentPaths();
     TestThrowingCallbacks();
     TestCreationHook();
+    TestRc2SwapChainGuards();
     std::printf("%d checks, %d failed\n", g_checks, g_failed);
     return g_failed == 0 ? 0 : 1;
 }
