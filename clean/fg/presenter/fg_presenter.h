@@ -72,8 +72,9 @@ enum class FgRealOnlyReason : std::uint8_t {
     Pressure,        // no slot / pending-interval credit for generated images
     EpochChanged,    // swap-chain epoch changed (resize, recreation)
     DeviceLost,      // the device is gone
+    Late,            // every generated reservation missed its deadline
 };
-constexpr std::uint32_t kFgRealOnlyReasonCount = 11;
+constexpr std::uint32_t kFgRealOnlyReasonCount = 12;
 
 // Why one generated index did not reach the display.
 enum class FgDropReason : std::uint8_t {

@@ -446,6 +446,8 @@ void TestEngineLateAndLeases() {
     FgIntervalPlan q = MakePlan(1, 2, 2, p.targets[2].target, 166667, 1);
     CHECK(e.BeginInterval(q, q.targets[0].deadline + 1, &res) == FgStatus::Ok);
     CHECK(!res.slots[0].reserved && res.slots[0].refused == FgDropReason::Late && res.slots[1].reserved);
+    CHECK(e.Stats().real_only_intervals[static_cast<std::uint32_t>(FgRealOnlyReason::Pressure)] == 0);
+    CHECK(e.Stats().real_only_intervals[static_cast<std::uint32_t>(FgRealOnlyReason::Late)] == 1);
 }
 
 void TestEngineCancelAndRevoke() {
@@ -521,7 +523,11 @@ void TestEngineFeedback() {
     e.TakeOutbox(&out);
     CHECK(out.size() == 3);
     CHECK(!e.OnPresentDropped(out[2].present_id, FgDropReason::Late));  // a real image is never dropped
+    const std::uint64_t producer_late = e.Stats().generated_late_pre_queue;
+    const std::uint64_t post_queue = e.Stats().generated_dropped_post_queue;
     CHECK(e.OnPresentDropped(out[0].present_id, FgDropReason::Late));
+    CHECK(e.Stats().generated_late_pre_queue == producer_late);
+    CHECK(e.Stats().generated_dropped_post_queue == post_queue + 1);
     CHECK(e.SlotState(out[0].slot) == FgEngineSlotState::Free && e.Stats().dropped_late == 1);
     CHECK(e.OnPresentSkipped(out[1].present_id) && e.Stats().display_skipped == 1);
     CHECK(!e.OnPresentSkipped(out[1].present_id));  // already gone

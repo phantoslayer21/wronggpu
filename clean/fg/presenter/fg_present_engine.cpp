@@ -337,6 +337,7 @@ FgStatus FgPresentEngine::BeginInterval(const FgIntervalPlan& plan, FgTicks now,
     stats_.generated_requested += plan.requested_count;
     stats_.generated_scheduled += n;
     std::uint32_t reserved_generated = 0;
+    bool pressure = false;
     for (std::uint32_t k = 0; k < n; ++k) {
         const FgFrameTarget& t = plan.targets[k];
         FgPresentSlot& ps = out->slots[k];
@@ -355,6 +356,7 @@ FgStatus FgPresentEngine::BeginInterval(const FgIntervalPlan& plan, FgTicks now,
                           ? FindFree()
                           : -1;
         if (g < 0) {
+            pressure = true;
             ps.refused = FgDropReason::Pressure;
             if (trace_fn_) trace_fn_(trace_ctx_, plan.interval_id, plan.real_frame_id, t.index, false, 3u, now, t.target);
             ++stats_.dropped_pressure;
@@ -375,8 +377,10 @@ FgStatus FgPresentEngine::BeginInterval(const FgIntervalPlan& plan, FgTicks now,
         ++reserved_generated;
         ++stats_.generated_reserved;
     }
-    if (reserved_generated == 0)
-        ++stats_.real_only_intervals[static_cast<std::uint32_t>(FgRealOnlyReason::Pressure)];
+    if (reserved_generated == 0) {
+        const FgRealOnlyReason why = pressure ? FgRealOnlyReason::Pressure : FgRealOnlyReason::Late;
+        ++stats_.real_only_intervals[static_cast<std::uint32_t>(why)];
+    }
     open_ = true;
     open_reservation_ = *out;
     CommitTimeline(plan);

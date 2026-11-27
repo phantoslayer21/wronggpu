@@ -34,6 +34,7 @@ const char* FgRealOnlyReasonName(FgRealOnlyReason r) {
         case FgRealOnlyReason::Pressure: return "pressure";
         case FgRealOnlyReason::EpochChanged: return "epoch-changed";
         case FgRealOnlyReason::DeviceLost: return "device-lost";
+        case FgRealOnlyReason::Late: return "late";
     }
     return "unknown";
 }
