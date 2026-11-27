@@ -174,6 +174,7 @@ private:
     std::uint32_t effective_ = 0;
     std::uint32_t bad_run_ = 0;
     std::uint32_t good_run_ = 0;
+    std::uint32_t good_candidate_ = 0;
     std::uint32_t shortfall_run_ = 0;
     std::uint32_t vrr_floor_run_ = 0;
     bool over_lead_last_interval_ = false;

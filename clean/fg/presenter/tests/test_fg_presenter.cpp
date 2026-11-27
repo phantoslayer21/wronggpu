@@ -1413,6 +1413,28 @@ void TestTearingSchedulerFitsPresenterThroughput() {
     CHECK(AllOk(r));
 }
 
+void TestFixedGridCountCandidateRestartsItsStreak() {
+    g_case = "fixed-grid re-entry candidate streak";
+    FgSchedulerConfig sc = DefaultScheduler();
+    sc.adaptive_count = true;
+    sc.fixed_refresh_period = 83333;
+    sc.display.min_interval = sc.fixed_refresh_period;
+    sc.display.max_interval = 1000000;
+    sc.display.margin = 0;
+    sc.display.hysteresis = 0;
+    sc.display.reenter_intervals = 3;
+    sc.estimator.window = 1;
+    sc.estimator.min_samples = 1;
+    sc.estimator.outlier_percent = 200;
+    Rig r(sc, DefaultFake());
+    FgTicks t = kSecond;
+    for (const FgTicks delta : {166666, 166666, 166666, 333332, 333332, 499998}) {
+        t += delta;
+        r.Frame(t, 3);
+    }
+    CHECK(r.scheduler.EffectiveCount() == 1);
+}
+
 void TestRc2SchedulerPacing() {
     g_case = "rc2 scheduler pacing";
     for (const bool adaptive : {true, false}) {
@@ -1693,6 +1715,7 @@ int main() {
     TestTearingAtFiveImagesPerInterval();
     TestTearingPhysicalGapAfterSlowCall();
     TestTearingSchedulerFitsPresenterThroughput();
+    TestFixedGridCountCandidateRestartsItsStreak();
     std::printf("test_fg_presenter: %d checks, %d failure(s)\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

@@ -217,6 +217,7 @@ FgStatus FgTargetScheduler::BeginEpoch(std::uint64_t epoch) {
     effective_ = 0;
     bad_run_ = 0;
     good_run_ = 0;
+    good_candidate_ = 0;
     shortfall_run_ = 0;
     vrr_floor_run_ = 0;
     over_lead_last_interval_ = false;
@@ -320,13 +321,19 @@ std::uint32_t FgTargetScheduler::UpdateCount(std::uint32_t requested, FgTicks pe
             while (up < requested && !Fits(up, period, w.hysteresis)) ++up;
         }
         if (Fits(up, period, w.hysteresis)) {
+            if (good_candidate_ != up) {
+                good_candidate_ = up;
+                good_run_ = 0;
+            }
             if (++good_run_ >= w.reenter_intervals) {
                 effective_ = up;
                 good_run_ = 0;
+                good_candidate_ = 0;
                 bad_run_ = 0;
             }
         } else {
             good_run_ = 0;
+            good_candidate_ = 0;
         }
     }
     return effective_;
