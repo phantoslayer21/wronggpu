@@ -259,10 +259,13 @@ struct FgAsiSessionHost::Impl {
     std::atomic<uint32_t> st_phase{kFgPhaseWaiting}, st_reason{0}, st_real_only{0}, st_preset{0}, st_count{0},
         st_presenter{0};
     std::atomic<uint64_t> st_presents{0};
-    std::atomic<uint32_t> st_mult_source{kFgMultSourceManual}, st_req_count{0}, st_sched_count{0},
+    std::atomic<uint32_t> st_mult_source{kFgMultSourceManual}, st_game_req_count{0}, st_req_count{0}, st_sched_count{0},
         st_cap_reason{kFgCapNone}, st_refresh_hz{0}, st_sustained_mult_x100{100}, st_latency_limit{1},
         st_in_flight_real{0};
     std::atomic<bool> st_has_mfg_selector{false};
+    std::atomic<uint32_t> st_schedule_reason{0};
+    std::atomic<float> st_displayed_fps{0.0f}, st_base_fps{0.0f};
+    uint64_t display_sample_at = 0, display_sample_frames = 0, display_sample_real = 0;
     bool overlay_choice_logged = false;
     HANDLE wait_timer = nullptr;      // back-pressure waits (high resolution)
     uint64_t back_pressure_waits = 0; // game frames that waited for a presenter slot
@@ -1003,6 +1006,12 @@ struct FgAsiSessionHost::Impl {
         quiet_windows = 0;
         cap_miss_windows = 0;
         lateness_count_cap = 0;
+        display_sample_at = 0;
+        st_displayed_fps.store(0.0f);
+        st_base_fps.store(0.0f);
+        st_sched_count.store(0);
+        st_cap_reason.store(kFgCapNone);
+        st_schedule_reason.store(0);
         ++stats.sessions_destroyed;
     }
 
@@ -1345,6 +1354,7 @@ FgAsiLiveStatus FgAsiSessionHost::LiveStatus() const {
     s.host_overlay = m.host_overlay.load();
     s.multiplier_source = m.st_mult_source.load();
     s.game_has_mfg_selector = m.st_has_mfg_selector.load();
+    s.game_requested_count = m.st_game_req_count.load();
     s.requested_count = m.st_req_count.load();
     s.scheduled_count = m.st_sched_count.load();
     s.count_cap_reason = m.st_cap_reason.load();
@@ -1352,6 +1362,9 @@ FgAsiLiveStatus FgAsiSessionHost::LiveStatus() const {
     s.sustained_mult_x100 = m.st_sustained_mult_x100.load();
     s.latency_limit = m.st_latency_limit.load();
     s.in_flight_real = m.st_in_flight_real.load();
+    s.schedule_reason = m.st_schedule_reason.load();
+    s.displayed_fps = m.st_displayed_fps.load();
+    s.base_fps = m.st_base_fps.load();
     return s;
 }
 
@@ -1568,9 +1581,27 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
         wgfg::FgSessionResult sr;
         const int32_t rc = wgfg::FgSessionPresent(core, m.session.get(), desc, out, &sr);
         const wgfg::FgTicks t_after_record = wgfg::FgInterruptNow();
+        const uint64_t now = GetTickCount64();
+        if (const auto* presenter = m.session ? m.session->Presenter() : nullptr;
+            presenter && now - m.display_sample_at >= 250) {
+            const auto shown = presenter->Stats();
+            const uint64_t frames = shown.displayed_real + shown.displayed_generated;
+            const auto rate = [&](uint64_t count, uint64_t last) {
+                return m.display_sample_at && count >= last
+                           ? static_cast<float>(1000.0 * (count - last) / (now - m.display_sample_at))
+                           : 0.0f;
+            };
+            m.st_displayed_fps.store(rate(frames, m.display_sample_frames));
+            m.st_base_fps.store(rate(shown.displayed_real, m.display_sample_real));
+            m.display_sample_frames = frames;
+            m.display_sample_real = shown.displayed_real;
+            m.display_sample_at = now;
+        }
+        m.st_schedule_reason.store(static_cast<uint32_t>(sr.plan_real_only));
         m.st_presents.fetch_add(1);
         m.st_has_mfg_selector.store(core->has_mfg_selector());
         m.st_mult_source.store(core->multiplier_source());
+        m.st_game_req_count.store(core->requested_count());
         if (out) {
             m.st_req_count.store(out->requested_count);
             if (out->status == WG_FG_PRESENT_GENERATE) {
@@ -1654,6 +1685,8 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
         return rc;
     } catch (...) {
         m.handled = false;
+        m.st_sched_count.store(0);
+        m.st_phase.store(kFgPhaseRealOnly);
         return -1;
     }
 }

@@ -566,7 +566,7 @@ extern View v;
 bool RrReadyForGame(const wstring& dir, const wstring& exe, wstring* why = nullptr);
 wstring RrBackgroundWords(const wstring& exe);  // 0.6.0 polish: the game page's RR row while it is prepared again in the background
 static_assert(ID_G_OPTI_END <= ID_S_MODELFILE, "the OptiScaler rows' ids must not reach the Settings page's ids");
-static_assert(ID_G_OPTI_END <= ID_G_FGON && ID_G_FGPRESENTER < ID_G_FGMULT0 && ID_G_FGMULT0 + 5 <= ID_G_FGPRESET0 && ID_G_FGPRESET0 + 3 <= ID_S_MODELFILE,
+static_assert(ID_G_OPTI_END <= ID_G_FGON && ID_G_FGPRESENTER < ID_G_FGMULT0 && ID_G_FGMULT0 + 6 <= ID_G_FGPRESET0 && ID_G_FGPRESET0 + 3 <= ID_S_MODELFILE,
               "frame generation's ids must stay between the OptiScaler rows' ids and the Settings page's ids");
 static_assert(ID_S_LTEXT < ID_S_FGMORE && ID_S_FGTEXT < ID_S_REMOVEDATA, "the frame generation data row's ids must stay between Model L's and Remove data");
 static_assert(M_FILTER0 + 5 <= M_FGPRESENTER0 && M_FGPRESENTER0 + 4 <= M_OPTI0, "the presenters' menu commands must stay between the output filter's and OptiScaler's");

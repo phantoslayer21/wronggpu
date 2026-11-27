@@ -87,6 +87,7 @@ struct FgProxyConfig {
     FgBinding binding;
     FgSettings settings;               // the player's per-game settings (install switch, preset, multiplier, presenter)
     bool modes_qualified = kFgModesQualified;
+    bool panel_multipliers = false;      // accept ABI-range requests and apply the title multiplier policy
 };
 
 using FgLogFn = void (*)(void* ctx, const char* line);
@@ -146,8 +147,10 @@ public:
     // thread (a menu drawn inside a present): the values are taken on the game's thread at its next options call or
     // present, under the core's lock, and the session keeps running (N and the preset may change per game frame). The
     // game's own preset request still wins over the player's preset, as at start. false (nothing changes): a preset
-    // outside the binding's presets or a multiplier outside 2..6.
+    // outside the binding's presets or a multiplier other than Auto or 2..6.
     bool update_live_settings(uint32_t preset, uint32_t multiplier);
+    void enable_generation(bool enabled) { menu_enabled_.store(enabled); }
+    // Zero means no game request is available yet. One generated image means 2x output.
 
     // The route decision: WG_FG_REASON_NONE = FG is taken; otherwise the first failing fact.
     uint32_t route_reason() const;
@@ -163,6 +166,8 @@ public:
     bool has_mfg_selector() const { return cfg_.binding.has_mfg_selector; }
     uint32_t multiplier_source() const;  // FgMultiplierSource (game | manual)
     uint32_t requested_count() const;    // last valid count requested by the game (0 if none)
+    // The codec validates the request's ABI range. The core clamps it to the qualified route.
+    uint32_t options_max_generated() const;
 
     // ---- interposer calls (game -> transport -> here). Feature-scoped calls go to the next link unless the feature
     // is FG and FG is taken; the result is then the core's (0, or a game-interface result code). ----
@@ -207,7 +212,10 @@ private:
 
     uint32_t route_reason_locked() const;
     uint32_t effective_max_locked() const;
+    uint32_t manual_count_locked() const;
     void apply_live_locked();
+    uint32_t count_for_options_locked(uint32_t game_count) const;
+    bool use_game_count(uint32_t multiplier) const;
     void note_route_locked(bool defer_unprobed_adapter = false);
     void note_frame_locked(uint32_t reason, uint32_t real_only);
     void log_locked(const std::string& line) const;
@@ -251,7 +259,6 @@ private:
     uint32_t session_vp_ = 0;
     bool has_vp_ = false;
     uint32_t effective_preset_ = 0, effective_count_ = 0;
-    uint32_t multiplier_source_ = kFgMultSourceManual;
     bool latched_ = false;            // a present latched chain, window and epochs
     uint64_t swapchain_id_ = 0, window_id_ = 0, queue_epoch_ = 0, swapchain_epoch_ = 0;
     bool any_present_ = false;
@@ -274,6 +281,8 @@ private:
     mutable std::vector<std::string> log_lines_;
 
     // live settings (update_live_settings): sequence number << 32 | preset << 8 | multiplier, applied once per change
+    std::atomic<bool> menu_enabled_{true};
+    uint32_t submitted_preset_ = WG_FG_PRESET_NOT_SET;
     std::atomic<uint64_t> live_{0};
     uint32_t live_applied_ = 0;
 };

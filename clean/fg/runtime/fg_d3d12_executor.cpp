@@ -2627,7 +2627,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         // Capture linearizes an sRGB SRV, and its float16 conversion quiets signaling NaNs. Only the linear
         // UNORM formats round-trip every input code through capture and pack.
         const DXGI_FORMAT format = linear_copy_format(out.Format);
-        if (linear_copy_format(src.view) != format ||
+        if (src.view != format ||
             (format != DXGI_FORMAT_R8G8B8A8_UNORM && format != DXGI_FORMAT_B8G8R8A8_UNORM &&
              format != DXGI_FORMAT_R10G10B10A2_UNORM))
             return nullptr;

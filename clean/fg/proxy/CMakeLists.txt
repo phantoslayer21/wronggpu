@@ -218,11 +218,26 @@ if(WIN32)
   wg_fg_flags(fg_cp2077_asi_host)
   file(WRITE "${WG_FG_ASI_CASES}/cp2077-off/wronggpu-setup/settings.ini" "fg=off\n")
   file(WRITE "${WG_FG_ASI_CASES}/cp2077-on/wronggpu-setup/settings.ini" "fg=on\nfg_multiplier=4\n")
-  foreach(leg off on)
+  foreach(leg claim conflict truncated nonplugin)
+    file(WRITE "${WG_FG_ASI_CASES}/cp2077-${leg}/wronggpu-setup/settings.ini" "fg=on\n")
+  endforeach()
+  foreach(leg off on claim conflict truncated)
     add_test(NAME fg_cp2077_asi_${leg} COMMAND fg_cp2077_asi_host $<TARGET_FILE:wg_fg_asi> ${leg})
     set_tests_properties(fg_cp2077_asi_${leg} PROPERTIES ENVIRONMENT
                          "WG_STATE_GAME_DIR=${WG_FG_ASI_CASES}/cp2077-${leg};LOCALAPPDATA=${WG_FG_ASI_CASES}/cp2077-${leg}/localappdata")
   endforeach()
+
+  add_library(fg_asi_nonplugin_loader SHARED ${WG_FG_PROXY_DIR}/tests/fg_asi_nonplugin_loader.cpp)
+  wg_fg_flags(fg_asi_nonplugin_loader)
+  set_target_properties(fg_asi_nonplugin_loader PROPERTIES RUNTIME_OUTPUT_DIRECTORY
+                        "${CMAKE_CURRENT_BINARY_DIR}/nonplugin-host")
+  add_custom_command(TARGET fg_asi_nonplugin_loader POST_BUILD COMMAND ${CMAKE_COMMAND} -E touch
+                     "$<TARGET_FILE_DIR:fg_asi_nonplugin_loader>/OptiScaler.ini")
+  add_dependencies(fg_cp2077_asi_host fg_asi_nonplugin_loader)
+  add_test(NAME fg_cp2077_asi_nonplugin COMMAND fg_cp2077_asi_host $<TARGET_FILE:wg_fg_asi> nonplugin
+           $<TARGET_FILE:fg_asi_nonplugin_loader>)
+  set_tests_properties(fg_cp2077_asi_nonplugin PROPERTIES ENVIRONMENT
+                       "WG_STATE_GAME_DIR=${WG_FG_ASI_CASES}/cp2077-nonplugin;LOCALAPPDATA=${WG_FG_ASI_CASES}/cp2077-nonplugin/localappdata")
 
   # Mutants of the codec and the present path: each breaks one rule; the suite must catch every one.
   #  1 a generated count of 0 accepted        2 a count above the maximum accepted   3 state written past its version

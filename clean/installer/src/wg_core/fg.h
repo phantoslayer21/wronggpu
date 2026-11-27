@@ -8,7 +8,7 @@
 //
 //   fg=off|on                                        default off
 //   fg_preset=A|B|C                                  default A
-//   fg_multiplier=2|3|4|5|6                          default 2
+//   fg_multiplier=auto|2|3|4|5|6                     default auto
 //   fg_presenter=auto|hwfq|dxgi_tearing|dxgi_vsync   default auto
 //
 // Strict: a value is taken only in exactly that spelling (no case folding, no leading zeros or signs, nothing inside the

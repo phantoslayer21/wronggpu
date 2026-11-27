@@ -437,21 +437,21 @@ int main() {
             require(IsFgKey("fg") && IsFgKey("fg_preset") && IsFgKey("fg_multiplier") && IsFgKey("fg_presenter") && !IsFgKey("FG") &&
                         !IsFgKey("fg_mode") && !IsFgKey("rr_mode") && !IsFgKey("model") && !IsFgKey(""),
                     "fg: the four keys, by their exact names only");
-            require(string(FgDefault("fg")) == "off" && string(FgDefault("fg_preset")) == "A" && string(FgDefault("fg_multiplier")) == "2" &&
+            require(string(FgDefault("fg")) == "off" && string(FgDefault("fg_preset")) == "A" && string(FgDefault("fg_multiplier")) == "auto" &&
                         string(FgDefault("fg_presenter")) == "auto" && !FgDefault("rr_mode") && !FgValues("executor"),
                     "fg: the defaults off, A, 2, auto");
             string n;
             wstring why;
             for (const char* v : {"off", "on"}) require(ValidateFgValue("fg", v, &n, &why) && n == v, "fg: off and on");
             for (const char* v : {"A", "B", "C"}) require(ValidateFgValue("fg_preset", v, &n, &why) && n == v, "fg_preset: A, B, C");
-            for (const char* v : {"2", "3", "4", "5", "6"}) require(ValidateFgValue("fg_multiplier", v, &n, &why) && n == v, "fg_multiplier: 2 to 6");
+            for (const char* v : {"auto", "2", "3", "4", "5", "6"}) require(ValidateFgValue("fg_multiplier", v, &n, &why) && n == v, "fg_multiplier: auto or 2 to 6");
             for (const char* v : {"auto", "hwfq", "dxgi_tearing", "dxgi_vsync"})
                 require(ValidateFgValue("fg_presenter", v, &n, &why) && n == v, "fg_presenter: auto, hwfq, dxgi_tearing, dxgi_vsync");
             require(ValidateFgValue("fg", "  on\t", &n, &why) && n == "on", "fg: spaces around a value are dropped (as on every line)");
             // strict: no case folding, no other spellings of the same thing
             for (const char* v : {"On", "ON", "1", "true", "yes", "", "o n"}) require(!ValidateFgValue("fg", v, &n, &why), "fg: only off / on, as written");
             for (const char* v : {"a", "b", "D", "AB", "0"}) require(!ValidateFgValue("fg_preset", v, &n, &why), "fg_preset: only A, B, C (upper case)");
-            for (const char* v : {"1", "7", "02", "+2", "2.0", "2x", "-3", " 3x"}) require(!ValidateFgValue("fg_multiplier", v, &n, &why), "fg_multiplier: only 2..6, plain digits");
+            for (const char* v : {"1", "7", "02", "+2", "2.0", "2x", "-3", " 3x"}) require(!ValidateFgValue("fg_multiplier", v, &n, &why), "fg_multiplier: auto or plain digits 2..6");
             for (const char* v : {"Auto", "HWFQ", "dxgi", "vsync", "dxgi-tearing"}) require(!ValidateFgValue("fg_presenter", v, &n, &why), "fg_presenter: only its four spellings");
             require(!ValidateFgValue("fg_preset", "b", &n, &why) && why == L"\"b\" is not a value of fg_preset (allowed, exactly as written: A, B, C)",
                     "fg: a refusal names the value, the key and the allowed spellings");
@@ -459,14 +459,14 @@ int main() {
 
             // settings.ini's view: defaults for missing keys, an invalid value keeps the default and is reported, a key's first line counts
             FgState s = FgStateOf({{"upscaler", "network"}, {"rr_mode", "fast"}});
-            require(!s.present && s.issues.empty() && s.v.size() == 4 && s.v["fg"] == "off" && s.v["fg_preset"] == "A" && s.v["fg_multiplier"] == "2" &&
+            require(!s.present && s.issues.empty() && s.v.size() == 4 && s.v["fg"] == "off" && s.v["fg_preset"] == "A" && s.v["fg_multiplier"] == "auto" &&
                         s.v["fg_presenter"] == "auto",
                     "fg state: a file without FG keys gives the defaults (and says it has none)");
             s = FgStateOf({{"fg", "on"}, {"fg_preset", "C"}, {"fg_multiplier", "4"}, {"fg_presenter", "dxgi_vsync"}, {"rr_mode", "exact"}});
             require(s.present && s.issues.empty() && s.v["fg"] == "on" && s.v["fg_preset"] == "C" && s.v["fg_multiplier"] == "4" && s.v["fg_presenter"] == "dxgi_vsync",
                     "fg state: the four keys read");
             s = FgStateOf({{"fg", "ON"}, {"fg_preset", "b"}, {"fg_multiplier", "9"}, {"fg_presenter", "hwfq"}});
-            require(s.present && s.issues.size() == 3 && s.v["fg"] == "off" && s.v["fg_preset"] == "A" && s.v["fg_multiplier"] == "2" && s.v["fg_presenter"] == "hwfq" &&
+            require(s.present && s.issues.size() == 3 && s.v["fg"] == "off" && s.v["fg_preset"] == "A" && s.v["fg_multiplier"] == "auto" && s.v["fg_presenter"] == "hwfq" &&
                         s.issues[0].find(L"\"ON\" is not a value of fg") != wstring::npos && s.issues[0].find(L"the default (off) is used") != wstring::npos,
                     "fg state: invalid values keep their defaults, each reported; a valid one is taken");
             s = FgStateOf({{"fg", "on"}, {"fg", "off"}});
@@ -482,7 +482,7 @@ int main() {
                     "fg keys: opted in, data ready: the four keys in their order and spelling");
             k = FgStateKeys(fp, {}, false);
             require(k.size() == 4 && k[0] == std::make_pair(string("fg"), string("off")) && k[1].second == "B", "fg keys: the data not ready: fg written as off, the rest kept");
-            fp.v = {{"fg", "off"}, {"fg_preset", "A"}, {"fg_multiplier", "2"}, {"fg_presenter", "auto"}};
+            fp.v = {{"fg", "off"}, {"fg_preset", "A"}, {"fg_multiplier", "auto"}, {"fg_presenter", "auto"}};
             k = FgStateKeys(fp, {{"fg", "on"}, {"rr_mode", "fast"}}, true);
             require(!FgOptedIn(fp) && k.size() == 4 && k[0].second == "off", "fg keys: back to the defaults while the file says on: off is written down");
             fp.v = {{"fg_multiplier", "5"}};

@@ -165,8 +165,7 @@ FgProxy::FgProxy(const FgProxyConfig& cfg, FgPresentOwners* owners, FgLogFn log,
         cfg_.settings = FgSettings{};
         log_locked("fg: settings not valid; frame generation stays off");
     }
-    multiplier_source_ =
-        (cfg_.binding.has_mfg_selector || cfg_.settings.follow_game_multiplier) ? kFgMultSourceGame : kFgMultSourceManual;
+
 }
 
 FgProxy::~FgProxy() { detach(); }
@@ -270,7 +269,7 @@ void FgProxy::set_executor(const WgFgExecutorV1* executor) {
 bool FgProxy::update_live_settings(uint32_t preset, uint32_t multiplier) {
     // cfg_.binding is fixed after construction: read without the lock (this call never takes it)
     if (preset >= WG_FG_PRESET_COUNT || !(cfg_.binding.presets_mask & (1u << preset)) ||
-        FgGeneratedCountOf(multiplier) == 0)
+        (multiplier != kFgAutoMultiplier && FgGeneratedCountOf(multiplier) == 0))
         return false;
     uint64_t cur = live_.load(std::memory_order_relaxed);
     for (;;) {
@@ -280,22 +279,30 @@ bool FgProxy::update_live_settings(uint32_t preset, uint32_t multiplier) {
     }
 }
 
-// The live settings a menu handed over, taken on the game's thread (core lock held): the player's preset and cap, and
-// the effective preset / count of the accepted options re-derived by the same rules as set_options.
+bool FgProxy::use_game_count(uint32_t multiplier) const {
+    return cfg_.binding.has_mfg_selector || multiplier == kFgAutoMultiplier;
+}
+
+uint32_t FgProxy::count_for_options_locked(uint32_t game_count) const {
+    // Streamline titles can always submit 1 for their default 2x, even without a selector.
+    // A manual multiplier controls those titles. Native adapter callers retain the count/cap contract.
+    if (game_count != WG_FG_COUNT_NOT_SET &&
+        (!cfg_.panel_multipliers || use_game_count(cfg_.settings.multiplier) || game_count == 0))
+        return game_count;
+    return cfg_.binding.has_mfg_selector ? 1u : manual_count_locked();
+}
+
+// A menu change takes effect on the game thread. Recompute the same count used by set_options.
 void FgProxy::apply_live_locked() {
     const uint64_t v = live_.load(std::memory_order_acquire);
     const uint32_t seq = static_cast<uint32_t>(v >> 32);
     if (seq == 0 || seq == live_applied_) return;
     live_applied_ = seq;
     const uint32_t preset = static_cast<uint32_t>((v >> 8) & 0xffu), multiplier = static_cast<uint32_t>(v & 0xffu);
-    if (preset == cfg_.settings.preset && multiplier == cfg_.settings.multiplier && !cfg_.settings.follow_game_multiplier)
+    if (preset == cfg_.settings.preset && multiplier == cfg_.settings.multiplier)
         return;
     cfg_.settings.preset = preset;
     cfg_.settings.multiplier = multiplier;
-    if (!cfg_.binding.has_mfg_selector) {
-        cfg_.settings.follow_game_multiplier = false;
-        multiplier_source_ = kFgMultSourceManual;
-    }
     std::string game;
     if (has_options_) {
         if (options_.preset != WG_FG_PRESET_NOT_SET) {
@@ -305,22 +312,19 @@ void FgProxy::apply_live_locked() {
             effective_preset_ = preset;
         }
         if (options_.enable) {
+            const uint32_t game_count = options_.generated_count;
             const uint32_t cap = effective_max_locked();
-            const uint32_t requested =
-                options_.generated_count == WG_FG_COUNT_NOT_SET ? FgGeneratedCountOf(multiplier) : options_.generated_count;
+            const uint32_t requested = count_for_options_locked(game_count);
             effective_count_ = requested > cap ? cap : requested;
-            game += "; generating " + std::to_string(effective_count_) + " per game frame (the game asks for " +
+            game += "; generating " + std::to_string(effective_count_) + " per game frame (requested " +
                     std::to_string(requested) + ")";
         }
     }
-    if (cfg_.binding.has_mfg_selector) {
-        log_locked(std::string("fg: live settings: preset ") + FgPresetSpelling(preset) +
-                   " (multiplier controlled by the game's own selector), from this frame" + game);
-    } else {
-        log_locked(std::string("fg: live settings: preset ") + FgPresetSpelling(preset) + ", multiplier " +
-                   std::to_string(multiplier) + "x (player cap " + std::to_string(FgGeneratedCountOf(multiplier)) +
-                   "), from this frame" + game);
-    }
+    const std::string multiplier_text = cfg_.binding.has_mfg_selector ? "set by the game"
+                                        : multiplier == kFgAutoMultiplier ? "Auto"
+                                                                          : std::to_string(multiplier) + "x";
+    log_locked(std::string("fg: live settings: preset ") + FgPresetSpelling(preset) + ", multiplier " +
+               multiplier_text + ", from this frame" + game);
 }
 
 void FgProxy::set_feature_function(const std::string& name, void* fn) {
@@ -360,25 +364,33 @@ uint32_t FgProxy::advertised_max_generated() const {
     return Min3(WG_FG_MAX_GENERATED, entry_max_, cfg_.binding.ui_max_generated);
 }
 
+uint32_t FgProxy::options_max_generated() const {
+    return cfg_.panel_multipliers ? WG_FG_MAX_GENERATED : advertised_max_generated();
+}
+
+uint32_t FgProxy::manual_count_locked() const {
+    return std::max(1u, FgGeneratedCountOf(cfg_.settings.multiplier));
+}
+
 uint32_t FgProxy::effective_max_locked() const {
     if (route_reason_locked() != WG_FG_REASON_NONE) return 0;
     const uint32_t route_max = Min3(WG_FG_MAX_GENERATED, entry_max_, cfg_.binding.ui_max_generated);
     // M1 / N-B7: games with their own MFG selector (and generic titles following the game with no manual override)
     // are never clamped by cfg_.settings.multiplier; only display/VRR and route_max bound the count.
-    if (cfg_.binding.has_mfg_selector || cfg_.settings.follow_game_multiplier) return route_max;
+    if (use_game_count(cfg_.settings.multiplier)) return route_max;
     return Min3(route_max, FgGeneratedCountOf(cfg_.settings.multiplier), WG_FG_MAX_GENERATED);
 }
 
 uint32_t FgProxy::multiplier_source() const {
     std::lock_guard<std::recursive_mutex> lock(mu_);
-    if (cfg_.binding.has_mfg_selector) return kFgMultSourceGame;
-    if ((live_.load(std::memory_order_acquire) >> 32) != 0) return kFgMultSourceManual;
-    return multiplier_source_;
+    const uint64_t live = live_.load(std::memory_order_acquire);
+    const uint32_t multiplier = live >> 32 ? static_cast<uint32_t>(live & 0xffu) : cfg_.settings.multiplier;
+    return use_game_count(multiplier) ? kFgMultSourceGame : kFgMultSourceManual;
 }
 
 uint32_t FgProxy::requested_count() const {
     std::lock_guard<std::recursive_mutex> lock(mu_);
-    return has_options_ && options_.generated_count != WG_FG_COUNT_NOT_SET ? options_.generated_count : 0u;
+    return has_options_ && options_.generated_count <= WG_FG_MAX_GENERATED ? options_.generated_count : 0u;
 }
 
 WgFgCapability FgProxy::capability() const {
@@ -406,7 +418,7 @@ void FgProxy::note_route_locked(bool defer_unprobed_adapter) {
         const std::string cap_desc =
             cfg_.binding.has_mfg_selector
                 ? "game selector"
-                : (cfg_.settings.follow_game_multiplier
+                : (cfg_.settings.multiplier == kFgAutoMultiplier
                        ? "follow game"
                        : "player cap " + std::to_string(FgGeneratedCountOf(cfg_.settings.multiplier)));
         log_locked("fg: frame generation taken (max generated " +
@@ -482,18 +494,12 @@ int32_t FgProxy::set_options(uint32_t feature, uint32_t viewport_id, const WgFgO
     }
     for (uint32_t i = 0; r == WG_FG_REASON_NONE && i < WG_FG_OPTIONAL_COUNT; ++i)
         if (decoded->optional_decl[i] > WG_FG_DECL_ALWAYS) r = WG_FG_REASON_BAD_OPTIONAL_DECL;
+    const uint32_t game_count = r == WG_FG_REASON_NONE ? decoded->generated_count : WG_FG_COUNT_NOT_SET;
     if (r == WG_FG_REASON_NONE && decoded->enable) {
         const uint32_t cap = effective_max_locked();
-        const bool game_gave_count = decoded->generated_count != WG_FG_COUNT_NOT_SET && decoded->generated_count > 0;
-        requested = decoded->generated_count == WG_FG_COUNT_NOT_SET ? FgGeneratedCountOf(cfg_.settings.multiplier)
-                                                                    : decoded->generated_count;
+        requested = count_for_options_locked(game_count);
         count = requested > cap ? cap : requested;
         if (count == 0) r = WG_FG_REASON_BAD_GENERATED_COUNT;
-        if (r == WG_FG_REASON_NONE) {
-            if (cfg_.binding.has_mfg_selector) multiplier_source_ = kFgMultSourceGame;
-            else if (cfg_.settings.follow_game_multiplier && game_gave_count) multiplier_source_ = kFgMultSourceGame;
-            else multiplier_source_ = kFgMultSourceManual;
-        }
     }
     if (r != WG_FG_REASON_NONE) {
         if (r != last_options_reason_) log_locked(std::string("fg: options refused: ") + ReasonName(r));
@@ -533,7 +539,7 @@ WgFgState FgProxy::state() const {
     s.struct_size = sizeof(s);
     s.abi_version = WG_FG_ADAPTER_ABI_VERSION;
     s.taken = route_reason_locked() == WG_FG_REASON_NONE ? 1u : 0u;
-    s.enabled = has_options_ && options_.enable ? 1u : 0u;
+    s.enabled = has_options_ && options_.enable && menu_enabled_.load() ? 1u : 0u;
     s.effective_preset = effective_preset_;
     s.effective_count = s.enabled ? effective_count_ : 0u;
     s.max_generated = s.taken ? Min3(WG_FG_MAX_GENERATED, entry_max_, cfg_.binding.ui_max_generated) : 0u;
@@ -643,7 +649,7 @@ void FgProxy::finish_result_locked(WgFgPresentResult* out, uint32_t status, uint
     r.real_only = real_only;
     r.requested_preset = has_options_ ? options_.preset : WG_FG_PRESET_NOT_SET;
     r.effective_preset = effective_preset_;
-    r.requested_count = has_options_ ? options_.generated_count : 0u;
+    r.requested_count = has_options_ && options_.enable ? count_for_options_locked(options_.generated_count) : 0u;
     r.effective_count = status == WG_FG_PRESENT_GENERATE ? effective_count_ : 0u;
     r.base_presents = base_presents_;
     r.generate_requests = generate_requests_;
@@ -807,15 +813,21 @@ int32_t FgProxy::present(const WgFgPresentDesc* desc, WgFgPresentResult* out) {
         queue_epoch_ = desc->queue_epoch;
         swapchain_epoch_ = desc->swapchain_epoch;
     }
-    if (reason == WG_FG_REASON_NONE && (!has_options_ || !options_.enable || effective_count_ == 0))
+    if (reason == WG_FG_REASON_NONE &&
+        (!menu_enabled_.load() || !has_options_ || !options_.enable || effective_count_ == 0))
         real_only = WG_FG_REAL_ONLY_DISABLED;
     if (reason == WG_FG_REASON_NONE && real_only == WG_FG_REAL_ONLY_NONE)
         reason = assemble_locked(*desc, &packet, &real_only);
     if (reason == WG_FG_REASON_NONE && real_only == WG_FG_REAL_ONLY_NONE) {
+        // A/B/C change the blend graph or UI inputs. Prime those inputs at the next interval.
+        if (cfg_.panel_multipliers && submitted_preset_ != WG_FG_PRESET_NOT_SET && submitted_preset_ != packet.preset)
+            packet.flags |= WG_FG_FLAG_RESET;
         WgFgSessionDesc session = {};
         if (!has_executor_) reason = WG_FG_REASON_NO_EXECUTOR;
         else if (!session_desc(&session) || executor_.submit(executor_.self, &packet, &session) != 0)
             reason = WG_FG_REASON_EXECUTOR_REFUSED;
+        else
+            submitted_preset_ = packet.preset;
     }
     prune_locked(desc->frame_token);
     note_frame_locked(reason, real_only);
@@ -857,7 +869,7 @@ bool FgProxy::session_desc(WgFgSessionDesc* out) const {
     s.render_max_height = options_.render_max_height;
     s.dynamic_resolution = options_.dynamic_resolution;
     s.preset = effective_preset_;
-    s.max_generated = effective_max_locked();
+    s.max_generated = cfg_.panel_multipliers ? advertised_max_generated() : effective_max_locked();
     for (uint32_t i = 0; i < WG_FG_OPTIONAL_COUNT; ++i) s.optional_decl[i] = options_.optional_decl[i];
     s.hdr = (options_.color_space != WG_FG_CS_SDR || swapchain_cs_ != WG_FG_CS_SDR) ? 1u : 0u;
     s.presenter_mode = static_cast<uint32_t>(cfg_.settings.presenter);

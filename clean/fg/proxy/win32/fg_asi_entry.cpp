@@ -16,8 +16,8 @@
 // slot back; WrongGPU_FgQuery reports what happened (the launcher and the tests read it).
 //
 // OptiPluginInit (OptiScaler's plugin interface, wg_host_menu_abi.h; called right after InitializeASI):
-//  - the "WrongGPU Frame Generation" card on OptiScaler's Custom tab (fg_panel.h): status, and with fg=on the preset and
-//    multiplier, applied live and saved to settings.ini;
+//  - v6: claim FG ownership before installing the transport and register controls in the Frame Gen tab.
+//    Earlier hosts use the Custom card and require their native FG settings to be off at startup.
 //  - the session host learns that OptiScaler hosts it: fg_presenter=auto then presents through OptiScaler's swap chain
 //    (a DXGI flip presenter), so OptiScaler's menu and overlay stay visible on every image (fg_asi_session.h). The same
 //    holds when InitializeASI was called from OptiScaler's proxy module (OptiScaler.ini next to it);
@@ -42,6 +42,8 @@
 
 #include <intrin.h>
 
+#include <atomic>
+
 #include <memory>
 #include <mutex>
 #include <new>
@@ -54,10 +56,16 @@ namespace {
 using namespace wgfgp;
 using namespace wgfgp::win32;
 
-std::atomic<int> g_init{0};           // 0: not called, 1: running, 2: done
+std::atomic<int> g_init{0};           // 0: not called, 1: running, 2: done, 3: overlapping call
 std::atomic<uint32_t> g_init_calls{0};
+std::atomic_flag g_plugin_init_running = ATOMIC_FLAG_INIT;
 std::atomic<uint32_t> g_result{kFgNullArgument};
 std::atomic<uint32_t> g_settings_enabled{0};
+std::atomic<bool> g_menu_enabled{false};
+std::atomic<bool> g_known_multiplier{false};
+std::atomic<bool> g_prepared_by_host{false};
+std::wstring g_legacy_host_ini;
+std::atomic<bool> g_host_conflict{false};
 FgAsiTransport* g_transport = nullptr;  // created only with fg=on; never freed while the plugin is loaded
 std::wstring g_log_path;
 
@@ -77,9 +85,9 @@ std::wstring StateGameDir() {
     return ExeDir();
 }
 
-void LogLine(void*, const char* line) {
-    if (g_log_path.empty() || !line) return;
-    HANDLE h = CreateFileW(g_log_path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+void LogToPath(const std::wstring& path, const char* line) {
+    if (path.empty() || !line) return;
+    HANDLE h = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return;
     SYSTEMTIME t;
@@ -93,6 +101,15 @@ void LogLine(void*, const char* line) {
     DWORD written = 0;
     WriteFile(h, s.data(), static_cast<DWORD>(s.size()), &written, nullptr);  // one append per line
     CloseHandle(h);
+}
+
+void LogLine(void*, const char* line) { LogToPath(g_log_path, line); }
+
+void LogEarly(const char* line) noexcept {
+    try {
+        LogToPath(wgstate::JoinPath(StateGameDir(), L"wronggpu-fg.log"), line);
+    } catch (...) {
+    }
 }
 
 std::wstring ExeLeaf() {
@@ -109,13 +126,15 @@ FgAsiSessionHost* g_host = nullptr;  // the FG session host; never freed while t
 std::atomic<FgAsiSessionHost*> g_host_seen{nullptr};  // g_host, for the menu card (any thread)
 std::atomic<FgProxy*> g_core{nullptr};               // the installed transport's core, for the menu card
 FgSettings g_settings;                               // as read at InitializeASI
+FgTitleBinding g_title_binding;
 FgAsiConfig g_cfg;                                   // the transport configuration (route installs use it again)
-bool g_generic_deferred = false;  // no binding at start-up: the generic one may start when OptiScaler hooks the interface
+std::atomic<bool> g_generic_deferred{false};  // no binding at start-up: the generic one may start when OptiScaler hooks the interface
 std::atomic<bool> g_host_overlay{false};  // OptiScaler hosts this plugin
 const char* g_overlay_why = "OptiScaler's plugin interface";
 std::recursive_mutex g_route_mu;          // OptiScaler's hook callbacks (any thread) and the setup they do
 const WgHostMenuApi* g_host_api = nullptr;
 WgHostMenuPlugin* g_host_plugin = nullptr;
+bool g_host_init_result = false;
 
 std::string Utf8(const std::wstring& w) {
     if (w.empty()) return std::string();
@@ -161,6 +180,21 @@ bool InterfaceLinked(const FgImportBinding& im) {
     return !FgCollectSlots(GetModuleHandleW(nullptr), im.interposer_leaf.c_str(), names, budget).empty();
 }
 
+panel::Status PanelStatus();
+
+void PublishCurrent(bool immediate) {
+    const auto sequence = panel::NextReportSequence();
+    panel::Publish(PanelStatus(), sequence, immediate);
+}
+
+// Keep the menu reporting outside the session's present-thread lock.
+int32_t PresentRoute(void* ctx, FgProxy* core, const WgFgPresentDesc* desc, WgFgPresentResult* out) {
+    const auto sequence = panel::NextReportSequence();
+    const auto result = FgAsiSessionHost::Route(ctx, core, desc, out);
+    panel::Publish(PanelStatus(), sequence);
+    return result;
+}
+
 // A binding was taken: the runtime the session needs is checked before anything is patched, then the session host and
 // the codec go into g_cfg. false: nothing is installed (g_result says why).
 bool SetUpBinding(const FgTitleBinding& binding, const wgstate::Settings& st) {
@@ -191,10 +225,11 @@ bool SetUpBinding(const FgTitleBinding& binding, const wgstate::Settings& st) {
     if (g_host_overlay.load()) g_host->SetHostOverlay(g_overlay_why);
     g_host_seen.store(g_host);
     FgApplyBinding(binding, &g_cfg);
+    g_cfg.core.panel_multipliers = true;
     g_codec = new (std::nothrow) FgSl214Codec(binding.layout);
     g_cfg.codec = g_codec;
     g_cfg.presenter = g_host;
-    g_cfg.present_route = &FgAsiSessionHost::Route;
+    g_cfg.present_route = &PresentRoute;
     g_cfg.present_route_ctx = g_host;
     g_cfg.factory_note = &FgAsiSessionHost::FactoryNote;
     g_cfg.factory_note_ctx = g_host;
@@ -213,6 +248,7 @@ void NoteInstalled(uint32_t r) {
     if (r == kFgInstalled && g_host && g_transport && g_transport->core()) {
         g_host->OnInstalled(g_transport->core());
         g_core.store(g_transport->core());
+        g_transport->core()->enable_generation(g_menu_enabled.load());
     }
 }
 
@@ -226,17 +262,24 @@ void Initialize() {
         LogLine(nullptr, ("fg: setting " + i.key + "=" + i.value + " not used (" + i.why + "); its default stays").c_str());
     g_settings = settings;
     g_settings_enabled.store(settings.enabled ? 1u : 0u);
+    g_menu_enabled.store(settings.enabled);
+    if (FgSelectShippedBinding(ExeLeaf(), &g_title_binding))
+        g_known_multiplier.store(g_title_binding.core.has_mfg_selector);
     if (!settings.enabled) {
-        // INSTALL-OFF GATE: no transport, nothing read from the process, nothing patched
+        // INSTALL-OFF GATE: no transport, no import scan, no hooks
         g_result.store(kFgInstallOff);
         LogLine(nullptr, "fg: frame generation is off (fg=off or not set); no hooks installed");
-        return;
     }
-    g_cfg.settings = settings;
+}
+
+void StartTransport() {
+    if (!g_settings.enabled || g_transport) return;
+
+    FgTitleBinding binding = g_title_binding;
+    bool have = binding.valid;
+    g_cfg.settings = g_settings;
     // the qualified title binding for this exe, else the generic interface 2.x binding when the game links the
     // interface (else the transport patches nothing)
-    FgTitleBinding binding;
-    bool have = FgSelectShippedBinding(ExeLeaf(), &binding);
     if (have) {
         LogLine(nullptr, ("fg: title binding " + binding.id + " (" + binding.title + ")").c_str());
     } else {
@@ -255,8 +298,8 @@ void Initialize() {
                                  : "fg: this build carries no title binding for this game");
         }
     }
-    if (have && !SetUpBinding(binding, st)) return;
-    g_cfg.core.settings = settings;
+    if (have && !SetUpBinding(binding, wgstate::ReadSettings(StateGameDir()))) return;
+    g_cfg.core.settings = g_settings;
     g_cfg.log = &LogLine;
     g_transport = new (std::nothrow) FgAsiTransport();
     if (!g_transport) {
@@ -285,8 +328,21 @@ void NoteCaller(void* return_address) {
     const std::wstring ini = path.substr(0, slash + 1) + L"OptiScaler.ini";
     const DWORD a = GetFileAttributesW(ini.c_str());
     if (a == INVALID_FILE_ATTRIBUTES || (a & FILE_ATTRIBUTE_DIRECTORY)) return;
+    g_legacy_host_ini = ini;
     g_overlay_why = "its proxy module loaded this plugin";
     g_host_overlay.store(true);
+}
+
+// The legacy host has no arbitration API. Its input and output are picked at game start.
+bool LegacyNativeFgIsOff() {
+    const auto is_default = [](const wchar_t* section, const wchar_t* key, const wchar_t* off) {
+        wchar_t value[32];
+        GetPrivateProfileStringW(section, key, L"auto", value, _countof(value), g_legacy_host_ini.c_str());
+        return _wcsicmp(value, L"auto") == 0 || _wcsicmp(value, off) == 0;
+    };
+    return !g_legacy_host_ini.empty() && is_default(L"FrameGen", L"FGInput", L"nofg") &&
+           is_default(L"FrameGen", L"FGOutput", L"nofg") && is_default(L"FrameGen", L"FGType", L"nofg") &&
+           is_default(L"FrameGen", L"Enabled", L"false") && is_default(L"fakenvapi", L"ForceXeLL", L"false");
 }
 
 bool RegisterRoutes(void*, const FgRoute* routes, uint32_t count) {
@@ -326,28 +382,61 @@ void OnHostHooked(void* module, uint32_t major, uint32_t minor, uint32_t patch, 
             return;
         }
         g_generic_deferred = false;
+        if (panel::HasFrameGenApi(g_host_api) && !panel::ClaimOutput(g_host_api, g_host_plugin)) {
+            g_host_conflict.store(true);
+            LogLine(nullptr, "fg: OptiScaler refused the deferred FG claim; nothing installed");
+            return;
+        }
         LogLine(nullptr, ("fg: generic binding " + generic.id + " (" + generic.title + ")").c_str());
-        if (!SetUpBinding(generic, wgstate::ReadSettings(StateGameDir()))) return;
-        NoteInstalled(g_transport->install_routes(g_cfg, m, major, minor, &RegisterRoutes, nullptr));
+        if (SetUpBinding(generic, wgstate::ReadSettings(StateGameDir()))) {
+            NoteInstalled(g_transport->install_routes(g_cfg, m, major, minor, &RegisterRoutes, nullptr));
+            if (auto* core = g_core.load()) {
+                const auto pending = panel::Current();
+                core->update_live_settings(pending.preset, pending.multiplier);
+            }
+        }
+        if (!g_transport->active()) panel::ReleaseOutput();
+        PublishCurrent(true);
     } catch (...) {
+        if (!g_transport || !g_transport->active()) panel::ReleaseOutput();
         LogLine(nullptr, "fg: OptiScaler's interface hook callback failed; nothing more is installed");
     }
 }
 
 panel::Status PanelStatus() {
     panel::Status s;
-    s.enabled = g_settings_enabled.load() != 0;
+    s.enabled = g_menu_enabled.load();
+    s.host_conflict = g_host_conflict.load();
+    s.deferred = g_generic_deferred.load();
     s.install_result = g_result.load();
     s.installed = s.install_result == kFgInstalled;
     FgAsiSessionHost* h = g_host_seen.load();
     s.have_host = h != nullptr;
     if (h) s.live = h->LiveStatus();
+    s.live.game_has_mfg_selector = g_known_multiplier.load();
     return s;
 }
 
 bool PanelApply(uint32_t preset, uint32_t multiplier) {
+    std::unique_lock<std::recursive_mutex> lock(g_route_mu, std::try_to_lock);
+    if (!lock) return false;
     FgProxy* core = g_core.load();
     return core && core->update_live_settings(preset, multiplier);
+}
+
+bool PanelEnable(bool enabled) {
+    std::unique_lock<std::recursive_mutex> lock(g_route_mu, std::try_to_lock);
+    if (!lock) return false;
+    auto* core = g_core.load();
+    if (!g_settings_enabled.load() || g_host_conflict.load() || (!core && !g_generic_deferred))
+        return false;
+    g_menu_enabled.store(enabled);
+    if (core) core->enable_generation(enabled);
+    const auto sequence = panel::NextReportSequence();
+    auto status = PanelStatus();
+    if (enabled) status.live.phase = kFgPhaseWaiting;
+    panel::Publish(status, sequence, true);
+    return true;
 }
 
 std::wstring PanelGameDir() { return StateGameDir(); }
@@ -368,68 +457,138 @@ struct WgFgAsiStatus {
     uint32_t init_calls;
 };
 
-// The return address is taken here, in InitializeASI's own frame (the module it names is the caller: OptiScaler).
+__declspec(dllexport) void OptiPluginPrepareASI() {
+    g_prepared_by_host.store(true);
+    if (g_init.load() != 0)
+        LogEarly("fg: OptiPluginPrepareASI called after initialisation started; an earlier transport cannot become the hosted route");
+}
+
+// The return address also detects legacy OptiScaler hosts, which omit the prepare callback.
 __declspec(dllexport) __declspec(noinline) void InitializeASI() {
     void* caller = _ReturnAddress();
     g_init_calls.fetch_add(1);
     int expected = 0;
-    if (!g_init.compare_exchange_strong(expected, 1)) return;  // a second call: nothing changes
-    NoteCaller(caller);
+    if (!g_init.compare_exchange_strong(expected, 1)) {
+        if (expected == 1 && g_init.compare_exchange_strong(expected, 3))
+            LogEarly("fg: overlapping InitializeASI calls; standing down for this run");
+        return;
+    }
+    std::lock_guard<std::recursive_mutex> lock(g_route_mu);
     try {
+        NoteCaller(caller);
         Initialize();
+        if (g_init.load() == 1 && !g_prepared_by_host.load()) {
+            if (!g_legacy_host_ini.empty() && !LegacyNativeFgIsOff()) {
+                g_host_conflict.store(true);
+                LogLine(nullptr, "fg: no exclusive legacy FG route; set OptiScaler's FG input and output to None, then restart");
+            } else {
+                StartTransport();
+            }
+        }
     } catch (...) {
         g_result.store(kFgNullArgument);
         LogLine(nullptr, "fg: initialisation failed; nothing stays patched");
         if (g_transport) g_transport->restore();
     }
-    g_init.store(2);
+    expected = 1;
+    if (!g_init.compare_exchange_strong(expected, 2)) {
+        g_core.store(nullptr);
+        g_generic_deferred = false;
+        if (g_transport) g_transport->restore();
+        g_result.store(kFgAlreadyActive);
+        g_init.store(2);
+    }
 }
 
 // OptiScaler's plugin interface (see the top of this file). Called after InitializeASI; false: nothing was added.
 __declspec(dllexport) bool OptiPluginInit(const WgHostMenuApi* api, WgHostMenuPlugin* plugin) {
     if (!api || !plugin) return false;
+    if (g_plugin_init_running.test_and_set()) {
+        LogEarly("fg: overlapping OptiPluginInit call declined");
+        return false;
+    }
+    struct ClearInitFlag {
+        ~ClearInitFlag() { g_plugin_init_running.clear(); }
+    } clear_init_flag;
+    if (g_init.load() != 2) {
+        LogEarly("fg: OptiPluginInit overlapped or preceded InitializeASI; hosted FG declined");
+        return false;
+    }
     std::lock_guard<std::recursive_mutex> lock(g_route_mu);
+    if (g_host_api) return api == g_host_api && plugin == g_host_plugin && g_host_init_result;
+    g_host_api = api;
+    g_host_plugin = plugin;
     try {
-        g_host_api = api;
-        g_host_plugin = plugin;
         g_host_overlay.store(true);
         if (g_host) g_host->SetHostOverlay("OptiPluginInit");
         panel::Hooks hooks;
         hooks.status = &PanelStatus;
         hooks.apply = &PanelApply;
+        hooks.enable = &PanelEnable;
         hooks.game_dir = &PanelGameDir;
         hooks.log = &PanelLog;
         const bool card = panel::Init(api, plugin, hooks, g_settings);
+        const bool v6 = panel::HasFrameGenApi(api);
+        if (g_settings.enabled && g_result.load() != kFgAlreadyActive && !g_host_conflict.load()) {
+            if (v6) {
+                // In the v6 lifecycle only settings have been read. Never start without an accepted claim.
+                if (g_transport && g_transport->active()) {
+                    // A separate loader ran before this host's lifecycle. Stand down.
+                    g_core.store(nullptr);
+                    g_transport->restore();
+                    g_host_conflict.store(true);
+                    LogLine(nullptr, "fg: an earlier ASI loader started frame generation; routes removed");
+                    return g_host_init_result = card;
+                }
+                if (!card || !panel::ClaimOutput(api, plugin)) {
+                    g_host_conflict.store(true);
+                    LogLine(nullptr, "fg: could not reserve OptiScaler's FG output; no hosted hooks installed");
+                    return g_host_init_result = card;
+                }
+            } else if (g_prepared_by_host.load() || (!g_legacy_host_ini.empty() && !LegacyNativeFgIsOff())) {
+                g_host_conflict.store(true);
+                LogLine(nullptr, "fg: no exclusive legacy FG route; set OptiScaler's FG input and output to None, then restart");
+                return g_host_init_result = card;
+            }
+            StartTransport();
+        }
+
         bool routes = false;
         if (g_settings.enabled && g_transport && (g_transport->active() || g_generic_deferred)) {
             if (api->version >= 3 && WG_HOST_MENU_HAS(api, register_streamline_routes) &&
                 WG_HOST_MENU_HAS(api, set_streamline_callback)) {
                 LogLine(nullptr, "fg: asking OptiScaler for its game-interface hook (plugin interface 3)");
                 routes = api->set_streamline_callback(plugin, &OnHostHooked, nullptr);
-                if (routes && g_generic_deferred && !g_transport->active()) {
-                    const size_t dxgi_patched = g_transport->install_dxgi_early(&LogLine, nullptr);
-                    if (dxgi_patched)
-                        LogLine(nullptr, ("fg: early DXGI factory hook installed (" + std::to_string(dxgi_patched) +
-                                          " slot(s)) ahead of OptiScaler's interface hook")
-                                             .c_str());
-                }
             } else {
                 LogLine(nullptr, ("fg: OptiScaler's plugin interface " + std::to_string(api->version) +
                                   " has no game-interface routes (needs 3); the import slots stay the transport")
                                      .c_str());
             }
         }
-        return card || routes;
+        if (g_generic_deferred && !routes && (!g_transport || !g_transport->active()))
+            g_generic_deferred = false;
+        if (!g_transport || !g_transport->active()) {
+            panel::ReleaseOutput();
+            if (g_settings.enabled && !g_host_conflict.load())
+                LogLine(nullptr, "fg: no transport routes installed; OptiScaler's FG output is available");
+        }
+        PublishCurrent(true);
+        return g_host_init_result = card || routes;
     } catch (...) {
+        g_core.store(nullptr);
+        if (g_transport) g_transport->restore();
+        panel::ReleaseOutput();
         LogLine(nullptr, "fg: OptiPluginInit failed; nothing was added to OptiScaler");
         return false;
     }
 }
 
 __declspec(dllexport) void WrongGPU_FgShutdown() {
-    if (g_init.load() != 2 || !g_transport) return;
+    std::lock_guard<std::recursive_mutex> lock(g_route_mu);
+    if (g_init.load() != 2) return;
     g_core.store(nullptr);
-    g_transport->restore();
+    if (g_transport) g_transport->restore();
+    panel::ReleaseOutput();
     LogLine(nullptr, "fg: shut down; every redirected slot put back");
 }
 

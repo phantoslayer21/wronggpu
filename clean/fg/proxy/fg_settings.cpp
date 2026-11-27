@@ -13,7 +13,7 @@ struct Spelling {
 
 constexpr Spelling kPresets[] = {{"A", 0}, {"B", 1}, {"C", 2}};
 constexpr Spelling kPresenters[] = {{"auto", 0}, {"hwfq", 1}, {"dxgi_tearing", 2}, {"dxgi_vsync", 3}};
-constexpr Spelling kMultipliers[] = {{"2", 2}, {"3", 3}, {"4", 4}, {"5", 5}, {"6", 6}};
+constexpr Spelling kMultipliers[] = {{"auto", kFgAutoMultiplier}, {"2", 2}, {"3", 3}, {"4", 4}, {"5", 5}, {"6", 6}};
 
 template <size_t K>
 bool Lookup(const Spelling (&table)[K], const std::string& v, uint32_t* out) {
@@ -70,16 +70,11 @@ bool FgParseSetting(const std::string& key, const std::string& value, FgSettings
         return true;
     }
     if (key == kFgKeyMultiplier) {
-        if (value == "auto") {
-            s->follow_game_multiplier = true;
-            return true;
-        }
         if (!Lookup(kMultipliers, value, &v)) {
             Say(why, "fg_multiplier takes auto, 2, 3, 4, 5 or 6");
             return false;
         }
         s->multiplier = v;
-        s->follow_game_multiplier = false;
         return true;
     }
     if (key == kFgKeyPresenter) {
@@ -106,12 +101,11 @@ FgSettings FgSettingsFromKeyValues(const FgKeyValues& kv, std::vector<FgSettings
             if (!FgParseSetting(p.first, p.second, &s, &why) && issues) issues->push_back({p.first, p.second, why});
         }
     }
-    if (!seen[2]) s.follow_game_multiplier = true;
     return s;
 }
 
 bool FgSettingsValid(const FgSettings& s) {
-    return FgPresetSpelling(s.preset) != nullptr && FgGeneratedCountOf(s.multiplier) != 0 &&
+    return FgPresetSpelling(s.preset) != nullptr && SpellingOf(kMultipliers, s.multiplier) != nullptr &&
            FgPresenterSpelling(s.presenter) != nullptr;
 }
 

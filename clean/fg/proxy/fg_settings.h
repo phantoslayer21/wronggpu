@@ -7,7 +7,7 @@
 //   fg=off|on                                   default off: WrongGPU never takes frame generation unless the player
 //                                               turns it on (and the route qualifies, fg_proxy_core.h)
 //   fg_preset=A|B|C                             default A
-//   fg_multiplier=2|3|4|5|6                     default 2 (2x: one generated image per game frame; N = multiplier - 1)
+//   fg_multiplier=auto|2|3|4|5|6                default auto (game request; 2x if none is supplied)
 //   fg_presenter=auto|hwfq|dxgi_tearing|dxgi_vsync   default auto
 //
 // Strict: a value is taken only in exactly the spelling above (no case folding, no leading zeros or signs, no spaces
@@ -29,6 +29,7 @@ inline constexpr const char* kFgKeyPreset = "fg_preset";
 inline constexpr const char* kFgKeyMultiplier = "fg_multiplier";
 inline constexpr const char* kFgKeyPresenter = "fg_presenter";
 
+inline constexpr uint32_t kFgAutoMultiplier = 0;
 inline constexpr uint32_t kFgMinMultiplier = 2;
 inline constexpr uint32_t kFgMaxMultiplier = 6;
 
@@ -37,11 +38,8 @@ enum class FgPresenterChoice : uint32_t { Auto = 0, Hwfq = 1, DxgiTearing = 2, D
 struct FgSettings {
     bool enabled = false;          // fg
     uint32_t preset = 0;           // fg_preset: WgFgPreset (A = 0, B = 1, C = 2)
-    uint32_t multiplier = 2;       // fg_multiplier: 2..6
+    uint32_t multiplier = kFgAutoMultiplier;  // fg_multiplier: Auto or a manual fallback (2..6)
     FgPresenterChoice presenter = FgPresenterChoice::Auto;  // fg_presenter
-    // true when fg_multiplier was omitted from settings.ini (M1/N-B7: unknown titles honour a valid game count by
-    // default until the player picks a manual multiplier). Default false preserves direct C++ struct callers / tests.
-    bool follow_game_multiplier = false;
 };
 
 struct FgSettingsIssue {

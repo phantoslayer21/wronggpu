@@ -360,11 +360,11 @@ int DriveFeature(Rig& rig, uint32_t feature) {
 
 void TestSettingsDefaultsAndParse() {
     FgSettings d;
-    CHECK(!d.enabled && d.preset == 0 && d.multiplier == 2 && d.presenter == FgPresenterChoice::Auto);
+    CHECK(!d.enabled && d.preset == 0 && d.multiplier == kFgAutoMultiplier && d.presenter == FgPresenterChoice::Auto);
     CHECK(FgSettingsValid(d));
     std::vector<FgSettingsIssue> issues;
     FgSettings e = FgSettingsFromKeyValues({}, &issues);
-    CHECK(!e.enabled && e.preset == 0 && e.multiplier == 2 && e.presenter == FgPresenterChoice::Auto && issues.empty());
+    CHECK(!e.enabled && e.preset == 0 && e.multiplier == kFgAutoMultiplier && e.presenter == FgPresenterChoice::Auto && issues.empty());
 
     FgSettings s = FgSettingsFromKeyValues(
         {{"rr_mode", "quality"}, {"fg", "on"}, {"fg_preset", "C"}, {"fg_multiplier", "6"}, {"fg_presenter", "hwfq"}},
@@ -392,7 +392,7 @@ void TestSettingsDefaultsAndParse() {
     for (const char* v : bad_mult) {
         issues.clear();
         s = FgSettingsFromKeyValues({{"fg_multiplier", v}}, &issues);
-        CHECK(s.multiplier == 2 && issues.size() == 1);
+        CHECK(s.multiplier == kFgAutoMultiplier && issues.size() == 1);
     }
     const char* bad_presenter[] = {"Auto", "HWFQ", "vsync", "tearing", "dxgi", "dxgi-vsync", ""};
     for (const char* v : bad_presenter) {
@@ -421,7 +421,7 @@ void TestSettingsRoundTrip() {
     int combos = 0;
     for (int en = 0; en < 2; ++en)
         for (uint32_t p = 0; p < 3; ++p)
-            for (uint32_t m = 2; m <= 6; ++m)
+            for (uint32_t m : {kFgAutoMultiplier, 2u, 3u, 4u, 5u, 6u})
                 for (uint32_t pr = 0; pr < 4; ++pr) {
                     FgSettings s;
                     s.enabled = en != 0;
@@ -436,7 +436,7 @@ void TestSettingsRoundTrip() {
                           back.presenter == s.presenter);
                     ++combos;
                 }
-    CHECK(combos == 120);
+    CHECK(combos == 144);
 
     // apply: FG keys replaced in place or appended; every other entry stays where it is with its value
     FgKeyValues kv = {{"rr_mode", "balanced"}, {"fg_preset", "B"}, {"model", "m"}, {"rr_enabled", "1"}};
@@ -738,7 +738,7 @@ void TestLiveSettings() {
     CHECK(r.status == WG_FG_PRESENT_GENERATE && r.effective_count == 3 && r.effective_preset == 2);
     CHECK(rig.exec.last.generated_count == 3 && rig.exec.last.preset == 2);
     CHECK(rig.proxy.state().effective_count == 3 && rig.proxy.advertised_max_generated() == 5);
-    CHECK(rig.log_lines("fg: live settings: preset C, multiplier 4x (player cap 3), from this frame") == 1);
+    CHECK(rig.log_lines("fg: live settings: preset C, multiplier 4x, from this frame") == 1);
     // the same values again: nothing changes, nothing logged
     CHECK(rig.proxy.update_live_settings(2, 4));
     rig.feed(3);
@@ -1343,11 +1343,18 @@ void TestRc2MultiplierCapability() {
     {
         std::vector<FgSettingsIssue> issues;
         const FgSettings omitted = FgSettingsFromKeyValues({{"fg", "on"}}, &issues);
-        CHECK(issues.empty() && omitted.enabled && omitted.follow_game_multiplier);
+        CHECK(issues.empty() && omitted.enabled && omitted.multiplier == kFgAutoMultiplier);
         const FgSettings auto_kv = FgSettingsFromKeyValues({{"fg", "on"}, {"fg_multiplier", "auto"}}, &issues);
-        CHECK(issues.empty() && auto_kv.enabled && auto_kv.follow_game_multiplier && FgSettingsValid(auto_kv));
+        CHECK(issues.empty() && auto_kv.enabled && auto_kv.multiplier == kFgAutoMultiplier && FgSettingsValid(auto_kv));
+        FgSettings changed = auto_kv;
+        changed.preset = 2;
+        FgKeyValues saved = {{"fg_multiplier", "auto"}, {"rr_mode", "quality"}};
+        CHECK(FgApplySettings(changed, &saved));
+        CHECK(saved[0] == std::make_pair(std::string("fg_multiplier"), std::string("auto")));
+        const auto read_back = FgSettingsFromKeyValues(saved, &issues);
+        CHECK(issues.empty() && read_back.preset == 2 && read_back.multiplier == kFgAutoMultiplier);
         const FgSettings manual = FgSettingsFromKeyValues({{"fg", "on"}, {"fg_multiplier", "4"}}, &issues);
-        CHECK(issues.empty() && !manual.follow_game_multiplier && manual.multiplier == 4);
+        CHECK(issues.empty() && manual.multiplier == 4);
     }
     {
         // Cyberpunk capability (has_mfg_selector = true): even with settings.multiplier = 2, game's 2x/3x/4x/6x are
@@ -1355,7 +1362,6 @@ void TestRc2MultiplierCapability() {
         FgProxyConfig cfg = QualifiedConfig();
         cfg.binding.has_mfg_selector = true;
         cfg.settings.multiplier = 2;
-        cfg.settings.follow_game_multiplier = false;
         Rig rig(cfg);
         CHECK(rig.proxy.has_mfg_selector());
         CHECK(rig.proxy.multiplier_source() == kFgMultSourceGame);
@@ -1380,12 +1386,12 @@ void TestRc2MultiplierCapability() {
         CHECK(r.status == WG_FG_PRESENT_GENERATE && r.effective_count == 3 && r.effective_preset == 2);
     }
     {
-        // Generic title (has_mfg_selector = false) with follow_game_multiplier = true: honours valid game count 3 (4x),
+        // Generic title (has_mfg_selector = false) with Auto: honours valid game count 3 (4x),
         // then switches to manual cap when update_live_settings is called.
         FgProxyConfig cfg = QualifiedConfig();
         cfg.binding.has_mfg_selector = false;
-        cfg.settings.multiplier = 2;
-        cfg.settings.follow_game_multiplier = true;
+        cfg.settings.multiplier = kFgAutoMultiplier;
+        cfg.panel_multipliers = true;
         Rig rig(cfg);
         CHECK(!rig.proxy.has_mfg_selector());
         CHECK(rig.proxy.multiplier_source() == kFgMultSourceGame);
@@ -1395,15 +1401,89 @@ void TestRc2MultiplierCapability() {
         rig.feed(1);
         WgFgPresentResult r = rig.present(1);
         CHECK(r.status == WG_FG_PRESENT_GENERATE && r.effective_count == 3);
-        CHECK(rig.proxy.update_live_settings(0, 2));
-        CHECK(rig.proxy.multiplier_source() == kFgMultSourceManual);
+        CHECK(rig.proxy.update_live_settings(2, kFgAutoMultiplier));  // preset only
         rig.feed(2);
         r = rig.present(2);
+        CHECK(r.status == WG_FG_PRESENT_GENERATE && r.effective_count == 3 && r.effective_preset == 2);
+        CHECK(rig.proxy.multiplier_source() == kFgMultSourceGame);
+        CHECK(rig.proxy.update_live_settings(2, 2));
+        CHECK(rig.proxy.multiplier_source() == kFgMultSourceManual);
+        rig.feed(3);
+        r = rig.present(3);
         CHECK(r.status == WG_FG_PRESENT_GENERATE && r.effective_count == 1);
     }
 }
 
 }  // namespace
+
+void TestPanelMultiplierPolicy() {
+    for (bool qualified : {false, true}) {
+        FgProxyConfig cfg = QualifiedConfig();
+        cfg.panel_multipliers = true;
+        cfg.binding.has_mfg_selector = qualified;
+        cfg.settings.multiplier = 4;
+        Rig rig(cfg);
+        CHECK(rig.proxy.claim_present(kChain, WG_FG_OWNER_NATIVE_ADAPTER) == WG_FG_REASON_NONE);
+
+        auto o = Options(WG_FG_COUNT_NOT_SET);
+        CHECK(rig.proxy.set_options(kFeatFg, 1, &o, nullptr) == WG_OK);
+        rig.feed(1);
+        CHECK(rig.present(1).effective_count == (qualified ? 1u : 3u));
+        CHECK(rig.proxy.requested_count() == 0);
+
+        o.generated_count = 1;
+        CHECK(rig.proxy.set_options(kFeatFg, 1, &o, nullptr) == WG_OK);
+        rig.feed(2);
+        const auto default_request = rig.present(2);
+        CHECK(default_request.effective_count == (qualified ? 1u : 3u) && rig.proxy.requested_count() == 1);
+        CHECK(default_request.requested_count == (qualified ? 1u : 3u));
+        CHECK((rig.exec.last.flags & WG_FG_FLAG_RESET) == 0);
+
+        CHECK(rig.proxy.update_live_settings(0, kFgAutoMultiplier));
+        rig.feed(3);
+        CHECK(rig.present(3).effective_count == 1);
+        CHECK(rig.proxy.multiplier_source() == kFgMultSourceGame);
+        CHECK((rig.exec.last.flags & WG_FG_FLAG_RESET) == 0);
+
+        // Both selector titles and Auto can follow a higher game request without resetting history.
+        o.generated_count = 4;
+        CHECK(rig.proxy.set_options(kFeatFg, 1, &o, nullptr) == WG_OK);
+        rig.feed(4);
+        CHECK(rig.present(4).effective_count == 4 && rig.proxy.requested_count() == 4);
+        CHECK((rig.exec.last.flags & WG_FG_FLAG_RESET) == 0);
+
+        CHECK(rig.proxy.update_live_settings(1, kFgAutoMultiplier));
+        rig.feed(5);
+        CHECK(rig.present(5).effective_preset == 1 && rig.exec.last.generated_count == 4);
+        CHECK((rig.exec.last.flags & WG_FG_FLAG_RESET) != 0);
+        rig.feed(6);
+        CHECK(rig.present(6).effective_count == 4);
+        CHECK((rig.exec.last.flags & WG_FG_FLAG_RESET) == 0);
+
+        rig.proxy.enable_generation(false);
+        rig.feed(7);
+        CHECK(rig.present(7).real_only == WG_FG_REAL_ONLY_DISABLED);
+        rig.proxy.enable_generation(true);
+        rig.feed(8);
+        CHECK(rig.present(8).effective_count == 4);
+
+        CHECK(rig.proxy.update_live_settings(1, kFgAutoMultiplier));
+        o.generated_count = WG_FG_COUNT_NOT_SET;
+        CHECK(rig.proxy.set_options(kFeatFg, 1, &o, nullptr) == WG_OK);
+        rig.feed(9);
+        CHECK(rig.present(9).effective_count == 1);
+    }
+
+    FgProxyConfig cfg = QualifiedConfig();
+    cfg.panel_multipliers = true;
+    cfg.binding.ui_max_generated = 3;
+    cfg.settings.multiplier = kFgAutoMultiplier;
+    Rig capped(cfg);
+    auto o = Options(5);
+    CHECK(capped.proxy.options_max_generated() == 5 && capped.proxy.advertised_max_generated() == 3);
+    CHECK(capped.proxy.set_options(kFeatFg, 1, &o, nullptr) == WG_OK);
+    CHECK(capped.proxy.requested_count() == 5 && capped.proxy.state().effective_count == 3);
+}
 
 int main() {
     TestSettingsDefaultsAndParse();
@@ -1420,6 +1500,7 @@ int main() {
     TestEntries();
     TestLiveSettings();
     TestRc2MultiplierCapability();
+    TestPanelMultiplierPolicy();
 #if defined(WG_FG_HAVE_RUNTIME_CONTRACT)
     TestRuntimeContractBridge();
     std::printf("runtime contract bridge: checked\n");

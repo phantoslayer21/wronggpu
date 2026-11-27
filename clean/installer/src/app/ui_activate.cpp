@@ -142,7 +142,7 @@ void ActivateWidget(int id) {
     }
     if (id >= ID_G_PRE0 && id < ID_G_PRE0 + 2) { static const char* const x[] = {"scale", "original"}; SetSetting(v.edit, "pre_exposure", x[id - ID_G_PRE0], nullptr); Invalidate(); return; }
     // frame generation (fg.h): the multiplier's segments (2x..6x) and the preset's (A, B, C), in the exact spellings
-    if (id >= ID_G_FGMULT0 && id < ID_G_FGMULT0 + 5) { static const char* const x[] = {"2", "3", "4", "5", "6"}; SetSetting(v.edit, "fg_multiplier", x[id - ID_G_FGMULT0], nullptr); Invalidate(); return; }
+    if (id >= ID_G_FGMULT0 && id < ID_G_FGMULT0 + 6) { static const char* const x[] = {"auto", "2", "3", "4", "5", "6"}; SetSetting(v.edit, "fg_multiplier", x[id - ID_G_FGMULT0], nullptr); Invalidate(); return; }
     if (id >= ID_G_FGPRESET0 && id < ID_G_FGPRESET0 + 3) { static const char* const x[] = {"A", "B", "C"}; SetSetting(v.edit, "fg_preset", x[id - ID_G_FGPRESET0], nullptr); Invalidate(); return; }
     if (id >= ID_G_RRMODE0 && id < ID_G_RRMODE0 + 3) { static const char* const x[] = {"exact", "accurate", "fast"}; SetSetting(v.edit, "rr_mode", x[id - ID_G_RRMODE0], nullptr); Invalidate(); return; }
     if (id >= ID_G_FPS0 && id < ID_G_FPS0 + 3) { static const char* const x[] = {"keep", "on", "off"}; SetSetting(v.edit, "fps_overlay", x[id - ID_G_FPS0], nullptr); Invalidate(); return; }

@@ -147,13 +147,17 @@ struct FgAsiLiveStatus {
     // M1 / A4 / A2 extensions (appended so existing fields stay ABI/source compatible for Track B's menu card):
     uint32_t multiplier_source = 0;      // FgMultiplierSource: 0 = manual, 1 = game
     bool game_has_mfg_selector = false;  // from qualified title binding
-    uint32_t requested_count = 0;        // N the game asked for (0..5)
+    uint32_t game_requested_count = 0;   // count supplied by the game (0 if unavailable)
+    uint32_t requested_count = 0;        // N from the active multiplier before route and schedule caps (0..5)
     uint32_t scheduled_count = 0;        // N scheduled after display/VRR and latency caps (0..5)
     uint32_t count_cap_reason = kFgCapNone;
     uint32_t display_refresh_hz = 0;     // active display refresh rate in Hz (0 if unreadable)
     uint32_t sustained_mult_x100 = 100;  // sustained effective multiplier * 100 (e.g. 396 = 3.96x)
     uint32_t latency_limit = 0;          // active game frame-latency limit (1..16)
     uint32_t in_flight_real = 0;         // current real frames in flight to the presenter
+    uint32_t schedule_reason = 0;   // wgfg::FgRealOnlyReason when the schedule contains only the real frame
+    float displayed_fps = 0.0f;     // total reported by the presenter, 0 until sampled
+    float base_fps = 0.0f;          // real images from the same sample
 };
 
 class FgAsiSessionHost final : public IFgPresentCallback {

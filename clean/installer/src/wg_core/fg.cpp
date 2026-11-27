@@ -21,7 +21,7 @@ struct FgKeyDef {
 constexpr FgKeyDef kFgKeyDefs[] = {
     {kFgKeyEnable, "off|on", "off"},
     {kFgKeyPreset, "A|B|C", "A"},
-    {kFgKeyMultiplier, "2|3|4|5|6", "2"},
+    {kFgKeyMultiplier, "auto|2|3|4|5|6", "auto"},
     {kFgKeyPresenter, "auto|hwfq|dxgi_tearing|dxgi_vsync", "auto"},
 };
 
