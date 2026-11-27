@@ -2113,11 +2113,12 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::strin
         uint64_t session_failures = 0;
         uint64_t queue_waits = 0;
         uint32_t queue_peak = 0;
+        uint64_t admission_present = 0, admission_consumed = 0;
         uint32_t steady_max_scheduled = 0;
     };
 
     auto run_leg = [&](const char* label, bool fg_enable, uint32_t gen_n, int slow_frames, int64_t slow_us,
-                       int fast_frames, int64_t gpu_us, int64_t cpu_us) -> SmokeRunResult {
+                       int fast_frames, int64_t gpu_us, int64_t cpu_us, bool switch_counts = false) -> SmokeRunResult {
         SmokeRunResult out;
         SmokeLogCapture cap;
         FgPresentOwners owners;
@@ -2186,6 +2187,10 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::strin
         int steady_count = 0;
         FgAsiSessionStats steady_stats;
         for (int f = 0; f < total_frames; ++f) {
+            if (switch_counts && (f == 35 || f == 75)) {
+                opt.generated_count = f == 35 ? 3u : 2u;
+                core.set_options(WG_FEAT_FRAME_GENERATION, 1, &opt, &opt);
+            }
             if (lat) {
                 const DWORD wait = WaitForSingleObject(lat, 200);
                 if (admission_only) CHECK(wait == WAIT_OBJECT_0);
@@ -2274,6 +2279,8 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::strin
         out.session_failures = st.session_failures;
         out.queue_waits = st.presenter_queue_waits;
         out.queue_peak = st.presenter_queue_peak;
+        out.admission_present = st.admission_present_intervals;
+        out.admission_consumed = st.admission_consumed_intervals;
         if (st.generated_scheduled > steady_stats.generated_scheduled && st.generated_late >= steady_stats.generated_late)
             out.steady_late_drop_pct = 100.0 * static_cast<double>(st.generated_late - steady_stats.generated_late) /
                                       static_cast<double>(st.generated_scheduled - steady_stats.generated_scheduled);
@@ -2309,6 +2316,34 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::strin
                     out.steady_max_scheduled);
         return out;
     };
+
+    if (only == "admission-policy") {
+        char env_mode[16] = {};
+        GetEnvironmentVariableA("WG_FG_ADMISSION", env_mode, sizeof(env_mode));
+        const bool force_present = std::strcmp(env_mode, "present") == 0;
+        const bool force_consumed = std::strcmp(env_mode, "consumed") == 0;
+        for (const uint32_t requested : {0u, 1u, 2u, 3u, 5u}) {
+            const auto run = run_leg("admission-policy", requested > 0, std::max(1u, requested), 0, 0, 110, 18500, 6500);
+            CHECK(run.present_errors == 0 && run.session_failures == 0);
+            CHECK(run.real_sub >= 105);
+            if (requested > 0) CHECK(run.sched >= 75);
+            const bool expects_consumed = requested > 0 && !force_present && (force_consumed || requested >= 3);
+            CHECK((run.queue_peak > 0) == expects_consumed);
+            CHECK(run.queue_peak <= 2);
+            CHECK(run.admission_consumed > 50 || !expects_consumed);
+            CHECK(run.admission_consumed == 0 || expects_consumed);
+            CHECK(run.admission_present > 0);
+            CHECK(run.admission_present + run.admission_consumed == run.real_sub);
+        }
+        if (!force_present && !force_consumed) {
+            const auto mixed = run_leg("2x-to-4x-to-3x", true, 1u, 0, 0, 112, 18500, 6500, true);
+            CHECK(mixed.present_errors == 0 && mixed.session_failures == 0);
+            CHECK(mixed.admission_present >= 65 && mixed.admission_consumed >= 30);
+            CHECK(mixed.queue_peak == 2);
+            CHECK(mixed.admission_present + mixed.admission_consumed == mixed.real_sub);
+        }
+        return;
+    }
 
     if (only == "consumed-6x") {
         // RT-on windows at x6 were display-limited to about five output images per 15.8 ms interval.
@@ -2481,7 +2516,8 @@ int main(int argc, char** argv) {
                                            only.empty() || only == "cadence");
                 }
                 if (preset < 0 && (only.empty() || only == "smoke" || only == "admission" ||
-                                   only == "real-only-admission" || only == "consumed-6x")) {
+                                   only == "real-only-admission" || only == "consumed-6x" ||
+                                   only == "admission-policy")) {
                     g_case = "gpu-smoke-pacing";
                     TestSmokeGpuBoundPacing(g, dxil, only);
                 }

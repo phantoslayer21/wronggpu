@@ -19,8 +19,9 @@
 //    through the swap-chain hook's facade seam: GetBuffer, GetCurrentBackBufferIndex, GetFrameLatencyWaitableObject),
 //    so the presenter's copies and presents into the real chain never race the game's rendering. The facade buffer
 //    the game presents is the colour input of the interval.
-//  - ADMISSION. The game's latency limit bounds intervals awaiting their first image by default.
-//    WG_FG_ADMISSION=consumed opts generating intervals into real-frame consumption and a two-interval presenter bound.
+//  - ADMISSION. By default requests for three or more generated images admit until real-frame consumption and use
+//    a two-interval presenter bound. Lower counts and real-only frames use first-present admission.
+//    WG_FG_ADMISSION=present|consumed|policy selects the rule for generating intervals.
 //  - SESSION. Created on the present thread once the core has a session description (options and a latched present),
 //    with one FgD3d12Executor for the host's lifetime (pipelines built once) and the presenter the settings name
 //    (fg_presenter: auto / hwfq / dxgi_tearing / dxgi_vsync, through FgWinPresenterSource). Every game present goes
@@ -122,6 +123,7 @@ struct FgAsiSessionStats {
     uint64_t back_pressure_waits = 0, credit_waits = 0, admission_timeouts = 0, real_retires = 0, noop_fullscreen_ignored = 0;
     uint64_t presenter_queue_waits = 0;
     uint32_t presenter_queue_peak = 0;  // reserved intervals, including the head
+    uint64_t admission_present_intervals = 0, admission_consumed_intervals = 0;
     uint64_t generated_scheduled = 0, generated_late = 0;  // active presenter session
 };
 
