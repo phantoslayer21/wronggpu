@@ -218,7 +218,7 @@ struct FgAsiSessionHost::Impl {
 
     // The waitable paces facade hand-offs. Admission bounds unconsumed game frames and reserves presenter space
     // until the real endpoint retires. Presenter callbacks take only the leaf admission lock.
-    bool admission_until_present = false;
+    bool admission_until_present = true;
     mutable std::mutex credit_mu;
     std::condition_variable credit_cv;
     HANDLE latency_sem = nullptr;
@@ -1620,8 +1620,8 @@ FgAsiSessionHost::FgAsiSessionHost(const FgAsiSessionConfig& cfg, std::unique_pt
     impl_->pending_admissions.reserve(16);
     impl_->presenter_intervals.reserve(kPresenterAdmissionDepth);
     char admission[16] = {};
-    if (GetEnvironmentVariableA("WG_FG_ADMISSION", admission, sizeof(admission)) == 7)
-        impl_->admission_until_present = std::strcmp(admission, "present") == 0;
+    if (GetEnvironmentVariableA("WG_FG_ADMISSION", admission, sizeof(admission)) == 8)
+        impl_->admission_until_present = std::strcmp(admission, "consumed") != 0;
     impl_->weights = std::move(weights);
     impl_->InitTraceCsv();
     impl_->StartTraceWorker();

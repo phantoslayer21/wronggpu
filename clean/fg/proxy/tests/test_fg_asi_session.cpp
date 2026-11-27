@@ -2306,14 +2306,14 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, bool admission_o
 
     if (admission_only) {
         char mode[16] = {};
-        const bool legacy = GetEnvironmentVariableA("WG_FG_ADMISSION", mode, sizeof(mode)) == 7 &&
-                            std::strcmp(mode, "present") == 0;
+        const bool use_consumption = GetEnvironmentVariableA("WG_FG_ADMISSION", mode, sizeof(mode)) == 8 &&
+                                     std::strcmp(mode, "consumed") == 0;
         // A GPU-bound title waits at frame start, records for ~4 ms, and queues 7 ms of GPU work at Present.
         // Warm up at a slower cadence to put the first-image budget above the steady GPU period.
         const SmokeRunResult run = run_leg("admission-7ms", true, 1u, 8, 12000, 320, 7000, 4000);
         CHECK(run.present_errors == 0 && run.session_failures == 0);
         CHECK(run.sched >= 200);
-        if (legacy) {
+        if (!use_consumption) {
             CHECK(run.queue_peak == 0 && run.queue_waits == 0);
             return;
         }

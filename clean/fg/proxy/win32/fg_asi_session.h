@@ -19,8 +19,8 @@
 //    through the swap-chain hook's facade seam: GetBuffer, GetCurrentBackBufferIndex, GetFrameLatencyWaitableObject),
 //    so the presenter's copies and presents into the real chain never race the game's rendering. The facade buffer
 //    the game presents is the colour input of the interval.
-//  - ADMISSION. The game latency limit bounds real frames awaiting consumption. The presenter reserves room for
-//    the head interval and at most one following interval. WG_FG_ADMISSION=present restores first-image admission.
+//  - ADMISSION. The game's latency limit bounds intervals awaiting their first image by default.
+//    WG_FG_ADMISSION=consumed opts into real-frame consumption admission and bounds the presenter to two intervals.
 //  - SESSION. Created on the present thread once the core has a session description (options and a latched present),
 //    with one FgD3d12Executor for the host's lifetime (pipelines built once) and the presenter the settings name
 //    (fg_presenter: auto / hwfq / dxgi_tearing / dxgi_vsync, through FgWinPresenterSource). Every game present goes
