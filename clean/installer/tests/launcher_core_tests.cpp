@@ -2400,16 +2400,43 @@ int main() {
                         "Cyberpunk 2077: never direct; RR only by its files (its row adds no use)");
             }
             {   // the install's OptiScaler from its record: the proxy's copy entry has the edition DLL's hash
-                const wstring ed = PinnedEdition().dllSha256;
+                const EditionInfo pin = PinnedEdition();
+                require(wstring(kEditionPage).find(L"wronggpu-edition-20261127.1") != wstring::npos &&
+                        pin.file == L"OptiScaler_v10.0.0-pre1_20261127_WrongGPU-edition-v6.zip" &&
+                        pin.size == 185513174ull &&
+                        IEq(pin.sha256, L"0a187a66fa8889b817da6dc440ea5ec5a80dabeb3192eeb416534d350e5e05b3") &&
+                        IEq(pin.dllSha256, L"359eb5fb0a11b15d0bed7b227f9b0869fa85e77df43d6af791ba813e12e9b935") &&
+                        pin.version.find(L"v6") != wstring::npos,
+                        "PinnedEdition pins WrongGPU edition v6 (tag, file, size, archive sha256, DLL sha256, version)");
+                const wstring ed = pin.dllSha256;
+                const wstring v5 = L"ff6f06ca2f8e761016f41313e2533fd176623a7a85f9e9169c9fc003b227826d";
+                require(IsPriorEditionHash(v5) && !IsPriorEditionHash(ed) &&
+                        !IsPriorEditionHash(L"0000000000000000000000000000000000000000000000000000000000000000"),
+                        "IsPriorEditionHash: v5 recognised as prior edition; v6 and foreign hashes are not");
                 Record er; er.proxy = L"dxgi.dll";
                 er.e.push_back({L"copy", L"dxgi.dll", false, L"-", ed, L"wg-optibundle"});
-                require(!ed.empty() && RecordHasEdition(er), "a record whose OptiScaler DLL has the edition's hash: the edition");
+                require(!ed.empty() && RecordHasEdition(er) && !RecordHasPriorEdition(er),
+                        "a record whose OptiScaler DLL has the v6 edition's hash: the edition, not outdated");
+                er.e.back().inst = v5;
+                require(!RecordHasEdition(er) && RecordHasPriorEdition(er),
+                        "a record whose OptiScaler DLL has the v5 edition's hash: prior edition due for upgrade");
                 er.e.back().inst = L"0000000000000000000000000000000000000000000000000000000000000000";
-                require(!RecordHasEdition(er), "another OptiScaler DLL: not the edition");
+                require(!RecordHasEdition(er) && !RecordHasPriorEdition(er), "another OptiScaler DLL: neither current nor prior edition");
                 Record nr; nr.e.push_back({L"copy", L"winmm.dll", false, L"-", ed, L"wg-optibundle"});
                 require(RecordHasEdition(nr), "no proxy line: OptiScaler's DLL under a proxy name with the edition's hash");
                 Record pr; pr.proxy = L"dxgi.dll"; pr.e.push_back({L"copy", L"plugins\\WrongGPU.asi", false, L"-", ed, L"wg"});
                 require(!RecordHasEdition(pr), "the hash on another file than the proxy: not the edition");
+                // UpdateDue / InstalledLabel: an install with an older edition (v5) is marked for update even at the same WrongGPU version
+                {
+                    EmbeddedData pm{}; pm.version = L"0.7.0";
+                    Context uctx; uctx.data = &pm;
+                    GameEntry ge; ge.hasRecord = true; ge.installedVersion = L"0.7.0"; ge.optiEdition = false; ge.optiEditionOutdated = true;
+                    require(UpdateDue(ge, uctx) && InstalledLabel(ge).find(L"older OptiScaler edition") != wstring::npos,
+                            "UpdateDue / InstalledLabel: an install on v5 is due for update with the older-edition label");
+                    ge.optiEdition = true; ge.optiEditionOutdated = false;
+                    require(!UpdateDue(ge, uctx) && InstalledLabel(ge) == L"0.7.0",
+                            "UpdateDue / InstalledLabel: an install on v6 at the current version is kept");
+                }
                 require(RrDirectNoEditionText(L"Some Game").find(L"no OptiScaler edition") != wstring::npos &&
                         RrDirectNoEditionText(L"Some Game").find(L"isn't offered in Some Game, and the game") != wstring::npos,
                         "the warning carries the words the window turns into the player's sentence (ui_words.cpp)");

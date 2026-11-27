@@ -91,10 +91,13 @@ bool LauncherInstalled(wstring* exe) {
     return true;
 }
 bool UpdateDue(const GameEntry& e, const Context& ctx) {
-    return e.hasRecord && !e.installedVersion.empty() && ctx.data && (VersionLess(e.installedVersion, ctx.data->version) || e.otherBuild);
+    return e.hasRecord && !e.installedVersion.empty() && ctx.data &&
+           (VersionLess(e.installedVersion, ctx.data->version) || e.otherBuild || e.optiEditionOutdated);
 }
 wstring InstalledLabel(const GameEntry& e) {
-    return e.otherBuild ? e.installedVersion + L" (another build)" : e.installedVersion;
+    if (e.otherBuild) return e.installedVersion + L" (another build)";
+    if (e.optiEditionOutdated) return e.installedVersion + L" (older OptiScaler edition)";
+    return e.installedVersion;
 }
 wstring BuildTimeText(uint32_t t) {
     if (!t) return L"unknown";
@@ -328,6 +331,7 @@ GameEntry EntryFor(Context& ctx, const wstring& exeIn, const wstring& name, cons
         g.hosted = HostedRecord(rec);
         g.proxy = rec.proxy;
         g.optiEdition = RecordHasEdition(rec);
+        g.optiEditionOutdated = !g.optiEdition && RecordHasPriorEdition(rec);
         if (g.proxy.empty())
             for (auto& e : rec.e) for (auto px : kOptiProxies) if (e.action == L"copy" && IEq(e.rel, px)) g.proxy = px;
         g.adoptable = g.recordV1 || !IsFile(ProfilePath(g.dir)) || (g.perGameEntry && LauncherInstalled());

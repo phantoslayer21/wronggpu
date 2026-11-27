@@ -113,6 +113,7 @@ struct GameEntry {
     bool rrDirect = false;         // the game creates RR itself, not through the game interface (rr.h RrUse::direct): WrongGPU's
                                    // RR runs there only with WrongGPU's edition of OptiScaler
     bool optiEdition = false;      // the install's OptiScaler is WrongGPU's edition (rr.h RecordHasEdition; installed games only)
+    bool optiEditionOutdated = false;  // the install's OptiScaler is an older WrongGPU edition (e.g. v5) due for upgrade to v6
     bool rrInstalled = false;      // the install placed WrongGPU's RR files
     // Frame generation (fg.h; a build with its choice, WRONGGPU_FG): only games that offer it show anything of it
     bool fgUses = false;           // the game has a frame generation library (nvngx_dlssg.dll), or its install has the FG files

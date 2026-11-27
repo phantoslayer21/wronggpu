@@ -119,6 +119,15 @@ bool RecordHasEdition(const Record& m) {
     return false;
 }
 
+bool RecordHasPriorEdition(const Record& m) {
+    for (auto& x : m.e)
+        if (x.action == L"copy" && !m.proxy.empty() && IEq(x.rel, m.proxy)) return IsPriorEditionHash(x.inst);
+    for (auto& x : m.e)
+        for (auto px : kOptiProxies)
+            if (x.action == L"copy" && IEq(x.rel, px) && IsPriorEditionHash(x.inst)) return true;
+    return false;
+}
+
 wstring RrDirectNoEditionText(const wstring& game) {
     return L"This OptiScaler is no OptiScaler edition with plugin interface 4: WrongGPU's Ray Reconstruction isn't offered in " + game +
            L", and the game keeps its own ray tracing.";

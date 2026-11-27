@@ -185,10 +185,10 @@ def test_fg_game(t, opti, expected):
     fc = {c.get("text", ""): c for c in page.get("fg_controls", [])}
     sw = fc.get("Use WrongGPU (Frame generation)", {})
     t.check("game page with the data ready: Use WrongGPU (Frame generation) on", sw.get("checked") is True and sw.get("enabled") is True, sw)
-    segs = [c for c in page.get("fg_controls", []) if 3810 <= c.get("id", 0) < 3815]
+    segs = [c for c in page.get("fg_controls", []) if 3810 <= c.get("id", 0) < 3816]
     pres = [c for c in page.get("fg_controls", []) if 3820 <= c.get("id", 0) < 3823]
-    t.check("game page: the multiplier 2x..6x with 3x chosen", [c.get("text") for c in segs][:1] and len(segs) == 5 and
-            [c.get("checked") for c in segs] == [False, True, False, False, False], [(c.get("text"), c.get("checked")) for c in segs])
+    t.check("game page: the multiplier Auto, 2x..6x with 3x chosen", [c.get("text") for c in segs][:1] and len(segs) == 6 and
+            [c.get("checked") for c in segs] == [False, False, True, False, False, False], [(c.get("text"), c.get("checked")) for c in segs])
     t.check("game page: the preset A, B, C with C chosen (the outside change)", len(pres) == 3 and [c.get("checked") for c in pres] == [False, False, True],
             [(c.get("text"), c.get("checked")) for c in pres])
     sel = [c for c in page.get("fg_controls", []) if c.get("id") == 3803]

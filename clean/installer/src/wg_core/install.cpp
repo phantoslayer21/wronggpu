@@ -551,7 +551,7 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
     // downloaded) the RR plugin reports RR unsupported there, so the game keeps its own ray tracing.
     if (opti && rr && rule && rule->needsHostRestore) {
         if (ctx.opti.edition) {
-            LogLine(ctx, L"OptiScaler.dll: WrongGPU's edition of OptiScaler (plugin interface 5): " + wstring(rule->name) + L"'s Ray Reconstruction needs it");
+            LogLine(ctx, L"OptiScaler.dll: WrongGPU's edition of OptiScaler (plugin interface 6): " + wstring(rule->name) + L"'s Ray Reconstruction needs it");
         } else {
             const wstring w = L"This OptiScaler is no OptiScaler edition with plugin interface 5: WrongGPU's Ray Reconstruction isn't offered in " +
                               wstring(rule->name) + L", and the game keeps its own ray tracing.";
@@ -827,6 +827,10 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
                  L"Install again to be asked about it.", EXIT_OTHER_MODS);
         }
         if (!writtenOver) disable.push_back(f);
+    }
+    for (auto& f : now.priorEditionFiles) {
+        const bool writtenOver = IsAmdFidelityFxName(f) || std::find_if(optiFiles.begin(), optiFiles.end(), [&](const OptiFile& o) { return IEq(o.rel, f); }) != optiFiles.end();
+        if (!writtenOver && !EndsWithI(f, L".log")) disable.push_back(f);
     }
     for (auto& f : now.legacyFiles) disable.push_back(f);
     // other setups' plugins, moved aside with the player's OK so WrongGPU's RR plugin is the only one (exactly those the plan

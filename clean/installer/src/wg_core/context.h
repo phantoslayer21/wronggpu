@@ -67,7 +67,7 @@ struct Ui {
 struct OptiPackage {
     wstring source, dir, version, tempDir, error;
     std::vector<wstring> files;  // relative to dir: what goes next to the game exe (OptiScaler.dll renamed to the proxy)
-    bool edition = false;        // its OptiScaler.dll is WrongGPU's edition of OptiScaler (optiedition.h: the pinned DLL, plugin interface 5)
+    bool edition = false;        // its OptiScaler.dll is WrongGPU's edition of OptiScaler (optiedition.h: the pinned DLL, plugin interface 6)
     bool chosen() const { return !source.empty(); }
     bool ok() const { return chosen() && error.empty() && !dir.empty(); }
 };

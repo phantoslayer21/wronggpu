@@ -108,7 +108,7 @@ def _section(t, opti, game, edition_package, OPTI_INI, tag, refuses):
         proxy = [n for n in ("dxgi.dll", "winmm.dll", "version.dll") if os.path.isfile(os.path.join(b, n))]
         check("no OptiScaler chosen: the launcher downloads its edition (one GET), checks it (sha256), caches it in its data folder and installs it",
               rc == 0 and len(hits) == 1 and read(cache) == zbytes and "downloaded and checked" in log and proxy and read(os.path.join(b, proxy[0])) == dll and
-              "(WrongGPU edition, plugin interface 5)" in log, (rc, t.j.get("message"), hits, proxy, t.logtail()))
+              "(WrongGPU edition, plugin interface 6)" in log, (rc, t.j.get("message"), hits, proxy, t.logtail()))
         rc, seg = repair()
         check("the next install / repair reuses the cached, checked copy (no second download)",
               rc == 0 and len(hits) == 1 and "from the launcher's cache" in seg, (rc, hits, seg[-1500:]))
@@ -147,6 +147,122 @@ def _section(t, opti, game, edition_package, OPTI_INI, tag, refuses):
         check("uninstall: the game folder back byte for byte",
               rc == 0 and snapshot(root) == before, (rc, diff(before, snapshot(root))))
         shutil.rmtree(root, ignore_errors=True)
+
+        # ---- v5 -> v6 upgrade, cache isolation, v6 kept, and needsHostRestore RR game with v6 ----
+        import mockpe
+        v5_dir = os.path.join(t.work, "edition-v5-src")
+        shutil.rmtree(v5_dir, ignore_errors=True)
+        v5_dll = mockpe.make_dll({"ProductName": "OptiScaler", "FileDescription": "OptiScaler WrongGPU edition v5 (test stand-in)"}, (10, 0, 0, 5),
+                                 extra=b"OptiScaler WrongGPU edition v5 stand-in (synthetic, never loaded)", dll_name="OptiScaler.dll")
+        write(os.path.join(v5_dir, "OptiScaler.dll"), v5_dll)
+        write(os.path.join(v5_dir, "OptiScaler.ini"), OPTI_INI)
+        t.env["WRONGGPU_TEST_PRIOR_EDITION_DLL"] = sha(v5_dll)
+
+        # 1. v5 archive cached -> ignored, v6 fetched
+        if os.path.exists(cache):
+            os.remove(cache)
+        v5_cache = os.path.join(t.data, "optiscaler", "OptiScaler_v10.0.0-pre1_20261030_WrongGPU-edition-v5.zip")
+        with zipfile.ZipFile(v5_cache, "w", zipfile.ZIP_DEFLATED) as z5:
+            z5.writestr("OptiScaler.dll", v5_dll)
+            z5.writestr("OptiScaler.ini", OPTI_INI)
+        hits_before = len(hits)
+        t.env["WRONGGPU_TEST_EDITION"] = pin("http://127.0.0.1:%d/edition.zip" % port)
+        rootC, bC, exeC = game(t, "Edition CacheV5 Game", validated=True)
+        rc = t.run("install", exeC, "--noscan", "--force")
+        pC = [n for n in ("dxgi.dll", "winmm.dll", "version.dll") if os.path.isfile(os.path.join(bC, n))]
+        check("v5 archive cached: ignored, v6 fetched and installed",
+              rc == 0 and len(hits) == hits_before + 1 and os.path.isfile(cache) and pC and read(os.path.join(bC, pC[0])) == dll,
+              (rc, len(hits) - hits_before, pC, t.j.get("message")))
+
+        # 2. v6 installed -> kept, and cached v6 used with no network
+        rc_s = t.run("status", exeC, "--noscan")
+        gC = t.j.get("game", {})
+        check("v6 installed: status is installed (not update-available), optiscaler_edition=true, outdated=false",
+              rc_s == 0 and gC.get("status") == "installed" and gC.get("optiscaler_edition") is True and gC.get("optiscaler_edition_outdated") is False, gC)
+        t.env["WRONGGPU_TEST_EDITION"] = pin("http://127.0.0.1:9/edition.zip")
+        rc_r, seg_r = (t.run("repair", exeC, "--noscan", "--force"), "")
+        check("v6 archive cached: used with no network (unreachable port) and v6 kept",
+              rc_r == 0 and len(hits) == hits_before + 1 and pC and read(os.path.join(bC, pC[0])) == dll,
+              (rc_r, len(hits) - hits_before, t.j.get("message")))
+        t.run("uninstall", exeC)
+        shutil.rmtree(rootC, ignore_errors=True)
+        if os.path.exists(v5_cache):
+            os.remove(v5_cache)
+
+        # 3. Managed v5 installed -> flagged update-available (older OptiScaler edition) and upgraded to v6 on update & repair
+        t.env["WRONGGPU_TEST_EDITION"] = pin("http://127.0.0.1:%d/edition.zip" % port)
+        rootM, bM, exeM = game(t, "Edition ManagedV5 Game", validated=True)
+        rc = t.run("install", exeM, "--opti=" + v5_dir, "--noscan", "--force")
+        rc_s = t.run("status", exeM, "--noscan")
+        gM = t.j.get("game", {})
+        check("managed v5 installed: flagged as update-available (older OptiScaler edition), optiscaler_edition=false, outdated=true",
+              rc == 0 and rc_s == 0 and gM.get("status") == "update-available" and "older OptiScaler edition" in gM.get("status_text", "") and
+              gM.get("optiscaler_edition") is False and gM.get("optiscaler_edition_outdated") is True, gM)
+        rc_u = t.run("update", exeM, "--noscan", "--force")
+        rc_s2 = t.run("status", exeM, "--noscan")
+        gM2 = t.j.get("game", {})
+        pM = [n for n in ("dxgi.dll", "winmm.dll", "version.dll") if os.path.isfile(os.path.join(bM, n))]
+        check("managed v5 update: upgraded to v6, status=installed, optiscaler_edition=true, outdated=false",
+              rc_u == 0 and rc_s2 == 0 and gM2.get("status") == "installed" and gM2.get("optiscaler_edition") is True and
+              gM2.get("optiscaler_edition_outdated") is False and pM and read(os.path.join(bM, pM[0])) == dll, (rc_u, gM2, pM))
+        # Also verify repair upgrades a managed v5 install to v6
+        rc_v5 = t.run("install", exeM, "--opti=" + v5_dir, "--noscan", "--force")
+        rc_rep = t.run("repair", exeM, "--noscan", "--force")
+        pM2 = [n for n in ("dxgi.dll", "winmm.dll", "version.dll") if os.path.isfile(os.path.join(bM, n))]
+        check("managed v5 repair: upgraded to v6",
+              rc_v5 == 0 and rc_rep == 0 and pM2 and read(os.path.join(bM, pM2[0])) == dll, (rc_v5, rc_rep, pM2))
+        t.run("uninstall", exeM)
+        shutil.rmtree(rootM, ignore_errors=True)
+
+        # 4. Unmanaged v5 DLL in game folder -> treated as outdated edition (Migrate, NOT foreign OptiScaler), upgraded in place without --switch
+        rootU, bU, exeU = game(t, "Edition UnmanagedV5 Game", validated=True)
+        write(os.path.join(bU, "winmm.dll"), v5_dll)
+        write(os.path.join(bU, "OptiScaler.ini"), OPTI_INI)
+        beforeU = snapshot(rootU)
+        rc_sU = t.run("status", exeU, "--noscan")
+        gU = t.j.get("game", {})
+        co_opti = [c for c in gU.get("coexistence", []) if c.get("tool") == "optiscaler"]
+        check("unmanaged v5: status=eligible (not players-optiscaler/foreign-mod), coexistence decision=migrate, proxy reused (winmm.dll)",
+              rc_sU == 0 and gU.get("status") == "eligible" and co_opti and co_opti[0].get("decision") == "migrate" and
+              gU.get("proxy_plan", {}).get("name", "").lower() == "winmm.dll", gU)
+        rc_iU = t.run("install", exeU, "--noscan", "--force")  # no --switch!
+        rc_sU2 = t.run("status", exeU, "--noscan")
+        gU2 = t.j.get("game", {})
+        check("unmanaged v5 install (without --switch): upgraded in place at winmm.dll to v6, optiscaler_edition=true",
+              rc_iU == 0 and rc_sU2 == 0 and read(os.path.join(bU, "winmm.dll")) == dll and not os.path.exists(os.path.join(bU, "dxgi.dll")) and
+              gU2.get("status") == "installed" and gU2.get("optiscaler_edition") is True, (rc_iU, gU2, t.j.get("message")))
+        rc_unU = t.run("uninstall", exeU)
+        check("unmanaged v5 uninstall: original v5 files restored byte for byte",
+              rc_unU == 0 and snapshot(rootU) == beforeU, (rc_unU, diff(beforeU, snapshot(rootU))))
+        shutil.rmtree(rootU, ignore_errors=True)
+
+        # 5. RR game that needs the edition (needsHostRestore: re9.exe) -> RR offered with v6
+        rootR = os.path.join(t.work, "games", "Edition Re9 Game")
+        shutil.rmtree(rootR, ignore_errors=True)
+        exeR = os.path.join(rootR, "re9.exe")
+        write(exeR, "mock RE9 game exe " * 200)
+        import run_installer_tests as _rit
+        write(os.path.join(rootR, "amd_fidelityfx_dx12.dll"), _rit.AMD_V1)
+        write(os.path.join(rootR, "nvngx_dlss.dll"), t.model.file)
+        write(os.path.join(rootR, "nvngx_dlssd.dll"), b"MZ mock dlss rr")
+        write(os.path.join(rootR, "sl.dlss_d.dll"), mockpe.make_dll({"ProductName": "Game interface RR plugin"}, (2, 8, 0, 0), extra=b"synthetic"))
+        write(os.path.join(rootR, "dinput8.dll"), b"MZ synthetic loader stand-in: REFramework v1.5 (test)")
+        write(os.path.join(rootR, "reframework", "config.txt"), "test")
+        beforeR = snapshot(rootR)
+        startR = os.path.getsize(t.log) if os.path.isfile(t.log) else 0
+        rc_R = t.run("install", exeR, "--noscan", "--force", "--experimental")
+        logR = read(t.log)[startR:].decode("utf-8", "replace")
+        rc_sR = t.run("status", exeR, "--noscan")
+        gR = t.j.get("game", {})
+        check("needsHostRestore RR game (re9.exe) with v6: installed with v6 DLL and RR plugin, no edition warning, plugin interface 6 logged",
+              rc_R == 0 and rc_sR == 0 and read(os.path.join(rootR, "dxgi.dll")) == dll and
+              os.path.isfile(os.path.join(rootR, "plugins", "WrongGPU-RR.asi")) and
+              not any("no OptiScaler edition" in w for w in t.j.get("warnings", [])) and
+              "plugin interface 6" in logR and gR.get("optiscaler_edition") is True and gR.get("rr_installed") is True,
+              (rc_R, gR, t.j.get("warnings"), logR[-1200:]))
+        t.run("uninstall", exeR)
+        shutil.rmtree(rootR, ignore_errors=True)
     finally:
         httpd.shutdown()
         t.env.pop("WRONGGPU_TEST_EDITION", None)
+        t.env.pop("WRONGGPU_TEST_PRIOR_EDITION_DLL", None)

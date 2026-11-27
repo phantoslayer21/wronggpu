@@ -421,7 +421,8 @@ void EntryJson(Json& j, const GameEntry& e) {
     j.Obj().S("name", e.name).S("exe", e.exe).S("dir", e.dir).S("source", e.source).S("status", StatusName(e.status)).S("status_text", e.statusText);
     if (e.hasRecord) {
         j.S("installed_version", e.installedVersion).B("other_build", e.otherBuild).B("record_v1", e.recordV1).B("per_game_entry", e.perGameEntry).B("optiscaler_route", e.hosted)
-            .B("adoptable", e.adoptable).B("repair_suggested", e.repairSuggested).S("proxy", e.proxy);
+            .B("adoptable", e.adoptable).B("repair_suggested", e.repairSuggested).S("proxy", e.proxy)
+            .B("optiscaler_edition", e.optiEdition).B("optiscaler_edition_outdated", e.optiEditionOutdated);
         j.B("can_roll_back", e.hasPrevious);  // the kept version fits this install's layout (launcher.cpp PreviousFits)
         if (e.hasPrevious && !e.previous.empty()) j.S("previous_version", e.previous);
         j.Key("problems").Arr(); for (auto& p : e.problems) j.Str(p); j.End();
@@ -447,7 +448,6 @@ void EntryJson(Json& j, const GameEntry& e) {
     if (e.rrUses) {
         const bool noEdition = e.rrDirect && e.hasRecord && e.rrInstalled && !e.optiEdition;
         j.B("rr_direct", e.rrDirect).B("rr_available", !noEdition);
-        if (e.hasRecord) j.B("optiscaler_edition", e.optiEdition);
         if (noEdition) j.S("rr_unavailable_why", L"the game creates Ray Reconstruction itself, and this install's OptiScaler is not WrongGPU's edition (plugin interface 4 or newer)");
     }
     // a tool of the player's the game needs first (gamerules.h): only such a game says anything of it

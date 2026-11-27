@@ -80,7 +80,7 @@ OptiPackage PrepareOptiScaler(Context& ctx, const wstring& chosen) {
         for (auto& d : ListDirs(abs)) stack.push_back(rel.empty() ? BaseName(d) : Join(rel, BaseName(d)));
     }
     std::sort(p.files.begin(), p.files.end());
-    LogLine(ctx, L"OptiScaler " + p.version + (p.edition ? L" (WrongGPU edition, plugin interface 5)" : L"") + L" from " + p.source + L": " + std::to_wstring(p.files.size()) + L" files");
+    LogLine(ctx, L"OptiScaler " + p.version + (p.edition ? L" (WrongGPU edition, plugin interface 6)" : L"") + L" from " + p.source + L": " + std::to_wstring(p.files.size()) + L" files");
     return p;
 }
 // OptiScaler's proxy name next to the game exe: the proxy picker's choice (coexist.h): where the player's OptiScaler is
