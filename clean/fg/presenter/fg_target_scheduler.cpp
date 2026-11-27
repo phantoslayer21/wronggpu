@@ -217,6 +217,7 @@ FgStatus FgTargetScheduler::BeginEpoch(std::uint64_t epoch) {
     protect_consumed_lead_ = false;
     fill_requested_ = fill_count_ = fill_overrun_ = 0;
     overflow_ready_ = false;
+    overflow_cap_ = 0;
     anchored_ = false;
     have_target_ = false;
     last_real_target_ = 0;
@@ -320,8 +321,6 @@ std::uint32_t FgTargetScheduler::UpdateCount(std::uint32_t requested, FgTicks pe
         }
     }
     std::uint32_t up = effective_ < requested ? (adaptive ? effective_ + 1 : requested) : 0;
-    if (up > 1 && up < requested && config_.guard_overflow_delivery && !overflow_ready_ &&
-        !Fits(requested, period, w.hysteresis)) up = 0;
     if (up > 0) {
         // A fixed grid can support 2x and 4x with no legal 3x plan.
         if (adaptive && config_.fixed_refresh_period > 0) {
@@ -368,7 +367,8 @@ FgTargetScheduler::FillPlan FgTargetScheduler::UpdateFill(std::uint32_t requeste
     };
     const FgTicks fastest = std::min(uncapped, latest_uncapped);
     const FgTicks slowest = std::max(uncapped, latest_uncapped);
-    const std::uint32_t limit = max_generated_cap_ ? std::min(requested, max_generated_cap_) : requested;
+    std::uint32_t limit = max_generated_cap_ ? std::min(requested, max_generated_cap_) : requested;
+    if (overflow_cap_) limit = std::min(limit, overflow_cap_);
     if (fill_count_ != 0) {
         const FgTicks target = target_for(fill_count_);
         if (fill_count_ > limit || slowest >= target) {
@@ -489,7 +489,12 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
         bad_run_ = 0;
         good_run_ = 0;
     } else if (period_estimate > 0) {
-        effective = UpdateCount(frame.requested_count, period_estimate);
+        // Give an oversized request the same count history as an explicit fitting
+        // request. Only an approved fill plan can add a count above the base fit.
+        const auto requested = adaptive_vrr && config_.guard_overflow_delivery
+                                   ? std::max(Largest(frame.requested_count, estimator_.Period()), fill.count)
+                                   : frame.requested_count;
+        effective = UpdateCount(requested, period_estimate);
     }
     if (reason == FgRealOnlyReason::None) {
         if (period_estimate == 0) reason = FgRealOnlyReason::NotPrimed;

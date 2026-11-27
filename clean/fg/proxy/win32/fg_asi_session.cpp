@@ -295,7 +295,7 @@ struct FgAsiSessionHost::Impl {
     OverflowDelivery delivery;
     wgfg::FgPresentStats delivery_base;
     uint32_t delivery_frames = 0, delivery_requested = 0, delivery_active = 0;
-    uint32_t delivery_overflow_frames = 0, delivery_drain_frames = 0;
+    uint32_t delivery_drain_frames = 0;
     bool delivery_fill = false, guard_delivery = false;
     uint64_t delivery_cap_steps = 0;
     uint32_t cap_miss_windows = 0;
@@ -1453,7 +1453,7 @@ struct FgAsiSessionHost::Impl {
         delivery = {};
         delivery_base = {};
         delivery_frames = delivery_requested = delivery_active = 0;
-        delivery_overflow_frames = delivery_drain_frames = 0;
+        delivery_drain_frames = 0;
         delivery_fill = guard_delivery = false;
         delivery_cap_steps = 0;
         budget_limits = {};
@@ -1478,10 +1478,7 @@ struct FgAsiSessionHost::Impl {
     // measured readiness from trace_ring (t_first_gen_ready / t_real_ready - t_after_wait), a GPU-readiness
     // ceiling [8, 32] ms, and miss-floor holdoff easing to prevent GPU-bound phase-boundary oscillation.
     void ApplyCountCaps() {
-        if (!session) return;
-        const uint32_t cap = lateness_count_cap && delivery.cap ? std::min(lateness_count_cap, delivery.cap)
-                                                                 : std::max(lateness_count_cap, delivery.cap);
-        session->SetMaxGeneratedCap(cap);
+        if (session) session->SetMaxGeneratedCap(lateness_count_cap);
     }
 
     void ControlDelivery(uint32_t requested, const wgfg::FgSessionResult& result, bool generating) {
@@ -1499,7 +1496,7 @@ struct FgAsiSessionHost::Impl {
             delivery_base = presenter->Stats();
             delivery_requested = generating ? requested : 0;
             delivery_frames = delivery_active = 0;
-            delivery_overflow_frames = delivery_drain_frames = 0;
+            delivery_drain_frames = 0;
             delivery_fill = false;
             return;
         }
@@ -1511,8 +1508,6 @@ struct FgAsiSessionHost::Impl {
         ++delivery_frames;
         delivery_active = std::max(delivery_active, result.scheduled);
         delivery_fill |= result.fill_period > 0;
-        if (session->LastReductionReason() == wgfg::FgRealOnlyReason::OutOfVrrWindow)
-            ++delivery_overflow_frames;
         const bool full = delivery_frames >= kBudgetWindow;
         if (!full && delivery_frames % kBudgetFastCheck != 0) return;
         const auto current = presenter->Stats();
@@ -1533,19 +1528,18 @@ struct FgAsiSessionHost::Impl {
         const bool headroom = margins.Size() >= 12 && margins.Percentile(0.10) >= 10000;
         const auto old_cap = delivery.cap;
         const auto old_ready = delivery.ready;
-        const bool overflow = delivery_fill || delivery_overflow_frames * 2 > delivery_frames || delivery.cap != 0;
+        const bool overflow = delivery_fill || delivery.cap != 0;
         delivery.Observe(offered, missed, delivery_active, requested, overflow,
                          headroom, full);
         if (old_cap != delivery.cap) {
             if (delivery.cap != 0 && (old_cap == 0 || delivery.cap < old_cap)) ++delivery_cap_steps;
-            ApplyCountCaps();
             // Wait for both outstanding intervals to drain before attributing misses to the new count.
             delivery_drain_frames = 2;
         }
-        if (old_ready != delivery.ready) session->SetOverflowReady(delivery.ready);
+        if (old_ready != delivery.ready || old_cap != delivery.cap)
+            session->SetOverflowReady(delivery.ready, delivery.cap);
         delivery_base = current;
         delivery_frames = delivery_active = 0;
-        delivery_overflow_frames = 0;
         delivery_fill = false;
     }
 
@@ -1708,7 +1702,9 @@ struct FgAsiSessionHost::Impl {
                 quiet_windows = 0;
                 if (lateness_count_cap > 0) {
                     const uint32_t route_max = core ? core->advertised_max_generated() : 5u;
-                    const uint32_t req_n = st_req_count.load();
+                    const auto* scheduler = session->Scheduler();
+                    const uint32_t planning = scheduler ? scheduler->PlanningCount() : 0;
+                    const uint32_t req_n = planning > 0 ? planning : st_req_count.load();
                     const uint32_t cap_ceil = req_n > 0 ? std::min(route_max, req_n) : route_max;
                     lateness_count_cap = (lateness_count_cap + 1 >= cap_ceil) ? 0u : lateness_count_cap + 1;
                     ApplyCountCaps();
@@ -1923,9 +1919,9 @@ struct FgAsiSessionHost::Impl {
         base.min_interval = d.scheduler.display.min_interval;
         char fill_env[8] = {};
         const auto fill_length = GetEnvironmentVariableA("WG_FG_FILL", fill_env, sizeof(fill_env));
-        const bool fill_off = fill_length == 3 && std::strcmp(fill_env, "off") == 0;
+        const bool fill_on = fill_length == 2 && std::strcmp(fill_env, "on") == 0;
         d.scheduler.overflow_fill = base.display.variable_refresh && base.display.refresh_period > 0 &&
-                                    fill_timer.Valid() && !fill_off;
+                                    fill_timer.Valid() && fill_on;
         d.scheduler.first_present_admission = base.display.variable_refresh && admission_mode == AdmissionMode::Present;
         d.scheduler.consumed_admission = base.display.variable_refresh && admission_mode == AdmissionMode::Consumed;
         d.scheduler.guard_overflow_delivery = base.display.variable_refresh;
