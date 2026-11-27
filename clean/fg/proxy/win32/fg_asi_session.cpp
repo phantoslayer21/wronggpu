@@ -1507,7 +1507,11 @@ struct FgAsiSessionHost::Impl {
                     sd.presenter_mode == WG_FG_PRESENTER_DXGI_VSYNC ||
                     (!base.display.variable_refresh &&
                      (sd.presenter_mode == WG_FG_PRESENTER_HWFQ || sd.presenter_mode == WG_FG_PRESENTER_AUTO));
-                if (fixed_grid_presenter) d.scheduler.fixed_refresh_period = refresh_period;
+                if (fixed_grid_presenter) {
+                    d.scheduler.fixed_refresh_period = refresh_period;
+                    d.scheduler.display.min_interval = refresh_period;
+                    d.scheduler.display.margin = 0;
+                }
                 char line[224];
                 std::snprintf(line, sizeof line,
                               "fg host: display refresh %.1f Hz (%s, vrr=%s): VRR ceiling %.1f Hz (min_interval=%lld "

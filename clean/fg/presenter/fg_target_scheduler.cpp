@@ -490,7 +490,8 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
             const FgTicks slot = period / (static_cast<FgTicks>(n) + 1);
             if (slot >= w.min_interval && slot <= w.max_interval &&
                 slot >= origin - t_base + config_.bridge_and_submit_margin &&
-                target - origin <= config_.max_lead)
+                target - origin <= config_.max_lead &&
+                (config_.fixed_refresh_period == 0 || FitsRaw(n, period)))
                 break;
             --n;
             lead_need = needed_lead(n);
@@ -529,7 +530,7 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
         period = period_estimate + correction;
         FgTicks floor = 0;
         if (!CheckedMul(static_cast<FgTicks>(n) + 1, w.min_interval, &floor)) return FgStatus::Overflow;
-        if (config_.adaptive_count && n > 0 && diff < -deadband && period < floor) {
+        if (config_.adaptive_count && config_.fixed_refresh_period == 0 && n > 0 && diff < -deadband && period < floor) {
             // Excess playout lead wants a shorter period than (n + 1) * min_interval allows; clamping at the VRR
             // floor would throttle an L=1 waitable caller to (n + 1) * min_interval forever. Require exit_intervals
             // consecutive frames so transient alternating jitter near the VRR ceiling does not step N down.
@@ -554,6 +555,15 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
         if (period < floor) period = floor;
         const FgTicks feasible = origin + config_.real_min_lead - t_base;
         if (period < feasible) period = feasible;
+        if (config_.fixed_refresh_period > 0 && n > 0 && !FitsRaw(n, period)) {
+            if (period_estimate >= feasible && FitsRaw(n, period_estimate)) {
+                period = period_estimate;
+            } else {
+                while (n > 0 && !FitsRaw(n, period)) --n;
+                last_reduction_reason_ = FgRealOnlyReason::OutOfVrrWindow;
+                if (n == 0 && reason == FgRealOnlyReason::None) reason = last_reduction_reason_;
+            }
+        }
     }
     if (period < static_cast<FgTicks>(n) + 1) period = static_cast<FgTicks>(n) + 1;
 

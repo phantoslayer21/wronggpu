@@ -1264,6 +1264,26 @@ void TestTearingPlanHeadNearCeiling() {
 void TestRc2SchedulerPacing() {
     g_case = "rc2 scheduler pacing";
     {
+        // Drain extra lead at 30 fps without emitting a plan the 120 Hz presenter would reject.
+        FgSchedulerConfig sc = DefaultScheduler();
+        sc.fixed_refresh_period = 83333;
+        sc.display.min_interval = sc.fixed_refresh_period;
+        sc.display.margin = 0;
+        sc.adaptive_count = true;
+        sc.first_image_budget = 200000;
+        Rig r(sc, DefaultFake());
+        FgTicks t = kSecond;
+        for (int i = 0; i < 80; ++i) {
+            t += 333332;
+            if (i == 20) r.scheduler.SetFirstImageBudget(40000);
+            r.Frame(t, 3);
+        }
+        r.RunUntil(t + 700000);
+        CHECK(AllOk(r));
+        CHECK(r.Generating() >= 70);
+        for (const auto& plan : r.plans) CHECK(FgPlanFitsRefresh(plan, sc.fixed_refresh_period));
+    }
+    {
         // At 30 fps, a 21 ms budget plus the 6x interpolation span needs 48.8 ms of lead.
         FgSchedulerConfig sc = DefaultScheduler();
         sc.first_image_budget = 210000;
