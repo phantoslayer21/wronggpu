@@ -1217,6 +1217,65 @@ void TestFrameStartWaitableCadence() {
     }
 }
 
+void TestRealConsumptionBeforePresentation() {
+    g_case = "real consumption before presentation";
+    struct Fences final : IFgFenceSource {
+        std::uint64_t done[2] = {};
+        bool FenceValid(std::uint32_t fence) const override { return fence < 2; }
+        std::uint64_t FenceCompleted(std::uint32_t fence) const override { return done[fence]; }
+    } fences;
+    struct Trace {
+        std::uint64_t consumed = 0;
+        static void Event(void* ctx, std::uint64_t, std::uint64_t, std::uint32_t, bool real,
+                          std::uint8_t kind, FgTicks, FgTicks) {
+            if (real && kind == kFgTraceRealConsumed) ++static_cast<Trace*>(ctx)->consumed;
+        }
+    } trace;
+    FgEngineConfig config;
+    config.probe.supported = true;
+    config.probe.per_image_target_time = true;
+    config.probe.max_generated = 1;
+    config.slot_count = 6;
+    FgPresentEngine engine(config, &fences);
+    engine.SetTraceCallback(&Trace::Event, &trace);
+    CHECK(engine.Attach(1) == FgStatus::Ok);
+
+    FgIntervalPlan plan;
+    plan.epoch = plan.interval_id = plan.real_frame_id = 1;
+    plan.requested_count = plan.generated_count = 1;
+    plan.target_count = 2;
+    plan.t_base = kSecond;
+    plan.period = 200000;
+    CHECK(FgBuildTargets(plan.t_base, plan.period, 1, plan.margin, plan.targets) == FgStatus::Ok);
+    FgIntervalReservation reservation;
+    CHECK(engine.BeginInterval(plan, plan.t_base, &reservation) == FgStatus::Ok);
+    FgIntervalSubmission submission;
+    submission.epoch = submission.interval_id = 1;
+    submission.count = 2;
+    submission.produced[0] = submission.produced[1] = true;
+    submission.ready[0] = {0, 1};
+    submission.ready[1] = {1, 1};
+    CHECK(engine.SubmitInterval(submission, plan.t_base) == FgStatus::Ok);
+    FgReadyFence watched;
+    CHECK(engine.PendingConsumptionFence(&watched) && watched.fence == 1 && watched.value == 1);
+    CHECK(trace.consumed == 0);
+    fences.done[1] = 1;
+    engine.Pump(plan.t_base + 60000);  // real copy ready at 6 ms, first image targeted at 10 ms
+    CHECK(trace.consumed == 1);
+    CHECK(engine.QueuedCount() == 0);  // the first generated fence is still pending in the display FIFO
+    engine.Pump(plan.t_base + 70000);
+    CHECK(trace.consumed == 1);
+
+    plan.interval_id = plan.real_frame_id = 2;
+    plan.t_base += plan.period;
+    plan.requested_count = plan.generated_count = 0;
+    plan.target_count = 1;
+    plan.real_only_reason = FgRealOnlyReason::GenerationOff;
+    CHECK(FgBuildTargets(plan.t_base, plan.period, 0, plan.margin, plan.targets) == FgStatus::Ok);
+    CHECK(engine.PresentRealOnly(plan, FgRealImage{1, 2, {1, 2}}) == FgStatus::Ok);
+    CHECK(trace.consumed == 2);  // the GPU-ordered real-only image is accepted even before its copy fence completes
+}
+
 void TestTearingPlanHeadNearCeiling() {
     g_case = "tearing plan head near VRR ceiling";
     constexpr FgTicks kMinInterval = 28619;   // ~349.4 Hz ceiling on 360 Hz VRR display
@@ -1513,6 +1572,7 @@ int main() {
     TestRc2SchedulerPacing();
     TestSmokePacingTraps();
     TestFrameStartWaitableCadence();
+    TestRealConsumptionBeforePresentation();
     TestTearingPlanHeadNearCeiling();
     std::printf("test_fg_presenter: %d checks, %d failure(s)\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

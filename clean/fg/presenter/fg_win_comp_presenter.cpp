@@ -745,6 +745,9 @@ void FgWinCompPresenter::Run(HANDLE stop, HANDLE wake) {
                 ID3D12Fence* f = fences12_.Get(head.fence);
                 if (f) f->SetEventOnCompletion(head.value, fence_event_);
             }
+            if (engine_.PendingConsumptionFence(&head)) {
+                if (ID3D12Fence* f = fences12_.Get(head.fence)) f->SetEventOnCompletion(head.value, fence_event_);
+            }
             if (throttle_available) {
                 timeout = 2;
             } else {

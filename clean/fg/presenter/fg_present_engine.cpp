@@ -152,6 +152,18 @@ bool FgPresentEngine::HeadPendingFence(FgReadyFence* out) const {
     return true;
 }
 
+bool FgPresentEngine::PendingConsumptionFence(FgReadyFence* out) const {
+    for (const auto slot : pending_) {
+        const Slot& s = slots_[slot];
+        if (!s.consumption_pending) continue;
+        const FgReadyFence& head = slots_[pending_.front()].fence;
+        if (s.fence.fence == head.fence && s.fence.value == head.value) return false;
+        *out = s.fence;
+        return true;
+    }
+    return false;
+}
+
 std::uint64_t FgPresentEngine::SlotPresentId(std::uint32_t slot) const {
     return slot < slots_.size() && slots_[slot].state == FgEngineSlotState::Queued ? slots_[slot].present_id : 0;
 }
@@ -390,6 +402,7 @@ FgStatus FgPresentEngine::SubmitInterval(const FgIntervalSubmission& sub, FgTick
         }
         sl.fence = sub.ready[i];
         sl.state = FgEngineSlotState::Pending;
+        sl.consumption_pending = sl.real && trace_fn_;
         pending_.push_back(ps.slot);
     }
     open_ = false;
@@ -449,6 +462,8 @@ FgStatus FgPresentEngine::PresentRealOnly(const FgIntervalPlan& plan, const FgRe
     stats_.generated_requested += plan.requested_count;
     ++stats_.real_only_intervals[static_cast<std::uint32_t>(plan.real_only_reason)];
     CommitTimeline(plan);
+    // The real-only copy is GPU-ordered and its image has been accepted into the FIFO.
+    EmitTrace(r, kFgTraceRealConsumed, 0);
     return FgStatus::Ok;
 }
 
@@ -559,6 +574,13 @@ void FgPresentEngine::Pump(FgTicks now) {
     for (Slot& s : slots_)
         if (s.state == FgEngineSlotState::Draining && FenceDone(s)) s.state = FgEngineSlotState::Free;
     if (state_ != FgPresenterState::Attached) return;
+    for (const auto slot : pending_) {
+        Slot& s = slots_[slot];
+        if (s.consumption_pending && FenceDone(s)) {
+            s.consumption_pending = false;
+            EmitTrace(s, kFgTraceRealConsumed, now);
+        }
+    }
     std::size_t consumed = 0;
     for (; consumed < pending_.size(); ++consumed) {
         const std::uint32_t slot = pending_[consumed];

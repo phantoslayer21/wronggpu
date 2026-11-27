@@ -19,6 +19,8 @@
 //    through the swap-chain hook's facade seam: GetBuffer, GetCurrentBackBufferIndex, GetFrameLatencyWaitableObject),
 //    so the presenter's copies and presents into the real chain never race the game's rendering. The facade buffer
 //    the game presents is the colour input of the interval.
+//  - ADMISSION. The game latency limit bounds real frames awaiting consumption. The presenter reserves room for
+//    the head interval and at most one following interval. WG_FG_ADMISSION=present restores first-image admission.
 //  - SESSION. Created on the present thread once the core has a session description (options and a latched present),
 //    with one FgD3d12Executor for the host's lifetime (pipelines built once) and the presenter the settings name
 //    (fg_presenter: auto / hwfq / dxgi_tearing / dxgi_vsync, through FgWinPresenterSource). Every game present goes
@@ -118,6 +120,9 @@ struct FgAsiSessionStats {
              exec_net2_exact = 0;
     // A2 / N-B3 / N-S3 diagnostics
     uint64_t back_pressure_waits = 0, credit_waits = 0, admission_timeouts = 0, real_retires = 0, noop_fullscreen_ignored = 0;
+    uint64_t presenter_queue_waits = 0;
+    uint32_t presenter_queue_peak = 0;  // reserved intervals, including the head
+    uint64_t generated_scheduled = 0, generated_late = 0;  // active presenter session
 };
 
 // What the host's last game present did (FgAsiSessionHost::LiveStatus), for a menu. Plain values.
@@ -154,7 +159,7 @@ struct FgAsiLiveStatus {
     uint32_t display_refresh_hz = 0;     // active display refresh rate in Hz (0 if unreadable)
     uint32_t sustained_mult_x100 = 100;  // sustained effective multiplier * 100 (e.g. 396 = 3.96x)
     uint32_t latency_limit = 0;          // active game frame-latency limit (1..16)
-    uint32_t in_flight_real = 0;         // accepted intervals that have yet to start presenting
+    uint32_t in_flight_real = 0;         // accepted real frames before the selected admission boundary
     uint32_t schedule_reason = 0;   // wgfg::FgRealOnlyReason when the schedule contains only the real frame
     float displayed_fps = 0.0f;     // total reported by the presenter, 0 until sampled
     float base_fps = 0.0f;          // real images from the same sample

@@ -37,7 +37,9 @@ public:
 using FgRealRetireFn = void (*)(void* ctx, std::uint64_t frame_id, std::uint64_t interval_id, bool displayed);
 
 // Lightweight per-image trace event (A3). event_kind: 0=queued(fence_done), 1=submitted, 2=displayed, 3=dropped_pre,
-// 4=dropped_post, 5=skipped, 6=display submission estimate, 7=present lease taken. Must not re-enter the engine.
+// 4=dropped_post, 5=skipped, 6=display submission estimate, 7=present lease taken, 8=real frame consumed.
+// Must not re-enter the engine.
+constexpr std::uint8_t kFgTraceRealConsumed = 8;
 using FgPresentTraceFn = void (*)(void* ctx, std::uint64_t interval_id, std::uint64_t frame_id,
                                   std::uint32_t index, bool real,
                                   std::uint8_t event_kind, FgTicks ts, FgTicks target);
@@ -147,6 +149,8 @@ public:
     FgTicks NextDeadline() const;
     // The fence the head of the pending queue waits for (false when nothing is pending).
     bool HeadPendingFence(FgReadyFence* out) const;
+    // Also watch the real copy independently of a generated image at the head of the pending queue.
+    bool PendingConsumptionFence(FgReadyFence* out) const;
     // Engine present id of a Queued slot (0 otherwise).
     std::uint64_t SlotPresentId(std::uint32_t slot) const;
     bool Drained() const;  // nothing but the image on screen (and free slots) left
@@ -180,6 +184,7 @@ private:
         std::uint64_t present_id = 0;
         bool represent = false;
         bool real_credit_active = false;
+        bool consumption_pending = false;
     };
 
     void RetireReal(Slot& s, bool displayed);

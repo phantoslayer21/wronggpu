@@ -1288,8 +1288,8 @@ void TestRc2LatencyAndPacing(Gpu& gpu, const std::string& dxil, bool run_latency
                 int waits_ok = 0, present_errors = 0;
                 uint64_t bp_before_off = 0, bp_after_off = 0;
                 const int total_frames = 22;
-                const int stall_frame = 3;
-                const int stall_end = stall_frame + static_cast<int>(lat);
+                const int stall_frame = 5;  // after the scheduler has primed its generated path
+                const int stall_end = stall_frame + 3;
                 ComPtr<ID3D12Fence> stalled_game;
                 std::thread unblock;
                 bool have_next_credit = false;
@@ -1399,7 +1399,7 @@ void TestRc2LatencyAndPacing(Gpu& gpu, const std::string& dxil, bool run_latency
                     CHECK(host->LiveStatus().in_flight_real <= lat);
                     if (FAILED(chain->Present(0, 0))) ++present_errors;
                     if (wait_on_game && stalled_game && f == stall_frame) {
-                        CHECK(host->LiveStatus().in_flight_real > 0);
+                        if (host->LiveStatus().scheduled_count > 0) CHECK(host->LiveStatus().in_flight_real > 0);
                         have_next_credit = cached_waitable && WaitForSingleObject(cached_waitable, 0) == WAIT_OBJECT_0;
                         CHECK(have_next_credit);
                         CHECK(SUCCEEDED(stalled_game->Signal(1)));
@@ -1856,7 +1856,7 @@ void TestRc2LatencyAndPacing(Gpu& gpu, const std::string& dxil, bool run_latency
 // frames (25 ms) transitioning into steady 10.5 ms / 12.5 ms / 18.5 ms GPU-bound rendering at 2x (N=1), 4x (N=3), and
 // 6x (N=5). Proves no bistable 2x LatencyCap trap, < 2% late drops at 2x, < 5% late drops at 4x/6x, base FPS >= 85%
 // of FG-off, and presented output scaling cleanly with N.
-void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil) {
+void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, bool admission_only) {
     ComPtr<IDXGIFactory2> f2;
     CHECK(SUCCEEDED(gpu.factory.As(&f2)));
     GameTextures game;
@@ -2039,7 +2039,7 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil) {
             return true;
         }
 
-        bool Submit(Gpu& g, int f, ID3D12Resource* dst, int64_t gpu_us) {
+        bool Submit(Gpu& g, int f, ID3D12Resource* dst, int64_t gpu_us, int64_t overlap_us) {
             const int s = f & (kRing - 1);
             if (ring_val[s] > 0 && ring_fence->GetCompletedValue() < ring_val[s]) {
                 ring_fence->SetEventOnCompletion(ring_val[s], ring_event);
@@ -2068,7 +2068,9 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil) {
             if (FAILED(g.queue->Wait(sim_fence.Get(), sv))) return false;
             {
                 std::lock_guard<std::mutex> lock(mu);
-                jobs.push_back({sv, std::chrono::steady_clock::now(), gpu_us});
+                // The title can start feeding the GPU before its CPU thread reaches Present. Its serialized render
+                // service time is still gpu_us. Only an idle GPU gains the submission overlap.
+                jobs.push_back({sv, std::chrono::steady_clock::now() - std::chrono::microseconds(overlap_us), gpu_us});
             }
             cv.notify_one();
             ring_val[s] = ++ring_seq;
@@ -2089,6 +2091,7 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil) {
     struct SmokeRunResult {
         double steady_base_fps = 0.0;
         double late_drop_pct = 0.0;
+        double steady_late_drop_pct = 0.0;
         double submitted_mult = 1.0;
         uint64_t latency_cap_ro = 0;
         uint64_t sched = 0;
@@ -2100,6 +2103,9 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil) {
         double final_budget_ms = 0.0;
         int present_errors = 0;
         uint64_t session_failures = 0;
+        uint64_t queue_waits = 0;
+        uint32_t queue_peak = 0;
+        uint32_t steady_max_scheduled = 0;
     };
 
     auto run_leg = [&](const char* label, bool fg_enable, uint32_t gen_n, int slow_frames, int64_t slow_us,
@@ -2167,11 +2173,15 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil) {
 
         const int total_frames = slow_frames + fast_frames;
         // Measure steady-state base FPS over the remaining 100-180 frames after slow-startup recovery (~60 frames).
-        const int steady_from = slow_frames + (fast_frames > 100 ? 60 : 15);
+        const int steady_from = slow_frames + (admission_only ? 100 : (fast_frames > 100 ? 60 : 15));
         std::chrono::steady_clock::time_point steady_t0{};
         int steady_count = 0;
+        FgAsiSessionStats steady_stats;
         for (int f = 0; f < total_frames; ++f) {
-            if (lat) WaitForSingleObject(lat, 200);
+            if (lat) {
+                const DWORD wait = WaitForSingleObject(lat, 200);
+                if (admission_only) CHECK(wait == WAIT_OBJECT_0);
+            }
             const bool is_slow = f < slow_frames;
             const int64_t frame_cpu_us = is_slow ? slow_us : cpu_us;
             const int64_t frame_gpu_us = is_slow ? slow_us : gpu_us;
@@ -2181,7 +2191,7 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil) {
             ComPtr<ID3D12Resource> bb;
             CHECK(SUCCEEDED(chain->GetBuffer(bi, IID_PPV_ARGS(&bb))) && bb);
             if (!bb) break;
-            CHECK(pacer.Submit(gpu, f, bb.Get(), frame_gpu_us));
+            CHECK(pacer.Submit(gpu, f, bb.Get(), frame_gpu_us, admission_only ? 1000 : 0));
             WgFgTag tags[2] = {};
             ID3D12Resource* res[2] = {game.motion.Get(), game.depth.Get()};
             const uint32_t nts[2] = {kNtMotion, kNtDepth};
@@ -2234,8 +2244,14 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil) {
             r.abi_version = WG_FG_ADAPTER_ABI_VERSION;
             FgAsiSessionHost::Route(host.get(), &core, &d, &r);
             if (FAILED(chain->Present(0, 0))) ++out.present_errors;
-            if (f == steady_from) steady_t0 = std::chrono::steady_clock::now();
-            else if (f > steady_from) ++steady_count;
+            if (admission_only) CHECK(host->LiveStatus().in_flight_real <= 1);
+            if (f == steady_from) {
+                steady_t0 = std::chrono::steady_clock::now();
+                steady_stats = host->Stats();
+            } else if (f > steady_from) {
+                ++steady_count;
+                out.steady_max_scheduled = std::max(out.steady_max_scheduled, host->LiveStatus().scheduled_count);
+            }
         }
         const auto steady_t1 = std::chrono::steady_clock::now();
         const double steady_s =
@@ -2248,6 +2264,11 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil) {
         CHECK(gpu.Wait());
         const FgAsiSessionStats st = host->Stats();
         out.session_failures = st.session_failures;
+        out.queue_waits = st.presenter_queue_waits;
+        out.queue_peak = st.presenter_queue_peak;
+        if (st.generated_scheduled > steady_stats.generated_scheduled && st.generated_late >= steady_stats.generated_late)
+            out.steady_late_drop_pct = 100.0 * static_cast<double>(st.generated_late - steady_stats.generated_late) /
+                                      static_cast<double>(st.generated_scheduled - steady_stats.generated_scheduled);
         chain->Release();
         CHECK(gpu.Wait());
         host.reset();
@@ -2269,14 +2290,42 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil) {
                 static_cast<double>(cap.real_sub + cap.sub) / static_cast<double>(cap.real_sub);
 
         std::printf("    smoke %-22s: base=%.1f fps | sched=%llu sub=%llu late=%llu (%.2f%%, pre=%llu post=%llu) "
-                    "| real_sub=%llu mult=%.2fx ro_cap=%llu budget=%.1fms\n",
+                    "| real_sub=%llu mult=%.2fx ro_cap=%llu budget=%.1fms steady_late=%.2f%% queue_peak=%u "
+                    "queue_waits=%llu steady_max_n=%u\n",
                     label, out.steady_base_fps, static_cast<unsigned long long>(out.sched),
                     static_cast<unsigned long long>(out.sub), static_cast<unsigned long long>(out.dropped_late),
                     out.late_drop_pct, static_cast<unsigned long long>(out.pre_drop),
                     static_cast<unsigned long long>(out.post_drop), static_cast<unsigned long long>(out.real_sub),
-                    out.submitted_mult, static_cast<unsigned long long>(out.latency_cap_ro), out.final_budget_ms);
+                    out.submitted_mult, static_cast<unsigned long long>(out.latency_cap_ro), out.final_budget_ms,
+                    out.steady_late_drop_pct, out.queue_peak, static_cast<unsigned long long>(out.queue_waits),
+                    out.steady_max_scheduled);
         return out;
     };
+
+    if (admission_only) {
+        char mode[16] = {};
+        const bool legacy = GetEnvironmentVariableA("WG_FG_ADMISSION", mode, sizeof(mode)) == 7 &&
+                            std::strcmp(mode, "present") == 0;
+        // A GPU-bound title waits at frame start, records for ~4 ms, and queues 7 ms of GPU work at Present.
+        // Warm up at a slower cadence to put the first-image budget above the steady GPU period.
+        const SmokeRunResult run = run_leg("admission-7ms", true, 1u, 8, 12000, 320, 7000, 4000);
+        CHECK(run.present_errors == 0 && run.session_failures == 0);
+        CHECK(run.sched >= 200);
+        if (legacy) {
+            CHECK(run.queue_peak == 0 && run.queue_waits == 0);
+            return;
+        }
+        CHECK(run.steady_late_drop_pct < 2.0);
+        CHECK(run.steady_base_fps >= 1000.0 / (1.1 * 7.0));
+        CHECK(run.queue_peak == 2);
+
+        // Request 4x with a nominal 200 fps producer. The 349.4 Hz presenter must shed generated images.
+        const SmokeRunResult display_bound = run_leg("4x-display-bound", true, 3u, 24, 14000, 220, 5000, 4000);
+        CHECK(display_bound.present_errors == 0 && display_bound.session_failures == 0);
+        CHECK(display_bound.queue_peak == 2 && display_bound.queue_waits > 0);
+        CHECK(display_bound.sched > 0 && display_bound.steady_max_scheduled < 3);
+        return;
+    }
 
     // 1. 2x (N=1) GPU-bound at 10.5 ms (~95 fps) with 8 slow 25 ms startup frames (L=1).
     const SmokeRunResult off_105 = run_leg("off-10.5ms", false, 1u, 0, 0, 70, 10500, 3500);
@@ -2387,10 +2436,15 @@ int main(int argc, char** argv) {
                     TestRc2LatencyAndPacing(g, dxil, only.empty() || only == "latency",
                                            only.empty() || only == "cadence");
                 }
-                if (preset < 0 && (only.empty() || only == "smoke")) {
+                if (preset < 0 && (only.empty() || only == "smoke" || only == "admission")) {
                     g_case = "gpu-smoke-pacing";
-                    TestSmokeGpuBoundPacing(g, dxil);
+                    TestSmokeGpuBoundPacing(g, dxil, only == "admission");
                 }
+            }
+            if (g_debug_layer) {
+                const auto errors = g.DebugErrors();
+                std::printf("debug layer errors after GPU tests: %lld\n", static_cast<long long>(errors));
+                CHECK(errors == 0);
             }
         }
     }

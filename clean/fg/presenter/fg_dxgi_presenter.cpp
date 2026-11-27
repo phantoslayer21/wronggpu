@@ -728,6 +728,9 @@ void FgDxgiPresenter::Run(HANDLE stop, HANDLE wake) {
                 ID3D12Fence* fence = fences_.Get(f.fence);
                 if (fence) fence->SetEventOnCompletion(f.value, fence_event_);
             }
+            if (engine_.PendingConsumptionFence(&f)) {
+                if (ID3D12Fence* fence = fences_.Get(f.fence)) fence->SetEventOnCompletion(f.value, fence_event_);
+            }
             if (!CopiesIdleLocked()) copy_fence_->SetEventOnCompletion(copy_value_, copy_event_);
         }
         if (present_now) {
