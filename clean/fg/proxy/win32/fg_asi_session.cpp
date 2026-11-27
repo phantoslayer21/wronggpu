@@ -8,6 +8,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -291,6 +292,8 @@ struct FgAsiSessionHost::Impl {
     bool window_first = true;
     wgfg::FgPresentStats window_base;
     uint64_t generating_reanchors = 0;
+    using ReanchorCounts = std::array<uint64_t, wgfg::kFgReanchorReasonCount>;
+    ReanchorCounts generating_reanchor_causes{};
     uint32_t last_generating_count = 0;
     uint32_t quiet_windows = 0;
     FirstImageBudgetLimits budget_limits;
@@ -305,6 +308,7 @@ struct FgAsiSessionHost::Impl {
         uint64_t interval_id = 0;
         uint32_t requested_n = 0;
         uint32_t scheduled_n = 0;
+        wgfg::FgReanchorReason reanchor_reason = wgfg::FgReanchorReason::None;
         uint32_t in_flight = 0;
         uint32_t free_slots = 0;
         wgfg::FgTicks t_arrival = 0;
@@ -351,9 +355,9 @@ struct FgAsiSessionHost::Impl {
             char dir[MAX_PATH * 2] = {};
             const DWORD n = GetEnvironmentVariableA("WG_STATE_GAME_DIR", dir, static_cast<DWORD>(sizeof(dir)));
             if (n > 0 && n < sizeof(dir)) {
-                trace_csv_path = std::string(dir, n) + "\\wronggpu-fg-trace.csv";
+                trace_csv_path = std::string(dir, n) + "\\wronggpu-fg-trace-r7.csv";
             } else {
-                trace_csv_path = "wronggpu-fg-trace.csv";
+                trace_csv_path = "wronggpu-fg-trace-r7.csv";
             }
         }
     }
@@ -396,7 +400,7 @@ struct FgAsiSessionHost::Impl {
                                  "frame_token,interval_id,req_n,sched_n,in_flight,free_slots,t_arrival,wait_us,"
                                  "record_us,first_gen_ready_us,first_gen_sub_us,real_ready_us,real_sub_us,"
                                  "real_disp_us,max_slip_us,drops_pre,drops_post,skips_real,skips_generated,"
-                                 "display_time\n");
+                                 "display_time,reanchor_reason\n");
             }
             if (csv) {
                 for (const IntervalTrace& row : job.rows) AppendTraceCsv(csv, row);
@@ -410,7 +414,7 @@ struct FgAsiSessionHost::Impl {
         auto us_from = [&](wgfg::FgTicks ts) -> long long {
             return ts > 0 && tr.t_arrival > 0 ? static_cast<long long>((ts - tr.t_arrival) / 10) : -1ll;
         };
-        std::fprintf(fp, "%llu,%llu,%u,%u,%u,%u,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%u,%u,%u,%u,%s\n",
+        std::fprintf(fp, "%llu,%llu,%u,%u,%u,%u,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%u,%u,%u,%u,%s,%s\n",
                      static_cast<unsigned long long>(tr.frame_token),
                      static_cast<unsigned long long>(tr.interval_id), tr.requested_n, tr.scheduled_n, tr.in_flight,
                      tr.free_slots, static_cast<long long>(tr.t_arrival), us_from(tr.t_after_wait),
@@ -418,7 +422,8 @@ struct FgAsiSessionHost::Impl {
                      us_from(tr.t_real_ready), us_from(tr.t_real_submit), us_from(tr.t_real_display),
                      static_cast<long long>(tr.max_slip / 10), tr.drops_pre, tr.drops_post, tr.skips_real,
                      tr.skips_generated, tr.display_estimate ? "submit-estimate" :
-                         (tr.t_real_display > 0 ? "measured" : "unobserved"));
+                         (tr.t_real_display > 0 ? "measured" : "unobserved"),
+                     wgfg::FgReanchorReasonName(tr.reanchor_reason));
     }
 
     void RecordTraceInterval(const IntervalTrace& tr) {
@@ -440,7 +445,10 @@ struct FgAsiSessionHost::Impl {
         Impl& m = *static_cast<Impl*>(ctx);
         if (plan.generated_count > 0) {
             m.last_generating_count = plan.generated_count;
-            if (plan.reanchored) ++m.generating_reanchors;
+            if (plan.reanchored) {
+                ++m.generating_reanchors;
+                ++m.generating_reanchor_causes[static_cast<size_t>(plan.reanchor_reason)];
+            }
         }
         if (m.admission_mode == AdmissionMode::Consumed) {
             // A real-only plan returns admission at first present even if the request was higher.
@@ -457,6 +465,7 @@ struct FgAsiSessionHost::Impl {
         tr.interval_id = plan.interval_id;
         tr.requested_n = plan.requested_count;
         tr.scheduled_n = plan.generated_count;
+        tr.reanchor_reason = plan.reanchor_reason;
         tr.in_flight = m.st_in_flight_real.load();
         m.RecordTraceInterval(tr);
     }
@@ -545,10 +554,22 @@ struct FgAsiSessionHost::Impl {
         }
     }
 
+    static std::string FormatReanchorCauses(const ReanchorCounts& counts) {
+        std::string out;
+        for (size_t i = 0; i < counts.size(); ++i) {
+            if (counts[i] == 0) continue;
+            if (!out.empty()) out += ',';
+            out += wgfg::FgReanchorReasonName(static_cast<wgfg::FgReanchorReason>(i));
+            out += ':' + std::to_string(counts[i]);
+        }
+        return out.empty() ? "none" : out;
+    }
+
     void LogTraceSummary(const char* tag, wgfg::FgTicks summary_budget, const std::vector<IntervalTrace>& snap) {
         std::vector<int64_t> base_dt, wait_us, rec_us, gen_rdy_us, real_rdy_us, slip_us;
         std::vector<int64_t> present_interval_us, queue_depth_wait_us, inner_present_us;
         uint32_t max_in_flight = 0;
+        ReanchorCounts causes{};
         for (size_t i = 0; i < snap.size(); ++i) {
             const IntervalTrace& tr = snap[i];
             if (i > 0 && tr.t_arrival > snap[i - 1].t_arrival) {
@@ -568,6 +589,8 @@ struct FgAsiSessionHost::Impl {
             if (tr.t_real_submit > 0 && tr.inner_present_duration > 0)
                 inner_present_us.push_back(tr.inner_present_duration / 10);
             if (tr.in_flight > max_in_flight) max_in_flight = tr.in_flight;
+            if (tr.scheduled_n > 0 && tr.reanchor_reason != wgfg::FgReanchorReason::None)
+                ++causes[static_cast<size_t>(tr.reanchor_reason)];
         }
         char buf[704];
         std::snprintf(buf, sizeof(buf),
@@ -595,7 +618,7 @@ struct FgAsiSessionHost::Impl {
                       static_cast<long long>(Percentile(queue_depth_wait_us, 1.00)),
                       static_cast<long long>(Percentile(inner_present_us, 0.95)),
                       static_cast<long long>(Percentile(inner_present_us, 1.00)), inner_present_us.size());
-        Log(buf);
+        Log(std::string(buf) + " | gen_reanchor_causes=" + FormatReanchorCauses(causes));
     }
 
     void EnsureLatencySemLocked() {
@@ -1233,7 +1256,8 @@ struct FgAsiSessionHost::Impl {
                        " presenter_queue_peak=" + std::to_string(queue_peak) +
                        " admission_present_intervals=" + std::to_string(stats.admission_present_intervals) +
                        " admission_consumed_intervals=" + std::to_string(stats.admission_consumed_intervals) +
-                       " generating_reanchors=" + std::to_string(generating_reanchors);
+                       " generating_reanchors=" + std::to_string(generating_reanchors) +
+                       " gen_reanchor_causes=" + FormatReanchorCauses(generating_reanchor_causes);
             Log(reasons);
         }
         const wgfg::FgSessionResult r = session->Destroy();
@@ -1248,6 +1272,7 @@ struct FgAsiSessionHost::Impl {
         window_first = true;
         window_base = wgfg::FgPresentStats{};
         generating_reanchors = 0;
+        generating_reanchor_causes = {};
         last_generating_count = 0;
         quiet_windows = 0;
         cap_miss_windows = 0;

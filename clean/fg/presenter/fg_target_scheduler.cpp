@@ -428,10 +428,13 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
     }
 
     const bool consecutive_real_only = n == 0 && !last_interval_generated_;
-    bool reanchor = !anchored_ || period_estimate == 0 || consecutive_real_only;
-    bool latency_drain = false;
+    FgReanchorReason anchor_reason = FgReanchorReason::None;
+    if (!anchored_ || period_estimate == 0 || consecutive_real_only) {
+        anchor_reason = ev == FgIntervalEstimator::Event::Discontinuity ? FgReanchorReason::CadenceChange
+                                                                     : FgReanchorReason::Initial;
+    }
     FgTicks lead = 0;
-    if (!reanchor) {
+    if (anchor_reason == FgReanchorReason::None) {
         FgTicks end = 0;
         if (FgCheckedAdd(last_real_target_, period_estimate, &end) != FgStatus::Ok ||
             FgCheckedAdd(end, -origin, &lead) != FgStatus::Ok)
@@ -440,15 +443,14 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
         const bool sustained_excess = over_lead && over_lead_last_interval_;
         over_lead_last_interval_ = over_lead;
         if (lead < config_.real_min_lead) {
-            reanchor = true;  // behind: the real endpoint cannot be met on this timeline
+            anchor_reason = FgReanchorReason::RealTooLate;
             shortfall_run_ = 0;
         } else if (lead - config_.max_lead > period_estimate / 4 || sustained_excess) {
             // A small, isolated overrun can be ordinary jitter when the interpolation span is near the limit.
             // Act immediately on a large overrun and drain a small one only if it persists.
             // Re-anchor real-only to drain the excess lead and reset the cadence estimator so an L=1
             // frame-start-waitable caller cannot lock into an alternating LatencyCap limit cycle.
-            reanchor = true;
-            latency_drain = true;
+            anchor_reason = FgReanchorReason::ExcessLead;
             shortfall_run_ = 0;
             n = 0;
             lead_need = config_.real_min_lead;
@@ -464,11 +466,11 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
             const FgTicks min_slack = period_estimate / 4 < 35000 ? period_estimate / 4 : 35000;
             const FgTicks slack = slot / 2 > min_slack ? slot / 2 : min_slack;
             if (first_gen_lead < config_.bridge_and_submit_margin) {
-                reanchor = true;
+                anchor_reason = FgReanchorReason::GeneratedDeadline;
                 shortfall_run_ = 0;
             } else if (lead + slack < lead_need) {
                 if (++shortfall_run_ >= 2) {
-                    reanchor = true;
+                    anchor_reason = FgReanchorReason::LeadShortfall;
                     shortfall_run_ = 0;
                 }
             } else {
@@ -483,7 +485,7 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
 
     FgTicks t_base = 0;
     FgTicks period = 0;
-    if (reanchor) {
+    if (anchor_reason != FgReanchorReason::None) {
         over_lead_last_interval_ = false;
         for (;;) {
             FgTicks target = 0;
@@ -517,7 +519,8 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
         }
         if (n == 0 && reason == FgRealOnlyReason::None) reason = FgRealOnlyReason::Reanchor;
         out->reanchored = !anchored_ || !consecutive_real_only;
-        if (latency_drain) {
+        if (out->reanchored) out->reanchor_reason = anchor_reason;
+        if (anchor_reason == FgReanchorReason::ExcessLead) {
             anchored_ = false;
             estimator_.Reset();
             last_requested_ = 0;

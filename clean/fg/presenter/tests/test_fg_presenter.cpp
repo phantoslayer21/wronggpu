@@ -1438,6 +1438,21 @@ void TestFixedGridCountCandidateRestartsItsStreak() {
     CHECK(r.scheduler.EffectiveCount() == 1);
 }
 
+void TestSchedulerReportsReanchorCauses() {
+    g_case = "reanchor causes";
+    Rig r(DefaultScheduler(), DefaultFake());
+    FgTicks t = kSecond;
+    r.Frame(t, 1);
+    CHECK(r.plans.back().reanchored && r.plans.back().reanchor_reason == FgReanchorReason::Initial);
+    for (int i = 0; i < 20; ++i) {
+        t += 166667;
+        r.Frame(t, 1);
+    }
+    CHECK(!r.plans.back().reanchored && r.plans.back().reanchor_reason == FgReanchorReason::None);
+    r.Frame(t + 4000000, 1);
+    CHECK(r.plans.back().reanchored && r.plans.back().reanchor_reason == FgReanchorReason::CadenceChange);
+}
+
 void TestRc2SchedulerPacing() {
     g_case = "rc2 scheduler pacing";
     for (const bool adaptive : {true, false}) {
@@ -1719,6 +1734,7 @@ int main() {
     TestTearingPhysicalGapAfterSlowCall();
     TestTearingSchedulerFitsPresenterThroughput();
     TestFixedGridCountCandidateRestartsItsStreak();
+    TestSchedulerReportsReanchorCauses();
     std::printf("test_fg_presenter: %d checks, %d failure(s)\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

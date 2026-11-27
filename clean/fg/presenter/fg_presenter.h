@@ -112,6 +112,12 @@ struct FgFrameTarget {
     bool admitted = true;  // false: dropped by the scheduler at commit (already past its deadline)
 };
 
+enum class FgReanchorReason : std::uint8_t {
+    None, Initial, CadenceChange, RealTooLate, ExcessLead, GeneratedDeadline, LeadShortfall, Count
+};
+constexpr std::uint32_t kFgReanchorReasonCount = static_cast<std::uint32_t>(FgReanchorReason::Count);
+const char* FgReanchorReasonName(FgReanchorReason reason);
+
 // The schedule for interval R[j-1] -> R[j], committed once when R[j] arrives.
 struct FgIntervalPlan {
     std::uint64_t epoch = 0;
@@ -126,6 +132,7 @@ struct FgIntervalPlan {
     FgTicks margin = 0;       // bridge_and_submit_margin used for the deadlines
     std::uint32_t target_count = 0;  // generated_count + 1
     FgFrameTarget targets[kFgMaxTargets] = {};
+    FgReanchorReason reanchor_reason = FgReanchorReason::None;
 };
 
 // One reserved display slot.

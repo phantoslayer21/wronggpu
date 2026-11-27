@@ -39,6 +39,20 @@ const char* FgRealOnlyReasonName(FgRealOnlyReason r) {
     return "unknown";
 }
 
+const char* FgReanchorReasonName(FgReanchorReason r) {
+    switch (r) {
+        case FgReanchorReason::None: return "none";
+        case FgReanchorReason::Initial: return "initial";
+        case FgReanchorReason::CadenceChange: return "cadence-change";
+        case FgReanchorReason::RealTooLate: return "real-too-late";
+        case FgReanchorReason::ExcessLead: return "excess-lead";
+        case FgReanchorReason::GeneratedDeadline: return "generated-deadline";
+        case FgReanchorReason::LeadShortfall: return "lead-shortfall";
+        case FgReanchorReason::Count: break;
+    }
+    return "unknown";
+}
+
 const char* FgDropReasonName(FgDropReason r) {
     switch (r) {
         case FgDropReason::None: return "none";
