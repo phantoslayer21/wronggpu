@@ -356,9 +356,11 @@ class NamesAndProbe(unittest.TestCase):
                 self.assertRegex(holding[0], r'^\s*"' + re.escape(v) + r'",?$')
 
     def test_names_nowhere_else_in_clean(self):
-        # the four names appear only in binding/ (code refers to them by role)
         clean = os.path.dirname(os.path.dirname(PROXY))
-        needles = [x.lower() for x in list(rr_names().values()) + [interposer_name()]]
+        interposer = interposer_name().lower()
+        needles = [x.lower() for x in rr_names().values()] + [interposer]
+        # The FG lifecycle fixture names its mock DLL to match the deferred-load callback's binding.
+        fixture = os.path.join(clean, "fg", "proxy", "tests", "test_fg_win32_transport.cpp")
         hits = []
         for root, dirs, files in os.walk(clean):
             dirs[:] = [x for x in dirs if x not in ("__pycache__", ".git")]
@@ -371,7 +373,7 @@ class NamesAndProbe(unittest.TestCase):
                         text = f.read().decode("utf-8", "replace").lower()
                 except OSError:
                     continue
-                hits += [(path, x) for x in needles if x in text]
+                hits += [(path, x) for x in needles if x in text and (path, x) != (fixture, interposer)]
         self.assertEqual(hits, [])
 
     def test_probe_generation(self):
