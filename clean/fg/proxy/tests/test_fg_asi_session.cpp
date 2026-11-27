@@ -1884,6 +1884,7 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::strin
         double final_budget_ms = 0.0;
         bool saw_stats = false;
         bool warned_unknown_mode = false;
+        bool saw_interval_timing = false;
 
         static bool ParseU64(const char* line, const char* key, uint64_t* out) {
             const char* p = std::strstr(line, key);
@@ -1924,6 +1925,13 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::strin
             } else if (std::strstr(line, "fg host: real-only intervals:")) {
                 ParseU64(line, "latency-cap=", &self->latency_cap_ro);
                 ParseU64(line, "generating_reanchors=", &self->generating_reanchors);
+                std::printf("      log: %s\n", line);
+            } else if (std::strstr(line, "fg trace (")) {
+                uint64_t interval = 0, depth = 0, inner = 0;
+                if (ParseU64(line, "present_interval_us p95=", &interval) &&
+                    ParseU64(line, "queue_depth_wait_us p95=", &depth) &&
+                    ParseU64(line, "inner_present_us p95=", &inner) && interval > 0 && inner > 0)
+                    self->saw_interval_timing = true;
                 std::printf("      log: %s\n", line);
             } else if (std::strstr(line, "first-image budget") || std::strstr(line, "generated count cap") ||
                        std::strstr(line, "trace summary")) {
@@ -2127,6 +2135,7 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::strin
         uint32_t recovered_high = 0;
         int64_t gap_p95_us = 0;
         bool warned_unknown_mode = false;
+        bool saw_interval_timing = false;
     };
 
     auto run_leg = [&](const char* label, bool fg_enable, uint32_t gen_n, int slow_frames, int64_t slow_us,
@@ -2332,6 +2341,7 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::strin
         out.real_sub = cap.real_sub;
         out.latency_cap_ro = cap.latency_cap_ro;
         out.warned_unknown_mode = cap.warned_unknown_mode;
+        out.saw_interval_timing = cap.saw_interval_timing;
         out.generating_reanchors = cap.generating_reanchors;
         out.gap_p95_us = Percentile(std::move(admission_gaps), 0.95);
         out.final_budget_ms = cap.final_budget_ms;
@@ -2353,6 +2363,14 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::strin
                     out.steady_max_scheduled);
         return out;
     };
+
+    if (only == "interval-trace") {
+        const auto run = run_leg("x2-interval-trace", true, 1u, 0, 0, 120, 7000, 4000);
+        CHECK(run.present_errors == 0 && run.session_failures == 0);
+        CHECK(run.sched > 70);
+        CHECK(run.saw_interval_timing);
+        return;
+    }
 
     if (only == "admission-switch") {
         const auto run = run_leg("active-3-to-2-to-3", true, 3u, 8, 25000, 272, 18500, 6500);
@@ -2664,7 +2682,8 @@ int main(int argc, char** argv) {
                 }
                 if (preset < 0 && (only.empty() || only == "smoke" || only == "admission" ||
                                    only == "real-only-admission" || only == "consumed-6x" ||
-                                   only == "admission-policy" || only == "admission-switch")) {
+                                   only == "admission-policy" || only == "admission-switch" ||
+                                   only == "interval-trace")) {
                     g_case = "gpu-smoke-pacing";
                     TestSmokeGpuBoundPacing(g, dxil, only);
                 }

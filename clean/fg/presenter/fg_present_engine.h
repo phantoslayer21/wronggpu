@@ -40,8 +40,10 @@ using FgRealRetireFn = void (*)(void* ctx, std::uint64_t frame_id, std::uint64_t
 
 // Lightweight per-image trace event (A3). event_kind: 0=queued(fence_done), 1=submitted, 2=displayed, 3=dropped_pre,
 // 4=dropped_post, 5=skipped, 6=display submission estimate, 7=present lease taken, 8=real frame consumed.
+// 9=inner Present duration (ts carries elapsed ticks).
 // Must not re-enter the engine.
 constexpr std::uint8_t kFgTraceRealConsumed = 8;
+constexpr std::uint8_t kFgTraceInnerPresentDuration = 9;
 using FgPresentTraceFn = void (*)(void* ctx, std::uint64_t interval_id, std::uint64_t frame_id,
                                   std::uint32_t index, bool real,
                                   std::uint8_t event_kind, FgTicks ts, FgTicks target);
@@ -140,7 +142,8 @@ public:
     bool OnPresentDisplayed(std::uint64_t present_id, FgTicks actual, bool measured = false);
     // DXGI hands an in-flight present to the worker. Cancellation only touches the remaining queued suffix.
     bool LeasePresent(std::uint32_t slot, std::uint64_t present_id);
-    void FinishLeasedPresent(std::uint32_t slot, FgTicks submitted, FgTicks estimate, bool presented);
+    void FinishLeasedPresent(std::uint32_t slot, FgTicks submitted, FgTicks estimate, bool presented,
+                             FgTicks call_duration = 0);
     bool OnPresentSkipped(std::uint64_t present_id);    // the display path skipped it (a newer present was ready)
     bool OnPresentDropped(std::uint64_t present_id, FgDropReason reason);  // the back end did not present it
     // The display path no longer uses the slot's buffer (available event / copy finished). Only a Retired slot, or a

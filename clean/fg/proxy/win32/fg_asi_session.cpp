@@ -256,6 +256,7 @@ struct FgAsiSessionHost::Impl {
     std::unique_ptr<wgfg::FgSession> session;
     bool session_draining = false;
     bool handled = false;  // the current interval was presented by the session
+    uint64_t handled_interval_id = 0;
     uint64_t last_values[2] = {};  // N-B3: aligned to 2-interval executor pipeline bound
     FgAsiSessionStats stats;
     uint32_t probe_failures = 0;   // start-up adapter probes that found no DXGI factory (logged at most 3 times)
@@ -309,6 +310,10 @@ struct FgAsiSessionHost::Impl {
         wgfg::FgTicks t_arrival = 0;
         wgfg::FgTicks t_after_wait = 0;
         wgfg::FgTicks t_after_record = 0;
+        wgfg::FgTicks present_interval_duration = 0;
+        wgfg::FgTicks queue_depth_wait = 0;
+        wgfg::FgTicks inner_present_duration = 0;
+        bool present_interval_measured = false;
         wgfg::FgTicks t_first_gen_ready = 0;
         wgfg::FgTicks t_first_gen_submit = 0;
         wgfg::FgTicks t_real_ready = 0;
@@ -465,6 +470,16 @@ struct FgAsiSessionHost::Impl {
         }
     }
 
+    void RecordPresentIntervalTiming(uint64_t interval_id, wgfg::FgTicks duration, wgfg::FgTicks queue_wait) {
+        std::lock_guard<std::mutex> lock(trace_mu);
+        const uint32_t index = (trace_head + kTraceRingSize - 1) % kTraceRingSize;
+        if (trace_count == 0 || trace_ring[index].interval_id != interval_id) return;
+        IntervalTrace& tr = trace_ring[index];
+        tr.present_interval_duration = duration;
+        tr.queue_depth_wait = queue_wait;
+        tr.present_interval_measured = true;
+    }
+
     static void OnTraceThunk(void* ctx, uint64_t interval_id, uint64_t frame_id, uint32_t index, bool real, uint8_t kind,
                              wgfg::FgTicks ts, wgfg::FgTicks target) {
         Impl* m = static_cast<Impl*>(ctx);
@@ -500,6 +515,7 @@ struct FgAsiSessionHost::Impl {
                 case 3: ++tr.drops_pre; break;
                 case 4: ++tr.drops_post; break;
                 case 5: (real ? tr.skips_real : tr.skips_generated)++; break;
+                case wgfg::kFgTraceInnerPresentDuration: tr.inner_present_duration += ts; break;
                 default: break;
             }
             break;
@@ -531,6 +547,7 @@ struct FgAsiSessionHost::Impl {
 
     void LogTraceSummary(const char* tag, wgfg::FgTicks summary_budget, const std::vector<IntervalTrace>& snap) {
         std::vector<int64_t> base_dt, wait_us, rec_us, gen_rdy_us, real_rdy_us, slip_us;
+        std::vector<int64_t> present_interval_us, queue_depth_wait_us, inner_present_us;
         uint32_t max_in_flight = 0;
         for (size_t i = 0; i < snap.size(); ++i) {
             const IntervalTrace& tr = snap[i];
@@ -544,13 +561,21 @@ struct FgAsiSessionHost::Impl {
                 gen_rdy_us.push_back((tr.t_first_gen_ready - tr.t_arrival) / 10);
             if (tr.t_real_ready >= tr.t_arrival) real_rdy_us.push_back((tr.t_real_ready - tr.t_arrival) / 10);
             if (tr.t_real_display > 0) slip_us.push_back(tr.max_slip / 10);
+            if (tr.present_interval_measured) {
+                present_interval_us.push_back(tr.present_interval_duration / 10);
+                queue_depth_wait_us.push_back(tr.queue_depth_wait / 10);
+            }
+            if (tr.t_real_submit > 0 && tr.inner_present_duration > 0)
+                inner_present_us.push_back(tr.inner_present_duration / 10);
             if (tr.in_flight > max_in_flight) max_in_flight = tr.in_flight;
         }
-        char buf[384];
+        char buf[704];
         std::snprintf(buf, sizeof(buf),
                       "fg trace (%s, n=%zu): base_dt_us p50=%lld p95=%lld p99=%lld | wait_us p50=%lld max=%lld | "
                       "rec_us p50=%lld p95=%lld | gen1_rdy_us p50=%lld p95=%lld | real_rdy_us p50=%lld | "
-                      "slip_us p50=%lld p95=%lld max=%lld | max_inflight=%u budget_ms=%.1f",
+                      "slip_us p50=%lld p95=%lld max=%lld | max_inflight=%u budget_ms=%.1f | "
+                      "present_interval_us p95=%lld max=%lld | queue_depth_wait_us p95=%lld max=%lld | "
+                      "inner_present_us p95=%lld max=%lld (n=%zu)",
                       tag, snap.size(), static_cast<long long>(Percentile(base_dt, 0.50)),
                       static_cast<long long>(Percentile(base_dt, 0.95)),
                       static_cast<long long>(Percentile(base_dt, 0.99)),
@@ -563,7 +588,13 @@ struct FgAsiSessionHost::Impl {
                       static_cast<long long>(Percentile(real_rdy_us, 0.50)),
                       static_cast<long long>(Percentile(slip_us, 0.50)),
                       static_cast<long long>(Percentile(slip_us, 0.95)),
-                      static_cast<long long>(Percentile(slip_us, 1.00)), max_in_flight, summary_budget / 10000.0);
+                      static_cast<long long>(Percentile(slip_us, 1.00)), max_in_flight, summary_budget / 10000.0,
+                      static_cast<long long>(Percentile(present_interval_us, 0.95)),
+                      static_cast<long long>(Percentile(present_interval_us, 1.00)),
+                      static_cast<long long>(Percentile(queue_depth_wait_us, 0.95)),
+                      static_cast<long long>(Percentile(queue_depth_wait_us, 1.00)),
+                      static_cast<long long>(Percentile(inner_present_us, 0.95)),
+                      static_cast<long long>(Percentile(inner_present_us, 1.00)), inner_present_us.size());
         Log(buf);
     }
 
@@ -1060,13 +1091,15 @@ struct FgAsiSessionHost::Impl {
     }
 
     // N-B3: at most two intervals of executor work in flight on the compute timeline before the next submission.
-    void BoundQueueDepth() {
-        if (!exec) return;
+    wgfg::FgTicks BoundQueueDepth() {
+        if (!exec) return 0;
         const uint64_t want = last_values[0];
         last_values[0] = last_values[1];
         last_values[1] = exec->LastComputeValue();
-        if (want == 0) return;
+        if (want == 0) return 0;
+        const auto start = wgfg::FgInterruptNow();
         exec->WaitForComputeValue(want, 50);
+        return wgfg::FgInterruptNow() - start;
     }
 
     void RecordSessionFailure() {
@@ -2129,10 +2162,7 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
                 m.SignalFacadeReadFence(index);
                 m.facade_compute_fence[index] = m.exec->LastComputeValue();
                 m.FinishTraceInterval(sr.interval_id, out->requested_count, t_after_record);
-                if (++m.trace_since_summary >= kTraceSummaryInterval) {
-                    m.trace_since_summary = 0;
-                    m.QueueTraceSummary("periodic", false);
-                }
+                m.handled_interval_id = sr.interval_id;
             } else if (admitted) {
                 m.CancelAdmission(desc->frame_token);
             }
@@ -2161,6 +2191,7 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
 }
 
 HRESULT FgAsiSessionHost::PresentInterval(const FgPresentCall& call, IFgInnerPresenter& inner) {
+    const auto started = wgfg::FgInterruptNow();
     Impl& m = *impl_;
     std::lock_guard<std::recursive_mutex> lock(m.mu);
     ++m.stats.intervals;
@@ -2168,10 +2199,15 @@ HRESULT FgAsiSessionHost::PresentInterval(const FgPresentCall& call, IFgInnerPre
         // The facade hand-off is recorded. Release the game's frame-start token once reuse is GPU-ordered.
         m.handled = false;
         ++m.stats.session_presents;
-        m.BoundQueueDepth();
+        const auto queue_wait = m.BoundQueueDepth();
         const HRESULT advance = m.AdvanceFacade();
         if (SUCCEEDED(advance)) m.ReturnFacadeCredit();
         m.DrainRetiredTags(false);
+        m.RecordPresentIntervalTiming(m.handled_interval_id, wgfg::FgInterruptNow() - started, queue_wait);
+        if (++m.trace_since_summary >= kTraceSummaryInterval) {
+            m.trace_since_summary = 0;
+            m.QueueTraceSummary("periodic", false);
+        }
         return advance;
     }
     m.handled = false;

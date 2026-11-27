@@ -683,16 +683,16 @@ bool FgDxgiPresenter::PresentHead(HANDLE stop) {
         return true;
     }
     const bool shown = SUCCEEDED(hr) && hr != DXGI_STATUS_OCCLUDED;
+    const FgTicks duration = present_started > 0 ? present_done - present_started : 0;
     // Keep the submission and display estimates anchored to the return from the Present call.
     engine_.FinishLeasedPresent(head.present.slot, SUCCEEDED(hr) ? present_done : 0,
-                                tearing ? present_done : head.shown_at, shown);
+                                tearing ? present_done : head.shown_at, shown, duration);
     if (FAILED(hr)) {
         engine_.MarkFailed();
         local_.clear();
         return true;
     }
     ++info_.presents;
-    const FgTicks duration = present_done - present_started;
     info_.present_call_total += duration;
     if (duration > info_.present_call_max) info_.present_call_max = duration;
     if (tearing && shown) {

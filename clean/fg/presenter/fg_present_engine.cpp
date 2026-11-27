@@ -630,10 +630,12 @@ bool FgPresentEngine::LeasePresent(std::uint32_t slot, std::uint64_t present_id)
     return true;
 }
 
-void FgPresentEngine::FinishLeasedPresent(std::uint32_t slot, FgTicks submitted, FgTicks estimate, bool presented) {
+void FgPresentEngine::FinishLeasedPresent(std::uint32_t slot, FgTicks submitted, FgTicks estimate, bool presented,
+                                          FgTicks call_duration) {
     Slot& s = slots_[slot];
     if (s.state != FgEngineSlotState::Presenting) return;
     s.state = FgEngineSlotState::Retired;
+    if (call_duration > 0) EmitTrace(s, kFgTraceInnerPresentDuration, call_duration);
     if (submitted != 0) CountSubmission(s, submitted);
     if (presented) CountDisplay(s, estimate, false);
     // OnSlotReleased retires the slot once the GPU copy has finished.
