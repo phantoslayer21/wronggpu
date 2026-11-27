@@ -1333,7 +1333,7 @@ void TestTearingPlanHeadNearCeiling() {
 void TestTearingAtFiveImagesPerInterval() {
     g_case = "tearing service time at five images per interval";
     constexpr FgTicks slot = 31600;        // the x6 request scheduled four generated and one real at 15.8 ms
-    constexpr FgTicks min_interval = 28619;
+    const FgTicks min_interval = FgVrrMinInterval(27778, false);
     constexpr FgTicks call_duration = 3600;  // sensitivity case: 0.36 ms of synchronous wrapper/Present work
     constexpr FgTicks physical_period = 27778;
     auto run = [&](bool corrected_pacing) {
@@ -1357,7 +1357,7 @@ void TestTearingAtFiveImagesPerInterval() {
             }
             const FgTicks start = std::max(now, decision.issue_at);
             if (last_start > 0) CHECK(start - last_start >= min_interval);
-            if (call_done > 0) CHECK(start + call_duration - call_done >= physical_period);
+            if (call_done > 0) CHECK(start >= call_done);
             last_start = start;
             call_done = start + call_duration;
         }
@@ -1367,58 +1367,113 @@ void TestTearingAtFiveImagesPerInterval() {
     const uint32_t corrected = run(true);
     std::printf("    five-image cadence: %u/%u generated images late (previous/corrected), 480 scheduled\n",
                 legacy, corrected);
-    CHECK(legacy >= 36);    // the replay is sensitive to charging service time to each slot
+    CHECK(legacy >= 24);    // even at the new floor, charging service time to each slot misses at least 5%
     CHECK(corrected < 24);  // under 5% generated images late
 }
 
 void TestTearingPhysicalGapAfterSlowCall() {
-    g_case = "tearing completion gap after a slow call";
-    constexpr FgTicks physical_period = 27778;
-    constexpr FgTicks scheduled_interval = 28619;
-    constexpr FgTicks first_start = kSecond;
-    for (const FgTicks service_time : {FgTicks{4000}, FgTicks{570000}, FgTicks{870000}}) {
-        const FgTicks first_done = first_start + service_time;
-        const FgTicks next_start = std::max(first_done,
-            FgTearingEarliestIssue(first_start, first_done, scheduled_interval, physical_period));
-        const FgTicks next_done = next_start + 500;
-        CHECK(next_done - first_done >= physical_period);
-        CHECK(next_start - first_start >= scheduled_interval);
-        CHECK(next_start < first_done + scheduled_interval);
+    g_case = "routine Present spacing and stalled completion";
+    constexpr FgTicks physical = 27778;
+    const FgTicks floor = FgVrrMinInterval(physical, false);
+    CHECK(floor == 28333);
+    CHECK(FgVrrMinInterval(physical, true) == 28055);
+    FgTicks started = kSecond;
+    for (int i = 0; i < 350; ++i) {
+        const FgTicks next = FgTearingEarliestIssue(started, started + 5000, floor, physical);
+        CHECK(next - started == floor);
+        started = next;
     }
+    CHECK(started - kSecond <= kSecond);  // at least 350 starts/second with a 500 us call
+    for (const FgTicks duration : {FgTicks{30000}, FgTicks{570000}, FgTicks{870000}}) {
+        const FgTicks completed = started + duration;
+        CHECK(FgTearingEarliestIssue(started, completed, floor, physical) == completed + physical);
+    }
+    CHECK(!FgVrrVsyncQueueFull(11, 10));
+    CHECK(FgVrrVsyncQueueFull(12, 10));
+    CHECK(FgVrrVsyncQueueFull(0, 0xfffffffeu));
+    CHECK(!FgVrrVsyncQueueFull(10, 11));
 }
 
 void TestTearingSchedulerFitsPresenterThroughput() {
-    g_case = "tearing scheduler fits measured presenter throughput";
-    constexpr FgTicks physical = 27778;
-    constexpr FgTicks configured = 28619;
-    CHECK(FgTearingScheduledMinInterval(configured, physical, 4500) == 32278);
-    CHECK(FgTearingScheduledMinInterval(configured, physical, 21100) == 34722);
-    CHECK(FgTearingScheduledMinInterval(configured, physical, 0) == configured);
-    FgPresentCallPacing pacing;
-    for (int i = 0; i < 32; ++i) pacing.Observe(i == 3 ? 870000 : 3900);
-    CHECK(pacing.Estimate() == 3900);
-    FgSchedulerConfig sc = DefaultScheduler();
+    g_case = "tearing scheduler and presenter share the same spacing";
+    auto sc = DefaultScheduler();
     sc.adaptive_count = true;
-    sc.display.margin = 0;
-    sc.display.min_interval = configured;
-    Rig r(sc, DefaultFake());
+    sc.display.min_interval = FgVrrMinInterval(27778, false);
+    sc.display.margin = 200;
+    sc.display.hysteresis = 400;
+    sc.display.reenter_intervals = 3;
+    sc.first_image_budget = 100000;
+    sc.bridge_and_submit_margin = 2500;
+    FgTargetScheduler scheduler(sc);
+    CHECK(scheduler.BeginEpoch(1) == FgStatus::Ok);
     FgTicks t = kSecond;
-    r.scheduler.SetDisplayMinInterval(FgTearingScheduledMinInterval(configured, physical, pacing.Estimate()));
+    uint64_t frame = 0;
+    // Exercise an excess-lead drain while the estimated cadence still fits four images.
+    for (const FgTicks delta : {FgTicks{155000}, FgTicks{115000}}) {
+        for (int i = 0; i < 80; ++i) {
+            if (i == 65) scheduler.SetFirstImageBudget(55000);
+            t += delta;
+            FgIntervalPlan plan;
+            CHECK(scheduler.Commit({1, ++frame, t, 3}, &plan) == FgStatus::Ok);
+            if (i >= 55) {
+                CHECK(plan.generated_count == 3);
+                CHECK(plan.period >= sc.display.min_interval * 4);
+                CHECK(FgDxgiPlanFitsPacing(plan, false, 27778));
+                if (delta == 155000 && i == 70) CHECK(!FgDxgiPlanFitsPacing(plan, true, 27778));
+            }
+        }
+    }
+}
+
+void TestOverflowFillPacesOnlyTheNextGameRelease() {
+    g_case = "bounded overflow fill";
+    auto cfg = DefaultScheduler();
+    cfg.adaptive_count = true;
+    cfg.overflow_fill = true;
+    cfg.display.min_interval = FgVrrMinInterval(27778, false);
+    cfg.display.margin = 200;
+    cfg.display.hysteresis = 400;
+    cfg.display.reenter_intervals = 3;
+    cfg.estimator.window = 1;
+    cfg.estimator.min_samples = 1;
+    cfg.estimator.outlier_percent = 200;
+    FgTargetScheduler scheduler(cfg);
+    CHECK(scheduler.BeginEpoch(1) == FgStatus::Ok);
+    FgTicks arrival = kSecond, release_wait = 0;
+    uint64_t frame = 0;
+    auto step = [&](FgTicks base, uint32_t requested, bool enabled = true, bool reset = false, uint64_t epoch = 1) {
+        arrival += base + release_wait;
+        FgIntervalPlan plan;
+        CHECK(scheduler.Commit({epoch, ++frame, arrival, requested, enabled, reset, arrival, release_wait},
+                               &plan) == FgStatus::Ok);
+        release_wait = plan.fill_release_wait;
+        CHECK(release_wait >= 0 && release_wait * 100 <= base * 12);
+        return plan;
+    };
     for (int i = 0; i < 30; ++i) {
-        t += 160000;
-        r.Frame(t, 4);
+        const auto plan = step(80000, 5);
+        if (i >= 10) {
+            CHECK(plan.generated_count == 2 && plan.period >= 84999);
+            CHECK(plan.fill_period == 86799 && plan.fill_release_wait == 6799);
+        }
     }
-    CHECK(r.plans.back().generated_count == 4);
-    for (int i = 0; i < 32 * 6; ++i) pacing.Observe(i % 32 == 3 ? 570000 : 4500);
-    CHECK(pacing.Estimate() >= 4390 && pacing.Estimate() < 4500);
-    r.scheduler.SetDisplayMinInterval(FgTearingScheduledMinInterval(configured, physical, pacing.Estimate()));
-    for (int i = 0; i < 20; ++i) {
-        t += 160000;
-        r.Frame(t, 4);
-    }
-    r.RunUntil(t + 700000);
-    CHECK(r.plans.back().generated_count == 3);
-    CHECK(AllOk(r));
+    CHECK(step(95900, 5).fill_release_wait == 0);            // scene is now slower than the cap
+    for (int i = 0; i < 30; ++i) step(104000, 5);             // engage 4x
+    CHECK(step(104000, 5).fill_period == 115732);
+    for (int i = 0; i < 4; ++i) CHECK(step(80000, 5).fill_release_wait == 0);  // >16% exit, four in a row
+    for (int i = 0; i < 20; ++i) step(80000, 5);
+    CHECK(step(80000, 5).fill_period == 86799);
+    CHECK(step(76000, 5).fill_release_wait == 0);            // between the 12% and 16% limits
+    CHECK(step(80000, 4).fill_period == 0);                   // requested multiplier changed
+    for (int i = 0; i < 20; ++i) step(80000, 4);
+    CHECK(step(80000, 4, false).fill_period == 0);            // menu
+    CHECK(step(80000, 4).fill_period == 0);                   // must prime again
+    for (int i = 0; i < 20; ++i) step(80000, 4);
+    CHECK(step(80000, 4, true, true).fill_period == 0);       // reset
+    for (int i = 0; i < 20; ++i) step(80000, 4);
+    CHECK(step(80000, 0, false).fill_period == 0);            // FG disabled
+    CHECK(scheduler.BeginEpoch(2) == FgStatus::Ok);
+    CHECK(step(80000, 4, true, false, 2).fill_period == 0);   // new epoch
 }
 
 void TestFixedGridCountCandidateRestartsItsStreak() {
@@ -1459,58 +1514,29 @@ void TestSchedulerReportsReanchorCauses() {
 }
 
 void TestRtOffTearingFloorReplay() {
-    g_case = "RT-off tearing floor replay";
-    constexpr FgTicks physical = 27778;
-    constexpr FgTicks configured = 28619;
-    struct ReplayResult {
-        uint32_t generating = 0;
-        uint32_t out_of_window = 0;
-        uint32_t reanchors = 0;
-        uint32_t lead_shortfall = 0;
-    };
-    const auto replay = [&](uint32_t requested, bool bounded) {
-        auto config = DefaultScheduler();
-        config.first_image_budget = 85000;
-        config.bridge_and_submit_margin = 2500;
-        config.display.min_interval = configured;
-        config.adaptive_count = true;
-        FgTargetScheduler scheduler(config);
-        CHECK(scheduler.BeginEpoch(1) == FgStatus::Ok);
-        ReplayResult result;
-        FgTicks arrival = kSecond;
-        for (uint32_t i = 1; i <= 512; ++i) {
-            // Advance at about 140 fps. Replay intermittent high p85 reports and one pair of queue
-            // waits per ten frames. These inputs model the host signals, not a measured GPU workload.
-            arrival += 73529 + (static_cast<FgTicks>(i % 7) - 3) * 600;
-            const FgTicks call_p85 = i % 64 >= 16 && i % 64 < 32 ? 21100 : 4000;
-            scheduler.SetDisplayMinInterval(bounded ? FgTearingScheduledMinInterval(configured, physical, call_p85)
-                                                    : std::max(configured, physical + call_p85));
-            FgGameFrame frame{1, i, arrival, requested, true, false,
-                              arrival + (i % 10 == 3 || i % 10 == 4 ? 35000 : 0)};
+    g_case = "RT-off keeps 2x across the qualified VRR range";
+    auto config = DefaultScheduler();
+    config.first_image_budget = 85000;
+    config.bridge_and_submit_margin = 2500;
+    config.display.min_interval = FgVrrMinInterval(27778, false);
+    config.display.margin = 200;
+    config.display.hysteresis = 400;
+    config.display.reenter_intervals = 3;
+    config.adaptive_count = true;
+    FgTargetScheduler scheduler(config);
+    CHECK(scheduler.BeginEpoch(1) == FgStatus::Ok);
+    FgTicks arrival = kSecond;
+    uint64_t frame = 0;
+    for (FgTicks period = 65000; period <= 155000; period += 10000) {
+        for (int i = 0; i < 80; ++i) {
+            arrival += period + (i % 7 - 3) * 600;
+            const FgTicks origin = arrival + (i % 10 == 3 || i % 10 == 4 ? 35000 : 0);
             FgIntervalPlan plan;
-            CHECK(scheduler.Commit(frame, &plan) == FgStatus::Ok);
-            CHECK(plan.generated_count <= 1);
-            if (i <= 16) continue;
-            if (plan.generated_count > 0) {
-                ++result.generating;
-                if (plan.reanchored) ++result.reanchors;
-                if (plan.reanchor_reason == FgReanchorReason::LeadShortfall) ++result.lead_shortfall;
-            }
-            if (plan.real_only_reason == FgRealOnlyReason::OutOfVrrWindow) ++result.out_of_window;
+            CHECK(scheduler.Commit({1, ++frame, arrival, 1, true, false, origin}, &plan) == FgStatus::Ok);
+            CHECK(plan.real_only_reason != FgRealOnlyReason::OutOfVrrWindow);
+            if (i >= 30) CHECK(plan.generated_count == 1);
         }
-        return result;
-    };
-    const ReplayResult previous = replay(5, false);
-    const ReplayResult bounded = replay(5, true);
-    const ReplayResult x2 = replay(1, true);
-    std::printf("    RT-off replay previous/bounded: generating=%u/%u out-of-window=%u/%u "
-                "reanchors=%u/%u lead-shortfall=%u/%u\n",
-                previous.generating, bounded.generating, previous.out_of_window, bounded.out_of_window,
-                previous.reanchors, bounded.reanchors, previous.lead_shortfall, bounded.lead_shortfall);
-    CHECK(bounded.out_of_window < previous.out_of_window);
-    CHECK(bounded.generating >= 480);
-    CHECK(bounded.generating == x2.generating && bounded.out_of_window == x2.out_of_window &&
-          bounded.reanchors == x2.reanchors);
+    }
 }
 
 void TestDxgiDisplayCadence() {
@@ -1572,7 +1598,7 @@ void TestDxgiDisplayCadence() {
 void TestRtOffWrappedPresentReplay() {
     g_case = "RT-off wrapped Present spikes";
     constexpr FgTicks physical = 27778;
-    constexpr FgTicks configured = 28619;
+    const FgTicks configured = FgVrrMinInterval(physical, false);
     struct ReplayResult {
         uint32_t generating = 0;
         uint32_t pre_late = 0;
@@ -1580,23 +1606,23 @@ void TestRtOffWrappedPresentReplay() {
         uint32_t collision = 0;
         uint32_t completion_floor = 0;
     };
-    const auto replay = [&](uint32_t requested, bool bounded, bool spikes) {
+    const auto replay = [&](uint32_t requested, bool spikes) {
         auto config = DefaultScheduler();
         config.first_image_budget = 83000;
         config.bridge_and_submit_margin = 2500;
         config.adaptive_count = true;
+        config.display.min_interval = configured;
+        config.display.margin = 200;
+        config.display.hysteresis = 400;
+        config.display.reenter_intervals = 3;
         FgTargetScheduler scheduler(config);
         CHECK(scheduler.BeginEpoch(1) == FgStatus::Ok);
         ReplayResult result;
         FgTicks arrival = kSecond;
         FgTicks last_start = 0, last_done = 0;
         for (uint32_t i = 1; i <= 4096; ++i) {
-            // Alternate the faster and slower cadence phases observed at RT-off. Hold the
-            // scheduler's p85 inputs constant across runs independently of each modeled call.
-            const bool high_report = i % 1024 >= 512 && i % 1024 < 576;
-            const FgTicks call_p85 = high_report ? 21000 : 4900;
-            scheduler.SetDisplayMinInterval(bounded ? FgTearingScheduledMinInterval(configured, physical, call_p85)
-                                                    : std::max(configured, physical + call_p85));
+            // Alternate faster and slower RT-off phases without changing the scheduler floor.
+            const bool stall_burst = i % 1024 >= 512 && i % 1024 < 576;
             const FgTicks cadence = i % 512 < 120 ? 64700 : 86200;
             arrival += cadence + (static_cast<FgTicks>((i * 17) % 19) - 9) * 1400;
             const FgTicks origin = arrival + (i % 72 == 53 || i % 72 == 54 ? 36000 : 0);
@@ -1635,37 +1661,39 @@ void TestRtOffWrappedPresentReplay() {
                 const FgTicks issue = std::max({now, image.target, earliest});
                 FgTicks call = 4200 + (i % 5) * 350;
                 if (spikes && image.real && (i % 16 == 0 || i % 117 == 41)) call = 25000 + (i % 7) * 4000;
-                if (spikes && high_report && i % 3 == 0) call = 21000;
-                CHECK(last_done == 0 || issue + call - last_done >= physical);
+                if (spikes && stall_burst && i % 3 == 0) call = 21000;
+                CHECK(last_done == 0 || issue - last_start >= configured);
+                if (last_done - last_start > physical / 2) CHECK(issue - last_done >= physical);
                 last_start = issue;
                 last_done = issue + call;
             }
         }
-        std::printf("    RT-off Present replay N=%u bounded=%d spikes=%d gen=%u pre=%u "
+        std::printf("    RT-off Present replay N=%u spikes=%d gen=%u pre=%u "
                     "deadline/collision/completion-floor=%u/%u/%u\n",
-                    requested, bounded, spikes, result.generating, result.pre_late, result.deadline,
+                    requested, spikes, result.generating, result.pre_late, result.deadline,
                     result.collision, result.completion_floor);
         return result;
     };
     for (const uint32_t requested : {1u, 2u, 3u, 5u}) {
-        for (const bool bounded : {false, true}) {
-            const auto routine = replay(requested, bounded, false);
-            const auto spiked = replay(requested, bounded, true);
-            CHECK(spiked.generating == routine.generating && spiked.pre_late == routine.pre_late);
-            CHECK(spiked.collision > routine.collision);
-            CHECK(spiked.completion_floor > routine.completion_floor);
-        }
+        const auto routine = replay(requested, false);
+        const auto spiked = replay(requested, true);
+        CHECK(spiked.generating == routine.generating && spiked.pre_late == routine.pre_late);
+        CHECK(routine.completion_floor == 0);
+        CHECK(spiked.completion_floor > 0);
     }
 }
 
 void TestRtOffAdmissionWaitKeepsProducerLead() {
     g_case = "RT-off producer lead after admission waits";
     constexpr FgTicks physical = 27778;
-    constexpr FgTicks configured = 28619;
+    const FgTicks configured = FgVrrMinInterval(physical, false);
     auto config = DefaultScheduler();
     config.first_image_budget = 92000;
     config.bridge_and_submit_margin = 2500;
-    config.display.min_interval = FgTearingScheduledMinInterval(configured, physical, 4700);
+    config.display.min_interval = configured;
+    config.display.margin = 200;
+    config.display.hysteresis = 400;
+    config.display.reenter_intervals = 3;
     config.adaptive_count = true;
     FgTargetScheduler scheduler(config);
     CHECK(scheduler.BeginEpoch(1) == FgStatus::Ok);
@@ -1696,6 +1724,7 @@ void TestRtOffAdmissionWaitKeepsProducerLead() {
     std::printf("    RT-off lead replay: generating=%u reanchors=%u modeled pre/post-late=%u/%u\n",
                 generating, reanchors, pre_late, post_late);
     CHECK(generating >= 300);
+    CHECK(reanchors == 0);
     CHECK((pre_late + post_late) * 1000 <= generating * 16);
 }
 
@@ -1865,6 +1894,7 @@ void TestSmokePacingTraps() {
         sc.display.min_interval = 28619;  // ~349.4 Hz VRR ceiling
         sc.display.margin = 0;
         sc.adaptive_count = true;
+        sc.first_present_admission = true;
         FgTargetScheduler scheduler(sc);
         CHECK(scheduler.BeginEpoch(1) == FgStatus::Ok);
         FgTicks pending_release = 0;
@@ -1979,6 +2009,7 @@ int main() {
     TestTearingAtFiveImagesPerInterval();
     TestTearingPhysicalGapAfterSlowCall();
     TestTearingSchedulerFitsPresenterThroughput();
+    TestOverflowFillPacesOnlyTheNextGameRelease();
     TestFixedGridCountCandidateRestartsItsStreak();
     TestSchedulerReportsReanchorCauses();
     TestRtOffTearingFloorReplay();

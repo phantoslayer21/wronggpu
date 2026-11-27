@@ -260,6 +260,11 @@ struct FgAsiSessionHost::Impl {
     bool session_draining = false;
     bool handled = false;  // the current interval was presented by the session
     uint64_t handled_interval_id = 0;
+    wgfg::FgHighResTimer fill_timer;
+    wgfg::FgTicks previous_fill_wait = 0;
+    wgfg::FgTicks current_fill_wait = 0, current_fill_period = 0;
+    uint64_t fill_cap_intervals = 0, fill_high_intervals = 0, fill_gameplay_intervals = 0;
+    double fill_trim_sum = 0.0;
     uint64_t last_values[2] = {};  // N-B3: aligned to 2-interval executor pipeline bound
     FgAsiSessionStats stats;
     uint32_t probe_failures = 0;   // start-up adapter probes that found no DXGI factory (logged at most 3 times)
@@ -285,10 +290,7 @@ struct FgAsiSessionHost::Impl {
 
     // lateness control (kBudget*): budget kept across sessions of the run
     wgfg::FgTicks budget = kBudgetBase;
-    wgfg::FgTicks tearing_schedule_base = 0;
-    wgfg::FgTicks tearing_physical_period = 0;
     wgfg::FgTicks tearing_schedule_interval = 0;
-    uint64_t last_tearing_schedule_poll = 0;
     uint32_t lateness_count_cap = 0;
     uint32_t cap_miss_windows = 0;
     uint32_t window_frames = 0;
@@ -717,6 +719,18 @@ struct FgAsiSessionHost::Impl {
     void ReturnFacadeCredit() {
         std::lock_guard<std::mutex> lock(credit_mu);
         RefillWaitableLocked(false);
+    }
+
+    void PaceFacadeRelease() {
+        if (current_fill_wait <= 0) return;
+        const auto start = wgfg::FgInterruptNow();
+        if (!fill_timer.ArmAt(start + current_fill_wait)) return;
+        const auto timeout = static_cast<DWORD>((current_fill_wait + 9999) / 10000 + 1);
+        if (WaitForSingleObject(fill_timer.Handle(), timeout) != WAIT_OBJECT_0) fill_timer.Cancel();
+        previous_fill_wait = wgfg::FgInterruptNow() - start;
+        ++fill_cap_intervals;
+        const auto uncapped = current_fill_period - current_fill_wait;
+        fill_trim_sum += 100.0 * previous_fill_wait / (uncapped + previous_fill_wait);
     }
 
     void EndAdmissionLocked(uint64_t frame_id) {
@@ -1303,7 +1317,13 @@ struct FgAsiSessionHost::Impl {
             char gameplay[32] = "n/a";
             if (display.samples.gameplay_real)
                 std::snprintf(gameplay, sizeof(gameplay), "%.2fx", display.samples.GameplayMultiplier());
-            Log(std::string(buf) + " | gameplay_mult=" + gameplay + " | " + FormatDisplay(display));
+            char fill[168];
+            std::snprintf(fill, sizeof(fill), " | fill_cap_intervals=%llu fill_mean_trim_pct=%.2f "
+                          "fill_high_gameplay_pct=%.2f",
+                          static_cast<unsigned long long>(fill_cap_intervals),
+                          fill_cap_intervals ? fill_trim_sum / fill_cap_intervals : 0.0,
+                          fill_gameplay_intervals ? 100.0 * fill_high_intervals / fill_gameplay_intervals : 0.0);
+            Log(std::string(buf) + " | gameplay_mult=" + gameplay + fill + " | " + FormatDisplay(display));
             // why intervals were real-only (the scheduler's / presenter's reasons), and the DXGI back end's presents
             std::string reasons = "fg host: real-only intervals:";
             for (uint32_t k = 1; k < wgfg::kFgRealOnlyReasonCount; ++k)
@@ -1312,6 +1332,9 @@ struct FgAsiSessionHost::Impl {
                            std::to_string(ps.real_only_intervals[k]);
             if (const auto* dx = dynamic_cast<const wgfg::FgDxgiPresenter*>(pr)) {
                 const wgfg::FgDxgiPresenterInfo in = dx->Info();
+                char gap_share[48] = {};
+                std::snprintf(gap_share, sizeof(gap_share), "%.3f",
+                              in.start_gap_samples ? 100.0 * in.start_gap_under_refresh / in.start_gap_samples : 0.0);
                 reasons += "; dxgi presents=" + std::to_string(in.presents) +
                        " latency_timeouts=" + std::to_string(in.latency_timeouts) +
                        " occlusion_retired_real=" + std::to_string(in.occlusion_retired_real) +
@@ -1320,6 +1343,14 @@ struct FgAsiSessionHost::Impl {
                        " present_call_us_max=" + std::to_string(in.present_call_max / 10) +
                        " present_call_p85_smoothed_us=" + std::to_string(in.present_call_p85_smoothed / 10) +
                        " scheduler_tearing_min_us=" + std::to_string(tearing_schedule_interval / 10) +
+                       " present_call_us p50=" + std::to_string(in.call_p50 / 10) +
+                       " p95=" + std::to_string(in.call_p95 / 10) + " p99=" + std::to_string(in.call_p99 / 10) +
+                       " present_start_gap_us p05=" + std::to_string(in.start_gap_p05 / 10) +
+                       " p50=" + std::to_string(in.start_gap_p50 / 10) + " p95=" + std::to_string(in.start_gap_p95 / 10) +
+                       " n=" + std::to_string(in.start_gap_samples) +
+                       " under_refresh=" + std::to_string(in.start_gap_under_refresh) +
+                       " under_refresh_pct=" + gap_share +
+                       " vrr_vsync_queue_drops=" + std::to_string(in.vrr_queue_drops) +
                        " tearing_drop_deadline=" + std::to_string(in.tearing_drop_deadline) +
                        " tearing_drop_collision=" + std::to_string(in.tearing_drop_collision) +
                        " tearing_collision_completion_floor=" + std::to_string(in.tearing_collision_completion_floor);
@@ -1352,6 +1383,9 @@ struct FgAsiSessionHost::Impl {
         Log(std::string("fg host: session destroyed (") + why + "): " + wgfg::FgSessionErrorName(r.error));
         session.reset();
         QueueTraceSummary(why, true, closing_display);
+        previous_fill_wait = current_fill_wait = current_fill_period = 0;
+        fill_cap_intervals = fill_high_intervals = fill_gameplay_intervals = 0;
+        fill_trim_sum = 0.0;
         exec_source.reset();
         win_source.reset();
         DrainAdmissions();
@@ -1621,17 +1655,6 @@ struct FgAsiSessionHost::Impl {
         }
     }
 
-    void UpdateTearingSchedule() {
-        if (tearing_physical_period <= 0 || !AdvanceTearingSchedulePoll(st_presents.load(), last_tearing_schedule_poll))
-            return;
-        const auto* dx = dynamic_cast<const wgfg::FgDxgiPresenter*>(session->Presenter());
-        if (!dx) return;
-        const auto interval = wgfg::FgTearingScheduledMinInterval(tearing_schedule_base, tearing_physical_period,
-                                                                 dx->Info().present_call_p85_smoothed);
-        if (interval != tearing_schedule_interval && session->SetDisplayMinInterval(interval))
-            tearing_schedule_interval = interval;
-    }
-
     void TryCreateSession(FgProxy* c) {
         if (session || stats.gave_up || !c || !c->fg_taken() || facade.empty() || !inner || !device || !queue) return;
         WgFgSessionDesc sd = {};
@@ -1692,8 +1715,9 @@ struct FgAsiSessionHost::Impl {
         // framerates are paced smoothly without fixed-grid BeginInterval refusals; AUTO only enables variable_refresh
         // when the chain itself allows tearing (otherwise FgSelectPresenter would pick DxgiFlipTearing and fail).
         const bool chain_tearing = tearing_supported && (chain_flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0;
+        const bool vsync_mode = sd.presenter_mode == WG_FG_PRESENTER_DXGI_VSYNC;
         base.display.variable_refresh =
-            sd.presenter_mode == WG_FG_PRESENTER_HWFQ ? tearing_supported : chain_tearing;
+            sd.presenter_mode == WG_FG_PRESENTER_HWFQ || vsync_mode ? tearing_supported : chain_tearing;
         base.worker_registration = {
             &FgSwapChain::RegisterWorkerThread, &FgSwapChain::UnregisterWorkerThread,
             [](void* ctx, DWORD tid, bool priority, bool mmcss) {
@@ -1712,11 +1736,11 @@ struct FgAsiSessionHost::Impl {
         d.scheduler.max_lead = 500000;            // 50 ms playout lead cap (fits 50-60 fps 4x/6x with GPU-bound budget)
         const bool tearing_mode = sd.presenter_mode == WG_FG_PRESENTER_DXGI_TEARING ||
                                   (sd.presenter_mode == WG_FG_PRESENTER_AUTO && base.display.variable_refresh);
-        if (tearing_mode) d.scheduler.bridge_and_submit_margin = 2500;  // 0.25 ms submit margin for DXGI tearing
+        if (tearing_mode || (vsync_mode && base.display.variable_refresh))
+            d.scheduler.bridge_and_submit_margin = 2500;
         {
             // O-A4 / M1: query active monitor refresh via EnumDisplaySettingsExW (fallback to compositor grid).
-            // Cap output strictly inside the VRR ceiling (~3% margin: ~349 Hz on a 360 Hz panel) so generated frames
-            // never exceed panel refresh and tear.
+            // The planner and presenter use the same refresh-derived minimum spacing.
             wgfg::FgTicks refresh_period = 0;
             uint32_t refresh_hz = 0;
             bool from_mode = QueryMonitorRefresh(hwnd, &refresh_period, &refresh_hz);
@@ -1735,10 +1759,15 @@ struct FgAsiSessionHost::Impl {
                 d.scheduler.display.max_interval =
                     base.display.variable_refresh ? 208333 : 1000000;  // 48 Hz VRR floor vs 10 Hz fixed
                 d.scheduler.adaptive_count = true;
-                const bool fixed_grid_presenter =
-                    sd.presenter_mode == WG_FG_PRESENTER_DXGI_VSYNC ||
-                    (!base.display.variable_refresh &&
-                     (sd.presenter_mode == WG_FG_PRESENTER_HWFQ || sd.presenter_mode == WG_FG_PRESENTER_AUTO));
+                if (base.display.variable_refresh) {
+                    d.scheduler.display.min_interval = wgfg::FgVrrMinInterval(refresh_period, vsync_mode);
+                    d.scheduler.display.margin = 200;
+                    d.scheduler.display.hysteresis = 400;
+                    d.scheduler.display.exit_intervals = 2;
+                    d.scheduler.display.reenter_intervals = 3;
+                }
+                const bool fixed_grid_presenter = !base.display.variable_refresh &&
+                                                  sd.presenter_mode != WG_FG_PRESENTER_DXGI_TEARING;
                 if (fixed_grid_presenter) {
                     d.scheduler.fixed_refresh_period = refresh_period;
                     d.scheduler.display.min_interval = refresh_period;
@@ -1760,6 +1789,12 @@ struct FgAsiSessionHost::Impl {
             }
         }
         base.min_interval = d.scheduler.display.min_interval;
+        char fill_env[8] = {};
+        const auto fill_length = GetEnvironmentVariableA("WG_FG_FILL", fill_env, sizeof(fill_env));
+        const bool fill_off = fill_length == 3 && std::strcmp(fill_env, "off") == 0;
+        d.scheduler.overflow_fill = base.display.variable_refresh && base.display.refresh_period > 0 &&
+                                    fill_timer.Valid() && !fill_off;
+        d.scheduler.first_present_admission = base.display.variable_refresh && admission_mode == AdmissionMode::Present;
         win_source.reset(new (std::nothrow) wgfg::FgWinPresenterSource(base));
         if (win_source)
             exec_source.reset(new (std::nothrow) wgfg::FgExecutorPresenterSource(win_source.get(), exec.get()));
@@ -1805,14 +1840,13 @@ struct FgAsiSessionHost::Impl {
         c->set_executor(&h);
         ++stats.sessions_created;
         const wgfg::FgPresenterChoice chosen = win_source->LastSelection().chosen;
-        if (stats.sessions_created == 1 && chosen == wgfg::FgPresenterChoice::DxgiFlipTearing) {
+        const bool dxgi = chosen == wgfg::FgPresenterChoice::DxgiFlipTearing ||
+                          chosen == wgfg::FgPresenterChoice::DxgiFlipVsync;
+        if (stats.sessions_created == 1 && dxgi) {
             startup_present_base = st_presents.load();
             startup_admission_until = wgfg::FgInterruptNow() + 10000000;  // first second on the first chain
         }
-        tearing_schedule_base = base.min_interval;
-        tearing_physical_period = chosen == wgfg::FgPresenterChoice::DxgiFlipTearing ? base.display.refresh_period : 0;
-        tearing_schedule_interval = tearing_physical_period > 0 ? tearing_schedule_base : 0;
-        last_tearing_schedule_poll = st_presents.load();
+        tearing_schedule_interval = dxgi ? base.min_interval : 0;
         st_presenter.store(static_cast<uint32_t>(chosen));
         Log(std::string("fg host: session created, ") + std::to_string(sd.output_width) + " x " +
             std::to_string(sd.output_height) + ", preset " + std::to_string(sd.preset) + ", N up to " +
@@ -1820,7 +1854,8 @@ struct FgAsiSessionHost::Impl {
             ", generated_fences=" + (exec->PerIndexFences() ? "per-index" : "single-batch-when-eligible") +
             ", presenter " +
             wgfg::FgPresenterChoiceName(chosen) + ", latency_limit=" + std::to_string(st_latency_limit.load()) +
-            ", admission=" + (admission_mode == AdmissionMode::Consumed ? "consumed" : "present"));
+            ", admission=" + (admission_mode == AdmissionMode::Consumed ? "consumed" : "present") +
+            ", fill=" + (d.scheduler.overflow_fill ? "on" : "off"));
     }
 };
 
@@ -2114,6 +2149,7 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
     std::lock_guard<std::recursive_mutex> lock(m.mu);
     m.handled = false;
     m.current_plan_consumed = false;
+    m.current_fill_wait = m.current_fill_period = 0;
     bool admitted = false;
     WgFgPresentResult local = {};
     if (!out) out = &local;
@@ -2148,8 +2184,8 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
         if (fg_enabled) m.WaitForPresenterRoom();
         const wgfg::FgTicks t_after_wait = wgfg::FgInterruptNow();
         if (m.session && !m.session_draining && desc) {
-            m.session->SetNextArrival(t_arrival, t_after_wait);
-            m.UpdateTearingSchedule();
+            m.session->SetNextArrival(t_arrival, t_after_wait, m.previous_fill_wait);
+            m.previous_fill_wait = 0;
             m.next_trace = {};
             m.next_trace.t_arrival = t_arrival;
             m.next_trace.t_after_wait = t_after_wait;
@@ -2287,6 +2323,16 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
                 m.facade_compute_fence[index] = m.exec->LastComputeValue();
                 m.FinishTraceInterval(sr.interval_id, out->requested_count, t_after_record);
                 m.handled_interval_id = sr.interval_id;
+                const bool gameplay = fg_enabled && sr.plan_real_only != wgfg::FgRealOnlyReason::MenuDisabled &&
+                                      !sr.menu_detected && !sr.menu_copy;
+                if (gameplay) {
+                    ++m.fill_gameplay_intervals;
+                    if (sr.fill_period > 0) {
+                        ++m.fill_high_intervals;
+                        m.current_fill_period = sr.fill_period;
+                        m.current_fill_wait = sr.fill_release_wait;
+                    }
+                }
             } else if (admitted) {
                 m.CancelAdmission(desc->frame_token);
             }
@@ -2325,7 +2371,11 @@ HRESULT FgAsiSessionHost::PresentInterval(const FgPresentCall& call, IFgInnerPre
         ++m.stats.session_presents;
         const auto queue_wait = m.BoundQueueDepth();
         const HRESULT advance = m.AdvanceFacade();
-        if (SUCCEEDED(advance)) m.ReturnFacadeCredit();
+        if (SUCCEEDED(advance)) {
+            // The real image and its fences are already submitted. Pace only the game's next release.
+            m.PaceFacadeRelease();
+            m.ReturnFacadeCredit();
+        }
         m.DrainRetiredTags(false);
         m.RecordPresentIntervalTiming(m.handled_interval_id, wgfg::FgInterruptNow() - started, queue_wait);
         if (++m.trace_since_summary >= kTraceSummaryInterval) {

@@ -98,6 +98,8 @@ struct FgSchedulerConfig {
     FgTicks fixed_refresh_period = 0;   // > 0: require period / (N + 1) to fit a whole multiple of this refresh period
     bool adaptive_count = false;        // false: a fixed count outside the window suspends; true: lower the count
     bool menu_reprimes_history = true;  // a menu frame is not history for the next interval
+    bool overflow_fill = false;        // host may pace the release after submitting a fill plan
+    bool first_present_admission = false;  // subtract known waits for this scheduler's prior first image
 };
 
 // One game frame as the game presents it.
@@ -109,6 +111,7 @@ struct FgGameFrame {
     bool generation_enabled = true;     // menu / game decision for this interval
     bool reset = false;                 // camera cut / history reset on this frame
     FgTicks budget_origin = 0;          // post-wait submission time (0: use arrival)
+    FgTicks previous_release_wait = 0;  // measured fill wait returned with the preceding game frame
 };
 
 class FgTargetScheduler {
@@ -143,7 +146,6 @@ public:
     // images finish after their display time gives the GPU more of it). Clamped to [0, max_lead]. The next commit
     // uses the new lead. Sustained shortfall can re-anchor and excess lead drains through bounded correction.
     void SetFirstImageBudget(FgTicks budget);
-    void SetDisplayMinInterval(FgTicks min_interval);
     // Optional upper cap on scheduled generated count when producer misses persist.
     // 0 clears the override.
     void SetMaxGeneratedCap(std::uint32_t cap);
@@ -155,9 +157,21 @@ private:
     bool FitsRaw(std::uint32_t n, FgTicks period) const;
     std::uint32_t Largest(std::uint32_t upto, FgTicks period) const;
     std::uint32_t UpdateCount(std::uint32_t requested, FgTicks period);
+    struct FillPlan {
+        std::uint32_t count = 0;
+        FgTicks period = 0;
+        FgTicks wait = 0;
+    };
+    FillPlan UpdateFill(std::uint32_t requested, bool eligible, FgTicks latest_uncapped);
 
     FgSchedulerConfig config_;
     FgIntervalEstimator estimator_;
+    FgIntervalEstimator uncapped_estimator_;
+    FgTicks uncapped_arrival_ = 0;
+    FgTicks cadence_arrival_ = 0, previous_credit_wait_ = 0;
+    std::uint32_t fill_requested_ = 0;
+    std::uint32_t fill_count_ = 0;
+    std::uint32_t fill_overrun_ = 0;
     bool epoch_started_ = false;
     bool lost_ = false;
     std::uint64_t epoch_ = 0;
@@ -169,7 +183,7 @@ private:
     bool have_target_ = false;
     FgTicks last_real_target_ = 0;
     bool history_valid_ = false;
-    bool last_interval_generated_ = false;
+    std::uint32_t last_interval_count_ = 0;
     std::uint32_t last_requested_ = 0;
     std::uint32_t effective_ = 0;
     std::uint32_t bad_run_ = 0;

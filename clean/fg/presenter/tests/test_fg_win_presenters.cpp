@@ -1319,6 +1319,50 @@ void TestGpuDxgi(Gpu& gpu) {
     if (FAILED(hr)) return;
     sc->SetMaximumFrameLatency(2);
     {
+        ComPtr<IDXGISwapChain4> vrr_chain;
+        CHECK(SUCCEEDED(make_chain(DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
+                                   &vrr_chain)));
+        if (vrr_chain) {
+            CHECK(SUCCEEDED(vrr_chain->SetMaximumFrameLatency(2)));
+            FgDxgiPresenterDesc dd;
+            dd.device = gpu.device.Get();
+            dd.queue = gpu.queue.Get();
+            dd.swap_chain = vrr_chain.Get();
+            dd.pacing = FgDxgiPacing::Vsync;
+            dd.variable_refresh = true;
+            dd.refresh_period = 27778;
+            dd.min_interval = FgVrrMinInterval(dd.refresh_period, true);
+            dd.max_generated = 1;
+            std::unique_ptr<FgDxgiPresenter> vrr;
+            CHECK(FgDxgiPresenter::Create(dd, &vrr).Ok());
+            if (vrr) {
+                CHECK(vrr->Attach(0xBEEE, 1) == FgStatus::Ok);
+                FgWinResult why;
+                const auto fence = vrr->RegisterFence(gpu.fence.Get(), &why);
+                CHECK(fence != 0);
+                uint64_t generated = 0, refused = 0;
+                CHECK(DriveFrames(vrr.get(), &gpu, fence, 1, 147000, 20, &generated, &refused));
+                CHECK(generated >= 10 && refused == 0);
+                CHECK(vrr->WaitIdle(1000));
+                const auto timing = vrr->Info();
+                const auto display = vrr->ReadDisplayCadence(false);
+                CHECK(timing.presents >= 20 && timing.start_gap_samples > 0);
+                CHECK(timing.start_gap_under_refresh == 0);
+                CHECK(display.submitted > 0);
+                std::printf("  DXGI VRR vsync: presents=%llu observed=%llu unresolved=%llu pending=%llu "
+                            "start_gap_us p50=%lld p95=%lld under_refresh=%llu\n",
+                            static_cast<unsigned long long>(timing.presents),
+                            static_cast<unsigned long long>(display.real + display.generated),
+                            static_cast<unsigned long long>(display.unresolved),
+                            static_cast<unsigned long long>(display.pending),
+                            static_cast<long long>(timing.start_gap_p50 / 10),
+                            static_cast<long long>(timing.start_gap_p95 / 10),
+                            static_cast<unsigned long long>(timing.start_gap_under_refresh));
+                CHECK(vrr->Detach() == FgStatus::Ok);
+            }
+        }
+    }
+    {
         FgDxgiPresenterDesc dd;
         dd.device = gpu.device.Get();
         dd.queue = gpu.queue.Get();

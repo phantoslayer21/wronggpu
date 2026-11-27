@@ -47,12 +47,6 @@ constexpr int64_t kFirstImageMissMargin = 5000;
 
 constexpr std::size_t kPresenterAdmissionDepth = 2;  // head and one following interval
 
-inline bool AdvanceTearingSchedulePoll(uint64_t count, uint64_t& last_poll) {
-    if (count - last_poll < 16) return false;
-    last_poll = count;
-    return true;
-}
-
 constexpr bool PresenterAdmissionAtCapacity(std::size_t intervals, std::size_t slots, bool has_consumed_interval) {
     return intervals >= slots || (has_consumed_interval && intervals >= kPresenterAdmissionDepth);
 }

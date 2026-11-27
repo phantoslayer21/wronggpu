@@ -133,6 +133,8 @@ struct FgIntervalPlan {
     std::uint32_t target_count = 0;  // generated_count + 1
     FgFrameTarget targets[kFgMaxTargets] = {};
     FgReanchorReason reanchor_reason = FgReanchorReason::None;
+    FgTicks fill_period = 0;        // chosen overflow period, when this plan schedules the higher count
+    FgTicks fill_release_wait = 0;  // additional game-frame release delay, after submission
 };
 
 // One reserved display slot.

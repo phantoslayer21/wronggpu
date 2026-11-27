@@ -34,12 +34,13 @@ struct FgDisplaySummary {
 
 enum class FgDisplayFeedbackError { Disjoint, Unsupported, ReadError };
 
-// Bounded memory for arbitrarily long sessions. Percentiles use 100 us bins, saturated at +/-100 ms.
+// Bounded memory for arbitrarily long sessions. Defaults use 100 us bins saturated at +/-100 ms.
+template<FgTicks Bin = 1000, FgTicks First = -1000, FgTicks Last = 1000>
 class FgDisplayHistogram {
 public:
     void Add(FgTicks value) {
-        const auto bin = std::clamp(value / kBin, -kLimit, kLimit);
-        ++bins_[static_cast<std::size_t>(bin + kLimit)];
+        const auto bin = std::clamp(value / Bin, First, Last);
+        ++bins_[static_cast<std::size_t>(bin - First)];
         ++count_;
     }
 
@@ -49,15 +50,13 @@ public:
         std::uint64_t cumulative = 0;
         for (std::size_t i = 0; i < bins_.size(); ++i) {
             cumulative += bins_[i];
-            if (cumulative >= rank) return (static_cast<FgTicks>(i) - kLimit) * kBin;
+            if (cumulative >= rank) return (static_cast<FgTicks>(i) + First) * Bin;
         }
-        return kLimit * kBin;
+        return Last * Bin;
     }
 
 private:
-    static constexpr FgTicks kBin = 1000;
-    static constexpr FgTicks kLimit = 1000;
-    std::array<std::uint64_t, 2 * kLimit + 1> bins_{};
+    std::array<std::uint64_t, Last - First + 1> bins_{};
     std::uint64_t count_ = 0;
 };
 
@@ -123,7 +122,7 @@ public:
 private:
     struct Samples {
         FgDisplaySummary total;
-        FgDisplayHistogram intervals, latency;
+        FgDisplayHistogram<> intervals, latency;
 
         FgDisplaySummary Summary() const {
             auto result = total;

@@ -281,6 +281,9 @@ std::uint32_t FgRefreshMultiple(FgTicks interval, FgTicks refresh_period, FgTick
 // A fixed-refresh back end shows a generating plan evenly only when its image interval period / (N + 1) is a whole
 // number of refreshes (within an eighth of a refresh); real-only plans always fit.
 bool FgPlanFitsRefresh(const FgIntervalPlan& plan, FgTicks refresh_period);
+inline bool FgDxgiPlanFitsPacing(const FgIntervalPlan& plan, bool fixed_grid, FgTicks refresh_period) {
+    return !fixed_grid || FgPlanFitsRefresh(plan, refresh_period);
+}
 
 // Relative due time for SetWaitableTimerEx (negative 100 ns units) to wake `lead` before `target`; 0 when that time
 // has already come (present at once).
@@ -301,12 +304,14 @@ struct FgTearingPlanDecision {
 inline FgTicks FgTearingEarliestIssue(FgTicks started, FgTicks completed, FgTicks scheduled_interval,
                                      FgTicks physical_period) {
     if (completed == 0) return 0;
-    const FgTicks completion_floor = completed + (physical_period > 0 ? physical_period : scheduled_interval);
     const FgTicks issue_floor = started + scheduled_interval;
-    return issue_floor > completion_floor ? issue_floor : completion_floor;
+    // A routine call overlaps the interval from its start. After a stall, reserve a full
+    // refresh from completion so a queued flip cannot be followed by a burst.
+    const FgTicks refresh = physical_period > 0 ? physical_period : scheduled_interval;
+    return completed - started > refresh / 2 ? std::max(issue_floor, completed + refresh) : issue_floor;
 }
 
-// Measure routine call work in fixed batches. A few blocked calls cannot set the scheduling floor.
+// Preserve the smoothed p85 diagnostic. It does not control either pacing floor.
 class FgPresentCallPacing {
 public:
     void Observe(FgTicks duration) {
@@ -327,13 +332,13 @@ private:
     FgTicks estimate_ = 0;
 };
 
-inline FgTicks FgTearingScheduledMinInterval(FgTicks configured, FgTicks physical_period, FgTicks call_estimate) {
-    if (physical_period <= 0 || call_estimate <= 0) return configured;
-    // Present returns can include waits outside routine dispatch work. Let those waits jitter the schedule
-    // without allowing a batch of blocked calls to redefine the display window. The issue guard still uses
-    // the actual previous completion and enforces the physical spacing independently.
-    const FgTicks call_allowance = std::min(call_estimate, physical_period / 4);
-    return std::max(configured, physical_period + call_allowance);
+inline FgTicks FgVrrMinInterval(FgTicks refresh, bool vsync) {
+    return refresh + refresh / (vsync ? 100 : 50);
+}
+
+inline bool FgVrrVsyncQueueFull(std::uint32_t submitted, std::uint32_t displayed) {
+    const std::uint32_t outstanding = submitted - displayed;
+    return outstanding >= 2 && outstanding < 0x80000000u;
 }
 
 inline FgTearingPlanDecision FgPlanTearingImage(FgTicks target, bool real, FgTicks now, FgTicks earliest,

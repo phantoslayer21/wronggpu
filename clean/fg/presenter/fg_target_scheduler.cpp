@@ -2,6 +2,7 @@
 // Target-time scheduler: see fg_target_scheduler.h.
 #include "fg_target_scheduler.h"
 
+#include <algorithm>
 #include <limits>
 
 namespace wgfg {
@@ -193,7 +194,8 @@ FgIntervalEstimator::Event FgIntervalEstimator::Push(FgTicks arrival) {
 
 // --- Scheduler -----------------------------------------------------------------------------------------------------
 
-FgTargetScheduler::FgTargetScheduler(const FgSchedulerConfig& config) : config_(config), estimator_(config.estimator) {
+FgTargetScheduler::FgTargetScheduler(const FgSchedulerConfig& config)
+    : config_(config), estimator_(config.estimator), uncapped_estimator_(config.estimator) {
     if (config_.max_generated > kFgMaxGenerated) config_.max_generated = kFgMaxGenerated;
     if (config_.real_min_lead < 1) config_.real_min_lead = 1;
     if (config_.bridge_and_submit_margin < 0) config_.bridge_and_submit_margin = 0;
@@ -208,11 +210,15 @@ FgStatus FgTargetScheduler::BeginEpoch(std::uint64_t epoch) {
     lost_ = false;
     epoch_ = epoch;
     estimator_.Reset();
+    uncapped_estimator_.Reset();
+    uncapped_arrival_ = 0;
+    cadence_arrival_ = previous_credit_wait_ = 0;
+    fill_requested_ = fill_count_ = fill_overrun_ = 0;
     anchored_ = false;
     have_target_ = false;
     last_real_target_ = 0;
     history_valid_ = false;
-    last_interval_generated_ = false;
+    last_interval_count_ = 0;
     last_requested_ = 0;
     effective_ = 0;
     bad_run_ = 0;
@@ -236,13 +242,9 @@ void FgTargetScheduler::SetFirstImageBudget(FgTicks budget) {
     if (budget < 0) budget = 0;
     if (budget > config_.max_lead) budget = config_.max_lead;
     // A large bootstrap correction should not repeat a whole interval of misses at the old lead.
-    // Ordinary controller adjustments still need two consecutive shortfalls before they re-anchor.
+    // Ordinary controller adjustments still need consecutive shortfalls before they re-anchor.
     if (budget - config_.first_image_budget >= 80000) shortfall_run_ = 1;
     config_.first_image_budget = budget;
-}
-
-void FgTargetScheduler::SetDisplayMinInterval(FgTicks min_interval) {
-    config_.display.min_interval = min_interval > 0 ? min_interval : 1;
 }
 
 void FgTargetScheduler::SetMaxGeneratedCap(std::uint32_t cap) {
@@ -339,6 +341,51 @@ std::uint32_t FgTargetScheduler::UpdateCount(std::uint32_t requested, FgTicks pe
     return effective_;
 }
 
+FgTargetScheduler::FillPlan FgTargetScheduler::UpdateFill(std::uint32_t requested, bool eligible,
+                                                          FgTicks latest_uncapped) {
+    const bool changed = requested != fill_requested_;
+    fill_requested_ = requested;
+    const FgTicks uncapped = uncapped_estimator_.Period();
+    if (!eligible || changed || uncapped <= 0 || latest_uncapped <= 0) {
+        fill_count_ = fill_overrun_ = 0;
+        return {};
+    }
+    const auto& w = config_.display;
+    const auto target_for = [&](std::uint32_t count) {
+        FgTicks target = 0;
+        if (!CheckedMul(static_cast<FgTicks>(count) + 1, w.min_interval + w.margin + w.hysteresis, &target))
+            return FgTicks{0};
+        return target;
+    };
+    const auto within_trim = [](FgTicks target, FgTicks period, FgTicks percent) {
+        return target - period <= (period / 100) * percent + (period % 100) * percent / 100;
+    };
+    const FgTicks fastest = std::min(uncapped, latest_uncapped);
+    const FgTicks slowest = std::max(uncapped, latest_uncapped);
+    const std::uint32_t limit = max_generated_cap_ ? std::min(requested, max_generated_cap_) : requested;
+    if (fill_count_ != 0) {
+        const FgTicks target = target_for(fill_count_);
+        if (fill_count_ > limit || slowest >= target) {
+            fill_count_ = fill_overrun_ = 0;
+            return {};
+        }
+        if (!within_trim(target, fastest, 16)) {
+            if (++fill_overrun_ >= 4) fill_count_ = fill_overrun_ = 0;
+            return {};
+        }
+        fill_overrun_ = 0;
+        // Retain the choice across jitter, while enforcing the 12% ceiling on every release.
+        if (!within_trim(target, fastest, 12)) return {};
+        return {fill_count_, target, target - slowest};
+    }
+    const auto count = Largest(limit, uncapped) + 1;
+    if (count > limit) return {};
+    const FgTicks target = target_for(count);
+    if (target <= slowest || !within_trim(target, fastest, 12)) return {};
+    fill_count_ = count;
+    return {count, target, target - slowest};
+}
+
 FgStatus FgTargetScheduler::Commit(const FgGameFrame& frame, FgIntervalPlan* out) {
     if (!out) return FgStatus::InvalidArgument;
     *out = FgIntervalPlan();
@@ -366,12 +413,45 @@ FgStatus FgTargetScheduler::Commit(const FgGameFrame& frame, FgIntervalPlan* out
 
 FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan* out) {
     const FgDisplayWindow& w = config_.display;
-    const FgIntervalEstimator::Event ev = estimator_.Push(frame.arrival);
+    const FgTicks origin = std::max(frame.arrival, frame.budget_origin);
+    const bool adaptive_vrr = config_.adaptive_count && config_.fixed_refresh_period == 0;
+    FgTicks cadence_arrival = frame.arrival;
+    const FgTicks arrival_delta = frame.arrival - last_arrival_;
+    if (config_.first_present_admission) {
+        FgTicks cadence_delta = arrival_delta;
+        FgTicks floor = 0;
+        // Near the spacing floor, first-present admission can pace the next arrival at the
+        // old count's own period. Check that the sample with that wait removed still supports
+        // generation. Far from this lock-in, retain the arrival cadence including natural waits.
+        if (last_interval_count_ > 1 &&
+            CheckedMul(static_cast<FgTicks>(last_interval_count_) + 1, w.min_interval, &floor) &&
+            estimator_.Period() <= floor + floor / 16) {
+            const auto without_wait = arrival_delta - Clamp(previous_credit_wait_, 0, arrival_delta);
+            if (FitsRaw(1, without_wait)) cadence_delta = without_wait;
+        }
+        if (cadence_arrival_ > 0 &&
+            FgCheckedAdd(cadence_arrival_, std::max<FgTicks>(1, cadence_delta), &cadence_arrival) != FgStatus::Ok)
+            return FgStatus::Overflow;
+        cadence_arrival_ = cadence_arrival;
+        previous_credit_wait_ = origin - frame.arrival;
+    }
+    FgTicks latest_uncapped = 0;
+    if (config_.overflow_fill && adaptive_vrr) {
+        if (uncapped_arrival_ > 0) {
+            latest_uncapped = arrival_delta - Clamp(frame.previous_release_wait, 0, arrival_delta);
+            if (FgCheckedAdd(uncapped_arrival_, std::max<FgTicks>(1, latest_uncapped), &uncapped_arrival_) != FgStatus::Ok)
+                return FgStatus::Overflow;
+        } else {
+            uncapped_arrival_ = frame.arrival;
+        }
+        uncapped_estimator_.Push(uncapped_arrival_);
+    }
+    const FgIntervalEstimator::Event ev = estimator_.Push(cadence_arrival);
     have_frame_ = true;
     last_frame_id_ = frame.frame_id;
     last_arrival_ = frame.arrival;
     if (ev == FgIntervalEstimator::Event::Discontinuity) anchored_ = false;
-    const FgTicks period_estimate = estimator_.Period();
+    FgTicks period_estimate = estimator_.Period();
 
     // History: may this interval interpolate between the previous game frame and this one?
     const bool previous_valid = history_valid_;
@@ -390,6 +470,11 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
         if (!previous_valid) reason = FgRealOnlyReason::NotPrimed;
     }
 
+    const FillPlan fill = UpdateFill(frame.requested_count,
+                                     config_.overflow_fill && period_estimate > 0 &&
+                                         reason == FgRealOnlyReason::None,
+                                     latest_uncapped);
+    period_estimate = std::max(period_estimate, fill.period);
     // Count for the display window (kept current while real-only, so hysteresis spans menus and suspensions).
     std::uint32_t effective = 0;
     if (frame.requested_count == 0) {
@@ -413,9 +498,8 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
         last_reduction_reason_ = FgRealOnlyReason::LatencyCap;
     }
 
-    const FgTicks origin = frame.budget_origin > frame.arrival ? frame.budget_origin : frame.arrival;
     const auto needed_lead = [&](std::uint32_t count) {
-        return RequiredLead(period_estimate, count == 0 && last_interval_generated_ ? effective : count);
+        return RequiredLead(period_estimate, count == 0 && last_interval_count_ > 0 ? effective : count);
     };
 
     FgTicks lead_need = needed_lead(n);
@@ -427,11 +511,7 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
         if (n == 0 && reason == FgRealOnlyReason::None) reason = FgRealOnlyReason::LatencyCap;
     }
 
-    const bool consecutive_real_only = n == 0 && !last_interval_generated_;
-    // Keep this narrow: the measured cadence must fit one generated image with the normal re-entry
-    // margin, and must be too fast for three output slots at the current tearing floor.
-    const bool single_near_ceiling = n == 1 && config_.adaptive_count && config_.fixed_refresh_period == 0 &&
-                                     period_estimate / 3 < w.min_interval && Fits(n, period_estimate, w.hysteresis);
+    const bool consecutive_real_only = n == 0 && last_interval_count_ == 0;
     FgReanchorReason anchor_reason = FgReanchorReason::None;
     if (!anchored_ || period_estimate == 0 || consecutive_real_only) {
         anchor_reason = ev == FgIntervalEstimator::Event::Discontinuity ? FgReanchorReason::CadenceChange
@@ -461,21 +541,18 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
             if (reason == FgRealOnlyReason::None) reason = FgRealOnlyReason::LatencyCap;
             last_reduction_reason_ = FgRealOnlyReason::LatencyCap;
         } else if (n > 0) {
-            // N-B2: avoid hair-trigger reanchors on normal 2-3 ms jitter. Only reanchor immediately if index 1's
-            // target would already fall inside bridge_and_submit_margin; for moderate lead shortfall beyond slack,
-            // require 2 consecutive intervals so transient jitter slews cleanly via bounded lead correction.
+            // A missed submit margin still reanchors immediately. The soft VRR check tolerates
+            // transient producer jitter and waits for three consecutive shortfalls.
             const FgTicks slot = period_estimate / (static_cast<FgTicks>(n) + 1);
             const FgTicks gen_span = lead_need - config_.first_image_budget;
             const FgTicks first_gen_lead = lead - gen_span;
-            const FgTicks min_slack = period_estimate / 4 < 35000 ? period_estimate / 4 : 35000;
-            // A stable game cadence does not restore lead spent waiting for admission. Use the regular
-            // jitter allowance against the post-wait origin, including at the single-image ceiling.
-            const FgTicks slack = slot / 2 > min_slack ? slot / 2 : min_slack;
+            const FgTicks min_slack = std::min(period_estimate / 4, adaptive_vrr ? FgTicks{25000} : FgTicks{35000});
+            const FgTicks slack = adaptive_vrr ? Clamp(slot / 2, min_slack, 35000) : std::max(slot / 2, min_slack);
             if (first_gen_lead < config_.bridge_and_submit_margin) {
                 anchor_reason = FgReanchorReason::GeneratedDeadline;
                 shortfall_run_ = 0;
             } else if (lead + slack < lead_need) {
-                if (++shortfall_run_ >= 2) {
+                if (++shortfall_run_ >= (adaptive_vrr ? 3u : 2u)) {
                     anchor_reason = FgReanchorReason::LeadShortfall;
                     shortfall_run_ = 0;
                 }
@@ -540,14 +617,17 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
     } else {
         // Bounded lead correction: keeps the lead near what the count needs without a visible step.
         // Excess lead (diff < 0, e.g. speedup or budget reduction) drains up to T/8 per interval so an L=1
-        // waitable caller is not pinned in slow motion while excess lead bleeds out; upward lead additions
-        // stay bounded at T/128 while generating so normal jitter does not stretch spacing.
+        // waitable caller is not pinned in slow motion while excess lead bleeds out. Ordinary upward
+        // corrections stay at T/128 while generating. Near the VRR ceiling, a single generated
+        // image can recover from a soft shortfall by up to T/16 before a third miss would re-anchor.
         t_base = last_real_target_;
         const FgTicks diff = lead_need - lead;
         const FgTicks deadband = period_estimate / 16;
         FgTicks correction = 0;
         if (diff > deadband) {
-            const FgTicks limit = n > 0 ? period_estimate / 128 : period_estimate / 8;
+            const bool recover_single = adaptive_vrr && n == 1 && period_estimate / 3 < w.min_interval &&
+                                        shortfall_run_ > 0;
+            const FgTicks limit = n > 0 ? period_estimate / (recover_single ? 16 : 128) : period_estimate / 8;
             correction = Clamp(diff / 8, 0, limit);
         } else if (diff < -deadband) {
             const FgTicks limit = diff < -period_estimate / 4 ? period_estimate / 4 : period_estimate / 8;
@@ -556,9 +636,8 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
         period = period_estimate + correction;
         FgTicks floor = 0;
         if (!CheckedMul(static_cast<FgTicks>(n) + 1, w.min_interval, &floor)) return FgStatus::Overflow;
-        // If N=1 already fits with headroom, a lead correction may reach the floor without suspending FG.
-        if (config_.adaptive_count && config_.fixed_refresh_period == 0 && n > 0 && diff < -deadband && period < floor &&
-            !single_near_ceiling) {
+        // A lead correction cannot invalidate a count the estimated cadence still supports.
+        if (adaptive_vrr && n > 0 && diff < -deadband && period < floor && !FitsRaw(n, period_estimate)) {
             // Excess playout lead wants a shorter period than (n + 1) * min_interval allows; clamping at the VRR
             // floor would throttle an L=1 waitable caller to (n + 1) * min_interval forever. Require exit_intervals
             // consecutive frames so transient alternating jitter near the VRR ceiling does not step N down.
@@ -603,6 +682,10 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
     out->real_frame_id = frame.frame_id;
     out->requested_count = frame.requested_count;
     out->generated_count = n;
+    if (n != 0 && n == fill.count) {
+        out->fill_period = fill.period;
+        out->fill_release_wait = fill.wait;
+    }
     out->real_only_reason = n > 0 ? FgRealOnlyReason::None : reason;
     if (n == 0 && out->real_only_reason == FgRealOnlyReason::None) out->real_only_reason = FgRealOnlyReason::NotPrimed;
     out->t_base = t_base;
@@ -616,7 +699,7 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
 
     last_real_target_ = out->targets[n].target;
     have_target_ = true;
-    last_interval_generated_ = n > 0;
+    last_interval_count_ = n;
     return FgStatus::Ok;
 }
 

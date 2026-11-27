@@ -74,7 +74,7 @@ FgWinResult FgDxgiPresenter::Create(const FgDxgiPresenterDesc& d, std::unique_pt
     cfg.slot_count = slots;
     cfg.max_pending_intervals = d.max_pending_intervals >= 1 ? d.max_pending_intervals : 2u;
     cfg.refresh_period = d.refresh_period;
-    if (d.pacing == FgDxgiPacing::Tearing)
+    if (d.pacing == FgDxgiPacing::Tearing || d.variable_refresh)
         cfg.pending_late_tolerance = d.late_tolerance > 40000 ? d.late_tolerance : 40000;
     std::unique_ptr<FgDxgiPresenter> p(new FgDxgiPresenter(d, cfg));
     p->info_.tearing_supported = tearing != FALSE;
@@ -97,7 +97,7 @@ FgWinResult FgDxgiPresenter::Initialize() {
     if (FAILED(hr)) return FgWinFail(FgStatus::Unsupported, FgWinRefusal::ResourceCreation, hr);
     const FgWinResult r = AcquireChain();
     if (!r.Ok()) return r;
-    if (desc_.pacing == FgDxgiPacing::Vsync) {
+    if (FixedGrid()) {
         if (!FgReadCompositorGrid(clock_map_, desc_.refresh_period, &info_.grid))
             return FgWinFail(FgStatus::Unsupported, FgWinRefusal::RefreshUnknown);
         grid_updated_at_ = FgInterruptNow();
@@ -226,7 +226,14 @@ FgPresenterProbe FgDxgiPresenter::Probe() const {
 
 FgDxgiPresenterInfo FgDxgiPresenter::Info() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return info_;
+    auto info = info_;
+    info.call_p50 = call_times_.Percentile(50);
+    info.call_p95 = call_times_.Percentile(95);
+    info.call_p99 = call_times_.Percentile(99);
+    info.start_gap_p05 = start_gaps_.Percentile(5);
+    info.start_gap_p50 = start_gaps_.Percentile(50);
+    info.start_gap_p95 = start_gaps_.Percentile(95);
+    return info;
 }
 
 FgDisplaySummary FgDxgiPresenter::ReadDisplayCadence(bool window) {
@@ -276,8 +283,8 @@ FgStatus FgDxgiPresenter::Attach(std::uint64_t chain_id, std::uint64_t epoch) {
 
 FgStatus FgDxgiPresenter::BeginInterval(const FgIntervalPlan& plan, FgIntervalReservation* out) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (desc_.pacing == FgDxgiPacing::Vsync && engine_.State() == FgPresenterState::Attached &&
-        !FgPlanFitsRefresh(plan, info_.grid.period)) {
+    if (engine_.State() == FgPresenterState::Attached &&
+        !FgDxgiPlanFitsPacing(plan, FixedGrid(), info_.grid.period)) {
         if (out) *out = FgIntervalReservation();
         return engine_.Refuse(FgStatus::Unsupported);  // fixed refresh cannot show this cadence evenly
     }
@@ -346,6 +353,8 @@ FgStatus FgDxgiPresenter::CompleteResize(bool resize_ok, std::uint64_t new_epoch
     if (presenting_ || !CopiesIdleLocked()) return engine_.Refuse(FgStatus::Busy);
     const FgStatus s = engine_.CompleteResize(resize_ok, new_epoch);
     if (s == FgStatus::Ok) display_.EndEpoch();
+    vrr_queue_full_ = false;
+    last_counted_start_ = 0;
     if (s != FgStatus::Ok) return s;
     const FgWinResult r = AcquireChain();  // the resized chain's buffers (and new slots when size / format changed)
     if (!r.Ok()) {
@@ -476,7 +485,7 @@ void FgDxgiPresenter::StepLocked(FgTicks now) {
         return;
     }
     ReleaseCopiedSlotsLocked();
-    if (st == FgPresenterState::Attached && desc_.pacing == FgDxgiPacing::Vsync &&
+    if (st == FgPresenterState::Attached && FixedGrid() &&
         now - grid_updated_at_ > kGridRefresh) {
         grid_updated_at_ = now;
         FgRefreshGrid grid;
@@ -512,7 +521,7 @@ void FgDxgiPresenter::StepLocked(FgTicks now) {
 }
 
 bool FgDxgiPresenter::PlanHeadLocked(FgTicks now, Planned* out) {
-    const bool vsync = desc_.pacing == FgDxgiPacing::Vsync;
+    const bool fixed = FixedGrid();
     while (!local_.empty()) {
         const FgEnginePresent p = local_.front();
         if (engine_.SlotPresentId(p.slot) != p.present_id) {  // cancelled since
@@ -521,7 +530,7 @@ bool FgDxgiPresenter::PlanHeadLocked(FgTicks now, Planned* out) {
         }
         Planned pl;
         pl.present = p;
-        if (vsync) {
+        if (fixed) {
             FgTicks vblank = 0;
             FgTicks submit = 0;
             if (FgSnapToRefreshGrid(p.target, info_.grid, &vblank, &submit) != FgStatus::Ok) {
@@ -567,7 +576,7 @@ bool FgDxgiPresenter::PlanHeadLocked(FgTicks now, Planned* out) {
             pl.issue_at = td.issue_at;
             pl.shown_at = p.target;
         }
-        if (vsync && !p.real && now > pl.shown_at) {
+        if (fixed && !p.real && now > pl.shown_at) {
             engine_.OnPresentDropped(p.present_id, FgDropReason::Late);
             local_.pop_front();
             continue;
@@ -584,9 +593,11 @@ bool FgDxgiPresenter::PlanHeadLocked(FgTicks now, Planned* out) {
 // lock-ordering conflict with OptiScaler's wrapper mutex during overlay rendering or resize).
 bool FgDxgiPresenter::PresentHead(HANDLE stop) {
     bool have_credit = false;
+    bool refresh_queue = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         have_credit = latency_credit_;
+        refresh_queue = vrr_queue_full_;
     }
     if (!have_credit) {
         HANDLE hs[2] = {stop, latency_};
@@ -609,6 +620,8 @@ bool FgDxgiPresenter::PresentHead(HANDLE stop) {
         std::lock_guard<std::mutex> lock(mutex_);
         latency_credit_ = true;
     }
+    DXGI_FRAME_STATISTICS queue_stats = {};
+    const auto queue_result = refresh_queue ? swap_->GetFrameStatistics(&queue_stats) : S_FALSE;
     Planned head;
     ComPtr<ID3D12Resource> bb;
     ComPtr<ID3D12Resource> src;
@@ -626,6 +639,19 @@ bool FgDxgiPresenter::PresentHead(HANDLE stop) {
         if (!latency_credit_) return true;
         const FgTicks now = FgInterruptNow();
         if (engine_.State() != FgPresenterState::Attached || !PlanHeadLocked(now, &head)) return true;
+        if (refresh_queue) {
+            if (queue_result == DXGI_ERROR_FRAME_STATISTICS_DISJOINT)
+                display_.Discontinuity(FgDisplayFeedbackError::Disjoint);
+            vrr_queue_full_ = queue_result == S_OK &&
+                              (queue_stats.PresentCount != 0 || queue_stats.PresentRefreshCount != 0) &&
+                              FgVrrVsyncQueueFull(vrr_last_submitted_id_, queue_stats.PresentCount);
+            if (!head.present.real && vrr_queue_full_) {
+                ++info_.vrr_queue_drops;
+                engine_.OnPresentDropped(head.present.present_id, FgDropReason::Pressure);
+                local_.pop_front();
+                return true;  // the next head may use this latency credit
+            }
+        }
         // Keep the wake lead even when the spacing floor controls so copy recording can start early.
         if (now + desc_.timer_lead < head.issue_at) return true;  // a new head with a later time: keep the credit
         min_present_at = FgTearingEarliestIssue(last_present_start_, last_present_done_, desc_.min_interval,
@@ -684,7 +710,7 @@ bool FgDxgiPresenter::PresentHead(HANDLE stop) {
         hr = queue->Signal(copy_fence.Get(), copy_val);
     }
     const bool tearing = desc_.pacing == FgDxgiPacing::Tearing;
-    if (SUCCEEDED(hr) && tearing && min_present_at != 0) {
+    if (SUCCEEDED(hr) && !FixedGrid() && min_present_at != 0) {
         // The lease is taken at most timer_lead before issue. Copy preparation can overlap that wait.
         assert(min_present_at - FgInterruptNow() <= desc_.timer_lead);
         while (FgInterruptNow() < min_present_at) YieldProcessor();
@@ -726,7 +752,7 @@ bool FgDxgiPresenter::PresentHead(HANDLE stop) {
     const FgTicks duration = present_started > 0 ? present_done - present_started : 0;
     // Keep the submission and display estimates anchored to the return from the Present call.
     engine_.FinishLeasedPresent(head.present.slot, SUCCEEDED(hr) ? present_done : 0,
-                                tearing ? present_done : head.shown_at, shown, duration);
+                                FixedGrid() ? head.shown_at : present_done, shown, duration);
     if (FAILED(hr)) {
         engine_.MarkFailed();
         local_.clear();
@@ -734,12 +760,28 @@ bool FgDxgiPresenter::PresentHead(HANDLE stop) {
     }
     ++info_.presents;
     info_.present_call_total += duration;
+    call_times_.Add(duration);
     if (duration > info_.present_call_max) info_.present_call_max = duration;
-    if (tearing && shown) {
+    if (shown) {
         call_pacing_.Observe(duration);
         info_.present_call_p85_smoothed = call_pacing_.Estimate();
+        if (last_counted_start_ > 0) {
+            const auto gap = present_started - last_counted_start_;
+            start_gaps_.Add(gap);
+            ++info_.start_gap_samples;
+            if (desc_.refresh_period > 0 && gap < desc_.refresh_period) ++info_.start_gap_under_refresh;
+        }
+        last_counted_start_ = present_started;
     }
     if (shown) {
+        const bool have_stats = stats_result == S_OK &&
+                                (frame_stats.PresentCount != 0 || frame_stats.PresentRefreshCount != 0 ||
+                                 frame_stats.SyncQPCTime.QuadPart != 0);
+        // The waitable object continues to gate real frames. Only use the ID guard when DXGI
+        // reports a valid queue depth, and allow the first real frame through to refresh it.
+        vrr_queue_full_ = desc_.variable_refresh && !tearing && id_result == S_OK && have_stats &&
+                          FgVrrVsyncQueueFull(present_id, frame_stats.PresentCount);
+        if (vrr_queue_full_) vrr_last_submitted_id_ = present_id;
         if (id_result == S_OK) {
             display_.Submitted(present_id, {head.present.target, present_started, head.present.real,
                                            head.present.gameplay});
@@ -754,8 +796,7 @@ bool FgDxgiPresenter::PresentHead(HANDLE stop) {
         } else {
             if (id_result != S_OK || stats_result != S_OK)
                 display_.Discontinuity(FgDisplayFeedbackError::ReadError);
-            if (stats_result == S_OK && (frame_stats.PresentCount != 0 || frame_stats.PresentRefreshCount != 0 ||
-                                         frame_stats.SyncQPCTime.QuadPart != 0)) {
+            if (have_stats) {
                 // With VRR there is no fixed time offset between distinct refresh counts.
                 const FgTicks displayed = frame_stats.PresentRefreshCount == frame_stats.SyncRefreshCount &&
                                                   frame_stats.SyncQPCTime.QuadPart > 0
@@ -767,7 +808,7 @@ bool FgDxgiPresenter::PresentHead(HANDLE stop) {
     }
     last_present_start_ = present_started;
     last_present_done_ = present_done;
-    if (!tearing) {
+    if (FixedGrid()) {
         have_vblank_ = true;
         last_vblank_ = head.shown_at;
     }
