@@ -284,6 +284,7 @@ struct FgAsiSessionHost::Impl {
     wgfg::FgTicks tearing_schedule_base = 0;
     wgfg::FgTicks tearing_physical_period = 0;
     wgfg::FgTicks tearing_schedule_interval = 0;
+    uint64_t last_tearing_schedule_poll = 0;
     uint32_t lateness_count_cap = 0;
     uint32_t cap_miss_windows = 0;
     uint32_t window_frames = 0;
@@ -1508,7 +1509,8 @@ struct FgAsiSessionHost::Impl {
     }
 
     void UpdateTearingSchedule() {
-        if (tearing_physical_period <= 0 || (st_presents.load() % 16) != 0) return;
+        if (tearing_physical_period <= 0 || !AdvanceTearingSchedulePoll(st_presents.load(), last_tearing_schedule_poll))
+            return;
         const auto* dx = dynamic_cast<const wgfg::FgDxgiPresenter*>(session->Presenter());
         if (!dx) return;
         const auto interval = wgfg::FgTearingScheduledMinInterval(tearing_schedule_base, tearing_physical_period,
@@ -1693,6 +1695,7 @@ struct FgAsiSessionHost::Impl {
         tearing_schedule_base = base.min_interval;
         tearing_physical_period = chosen == wgfg::FgPresenterChoice::DxgiFlipTearing ? base.display.refresh_period : 0;
         tearing_schedule_interval = tearing_physical_period > 0 ? tearing_schedule_base : 0;
+        last_tearing_schedule_poll = st_presents.load();
         st_presenter.store(static_cast<uint32_t>(chosen));
         Log(std::string("fg host: session created, ") + std::to_string(sd.output_width) + " x " +
             std::to_string(sd.output_height) + ", preset " + std::to_string(sd.preset) + ", N up to " +

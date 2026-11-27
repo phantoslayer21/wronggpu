@@ -2518,6 +2518,17 @@ void TestPresenterAdmissionHasAHardSlotBound() {
     CHECK(!PresenterAdmissionAtCapacity(1, 20, true));
 }
 
+void TestTearingSchedulePollSurvivesSkippedCounts() {
+    g_case = "pacing-crossed-tearing-poll";
+    uint64_t last_poll = 1;
+    CHECK(!AdvanceTearingSchedulePoll(15, last_poll));
+    CHECK(AdvanceTearingSchedulePoll(18, last_poll));
+    CHECK(last_poll == 18);
+    CHECK(!AdvanceTearingSchedulePoll(32, last_poll));
+    CHECK(AdvanceTearingSchedulePoll(35, last_poll));
+    CHECK(last_poll == 35);
+}
+
 void TestReadyBudgetCapAfterSpeedup() {
     g_case = "pacing-budget-cap";
     CHECK(FirstImageBudgetCap(250000, 1) == 285000);
@@ -2656,6 +2667,7 @@ int main(int argc, char** argv) {
     TestPacingPercentileKeepsFrameOrder();
     TestPacingSamplesRemainBounded();
     TestPresenterAdmissionHasAHardSlotBound();
+    TestTearingSchedulePollSurvivesSkippedCounts();
     TestReadyBudgetCapAfterSpeedup();
     TestFirstImageBudgetEasingFloor();
     TestBudgetCapNeedsReliableSamplesAndPreservesFloors();
