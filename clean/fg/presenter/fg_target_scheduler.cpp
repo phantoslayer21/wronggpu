@@ -218,6 +218,7 @@ FgStatus FgTargetScheduler::BeginEpoch(std::uint64_t epoch) {
     bad_run_ = 0;
     good_run_ = 0;
     shortfall_run_ = 0;
+    vrr_floor_run_ = 0;
     last_reduction_reason_ = FgRealOnlyReason::None;
     return FgStatus::Ok;
 }
@@ -232,6 +233,7 @@ void FgTargetScheduler::OnDeviceLost() {
 void FgTargetScheduler::SetFirstImageBudget(FgTicks budget) {
     if (budget < 0) budget = 0;
     if (budget > config_.max_lead) budget = config_.max_lead;
+    if (budget > config_.first_image_budget) shortfall_run_ = 1;
     config_.first_image_budget = budget;
 }
 
@@ -401,7 +403,7 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
     FgTicks lead_need = needed_lead(n);
     if (lead_need > config_.max_lead) {
         while (n > 0 && needed_lead(n) > config_.max_lead) --n;
-        lead_need = needed_lead(n);
+        lead_need = n > 0 ? needed_lead(n) : config_.real_min_lead;
         if (lead_need > config_.max_lead) lead_need = config_.real_min_lead;
         last_reduction_reason_ = FgRealOnlyReason::LatencyCap;
         if (n == 0 && reason == FgRealOnlyReason::None) reason = FgRealOnlyReason::LatencyCap;
@@ -409,6 +411,7 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
 
     const bool consecutive_real_only = n == 0 && !last_interval_generated_;
     bool reanchor = !anchored_ || period_estimate == 0 || consecutive_real_only;
+    bool latency_drain = false;
     FgTicks lead = 0;
     if (!reanchor) {
         FgTicks end = 0;
@@ -419,13 +422,16 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
             reanchor = true;  // behind: the real endpoint cannot be met on this timeline
             shortfall_run_ = 0;
         } else if (lead > config_.max_lead) {
+            // Playout lead exceeded max_lead (e.g. abrupt speedup after slow startup frames or a hitch).
+            // Re-anchor real-only to drain the excess lead and reset the cadence estimator so an L=1
+            // frame-start-waitable caller cannot lock into an alternating LatencyCap limit cycle.
+            reanchor = true;
+            latency_drain = true;
             shortfall_run_ = 0;
-            if (n > 0) {
-                --n;
-                lead_need = needed_lead(n);
-                if (n == 0) reason = FgRealOnlyReason::LatencyCap;
-                last_reduction_reason_ = FgRealOnlyReason::LatencyCap;
-            }
+            n = 0;
+            lead_need = config_.real_min_lead;
+            if (reason == FgRealOnlyReason::None) reason = FgRealOnlyReason::LatencyCap;
+            last_reduction_reason_ = FgRealOnlyReason::LatencyCap;
         } else if (n > 0) {
             // N-B2: avoid hair-trigger reanchors on normal 2-3 ms jitter. Only reanchor immediately if index 1's
             // target would already fall inside bridge_and_submit_margin; for moderate lead shortfall beyond slack,
@@ -487,20 +493,58 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
         }
         if (n == 0 && reason == FgRealOnlyReason::None) reason = FgRealOnlyReason::Reanchor;
         out->reanchored = !anchored_ || !consecutive_real_only;
-        anchored_ = period_estimate > 0;
+        if (latency_drain) {
+            anchored_ = false;
+            estimator_.Reset();
+            last_requested_ = 0;
+            effective_ = 0;
+            bad_run_ = 0;
+            good_run_ = 0;
+        } else {
+            anchored_ = period_estimate > 0;
+        }
+        vrr_floor_run_ = 0;
     } else {
         // Bounded lead correction: keeps the lead near what the count needs without a visible step.
+        // Excess lead (diff < 0, e.g. speedup or budget reduction) drains up to T/8 per interval so an L=1
+        // waitable caller is not pinned in slow motion while excess lead bleeds out; upward lead additions
+        // stay bounded at T/128 while generating so normal jitter does not stretch spacing.
         t_base = last_real_target_;
         const FgTicks diff = lead_need - lead;
         const FgTicks deadband = period_estimate / 16;
         FgTicks correction = 0;
-        if (diff > deadband || diff < -deadband) {
+        if (diff > deadband) {
             const FgTicks limit = n > 0 ? period_estimate / 128 : period_estimate / 8;
-            correction = Clamp(diff / 8, -limit, limit);
+            correction = Clamp(diff / 8, 0, limit);
+        } else if (diff < -deadband) {
+            const FgTicks limit = diff < -period_estimate / 4 ? period_estimate / 4 : period_estimate / 8;
+            correction = Clamp(diff / 2, -limit, 0);
         }
         period = period_estimate + correction;
         FgTicks floor = 0;
         if (!CheckedMul(static_cast<FgTicks>(n) + 1, w.min_interval, &floor)) return FgStatus::Overflow;
+        if (config_.adaptive_count && n > 0 && diff < -deadband && period < floor) {
+            // Excess playout lead wants a shorter period than (n + 1) * min_interval allows; clamping at the VRR
+            // floor would throttle an L=1 waitable caller to (n + 1) * min_interval forever. Require exit_intervals
+            // consecutive frames so transient alternating jitter near the VRR ceiling does not step N down.
+            if (++vrr_floor_run_ >= w.exit_intervals) {
+                vrr_floor_run_ = 0;
+                bad_run_ = 0;
+                good_run_ = 0;
+                while (n > 0) {
+                    FgTicks f = 0;
+                    if (!CheckedMul(static_cast<FgTicks>(n) + 1, w.min_interval, &f)) return FgStatus::Overflow;
+                    if (period >= f) break;
+                    --n;
+                }
+                effective_ = n;
+                last_reduction_reason_ = FgRealOnlyReason::OutOfVrrWindow;
+                if (n == 0 && reason == FgRealOnlyReason::None) reason = FgRealOnlyReason::OutOfVrrWindow;
+                if (!CheckedMul(static_cast<FgTicks>(n) + 1, w.min_interval, &floor)) return FgStatus::Overflow;
+            }
+        } else {
+            vrr_floor_run_ = 0;
+        }
         if (period < floor) period = floor;
         const FgTicks feasible = origin + config_.real_min_lead - t_base;
         if (period < feasible) period = feasible;

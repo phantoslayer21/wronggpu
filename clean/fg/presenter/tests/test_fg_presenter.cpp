@@ -1346,6 +1346,113 @@ void TestRc2SchedulerPacing() {
     }
 }
 
+// RC2 smoke regressions: L=1 frame-start-waitable recovery from slow startup frames and mid-run hitches.
+// Proves no bistable 2x LatencyCap trap (~38 fps) and no 15-second slow-motion crawl-down at 3x/4x/6x.
+void TestSmokePacingTraps() {
+    g_case = "smoke pacing traps";
+    constexpr FgTicks kMs = 10000;
+    auto run_transition = [](std::uint32_t requested, FgTicks slow_period, int slow_frames, FgTicks fast_period,
+                             int fast_frames, FgTicks* steady_period_out, std::uint32_t* latency_cap_ro_out,
+                             std::uint32_t* steady_gen_out) {
+        FgSchedulerConfig sc = DefaultScheduler();
+        sc.first_image_budget = 4 * kMs;
+        sc.bridge_and_submit_margin = 2500;
+        sc.max_lead = 280000;
+        sc.display.min_interval = 28619;  // ~349.4 Hz VRR ceiling
+        sc.display.margin = 0;
+        sc.adaptive_count = true;
+        FgTargetScheduler scheduler(sc);
+        CHECK(scheduler.BeginEpoch(1) == FgStatus::Ok);
+        FgTicks pending_release = 0;
+        FgTicks handoff = kSecond;
+        FgTicks steady_start = 0;
+        const int total = slow_frames + fast_frames;
+        const int steady_from = slow_frames + fast_frames / 2;
+        std::uint32_t latency_cap_ro = 0;
+        std::uint32_t steady_gen = 0;
+        for (int i = 1; i <= total; ++i) {
+            const FgTicks render = i <= slow_frames ? slow_period : fast_period;
+            const FgTicks arrival = handoff + render;
+            handoff = pending_release > arrival ? pending_release : arrival;
+            FgGameFrame game{1, static_cast<std::uint64_t>(i), arrival, requested, true, false, handoff};
+            FgIntervalPlan plan;
+            CHECK(scheduler.Commit(game, &plan) == FgStatus::Ok);
+            pending_release = plan.targets[0].target;
+            if (plan.generated_count == 0 && plan.real_only_reason == FgRealOnlyReason::LatencyCap) ++latency_cap_ro;
+            if (i == steady_from) steady_start = handoff;
+            if (i > steady_from && plan.generated_count > 0) ++steady_gen;
+        }
+        *steady_period_out = (handoff - steady_start) / (total - steady_from);
+        *latency_cap_ro_out = latency_cap_ro;
+        *steady_gen_out = steady_gen;
+    };
+
+    // Case A: 2x (N=1) startup slow frames (25 ms -> 7 ms) must NOT enter the ~38 fps bistable LatencyCap limit cycle.
+    {
+        FgTicks steady_p = 0;
+        std::uint32_t ro_cap = 0, steady_gen = 0;
+        run_transition(1u, 25 * kMs, 8, 7 * kMs, 100, &steady_p, &ro_cap, &steady_gen);
+        std::printf("  smoke 2x 25ms->7ms: steady_period=%.2fms latency_cap_ro=%u steady_gen=%u/50\n",
+                    steady_p / 10000.0, ro_cap, steady_gen);
+        CHECK(ro_cap <= 2);
+        CHECK(steady_p <= 75000);
+        CHECK(steady_gen >= 45);
+    }
+
+    // Case B: 3x/4x/6x slow-motion crawl-down after 25 ms -> 7 ms and 16 ms -> 7 ms startup frames.
+    for (const std::uint32_t req : {2u, 3u, 5u}) {
+        for (const FgTicks slow_p : {25 * kMs, 16 * kMs}) {
+            FgTicks steady_p = 0;
+            std::uint32_t ro_cap = 0, steady_gen = 0;
+            run_transition(req, slow_p, 8, 7 * kMs, 100, &steady_p, &ro_cap, &steady_gen);
+            std::printf("  smoke %ux %.0fms->7ms: steady_period=%.2fms latency_cap_ro=%u steady_gen=%u/50\n", req + 1,
+                        slow_p / 10000.0, steady_p / 10000.0, ro_cap, steady_gen);
+            CHECK(ro_cap <= 2);
+            CHECK(steady_p <= 75000);
+            CHECK(steady_gen >= 45);
+        }
+    }
+
+    // Case C: mid-run 199 ms hitch + 5 slow 25 ms frames at 3x (N=2) -> must recover promptly to 7 ms.
+    {
+        FgSchedulerConfig sc = DefaultScheduler();
+        sc.first_image_budget = 4 * kMs;
+        sc.bridge_and_submit_margin = 2500;
+        sc.max_lead = 280000;
+        sc.display.min_interval = 28619;
+        sc.display.margin = 0;
+        sc.adaptive_count = true;
+        FgTargetScheduler scheduler(sc);
+        CHECK(scheduler.BeginEpoch(1) == FgStatus::Ok);
+        FgTicks pending_release = 0;
+        FgTicks handoff = kSecond;
+        FgTicks steady_start = 0;
+        std::uint32_t ro_cap = 0, steady_gen = 0;
+        const int total = 120;
+        const int steady_from = 70;
+        for (int i = 1; i <= total; ++i) {
+            FgTicks render = 7 * kMs;
+            if (i == 31) render = 199 * kMs;
+            else if (i >= 32 && i <= 36) render = 25 * kMs;
+            const FgTicks arrival = handoff + render;
+            handoff = pending_release > arrival ? pending_release : arrival;
+            FgGameFrame game{1, static_cast<std::uint64_t>(i), arrival, 2u, true, false, handoff};
+            FgIntervalPlan plan;
+            CHECK(scheduler.Commit(game, &plan) == FgStatus::Ok);
+            pending_release = plan.targets[0].target;
+            if (plan.generated_count == 0 && plan.real_only_reason == FgRealOnlyReason::LatencyCap) ++ro_cap;
+            if (i == steady_from) steady_start = handoff;
+            if (i > steady_from && plan.generated_count > 0) ++steady_gen;
+        }
+        const FgTicks steady_p = (handoff - steady_start) / (total - steady_from);
+        std::printf("  smoke 3x 199ms-hitch->7ms: steady_period=%.2fms latency_cap_ro=%u steady_gen=%u/50\n",
+                    steady_p / 10000.0, ro_cap, steady_gen);
+        CHECK(ro_cap <= 2);
+        CHECK(steady_p <= 75000);
+        CHECK(steady_gen >= 45);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -1361,6 +1468,7 @@ int main() {
     TestRefusal();
     TestMutations();
     TestRc2SchedulerPacing();
+    TestSmokePacingTraps();
     TestFrameStartWaitableCadence();
     TestTearingPlanHeadNearCeiling();
     std::printf("test_fg_presenter: %d checks, %d failure(s)\n", g_checks, g_failures);

@@ -35,15 +35,21 @@ using Microsoft::WRL::ComPtr;
 namespace {
 
 constexpr uint32_t kMaxSessionFailures = 3;
-// Lateness control (O-A7 / A4): first-image budget starts at 4.0 ms and is capped at 8.0 ms (never climbs to 20-30 ms
-// buying runaway latency); eases back 0.5 ms after 3 quiet windows. Uses truthful scheduled denominator (no double
-// count). Switching to a faster preset (e.g. A/B -> C) decays the budget immediately (N-B7).
+// Lateness control: first-image budget starts at 4.0 ms and tracks measured GPU-bound readiness
+// (t_first_gen_ready / t_real_ready - t_after_wait) within a dynamic period-bounded ceiling
+// clamp(min(latency_limit, 2) * median_base_dt + 3.0 ms, 8.0 ms, 32.0 ms). Uses truthful generated_scheduled as the
+// denominator and a miss-floor holdoff (TCP ssthresh style) to ease latency down cleanly without sawtooth oscillation.
+// Switching to a faster preset (e.g. A/B -> C) resets the budget immediately (N-B7).
 constexpr wgfg::FgTicks kBudgetBase = 40000;
-constexpr wgfg::FgTicks kBudgetMax = 80000;
-constexpr wgfg::FgTicks kBudgetStepMin = 10000;
-constexpr wgfg::FgTicks kBudgetEase = 5000;
-constexpr uint32_t kBudgetWindow = 60;
-constexpr uint32_t kBudgetQuietWindows = 3;
+constexpr wgfg::FgTicks kBudgetCapMin = 80000;
+constexpr wgfg::FgTicks kBudgetCapMax = 320000;
+constexpr wgfg::FgTicks kBudgetStepMin = 6000;
+constexpr wgfg::FgTicks kBudgetEaseFast = 5000;
+constexpr wgfg::FgTicks kBudgetEaseProbe = 2500;
+constexpr uint32_t kBudgetFastCheck = 8;
+constexpr uint32_t kBudgetExcessDrainWindow = 12;
+constexpr uint32_t kBudgetFirstWindow = 6;
+constexpr uint32_t kBudgetWindow = 30;
 // Presenter slots: enough for three intervals in flight at 6x (3 * 6 = 18) plus the one on screen and real reserve.
 constexpr uint32_t kPresenterSlots = 20;
 constexpr uint32_t kPresenterMaxPendingIntervals = 3;
@@ -269,14 +275,18 @@ struct FgAsiSessionHost::Impl {
     uint64_t back_pressure_waits = 0; // game frames that waited for a presenter slot
     bool back_pressure_logged = false;
 
-    // lateness control (kBudget*): kept across sessions of the run
+    // lateness control (kBudget*): budget kept across sessions of the run
     wgfg::FgTicks budget = kBudgetBase;
     uint32_t lateness_count_cap = 0;
     uint32_t cap_miss_windows = 0;
     uint32_t window_frames = 0;
-    bool window_have = false;
+    bool window_first = true;
     wgfg::FgPresentStats window_base;
     uint32_t quiet_windows = 0;
+    wgfg::FgTicks budget_miss_floor = 0;
+    bool budget_probing = false;
+    uint32_t budget_ease_holdoff = 4;
+    uint32_t budget_grace_frames = 0;
     uint32_t budget_lines = 0;
     bool have_last_preset = false;
     uint32_t last_preset = 0;
@@ -1126,10 +1136,15 @@ struct FgAsiSessionHost::Impl {
         DrainAdmissions();
         for (uint64_t& v : last_values) v = 0;
         window_frames = 0;
-        window_have = false;
+        window_first = true;
+        window_base = wgfg::FgPresentStats{};
         quiet_windows = 0;
         cap_miss_windows = 0;
         lateness_count_cap = 0;
+        budget_miss_floor = 0;
+        budget_probing = false;
+        budget_ease_holdoff = 4;
+        budget_grace_frames = 0;
         display_sample_at = 0;
         display_sample_frames = 0;
         display_sample_real = 0;
@@ -1146,66 +1161,202 @@ struct FgAsiSessionHost::Impl {
         return true;
     }
 
-    // A4 / O-A7: truthful lateness control using generated_scheduled as denominator (zero double counting),
-    // budget capped at kBudgetMax (8.0 ms), and periodic A3 trace summaries + sustained multiplier update.
+    // A4 / smoke-fix: truthful lateness control using generated_scheduled as denominator (zero double counting),
+    // measured readiness from trace_ring (t_first_gen_ready / t_real_ready - t_after_wait), dynamic period-bounded
+    // ceiling [8, 32] ms, and miss-floor holdoff easing to prevent GPU-bound phase-boundary oscillation.
     void ControlLateness() {
         if (!session) return;
         const wgfg::IFgPresenter* pr = session->Presenter();
         if (!pr) return;
-        if (++window_frames < kBudgetWindow) return;
-        window_frames = 0;
-        const wgfg::FgPresentStats st = pr->Stats();
-        if (!window_have) {
-            window_base = st;
-            window_have = true;
+        if (budget_grace_frames > 0) {
+            if (--budget_grace_frames == 0) {
+                window_base = pr->Stats();
+                window_frames = 0;
+            }
             return;
         }
+        const uint32_t win_target = window_first ? kBudgetFirstWindow : kBudgetWindow;
+        ++window_frames;
+        const bool full_window = window_frames >= win_target;
+        const bool fast_probe = !window_first && !full_window && window_frames >= kBudgetFastCheck &&
+                                (window_frames % kBudgetFastCheck == 0);
+        const bool excess_probe = !window_first && !full_window && window_frames == kBudgetExcessDrainWindow &&
+                                  budget > kBudgetBase + 40000;
+        if (!full_window && !fast_probe && !excess_probe) return;
+        const wgfg::FgPresentStats st = pr->Stats();
         const uint64_t sched = st.generated_scheduled - window_base.generated_scheduled;
         const uint64_t disp_g = st.displayed_generated - window_base.displayed_generated;
         const uint64_t disp_r = st.displayed_real - window_base.displayed_real;
         const uint64_t late = st.dropped_late - window_base.dropped_late;
         const uint64_t pressure = st.dropped_pressure - window_base.dropped_pressure;
         const uint64_t skipped = st.display_skipped_generated - window_base.display_skipped_generated;
-        window_base = st;
+        const uint64_t missed = late + pressure + skipped;
+        const bool severe_storm = fast_probe && sched >= 6ull && missed * 5ull > sched;
+        const bool clean_excess_check = excess_probe && !severe_storm && sched >= 8ull && missed == 0;
+        if (!full_window && !severe_storm && !clean_excess_check) return;
+
+        // Read recent base_dt and generating-interval readiness from trace_ring under the leaf lock.
+        std::vector<int64_t> base_dts;
+        std::vector<int64_t> d_origins;
+        std::vector<int64_t> d_arrivals;
+        {
+            std::lock_guard<std::mutex> lock(trace_mu);
+            const uint32_t want_scan = std::max<uint32_t>(window_frames, 12u);
+            const uint32_t n_scan = trace_count < want_scan ? trace_count : want_scan;
+            base_dts.reserve(n_scan);
+            d_origins.reserve(n_scan);
+            d_arrivals.reserve(n_scan);
+            wgfg::FgTicks prev_arr = 0;
+            for (uint32_t k = 0; k < n_scan; ++k) {
+                const uint32_t idx = (trace_head + kTraceRingSize - n_scan + k) % kTraceRingSize;
+                const IntervalTrace& tr = trace_ring[idx];
+                if (tr.t_arrival > 0) {
+                    if (prev_arr > 0 && tr.t_arrival > prev_arr) {
+                        const int64_t dt = tr.t_arrival - prev_arr;
+                        if (dt >= 10000 && dt <= 2500000) base_dts.push_back(dt);
+                    }
+                    prev_arr = tr.t_arrival;
+                }
+                if (tr.scheduled_n > 0 && tr.t_after_wait > 0) {
+                    const wgfg::FgTicks ready_ts =
+                        tr.t_first_gen_ready > 0 ? tr.t_first_gen_ready : tr.t_real_ready;
+                    if (ready_ts > tr.t_after_wait) {
+                        const int64_t d = ready_ts - tr.t_after_wait;
+                        if (d > 0 && d <= 1000000) {
+                            d_origins.push_back(d);
+                            const int64_t d_arr =
+                                tr.t_arrival > 0 && ready_ts > tr.t_arrival ? ready_ts - tr.t_arrival : d;
+                            d_arrivals.push_back(d_arr <= 1000000 ? d_arr : d);
+                        }
+                    }
+                }
+            }
+        }
+        // If this was only a mid-window excess-slack probe, proceed only when d_origin proves the GPU finished well
+        // before WaitForCreditRoom returned (d_p90 <= 1.8 ms) AND the newest 4 frames' cadence has caught up to the
+        // current budget (p_med <= budget + 3.5 ms) so we never stack downward steps across phase lag.
+        const wgfg::FgTicks d_orig_p90_pre = Percentile(d_origins, 0.90);
+        std::vector<int64_t> tail_dts = base_dts;
+        if (tail_dts.size() > 4) tail_dts.erase(tail_dts.begin(), tail_dts.end() - 4);
+        const wgfg::FgTicks p_med_pre = Percentile(tail_dts, 0.50);
+        if (clean_excess_check &&
+            (d_origins.empty() || d_orig_p90_pre > 18000 || budget <= kBudgetBase + 40000 ||
+             (p_med_pre > 0 && p_med_pre > budget + 35000) ||
+             (budget_miss_floor > 0 && budget <= budget_miss_floor + 40000))) {
+            return;
+        }
+
+        const uint32_t evaluated_frames = window_frames;
+        window_frames = 0;
         if (disp_r > 0) {
             const uint32_t m100 =
                 static_cast<uint32_t>(((disp_r + disp_g) * 100ull + disp_r / 2) / disp_r);
             st_sustained_mult_x100.store(m100);
         }
-        if (sched < 10) return;
-        const uint64_t missed = late + pressure + skipped;
+        const uint64_t min_sched = window_first ? 3ull : (severe_storm ? 6ull : 10ull);
+        if (!clean_excess_check && sched < min_sched) {
+            if (missed > 0) window_base = st;
+            return;
+        }
+        const bool was_first = window_first;
+        window_first = false;
+        window_base = st;
+
+        // Use the newest half of base_dts on cold start / fast probe so startup slow frames age out immediately.
+        std::vector<int64_t> recent_dts = base_dts;
+        if ((was_first || severe_storm) && recent_dts.size() > 6)
+            recent_dts.erase(recent_dts.begin(), recent_dts.end() - 6);
+        const wgfg::FgTicks p_med = Percentile(recent_dts, 0.50);
+        // When d_origin > 1.8 ms (GPU was still executing frame work after WaitForCreditRoom returned), ready_ts -
+        // t_arrival measures true GPU frame time (unmasked by wait_us). When d_origin <= 1.8 ms, the GPU finished
+        // during WaitForCreditRoom, so d_origin reflects genuine excess budget slack.
+        std::vector<int64_t> d_effs;
+        d_effs.reserve(d_origins.size());
+        for (size_t i = 0; i < d_origins.size(); ++i) {
+            const int64_t d_orig = d_origins[i];
+            if (d_orig > 18000) {
+                const int64_t capped_arr = p_med > 0 ? std::min<int64_t>(d_arrivals[i], p_med + 20000) : d_arrivals[i];
+                d_effs.push_back(std::max<int64_t>(d_orig, capped_arr));
+            } else {
+                d_effs.push_back(d_orig);
+            }
+        }
+        // Newest <= 8 generating samples for fast raise target so stale pre-transition frames do not skew the step.
+        std::vector<int64_t> d_eff_recent = d_effs;
+        if (d_eff_recent.size() > 8) d_eff_recent.erase(d_eff_recent.begin(), d_eff_recent.end() - 8);
+        const wgfg::FgTicks d_p50 = Percentile(d_eff_recent, 0.50);
+        const wgfg::FgTicks d_p75 = Percentile(d_eff_recent, 0.75);
+        const wgfg::FgTicks d_p90 = Percentile(d_origins, 0.90);
+        const wgfg::FgTicks d_eff_p90 = Percentile(d_effs, 0.90);
+        const uint32_t depth = std::min<uint32_t>(std::max<uint32_t>(st_latency_limit.load(), 1u), 2u);
+        wgfg::FgTicks b_cap = kBudgetCapMin;
+        if (p_med > 0) {
+            const wgfg::FgTicks raw_cap = static_cast<wgfg::FgTicks>(depth) * p_med + 35000;
+            b_cap = std::max(kBudgetCapMin, std::min(kBudgetCapMax, raw_cap));
+        }
+
         const uint64_t on_time = sched > missed ? sched - missed : 0;
         wgfg::FgTicks next = budget;
-        if (missed * 10 > sched) {  // more than 1 in 10 scheduled images missed
+        if (missed * 50 > sched) {  // > 2% of scheduled generated images missed
             quiet_windows = 0;
-            if (budget < kBudgetMax) {
+            const bool need_more_budget = d_origins.empty() || (d_eff_p90 + 2500 > budget) || (d_p90 + 2500 > budget);
+            if (need_more_budget) {
+                budget_miss_floor = budget_probing ? std::max(budget_miss_floor, budget) : budget;
+                budget_ease_holdoff = budget_probing ? std::min<uint32_t>(16u, budget_ease_holdoff * 2u) : 5u;
+            }
+            budget_probing = false;
+            wgfg::FgTicks want = budget;
+            if (need_more_budget && budget < b_cap) {
+                const wgfg::FgTicks measured_target =
+                    !d_eff_recent.empty() ? ((was_first ? d_p50 : d_p75) + 12000) : 0;
+                const wgfg::FgTicks min_step = severe_storm ? 10000 : kBudgetStepMin;
+                want = std::min(b_cap, std::max(budget + min_step, measured_target));
+            }
+            if (want > budget + 500) {
+                next = want;
                 cap_miss_windows = 0;
-                next = budget + std::max(kBudgetStepMin, budget / 4);
-                if (next > kBudgetMax) next = kBudgetMax;
-            } else if (++cap_miss_windows >= 2) {
-                // O-A7: budget is already at the 8.0 ms ceiling and misses persist -> lower scheduled count
+            } else if (!severe_storm && missed * 20 > sched && ++cap_miss_windows >= 2) {
+                // > 5% misses persist at the dynamic ceiling (or budget is no longer limiting): step count cap down
+                // only when requesting > 1 generated image (capping N=1 to 1 is a no-op that blocks easing).
                 cap_miss_windows = 0;
-                const uint32_t cur_n = lateness_count_cap ? lateness_count_cap : st_req_count.load();
-                const uint32_t target_cap = cur_n > 1 ? cur_n - 1 : 1u;
-                if (lateness_count_cap == 0 || target_cap < lateness_count_cap) {
-                    lateness_count_cap = target_cap;
-                    session->SetMaxGeneratedCap(lateness_count_cap);
-                    char line[224];
-                    std::snprintf(line, sizeof line,
-                                  "fg host: budget at %.1f ms cap with %llu/%llu missed; stepping generated count cap "
-                                  "down to %u",
-                                  budget / 10000.0, static_cast<unsigned long long>(missed),
-                                  static_cast<unsigned long long>(sched), lateness_count_cap);
-                    Log(line);
+                const uint32_t req_n = st_req_count.load();
+                const uint32_t cur_n = lateness_count_cap ? lateness_count_cap : req_n;
+                if (cur_n > 1) {
+                    const uint32_t target_cap = cur_n - 1;
+                    if (lateness_count_cap == 0 || target_cap < lateness_count_cap) {
+                        lateness_count_cap = target_cap;
+                        session->SetMaxGeneratedCap(lateness_count_cap);
+                        char line[224];
+                        std::snprintf(line, sizeof line,
+                                      "fg host: budget at %.1f ms (cap %.1f ms) with %llu/%llu missed; stepping "
+                                      "generated count cap down to %u",
+                                      budget / 10000.0, b_cap / 10000.0, static_cast<unsigned long long>(missed),
+                                      static_cast<unsigned long long>(sched), lateness_count_cap);
+                        Log(line);
+                    }
                 }
             }
-        } else if (missed * 50 <= sched) {  // 2% or fewer missed: release cap first, then ease latency back
+        } else if (missed * 100 <= sched) {  // <= 1% missed: release count cap first, then ease latency back
             cap_miss_windows = 0;
-            if (++quiet_windows >= kBudgetQuietWindows) {
+            if (budget_probing) {
+                budget_probing = false;
+                budget_miss_floor = 0;
+                budget_ease_holdoff = 3;
+            }
+            const wgfg::FgTicks floor_b = !d_effs.empty() ? std::max(kBudgetBase, d_eff_p90 + 3000) : kBudgetBase;
+            const bool far_above_miss = budget_miss_floor == 0 || budget > budget_miss_floor + 7500;
+            const bool cadence_caught_up = p_med_pre == 0 || p_med_pre <= budget + 35000;
+            const bool large_excess = !d_effs.empty() && d_p90 <= 18000 && cadence_caught_up &&
+                                      budget > floor_b + 30000 &&
+                                      (budget_miss_floor == 0 || budget > budget_miss_floor + 30000);
+            const uint32_t need_wins = large_excess ? 1u : (far_above_miss ? 2u : budget_ease_holdoff);
+            if (++quiet_windows >= need_wins) {
                 quiet_windows = 0;
                 if (lateness_count_cap > 0) {
                     const uint32_t route_max = core ? core->advertised_max_generated() : 5u;
-                    lateness_count_cap = (lateness_count_cap + 1 >= route_max) ? 0u : lateness_count_cap + 1;
+                    const uint32_t req_n = st_req_count.load();
+                    const uint32_t cap_ceil = req_n > 0 ? std::min(route_max, req_n) : route_max;
+                    lateness_count_cap = (lateness_count_cap + 1 >= cap_ceil) ? 0u : lateness_count_cap + 1;
                     session->SetMaxGeneratedCap(lateness_count_cap);
                     char line[192];
                     std::snprintf(line, sizeof line,
@@ -1213,7 +1364,16 @@ struct FgAsiSessionHost::Impl {
                                   lateness_count_cap);
                     Log(line);
                 } else {
-                    next = budget - kBudgetEase < kBudgetBase ? kBudgetBase : budget - kBudgetEase;
+                    const wgfg::FgTicks excess_cap =
+                        budget > 225000 ? 55000 : (budget > 135000 ? 35000 : 20000);
+                    const wgfg::FgTicks step =
+                        large_excess ? std::min<wgfg::FgTicks>(excess_cap, std::max(kBudgetEaseFast, (budget - floor_b) / 2))
+                                     : (far_above_miss ? kBudgetEaseFast : kBudgetEaseProbe);
+                    const wgfg::FgTicks nxt = std::max(floor_b, budget - step);
+                    if (nxt + 500 < budget) {
+                        if (budget_miss_floor > 0 && nxt <= budget_miss_floor + 2000) budget_probing = true;
+                        next = nxt;
+                    }
                 }
             }
         } else {
@@ -1221,17 +1381,20 @@ struct FgAsiSessionHost::Impl {
             cap_miss_windows = 0;
         }
         if (next == budget || !session->SetFirstImageBudget(next)) return;
-        if (budget_lines < 32) {
+        if (next > budget) budget_grace_frames = 2;
+        if (budget_lines < 64) {
             ++budget_lines;
-            char line[320];
+            char line[352];
             std::snprintf(line, sizeof line,
                           "fg host: generated on time %llu of %llu scheduled (disp %llu, late %llu, pressure %llu, "
-                          "skip %llu) in %u frames: first-image budget %.1f -> %.1f ms%s",
+                          "skip %llu) in %u frames (p_med=%.1fms d_p50=%.1fms d_p90=%.1fms eff=%.1fms cap=%.1fms): "
+                          "first-image budget %.1f -> %.1f ms%s",
                           static_cast<unsigned long long>(on_time), static_cast<unsigned long long>(sched),
                           static_cast<unsigned long long>(disp_g), static_cast<unsigned long long>(late),
                           static_cast<unsigned long long>(pressure), static_cast<unsigned long long>(skipped),
-                          kBudgetWindow, budget / 10000.0, next / 10000.0,
-                          budget_lines == 32 ? " (the last budget line of this run)" : "");
+                          evaluated_frames, p_med / 10000.0, d_p50 / 10000.0, d_p90 / 10000.0, d_eff_p90 / 10000.0,
+                          b_cap / 10000.0, budget / 10000.0, next / 10000.0,
+                          budget_lines == 64 ? " (the last budget line of this run)" : "");
             Log(line);
         }
         budget = next;
@@ -1337,8 +1500,8 @@ struct FgAsiSessionHost::Impl {
         }
         wgfg::FgSessionDesc d;
         d.create = ToRuntime(sd);
-        d.scheduler.first_image_budget = budget;  // 4.0 ms base, capped at 8.0 ms (O-A7)
-        d.scheduler.max_lead = 280000;            // 28 ms latency cap (~1 real frame + 8 ms budget, O-A7)
+        d.scheduler.first_image_budget = budget;  // 4.0 ms base, dynamically bounded [8.0, 32.0] ms
+        d.scheduler.max_lead = 500000;            // 50 ms playout lead cap (fits 50-60 fps 4x/6x with GPU-bound budget)
         const bool tearing_mode = sd.presenter_mode == WG_FG_PRESENTER_DXGI_TEARING ||
                                   (sd.presenter_mode == WG_FG_PRESENTER_AUTO && base.display.variable_refresh);
         if (tearing_mode) d.scheduler.bridge_and_submit_margin = 2500;  // 0.25 ms submit margin for DXGI tearing
@@ -1812,6 +1975,10 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
                     m.lateness_count_cap = 0;
                     m.cap_miss_windows = 0;
                     m.quiet_windows = 0;
+                    m.budget_miss_floor = 0;
+                    m.budget_probing = false;
+                    m.budget_ease_holdoff = 4;
+                    m.budget_grace_frames = 0;
                     if (m.session) {
                         m.session->SetFirstImageBudget(m.budget);
                         m.session->SetMaxGeneratedCap(0);

@@ -175,6 +175,7 @@ private:
     std::uint32_t bad_run_ = 0;
     std::uint32_t good_run_ = 0;
     std::uint32_t shortfall_run_ = 0;
+    std::uint32_t vrr_floor_run_ = 0;
     std::uint32_t max_generated_cap_ = 0;
     FgRealOnlyReason last_reduction_reason_ = FgRealOnlyReason::None;
 };

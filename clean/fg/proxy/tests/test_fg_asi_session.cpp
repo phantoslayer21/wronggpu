@@ -23,13 +23,18 @@
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdio>
-#include <thread>
 #include <cstring>
+#include <deque>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "../../runtime/fg_d3d12_executor.h"
@@ -1846,6 +1851,466 @@ void TestRc2LatencyAndPacing(Gpu& gpu, const std::string& dxil, bool run_latency
     }
 }
 
+// RC2 smoke regressions: GPU-bound synthetic game at L=1 where real_ready lags arrival by ~1 frame, with slow startup
+// frames (25 ms) transitioning into steady 10.5 ms / 12.5 ms / 18.5 ms GPU-bound rendering at 2x (N=1), 4x (N=3), and
+// 6x (N=5). Proves no bistable 2x LatencyCap trap, < 2% late drops at 2x, < 5% late drops at 4x/6x, base FPS >= 85%
+// of FG-off, and presented output scaling cleanly with N.
+void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil) {
+    ComPtr<IDXGIFactory2> f2;
+    CHECK(SUCCEEDED(gpu.factory.As(&f2)));
+    GameTextures game;
+    CHECK(game.Init(gpu));
+    if (!f2 || !game.motion) return;
+
+    struct SmokeLogCapture {
+        std::mutex mu;
+        uint64_t sched = 0;
+        uint64_t sub = 0;
+        uint64_t dropped_late = 0;
+        uint64_t pre_drop = 0;
+        uint64_t post_drop = 0;
+        uint64_t real_sub = 0;
+        uint64_t latency_cap_ro = 0;
+        double final_budget_ms = 0.0;
+        bool saw_stats = false;
+
+        static bool ParseU64(const char* line, const char* key, uint64_t* out) {
+            const char* p = std::strstr(line, key);
+            if (!p) return false;
+            p += std::strlen(key);
+            char* end = nullptr;
+            const unsigned long long v = std::strtoull(p, &end, 10);
+            if (end == p) return false;
+            *out = static_cast<uint64_t>(v);
+            return true;
+        }
+        static bool ParseDouble(const char* line, const char* key, double* out) {
+            const char* p = std::strstr(line, key);
+            if (!p) return false;
+            p += std::strlen(key);
+            char* end = nullptr;
+            const double v = std::strtod(p, &end);
+            if (end == p) return false;
+            *out = v;
+            return true;
+        }
+        static void OnLog(void* ctx, const char* line) {
+            if (!ctx || !line) return;
+            auto* self = static_cast<SmokeLogCapture*>(ctx);
+            std::lock_guard<std::mutex> lock(self->mu);
+            if (std::strstr(line, "fg host: presenter stats:")) {
+                self->saw_stats = true;
+                ParseU64(line, "sched=", &self->sched);
+                ParseU64(line, "sub=", &self->sub);
+                ParseU64(line, "dropped_late=", &self->dropped_late);
+                ParseU64(line, "pre_drop=", &self->pre_drop);
+                ParseU64(line, "post_drop=", &self->post_drop);
+                ParseU64(line, "real_sub=", &self->real_sub);
+                ParseDouble(line, "budget_ms=", &self->final_budget_ms);
+                std::printf("      log: %s\n", line);
+            } else if (std::strstr(line, "fg host: real-only intervals:")) {
+                ParseU64(line, "latency-cap=", &self->latency_cap_ro);
+                std::printf("      log: %s\n", line);
+            } else if (std::strstr(line, "first-image budget") || std::strstr(line, "generated count cap") ||
+                       std::strstr(line, "trace summary")) {
+                std::printf("      log: %s\n", line);
+            }
+        }
+    };
+
+    struct AsyncGpuPacer {
+        enum { kRing = 4 };
+        ComPtr<ID3D12CommandAllocator> alloc[kRing];
+        ComPtr<ID3D12GraphicsCommandList> list;
+        ComPtr<ID3D12Resource> upload[kRing];
+        ComPtr<ID3D12Fence> ring_fence;
+        ComPtr<ID3D12Fence> sim_fence;
+        uint64_t ring_val[kRing] = {};
+        uint64_t ring_seq = 0;
+        uint64_t sim_seq = 0;
+        HANDLE ring_event = nullptr;
+        HANDLE cpu_timer = nullptr;
+
+        struct Job {
+            uint64_t val = 0;
+            std::chrono::steady_clock::time_point submit_tp;
+            int64_t dur_us = 0;
+        };
+        std::mutex mu;
+        std::condition_variable cv;
+        std::deque<Job> jobs;
+        bool stop = false;
+        bool abort_fast = false;
+        std::thread worker;
+
+        ~AsyncGpuPacer() {
+            Stop();
+            if (ring_event) CloseHandle(ring_event);
+            if (cpu_timer) CloseHandle(cpu_timer);
+        }
+
+        static void WaitUs(HANDLE timer, int64_t us) {
+            if (us <= 0) return;
+            if (timer) {
+                LARGE_INTEGER due;
+                due.QuadPart = -us * 10LL;
+                if (SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) {
+                    WaitForSingleObject(timer, static_cast<DWORD>(us / 1000 + 50));
+                    return;
+                }
+            }
+            Sleep(static_cast<DWORD>((us + 999) / 1000));
+        }
+
+        bool Init(Gpu& g) {
+            ring_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            cpu_timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+            if (!ring_event) return false;
+            if (FAILED(g.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&ring_fence))) ||
+                FAILED(g.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&sim_fence))))
+                return false;
+            const UINT pitch = (kW * 8 + 255) & ~255u;
+            for (int s = 0; s < kRing; ++s) {
+                if (FAILED(g.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&alloc[s]))))
+                    return false;
+                D3D12_HEAP_PROPERTIES hp = {};
+                hp.Type = D3D12_HEAP_TYPE_UPLOAD;
+                D3D12_RESOURCE_DESC rd = {};
+                rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+                rd.Width = static_cast<UINT64>(pitch) * kH;
+                rd.Height = 1;
+                rd.DepthOrArraySize = 1;
+                rd.MipLevels = 1;
+                rd.SampleDesc.Count = 1;
+                rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+                if (FAILED(g.device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                                                             D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                                             IID_PPV_ARGS(&upload[s]))))
+                    return false;
+                uint8_t* p = nullptr;
+                if (FAILED(upload[s]->Map(0, nullptr, reinterpret_cast<void**>(&p)))) return false;
+                for (UINT y = 0; y < kH; ++y) {
+                    for (UINT x = 0; x < kW; ++x) {
+                        uint16_t* t = reinterpret_cast<uint16_t*>(p + static_cast<size_t>(y) * pitch + 8ull * x);
+                        const UINT v = (x + 7 * static_cast<UINT>(s)) % 64;
+                        t[0] = static_cast<uint16_t>(0x3000 + v * 8);
+                        t[1] = static_cast<uint16_t>(0x3400 + ((y / 8) % 32) * 8);
+                        t[2] = 0x3800;
+                        t[3] = 0x3C00;
+                    }
+                }
+                upload[s]->Unmap(0, nullptr);
+            }
+            if (FAILED(g.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc[0].Get(), nullptr,
+                                                   IID_PPV_ARGS(&list))) ||
+                FAILED(list->Close()))
+                return false;
+            worker = std::thread([this]() {
+                HANDLE wt =
+                    CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+                auto busy_until = std::chrono::steady_clock::now();
+                for (;;) {
+                    Job job;
+                    bool fast = false;
+                    {
+                        std::unique_lock<std::mutex> lock(mu);
+                        cv.wait(lock, [this]() { return stop || !jobs.empty(); });
+                        if (jobs.empty()) break;
+                        job = jobs.front();
+                        jobs.pop_front();
+                        fast = abort_fast;
+                    }
+                    if (!fast && job.dur_us > 0) {
+                        const auto start_tp = job.submit_tp > busy_until ? job.submit_tp : busy_until;
+                        const auto done_tp = start_tp + std::chrono::microseconds(job.dur_us);
+                        const auto now_tp = std::chrono::steady_clock::now();
+                        if (done_tp > now_tp) {
+                            const int64_t rem_us =
+                                std::chrono::duration_cast<std::chrono::microseconds>(done_tp - now_tp).count();
+                            WaitUs(wt, rem_us);
+                        }
+                        busy_until = done_tp;
+                    }
+                    sim_fence->Signal(job.val);
+                }
+                if (wt) CloseHandle(wt);
+            });
+            return true;
+        }
+
+        bool Submit(Gpu& g, int f, ID3D12Resource* dst, int64_t gpu_us) {
+            const int s = f & (kRing - 1);
+            if (ring_val[s] > 0 && ring_fence->GetCompletedValue() < ring_val[s]) {
+                ring_fence->SetEventOnCompletion(ring_val[s], ring_event);
+                if (WaitForSingleObject(ring_event, 5000) != WAIT_OBJECT_0) return false;
+            }
+            if (FAILED(alloc[s]->Reset()) || FAILED(list->Reset(alloc[s].Get(), nullptr))) return false;
+            const UINT pitch = (kW * 8 + 255) & ~255u;
+            D3D12_RESOURCE_BARRIER b = {};
+            b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            b.Transition = {dst, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_COMMON,
+                            D3D12_RESOURCE_STATE_COPY_DEST};
+            list->ResourceBarrier(1, &b);
+            D3D12_TEXTURE_COPY_LOCATION d = {}, src = {};
+            d.pResource = dst;
+            d.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            src.pResource = upload[s].Get();
+            src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            src.PlacedFootprint.Footprint = {DXGI_FORMAT_R16G16B16A16_FLOAT, kW, kH, 1, pitch};
+            list->CopyTextureRegion(&d, 0, 0, 0, &src, nullptr);
+            std::swap(b.Transition.StateBefore, b.Transition.StateAfter);
+            list->ResourceBarrier(1, &b);
+            if (FAILED(list->Close())) return false;
+            ID3D12CommandList* cl[] = {list.Get()};
+            g.queue->ExecuteCommandLists(1, cl);
+            const uint64_t sv = ++sim_seq;
+            if (FAILED(g.queue->Wait(sim_fence.Get(), sv))) return false;
+            {
+                std::lock_guard<std::mutex> lock(mu);
+                jobs.push_back({sv, std::chrono::steady_clock::now(), gpu_us});
+            }
+            cv.notify_one();
+            ring_val[s] = ++ring_seq;
+            return SUCCEEDED(g.queue->Signal(ring_fence.Get(), ring_val[s]));
+        }
+
+        void Stop() {
+            {
+                std::lock_guard<std::mutex> lock(mu);
+                stop = true;
+                abort_fast = true;
+            }
+            cv.notify_all();
+            if (worker.joinable()) worker.join();
+        }
+    };
+
+    struct SmokeRunResult {
+        double steady_base_fps = 0.0;
+        double late_drop_pct = 0.0;
+        double submitted_mult = 1.0;
+        uint64_t latency_cap_ro = 0;
+        uint64_t sched = 0;
+        uint64_t sub = 0;
+        uint64_t dropped_late = 0;
+        uint64_t pre_drop = 0;
+        uint64_t post_drop = 0;
+        uint64_t real_sub = 0;
+        double final_budget_ms = 0.0;
+        int present_errors = 0;
+        uint64_t session_failures = 0;
+    };
+
+    auto run_leg = [&](const char* label, bool fg_enable, uint32_t gen_n, int slow_frames, int64_t slow_us,
+                       int fast_frames, int64_t gpu_us, int64_t cpu_us) -> SmokeRunResult {
+        SmokeRunResult out;
+        SmokeLogCapture cap;
+        FgPresentOwners owners;
+        FakeInterface iface;
+        FgProxyConfig pcfg = CoreConfig(2);
+        pcfg.binding.has_mfg_selector = true;
+        pcfg.settings.multiplier = gen_n + 1;
+        FgProxy core(pcfg, &owners, &SmokeLogCapture::OnLog, &cap);
+        const WgFgChainV1 ct = iface.table();
+        CHECK(core.attach_interposer(&ct, 2, 14) == WG_FG_REASON_NONE);
+        core.set_feature_function("fgTestSetOptions", &g_fn_a);
+        core.set_feature_function("fgTestGetState", &g_fn_b);
+
+        FgAsiSessionConfig hc;
+        hc.settings = pcfg.settings;
+        hc.dxil_dir = dxil;
+        hc.log = &SmokeLogCapture::OnLog;
+        hc.log_ctx = &cap;
+        std::unique_ptr<wgfg::FgExecWeights> w(new wgfg::FgExecWeights());
+        wgfg::FgExecSyntheticWeights(11, w.get());
+        std::unique_ptr<FgAsiSessionHost> host(new FgAsiSessionHost(hc, std::move(w)));
+        host->OnInstalled(&core);
+        FgAsiSessionHost::FactoryNote(host.get(), &core, gpu.factory.Get());
+
+        DXGI_SWAP_CHAIN_DESC1 sd = {};
+        sd.Width = kW;
+        sd.Height = kH;
+        sd.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        sd.SampleDesc.Count = 1;
+        sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        sd.BufferCount = 3;
+        sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        sd.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+        sd.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+        const UINT extra = host->ExtraSwapChainFlags(sd);
+        sd.Flags |= extra;
+        // Mirror the production DXGI factory hook: create the real swap chain on the host's dedicated present queue so
+        // generated-image presents never serialize behind the game's next frame on gpu.queue.
+        IUnknown* pq = host->CreationQueue(gpu.queue.Get(), sd);
+        IDXGISwapChain1* sc1 = nullptr;
+        CHECK(SUCCEEDED(f2->CreateSwapChainForComposition(pq ? pq : gpu.queue.Get(), &sd, nullptr, &sc1)) && sc1);
+        if (!sc1) return out;
+        FgSwapChain* chain = nullptr;
+        CHECK(SUCCEEDED(FgSwapChain::Create(sc1, gpu.queue.Get(), &SmokeLogCapture::OnLog, &cap, &chain)) && chain);
+        if (!chain) return out;
+        chain->SetExtraFlags(extra & ~DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT);
+        host->SetGameWaitable(true);
+        if (pq) host->AttachedPresentQueue(pq);
+        CHECK(chain->Attach(host.get(), &core, &owners, WG_FG_OWNER_SWAPCHAIN_WRAPPER) == WG_FG_REASON_NONE);
+        host->Attached(chain->Inner(), chain->Queue());
+        CHECK(chain->SetMaximumFrameLatency(1) == S_OK);
+
+        WgFgOptions opt = Options(fg_enable, 2);
+        opt.generated_count = gen_n;
+        core.set_options(WG_FEAT_FRAME_GENERATION, 1, &opt, &opt);
+
+        AsyncGpuPacer pacer;
+        CHECK(pacer.Init(gpu));
+        HANDLE lat = chain->GetFrameLatencyWaitableObject();
+        CHECK(lat != nullptr);
+
+        const int total_frames = slow_frames + fast_frames;
+        // Measure steady-state base FPS over the remaining 100-180 frames after slow-startup recovery (~60 frames).
+        const int steady_from = slow_frames + (fast_frames > 100 ? 60 : 15);
+        std::chrono::steady_clock::time_point steady_t0{};
+        int steady_count = 0;
+        for (int f = 0; f < total_frames; ++f) {
+            if (lat) WaitForSingleObject(lat, 200);
+            const bool is_slow = f < slow_frames;
+            const int64_t frame_cpu_us = is_slow ? slow_us : cpu_us;
+            const int64_t frame_gpu_us = is_slow ? slow_us : gpu_us;
+            AsyncGpuPacer::WaitUs(pacer.cpu_timer, frame_cpu_us);
+            const uint64_t tok = static_cast<uint64_t>(f) + 1;
+            const UINT bi = chain->GetCurrentBackBufferIndex();
+            ComPtr<ID3D12Resource> bb;
+            CHECK(SUCCEEDED(chain->GetBuffer(bi, IID_PPV_ARGS(&bb))) && bb);
+            if (!bb) break;
+            CHECK(pacer.Submit(gpu, f, bb.Get(), frame_gpu_us));
+            WgFgTag tags[2] = {};
+            ID3D12Resource* res[2] = {game.motion.Get(), game.depth.Get()};
+            const uint32_t nts[2] = {kNtMotion, kNtDepth};
+            const uint32_t fm[2] = {DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R32_FLOAT};
+            for (int t = 0; t < 2; ++t) {
+                tags[t].struct_size = sizeof(WgFgTag);
+                tags[t].native_type = nts[t];
+                tags[t].texture.resource = res[t];
+                tags[t].texture.format = fm[t];
+                tags[t].texture.width = kW;
+                tags[t].texture.height = kH;
+                tags[t].texture.state = D3D12_RESOURCE_STATE_COMMON;
+                tags[t].texture.frame_token = tok;
+                tags[t].texture.viewport_id = 1;
+                tags[t].texture.producer_epoch = 3;
+                tags[t].texture.rect = {0, 0, kW, kH};
+            }
+            core.tag(tags, 2, tags);
+            WgFgConstants k = {};
+            k.struct_size = sizeof(k);
+            k.abi_version = WG_FG_ADAPTER_ABI_VERSION;
+            k.frame_token = tok;
+            k.viewport_id = 1;
+            for (int i = 0; i < 4; ++i) k.camera_current[5 * i] = k.camera_previous[5 * i] = 1.0f;
+            k.motion_scale_x = k.motion_scale_y = 1.0f;
+            k.render_rect = {0, 0, kW, kH};
+            k.output_rect = {0, 0, kW, kH};
+            core.constants(&k, &k);
+            WgFgPresentDesc d = {};
+            d.struct_size = sizeof(d);
+            d.abi_version = WG_FG_ADAPTER_ABI_VERSION;
+            d.owner = WG_FG_OWNER_SWAPCHAIN_WRAPPER;
+            d.viewport_id = 1;
+            d.frame_token = tok;
+            d.swapchain_id = chain->Id();
+            d.swapchain_epoch = chain->Epoch();
+            d.window_id = 0x77;
+            d.luid.low = gpu.desc.AdapterLuid.LowPart;
+            d.luid.high = gpu.desc.AdapterLuid.HighPart;
+            d.backbuffer.resource = bb.Get();
+            d.backbuffer.format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            d.backbuffer.width = kW;
+            d.backbuffer.height = kH;
+            d.backbuffer.frame_token = tok;
+            d.backbuffer.viewport_id = 1;
+            d.backbuffer.rect = {0, 0, kW, kH};
+            bb.Reset();
+            WgFgPresentResult r = {};
+            r.struct_size = sizeof(r);
+            r.abi_version = WG_FG_ADAPTER_ABI_VERSION;
+            FgAsiSessionHost::Route(host.get(), &core, &d, &r);
+            if (FAILED(chain->Present(0, 0))) ++out.present_errors;
+            if (f == steady_from) steady_t0 = std::chrono::steady_clock::now();
+            else if (f > steady_from) ++steady_count;
+        }
+        const auto steady_t1 = std::chrono::steady_clock::now();
+        const double steady_s =
+            std::chrono::duration_cast<std::chrono::microseconds>(steady_t1 - steady_t0).count() / 1e6;
+        if (steady_s > 0.0 && steady_count > 0) out.steady_base_fps = static_cast<double>(steady_count) / steady_s;
+        if (lat) CloseHandle(lat);
+        // Let the last 1-2 in-flight GPU frames finish cleanly before teardown.
+        Sleep(40);
+        pacer.Stop();
+        CHECK(gpu.Wait());
+        const FgAsiSessionStats st = host->Stats();
+        out.session_failures = st.session_failures;
+        chain->Release();
+        CHECK(gpu.Wait());
+        host.reset();
+        const int64_t dbg = gpu.DebugErrors();
+        if (dbg >= 0) CHECK(dbg == 0);
+
+        out.sched = cap.sched;
+        out.sub = cap.sub;
+        out.dropped_late = cap.dropped_late;
+        out.pre_drop = cap.pre_drop;
+        out.post_drop = cap.post_drop;
+        out.real_sub = cap.real_sub;
+        out.latency_cap_ro = cap.latency_cap_ro;
+        out.final_budget_ms = cap.final_budget_ms;
+        if (cap.sched > 0)
+            out.late_drop_pct = 100.0 * static_cast<double>(cap.dropped_late) / static_cast<double>(cap.sched);
+        if (cap.real_sub > 0)
+            out.submitted_mult =
+                static_cast<double>(cap.real_sub + cap.sub) / static_cast<double>(cap.real_sub);
+
+        std::printf("    smoke %-22s: base=%.1f fps | sched=%llu sub=%llu late=%llu (%.2f%%, pre=%llu post=%llu) "
+                    "| real_sub=%llu mult=%.2fx ro_cap=%llu budget=%.1fms\n",
+                    label, out.steady_base_fps, static_cast<unsigned long long>(out.sched),
+                    static_cast<unsigned long long>(out.sub), static_cast<unsigned long long>(out.dropped_late),
+                    out.late_drop_pct, static_cast<unsigned long long>(out.pre_drop),
+                    static_cast<unsigned long long>(out.post_drop), static_cast<unsigned long long>(out.real_sub),
+                    out.submitted_mult, static_cast<unsigned long long>(out.latency_cap_ro), out.final_budget_ms);
+        return out;
+    };
+
+    // 1. 2x (N=1) GPU-bound at 10.5 ms (~95 fps) with 8 slow 25 ms startup frames (L=1).
+    const SmokeRunResult off_105 = run_leg("off-10.5ms", false, 1u, 0, 0, 70, 10500, 3500);
+    const SmokeRunResult fg_2x = run_leg("2x-10.5ms-slowstart", true, 1u, 8, 25000, 240, 10500, 3500);
+    CHECK(off_105.present_errors == 0 && off_105.steady_base_fps >= 70.0);
+    CHECK(fg_2x.present_errors == 0 && fg_2x.session_failures == 0);
+    CHECK(fg_2x.latency_cap_ro <= 2);
+    CHECK(fg_2x.sched >= 200);
+    CHECK(fg_2x.late_drop_pct < 2.0);
+    CHECK(fg_2x.steady_base_fps >= off_105.steady_base_fps * 0.85);
+    CHECK(fg_2x.submitted_mult >= 1.75);
+
+    // 2. 4x (N=3) GPU-bound at 12.5 ms (~80 fps -> 320 Hz <= 349.4 Hz VRR ceiling) with slow startup frames (L=1).
+    const SmokeRunResult off_125 = run_leg("off-12.5ms", false, 3u, 0, 0, 70, 12500, 3500);
+    const SmokeRunResult fg_4x = run_leg("4x-12.5ms-slowstart", true, 3u, 8, 25000, 220, 12500, 3500);
+    CHECK(off_125.present_errors == 0 && off_125.steady_base_fps >= 60.0);
+    CHECK(fg_4x.present_errors == 0 && fg_4x.session_failures == 0);
+    CHECK(fg_4x.latency_cap_ro <= 2);
+    CHECK(fg_4x.sched >= 500);
+    CHECK(fg_4x.late_drop_pct < 5.0);
+    CHECK(fg_4x.steady_base_fps >= off_125.steady_base_fps * 0.85);
+    CHECK(fg_4x.submitted_mult >= 3.20);
+
+    // 3. 6x (N=5) GPU-bound at 18.5 ms (~54 fps -> 324 Hz <= 349.4 Hz VRR ceiling) with slow startup frames (L=1).
+    const SmokeRunResult off_185 = run_leg("off-18.5ms", false, 5u, 0, 0, 50, 18500, 3500);
+    const SmokeRunResult fg_6x = run_leg("6x-18.5ms-slowstart", true, 5u, 8, 25000, 160, 18500, 3500);
+    CHECK(off_185.present_errors == 0 && off_185.steady_base_fps >= 42.0);
+    CHECK(fg_6x.present_errors == 0 && fg_6x.session_failures == 0);
+    CHECK(fg_6x.latency_cap_ro <= 2);
+    CHECK(fg_6x.sched >= 600);
+    CHECK(fg_6x.late_drop_pct < 5.0);
+    CHECK(fg_6x.steady_base_fps >= off_185.steady_base_fps * 0.85);
+    CHECK(fg_6x.submitted_mult >= 4.80);
+}
+
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     bool gpu = false;
@@ -1892,6 +2357,10 @@ int main(int argc, char** argv) {
                     g_case = "gpu-rc2-latency-and-pacing";
                     TestRc2LatencyAndPacing(g, dxil, only.empty() || only == "latency",
                                            only.empty() || only == "cadence");
+                }
+                if (preset < 0 && (only.empty() || only == "smoke")) {
+                    g_case = "gpu-smoke-pacing";
+                    TestSmokeGpuBoundPacing(g, dxil);
                 }
             }
         }
