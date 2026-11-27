@@ -151,7 +151,8 @@ public:
     // Optional upper cap on scheduled generated count when producer misses persist.
     // 0 clears the override.
     void SetMaxGeneratedCap(std::uint32_t cap);
-    void SetOverflowReady(bool ready) { overflow_ready_ = ready; }
+    void SetOverflowReady(bool ready, std::uint32_t limit = 0) { overflow_ready_ = ready; overflow_cap_ = limit; }
+    std::uint32_t PlanningCount() const { return last_requested_; }
     void SetConsumedLeadProtection(bool active) { protect_consumed_lead_ = active; }
     std::uint32_t MaxGeneratedCap() const { return max_generated_cap_; }
 
@@ -179,6 +180,7 @@ private:
     std::uint32_t fill_count_ = 0;
     std::uint32_t fill_overrun_ = 0;
     bool overflow_ready_ = false;
+    std::uint32_t overflow_cap_ = 0;
     bool epoch_started_ = false;
     bool lost_ = false;
     std::uint64_t epoch_ = 0;

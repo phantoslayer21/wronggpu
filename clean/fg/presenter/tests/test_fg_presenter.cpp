@@ -1438,6 +1438,33 @@ void TestTearingSchedulerFitsPresenterThroughput() {
     }
 }
 
+void TestOverflowRequestPlansTheFittingCountWithoutDeliveryCredit() {
+    g_case = "oversized request plans the same fitting count";
+    auto cfg = DefaultScheduler();
+    cfg.adaptive_count = true;
+    cfg.guard_overflow_delivery = true;
+    cfg.display.min_interval = FgVrrMinInterval(27778, false);
+    cfg.display.margin = 200;
+    cfg.display.hysteresis = 400;
+    cfg.display.reenter_intervals = 3;
+    cfg.estimator.window = cfg.estimator.min_samples = 1;
+    cfg.estimator.outlier_percent = 200;
+    FgTargetScheduler fitting(cfg), oversized(cfg);
+    CHECK(fitting.BeginEpoch(1) == FgStatus::Ok);
+    CHECK(oversized.BeginEpoch(1) == FgStatus::Ok);
+    FgTicks arrival = kSecond;
+    for (uint64_t i = 1; i <= 160; ++i) {
+        arrival += i <= 12 || (i >= 65 && i <= 74) ? 80000 : 133000;
+        FgIntervalPlan a, b;
+        CHECK(fitting.Commit({1, i, arrival, 3}, &a) == FgStatus::Ok);
+        CHECK(oversized.Commit({1, i, arrival, 5}, &b) == FgStatus::Ok);
+        CHECK(b.requested_count == 5);
+        CHECK(a.generated_count == b.generated_count && a.period == b.period && a.t_base == b.t_base);
+        CHECK(b.fill_period == 0);
+        if (i == 60 || i == 160) CHECK(b.generated_count == 3);
+    }
+}
+
 void TestOverflowFillPacesOnlyTheNextGameRelease() {
     g_case = "bounded overflow fill";
     auto cfg = DefaultScheduler();
@@ -2059,6 +2086,7 @@ int main() {
     TestTearingAtFiveImagesPerInterval();
     TestTearingPhysicalGapAfterSlowCall();
     TestTearingSchedulerFitsPresenterThroughput();
+    TestOverflowRequestPlansTheFittingCountWithoutDeliveryCredit();
     TestOverflowFillPacesOnlyTheNextGameRelease();
     TestFixedGridCountCandidateRestartsItsStreak();
     TestSchedulerReportsReanchorCauses();
