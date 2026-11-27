@@ -2,6 +2,8 @@
 // DXGI flip-discard presenter: see fg_dxgi_presenter.h.
 #include "fg_dxgi_presenter.h"
 
+#include <cassert>
+
 #include <cstddef>
 
 namespace wgfg {
@@ -655,6 +657,7 @@ bool FgDxgiPresenter::PresentHead(HANDLE stop) {
     const bool tearing = desc_.pacing == FgDxgiPacing::Tearing;
     if (SUCCEEDED(hr) && tearing && min_present_at != 0) {
         // The lease is taken at most timer_lead before issue. Copy preparation can overlap that wait.
+        assert(min_present_at - FgInterruptNow() <= desc_.timer_lead);
         while (FgInterruptNow() < min_present_at) YieldProcessor();
     }
     FgTicks present_started = 0;
@@ -719,9 +722,7 @@ void FgDxgiPresenter::Run(HANDLE stop, HANDLE wake) {
             Planned head;
             if (engine_.State() == FgPresenterState::Attached && PlanHeadLocked(now, &head)) {
                 // head.issue_at already includes both spacing floors.
-                const FgTicks target_at = head.issue_at > desc_.timer_lead ? head.issue_at - desc_.timer_lead : 0;
-                const FgTicks wake_at =
-                    desc_.pacing == FgDxgiPacing::Tearing && last_present_done_ > target_at ? last_present_done_ : target_at;
+                const FgTicks wake_at = head.issue_at > desc_.timer_lead ? head.issue_at - desc_.timer_lead : 0;
                 const auto next_allocator = ring_ % allocators_.size();
                 if (copy_fence_->GetCompletedValue() < allocator_value_[next_allocator]) {
                     timer_.Cancel();

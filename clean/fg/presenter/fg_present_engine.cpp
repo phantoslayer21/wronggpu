@@ -378,6 +378,7 @@ FgStatus FgPresentEngine::BeginInterval(const FgIntervalPlan& plan, FgTicks now,
         ++stats_.generated_reserved;
     }
     if (reserved_generated == 0) {
+        // A mixed late/pressure interval had an on-time image denied a slot and is attributed to pressure.
         const FgRealOnlyReason why = pressure ? FgRealOnlyReason::Pressure : FgRealOnlyReason::Late;
         ++stats_.real_only_intervals[static_cast<std::uint32_t>(why)];
     }
