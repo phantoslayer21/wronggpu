@@ -1465,7 +1465,7 @@ void TestOverflowFillPacesOnlyTheNextGameRelease() {
         return plan;
     };
     for (int i = 0; i < 16; ++i) CHECK(step(80000, 5).fill_release_wait == 0);
-    scheduler.SetOverflowReady(true);
+    scheduler.SetOverflowReady(true, true);
     for (int i = 0; i < 30; ++i) {
         const auto plan = step(80000, 5);
         if (i >= 10) {
@@ -1479,9 +1479,9 @@ void TestOverflowFillPacesOnlyTheNextGameRelease() {
     for (int i = 0; i < 4; ++i) CHECK(step(80000, 5).fill_release_wait == 0);  // >16% exit, four in a row
     for (int i = 0; i < 20; ++i) step(80000, 5);
     CHECK(step(80000, 5).fill_period == 86799);
-    scheduler.SetOverflowReady(false);
+    scheduler.SetOverflowReady(true, false);
     CHECK(step(80000, 5).fill_release_wait == 0);
-    scheduler.SetOverflowReady(true);
+    scheduler.SetOverflowReady(true, true);
     CHECK(step(76000, 5).fill_release_wait == 0);            // between the 12% and 16% limits
     CHECK(step(80000, 4).fill_period == 0);                   // requested multiplier changed
     for (int i = 0; i < 20; ++i) step(80000, 4);
