@@ -156,11 +156,18 @@ std::uint64_t FgPresentEngine::SlotPresentId(std::uint32_t slot) const {
     return slot < slots_.size() && slots_[slot].state == FgEngineSlotState::Queued ? slots_[slot].present_id : 0;
 }
 
+FgTicks FgPresentEngine::PendingDeadline(const Slot& s) const {
+    if (config_.pending_late_tolerance == 0) return s.deadline;
+    const FgTicks cap = (std::numeric_limits<FgTicks>::max)() - config_.pending_late_tolerance;
+    return (s.target > cap ? cap : s.target) + config_.pending_late_tolerance;
+}
+
 FgTicks FgPresentEngine::NextDeadline() const {
     FgTicks next = 0;
     for (const std::uint32_t p : pending_) {
         const Slot& s = slots_[p];
-        if (!s.real && (next == 0 || s.deadline < next)) next = s.deadline;
+        const FgTicks deadline = PendingDeadline(s);
+        if (!s.real && (next == 0 || deadline < next)) next = deadline;
     }
     return next;
 }
@@ -173,12 +180,12 @@ void FgPresentEngine::RetireReal(Slot& s, bool displayed) {
 }
 
 void FgPresentEngine::EmitTrace(const Slot& s, std::uint8_t event_kind, FgTicks ts) const {
-    if (trace_fn_) trace_fn_(trace_ctx_, s.interval_id, s.index, s.real, event_kind, ts, s.target);
+    if (trace_fn_) trace_fn_(trace_ctx_, s.interval_id, s.frame_id, s.index, s.real, event_kind, ts, s.target);
 }
 
 void FgPresentEngine::Drop(std::uint32_t slot, FgDropReason reason, bool hold_lease) {
     Slot& s = slots_[slot];
-    const bool post_queue = s.state == FgEngineSlotState::Pending || s.state == FgEngineSlotState::Queued;
+    const bool post_queue = s.state == FgEngineSlotState::Queued;
     switch (reason) {
         case FgDropReason::Late:
             ++stats_.dropped_late;
@@ -319,6 +326,7 @@ FgStatus FgPresentEngine::BeginInterval(const FgIntervalPlan& plan, FgTicks now,
         // admitted at commit, but the deadline may have passed since: never reserve a slot that cannot be shown
         if (!t.admitted || now > t.deadline) {
             ps.refused = FgDropReason::Late;
+            if (trace_fn_) trace_fn_(trace_ctx_, plan.interval_id, plan.real_frame_id, t.index, false, 3u, now, t.target);
             ++stats_.dropped_late;
             ++stats_.generated_dropped_pre_queue;
             continue;
@@ -328,6 +336,7 @@ FgStatus FgPresentEngine::BeginInterval(const FgIntervalPlan& plan, FgTicks now,
                           : -1;
         if (g < 0) {
             ps.refused = FgDropReason::Pressure;
+            if (trace_fn_) trace_fn_(trace_ctx_, plan.interval_id, plan.real_frame_id, t.index, false, 3u, now, t.target);
             ++stats_.dropped_pressure;
             ++stats_.generated_dropped_pre_queue;
             continue;
@@ -466,10 +475,14 @@ std::uint32_t FgPresentEngine::CancelSuffix(std::uint64_t from_id, bool all_stal
         } else if (all_stale || s.interval_id == revoked_interval) {
             if (reason == FgDropReason::Revoked) ++stats_.revoked;
             s.state = FgEngineSlotState::Retired;
+            ++stats_.generated_dropped_post_queue;
+            EmitTrace(s, 4u, now);
         } else if (now <= s.deadline) {
             Queue(slot, true);
         } else {
             s.state = FgEngineSlotState::Retired;
+            ++stats_.generated_dropped_post_queue;
+            EmitTrace(s, 4u, now);
         }
     }
     return static_cast<std::uint32_t>(scratch_.size());
@@ -552,7 +565,7 @@ void FgPresentEngine::Pump(FgTicks now) {
             Queue(slot, false);
             continue;
         }
-        if (now > s.deadline) {
+        if (now > PendingDeadline(s)) {
             Drop(slot, FgDropReason::Late, true);
             continue;
         }
@@ -565,14 +578,34 @@ void FgPresentEngine::Pump(FgTicks now) {
 bool FgPresentEngine::OnPresentSubmitted(std::uint64_t present_id, FgTicks when) {
     const int qi = FindQueued(present_id);
     if (qi < 0) return false;
-    const Slot& s = slots_[queued_[static_cast<std::size_t>(qi)]];
-    if (s.real) ++stats_.real_submitted;
-    else ++stats_.generated_submitted;
-    EmitTrace(s, 1u, when);
+    CountSubmission(slots_[queued_[static_cast<std::size_t>(qi)]], when);
     return true;
 }
 
-bool FgPresentEngine::OnPresentDisplayed(std::uint64_t present_id, FgTicks actual) {
+void FgPresentEngine::CountSubmission(const Slot& s, FgTicks when) {
+    if (s.real) ++stats_.real_submitted;
+    else ++stats_.generated_submitted;
+    EmitTrace(s, 1u, when);
+}
+
+bool FgPresentEngine::LeasePresent(std::uint32_t slot, std::uint64_t present_id) {
+    if (SlotPresentId(slot) != present_id || present_id == 0) return false;
+    RemoveQueued(slot);
+    slots_[slot].state = FgEngineSlotState::Presenting;
+    EmitTrace(slots_[slot], 7u, 0);
+    return true;
+}
+
+void FgPresentEngine::FinishLeasedPresent(std::uint32_t slot, FgTicks submitted, FgTicks estimate, bool presented) {
+    Slot& s = slots_[slot];
+    if (s.state != FgEngineSlotState::Presenting) return;
+    s.state = FgEngineSlotState::Retired;
+    if (submitted != 0) CountSubmission(s, submitted);
+    if (presented) CountDisplay(s, estimate, false);
+    // OnSlotReleased retires the slot once the GPU copy has finished.
+}
+
+bool FgPresentEngine::OnPresentDisplayed(std::uint64_t present_id, FgTicks actual, bool measured) {
     const int qi = FindQueued(present_id);
     if (qi < 0) return false;
     const std::uint32_t slot = queued_[static_cast<std::size_t>(qi)];
@@ -582,16 +615,22 @@ bool FgPresentEngine::OnPresentDisplayed(std::uint64_t present_id, FgTicks actua
     Slot& s = slots_[slot];
     s.state = FgEngineSlotState::Displayed;
     displayed_ = static_cast<int>(slot);
+    CountDisplay(s, actual, measured);
+    RetireReal(s, true);
+    return true;
+}
+
+void FgPresentEngine::CountDisplay(const Slot& s, FgTicks actual, bool measured) {
     if (s.real) ++stats_.displayed_real;
     else ++stats_.displayed_generated;
+    have_estimated_display_ = have_estimated_display_ || !measured;
+    stats_.display_time_measured = !have_estimated_display_;
     if (actual - s.target > stats_.max_slip) stats_.max_slip = actual - s.target;
     if (config_.refresh_period > 0 && have_display_ && actual - last_display_ < config_.refresh_period / 2)
         ++stats_.display_collisions;
     have_display_ = true;
     last_display_ = actual;
-    EmitTrace(s, 2u, actual);
-    RetireReal(s, true);
-    return true;
+    EmitTrace(s, measured ? 2u : 6u, actual);
 }
 
 bool FgPresentEngine::OnPresentSkipped(std::uint64_t present_id) {
@@ -602,6 +641,8 @@ bool FgPresentEngine::OnPresentSkipped(std::uint64_t present_id) {
     Slot& s = slots_[slot];
     s.state = FgEngineSlotState::Retired;
     ++stats_.display_skipped;
+    if (s.real) ++stats_.display_skipped_real;
+    else ++stats_.display_skipped_generated;
     EmitTrace(s, 5u, 0);
     RetireReal(s, false);
     return true;

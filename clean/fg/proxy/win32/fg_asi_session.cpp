@@ -12,8 +12,10 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <new>
+#include <thread>
 
 #include "../../presenter/fg_dxgi_presenter.h"
 #include "../../presenter/fg_win_common.h"
@@ -56,12 +58,6 @@ uint32_t PresenterFreeSlots(const wgfg::IFgPresenter* p) {
     if (const auto* d = dynamic_cast<const wgfg::FgDxgiPresenter*>(p)) return d->FreeSlots();
     if (const auto* c = dynamic_cast<const wgfg::FgWinCompPresenter*>(p)) return c->FreeSlots();
     return ~0u;
-}
-
-DWORD PresenterWorkerTid(const wgfg::IFgPresenter* p) {
-    if (const auto* d = dynamic_cast<const wgfg::FgDxgiPresenter*>(p)) return d->WorkerThreadId();
-    if (const auto* c = dynamic_cast<const wgfg::FgWinCompPresenter*>(p)) return c->WorkerThreadId();
-    return 0;
 }
 
 // Queries the active monitor's exact display mode refresh period (in 100 ns ticks) and Hz via EnumDisplaySettingsExW.
@@ -214,25 +210,25 @@ struct FgAsiSessionHost::Impl {
     std::vector<ComPtr<ID3D12Resource>> facade;
     std::vector<uint64_t> facade_game_fence;
     std::vector<uint64_t> facade_copy_fence;
+    std::vector<uint64_t> facade_compute_fence;
     UINT facade_index = 0;
     DXGI_FORMAT chain_format = DXGI_FORMAT_UNKNOWN;
     uint32_t color_space = WG_FG_CS_SDR;
     UINT width = 0, height = 0;
 
-    // A2 / O-A1: game frame-latency credit contract. Leaf lock `credit_mu` ONLY (never acquires Impl::mu or presenter
-    // mutex, preventing any lock-order inversion when the presenter worker retires a real frame).
-    // The `latency_sem` handle persists across resizes / fullscreen / session recreations so cached handles stay valid.
+    // The waitable paces facade hand-offs. Admission separately bounds intervals waiting for their first
+    // native submission. The presenter callbacks take only the leaf admission lock.
     mutable std::mutex credit_mu;
     std::condition_variable credit_cv;
     HANDLE latency_sem = nullptr;
     UINT latency_limit = 1;
-    bool waitable_handed_out = false;
-    std::vector<uint64_t> active_real_frames;
-    int32_t in_flight_real = 0;
-    int32_t credits_to_absorb = 0;
+    std::vector<uint64_t> pending_admissions;
     uint64_t real_retires = 0;
     uint64_t credit_waits = 0;
-    bool skip_next_copy_credit = false;
+    uint64_t admission_timeouts = 0;
+    bool admission_timeout_logged = false;
+    bool pending_copy = false;
+    bool pending_copy_latency = false;
 
     // copy path (facade -> real back buffer)
     ComPtr<ID3D12CommandAllocator> alloc[kCopyRing];
@@ -248,7 +244,7 @@ struct FgAsiSessionHost::Impl {
     std::unique_ptr<wgfg::FgWinPresenterSource> win_source;
     std::unique_ptr<wgfg::FgExecutorPresenterSource> exec_source;
     std::unique_ptr<wgfg::FgSession> session;
-    DWORD registered_worker_tid = 0;
+    bool session_draining = false;
     bool handled = false;  // the current interval was presented by the session
     uint64_t last_values[2] = {};  // N-B3: aligned to 2-interval executor pipeline bound
     FgAsiSessionStats stats;
@@ -299,17 +295,27 @@ struct FgAsiSessionHost::Impl {
         wgfg::FgTicks max_slip = 0;
         uint32_t drops_pre = 0;
         uint32_t drops_post = 0;
-        uint32_t skips = 0;
+        uint32_t skips_real = 0, skips_generated = 0;
+        bool display_estimate = false;
     };
+    IntervalTrace next_trace;
     mutable std::mutex trace_mu;
     IntervalTrace trace_ring[kTraceRingSize] = {};
     uint32_t trace_head = 0;
     uint32_t trace_count = 0;
     uint32_t trace_since_summary = 0;
-    wgfg::FgTicks prev_arrival = 0;
     bool trace_csv_enabled = false;
     std::string trace_csv_path;
-    bool trace_csv_header_written = false;
+    struct TraceJob {
+        std::vector<IntervalTrace> rows;
+        std::string summary_tag;
+        wgfg::FgTicks budget = 0;
+    };
+    std::condition_variable trace_cv;
+    std::deque<TraceJob> trace_jobs;
+    std::vector<IntervalTrace> trace_evicted;
+    std::thread trace_worker;
+    bool trace_stop = false;
 
     void InitTraceCsv() {
         char env[4] = {};
@@ -325,42 +331,109 @@ struct FgAsiSessionHost::Impl {
         }
     }
 
-    void AppendTraceCsv(const IntervalTrace& tr) {
-        if (!trace_csv_enabled || trace_csv_path.empty()) return;
-        FILE* fp = nullptr;
-        if (fopen_s(&fp, trace_csv_path.c_str(), "ab") != 0 || !fp) return;
-        if (!trace_csv_header_written) {
-            trace_csv_header_written = true;
-            std::fprintf(fp,
-                         "frame_token,interval_id,req_n,sched_n,in_flight,free_slots,t_arrival,wait_us,record_us,"
-                         "first_gen_ready_us,first_gen_sub_us,real_ready_us,real_sub_us,real_disp_us,max_slip_us,"
-                         "drops_pre,drops_post,skips\n");
+    void StartTraceWorker() {
+        try {
+            trace_worker = std::thread([this]() { RunTraceWorker(); });
+        } catch (const std::system_error&) {
+            Log("fg host: trace worker could not start");
         }
+    }
+
+    void StopTraceWorker() {
+        {
+            std::lock_guard<std::mutex> lock(trace_mu);
+            trace_stop = true;
+        }
+        trace_cv.notify_one();
+        if (trace_worker.joinable()) trace_worker.join();
+    }
+
+    void RunTraceWorker() {
+        FILE* csv = nullptr;
+        for (;;) {
+            TraceJob job;
+            {
+                std::unique_lock<std::mutex> lock(trace_mu);
+                trace_cv.wait(lock, [this]() { return trace_stop || !trace_jobs.empty(); });
+                if (trace_jobs.empty()) break;
+                job = std::move(trace_jobs.front());
+                trace_jobs.pop_front();
+            }
+            if (!job.summary_tag.empty()) {
+                LogTraceSummary(job.summary_tag.c_str(), job.budget, job.rows);
+                continue;
+            }
+            if (!csv && fopen_s(&csv, trace_csv_path.c_str(), "ab") == 0 && csv) {
+                if (std::fseek(csv, 0, SEEK_END) == 0 && std::ftell(csv) == 0)
+                    std::fprintf(csv,
+                                 "frame_token,interval_id,req_n,sched_n,in_flight,free_slots,t_arrival,wait_us,"
+                                 "record_us,first_gen_ready_us,first_gen_sub_us,real_ready_us,real_sub_us,"
+                                 "real_disp_us,max_slip_us,drops_pre,drops_post,skips_real,skips_generated,"
+                                 "display_time\n");
+            }
+            if (csv) {
+                for (const IntervalTrace& row : job.rows) AppendTraceCsv(csv, row);
+                std::fflush(csv);
+            }
+        }
+        if (csv) std::fclose(csv);
+    }
+
+    static void AppendTraceCsv(FILE* fp, const IntervalTrace& tr) {
         auto us_from = [&](wgfg::FgTicks ts) -> long long {
             return ts > 0 && tr.t_arrival > 0 ? static_cast<long long>((ts - tr.t_arrival) / 10) : -1ll;
         };
-        std::fprintf(fp, "%llu,%llu,%u,%u,%u,%u,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%u,%u,%u\n",
+        std::fprintf(fp, "%llu,%llu,%u,%u,%u,%u,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%u,%u,%u,%u,%s\n",
                      static_cast<unsigned long long>(tr.frame_token),
                      static_cast<unsigned long long>(tr.interval_id), tr.requested_n, tr.scheduled_n, tr.in_flight,
                      tr.free_slots, static_cast<long long>(tr.t_arrival), us_from(tr.t_after_wait),
                      us_from(tr.t_after_record), us_from(tr.t_first_gen_ready), us_from(tr.t_first_gen_submit),
                      us_from(tr.t_real_ready), us_from(tr.t_real_submit), us_from(tr.t_real_display),
-                     static_cast<long long>(tr.max_slip / 10), tr.drops_pre, tr.drops_post, tr.skips);
-        std::fclose(fp);
+                     static_cast<long long>(tr.max_slip / 10), tr.drops_pre, tr.drops_post, tr.skips_real,
+                     tr.skips_generated, tr.display_estimate ? "submit-estimate" :
+                         (tr.t_real_display > 0 ? "measured" : "unobserved"));
     }
 
     void RecordTraceInterval(const IntervalTrace& tr) {
         std::lock_guard<std::mutex> lock(trace_mu);
-        if (trace_count == kTraceRingSize) AppendTraceCsv(trace_ring[trace_head]);
+        if (trace_count == kTraceRingSize && trace_csv_enabled && trace_worker.joinable()) {
+            trace_evicted.push_back(trace_ring[trace_head]);
+            if (trace_evicted.size() >= 64) {
+                trace_jobs.push_back({std::move(trace_evicted), {}, 0});
+                trace_evicted.clear();
+                trace_cv.notify_one();
+            }
+        }
         trace_ring[trace_head] = tr;
         trace_head = (trace_head + 1) % kTraceRingSize;
         if (trace_count < kTraceRingSize) ++trace_count;
     }
 
-    static void OnTraceThunk(void* ctx, uint64_t interval_id, uint32_t index, bool real, uint8_t kind,
+    static void OnPlanThunk(void* ctx, const wgfg::FgIntervalPlan& plan) {
+        Impl& m = *static_cast<Impl*>(ctx);
+        IntervalTrace tr = m.next_trace;
+        tr.frame_token = plan.real_frame_id;
+        tr.interval_id = plan.interval_id;
+        tr.requested_n = plan.requested_count;
+        tr.scheduled_n = plan.generated_count;
+        tr.in_flight = m.st_in_flight_real.load();
+        m.RecordTraceInterval(tr);
+    }
+
+    void FinishTraceInterval(uint64_t interval_id, uint32_t requested, wgfg::FgTicks record) {
+        std::lock_guard<std::mutex> lock(trace_mu);
+        const uint32_t index = (trace_head + kTraceRingSize - 1) % kTraceRingSize;
+        if (trace_count != 0 && trace_ring[index].interval_id == interval_id) {
+            trace_ring[index].requested_n = requested;
+            trace_ring[index].t_after_record = record;
+        }
+    }
+
+    static void OnTraceThunk(void* ctx, uint64_t interval_id, uint64_t frame_id, uint32_t index, bool real, uint8_t kind,
                              wgfg::FgTicks ts, wgfg::FgTicks target) {
         Impl* m = static_cast<Impl*>(ctx);
         if (!m || interval_id == 0) return;
+        if (kind == 1 || kind == 7) m->CancelAdmission(frame_id);  // first native submission, whether generated or real
         const wgfg::FgTicks now = ts != 0 ? ts : wgfg::FgInterruptNow();
         std::lock_guard<std::mutex> lock(m->trace_mu);
         // Linear scan of recent entries (at most 32 back — intervals complete in FIFO order).
@@ -378,29 +451,45 @@ struct FgAsiSessionHost::Impl {
                     if (real) tr.t_real_submit = now;
                     else if (index == 1 && tr.t_first_gen_submit == 0) tr.t_first_gen_submit = now;
                     break;
-                case 2:  // displayed (or DXGI submit estimate)
+                case 2:  // measured display feedback
+                case 6:  // submission estimate
+                    if (kind == 6) tr.display_estimate = true;
                     if (real) tr.t_real_display = now;
                     if (target > 0 && now - target > tr.max_slip) tr.max_slip = now - target;
                     break;
                 case 3: ++tr.drops_pre; break;
                 case 4: ++tr.drops_post; break;
-                case 5: ++tr.skips; break;
+                case 5: (real ? tr.skips_real : tr.skips_generated)++; break;
                 default: break;
             }
             break;
         }
     }
 
-    void LogTraceSummary(const char* tag) {
-        std::vector<IntervalTrace> snap;
-        {
-            std::lock_guard<std::mutex> lock(trace_mu);
-            if (trace_count == 0) return;
+    void QueueTraceSummary(const char* tag, bool closing) {
+        std::lock_guard<std::mutex> lock(trace_mu);
+        if (trace_count != 0 && trace_worker.joinable()) {
+            std::vector<IntervalTrace> snap;
             snap.reserve(trace_count);
             const uint32_t start = trace_count == kTraceRingSize ? trace_head : 0;
             for (uint32_t i = 0; i < trace_count; ++i)
                 snap.push_back(trace_ring[(start + i) % kTraceRingSize]);
+            if (closing && trace_csv_enabled) {
+                trace_evicted.insert(trace_evicted.end(), snap.begin(), snap.end());
+                trace_jobs.push_back({std::move(trace_evicted), {}, 0});
+                trace_evicted.clear();
+            }
+            trace_jobs.push_back({std::move(snap), tag, budget});
+            trace_cv.notify_one();
         }
+        if (closing) {
+            trace_count = 0;
+            trace_head = 0;
+            trace_since_summary = 0;
+        }
+    }
+
+    void LogTraceSummary(const char* tag, wgfg::FgTicks summary_budget, const std::vector<IntervalTrace>& snap) {
         std::vector<int64_t> base_dt, wait_us, rec_us, gen_rdy_us, real_rdy_us, slip_us;
         uint32_t max_in_flight = 0;
         for (size_t i = 0; i < snap.size(); ++i) {
@@ -434,85 +523,72 @@ struct FgAsiSessionHost::Impl {
                       static_cast<long long>(Percentile(real_rdy_us, 0.50)),
                       static_cast<long long>(Percentile(slip_us, 0.50)),
                       static_cast<long long>(Percentile(slip_us, 0.95)),
-                      static_cast<long long>(Percentile(slip_us, 1.00)), max_in_flight, budget / 10000.0);
+                      static_cast<long long>(Percentile(slip_us, 1.00)), max_in_flight, summary_budget / 10000.0);
         Log(buf);
     }
 
-    // ---- A2 / O-A1 Credit contract helpers (leaf lock `credit_mu` ONLY) ----
     void EnsureLatencySemLocked() {
-        if (!latency_sem) {
-            const LONG initial = static_cast<LONG>(latency_limit) - in_flight_real;
-            latency_sem = CreateSemaphoreW(nullptr, initial > 0 ? initial : 0, 16, nullptr);
-        }
+        if (!latency_sem) latency_sem = CreateSemaphoreW(nullptr, static_cast<LONG>(latency_limit), 16, nullptr);
     }
 
-    void ReturnOneCreditLocked() {
-        if (credits_to_absorb > 0) {
-            --credits_to_absorb;
-        } else if (latency_sem && waitable_handed_out) {
-            LONG prev = 0;
-            if (ReleaseSemaphore(latency_sem, 1, &prev) && prev + 1 > static_cast<LONG>(latency_limit)) {
-                // Keep semaphore count capped at latency_limit even if the game requested the waitable handle and
-                // chose not to wait on it.
-                WaitForSingleObject(latency_sem, 0);
-            }
-        }
+    // Drain and restore within the configured limit. Release-then-trim exposes an extra token to a concurrent waiter.
+    void RefillWaitableLocked(bool top_up) {
+        if (!latency_sem) return;
+        LONG available = 0;
+        while (WaitForSingleObject(latency_sem, 0) == WAIT_OBJECT_0) ++available;
+        const LONG limit = static_cast<LONG>(latency_limit);
+        const LONG tokens = top_up ? limit : std::min(limit, available + 1);
+        if (tokens > 0) ReleaseSemaphore(latency_sem, tokens, nullptr);
+    }
+
+    void ReturnFacadeCredit() {
+        std::lock_guard<std::mutex> lock(credit_mu);
+        RefillWaitableLocked(false);
+    }
+
+    void EndAdmissionLocked(uint64_t frame_id) {
+        const auto it = std::find(pending_admissions.begin(), pending_admissions.end(), frame_id);
+        if (it == pending_admissions.end()) return;
+        pending_admissions.erase(it);
+        st_in_flight_real.store(static_cast<uint32_t>(pending_admissions.size()));
         credit_cv.notify_all();
     }
 
     static void OnRealRetireThunk(void* ctx, uint64_t frame_id, uint64_t, bool) {
-        Impl* m = static_cast<Impl*>(ctx);
-        if (!m) return;
-        std::lock_guard<std::mutex> lock(m->credit_mu);
-        auto it = std::find(m->active_real_frames.begin(), m->active_real_frames.end(), frame_id);
-        if (it == m->active_real_frames.end()) return;
-        m->active_real_frames.erase(it);
-        m->in_flight_real = static_cast<int32_t>(m->active_real_frames.size());
-        ++m->real_retires;
-        m->st_in_flight_real.store(static_cast<uint32_t>(m->in_flight_real));
-        m->ReturnOneCreditLocked();
+        Impl& m = *static_cast<Impl*>(ctx);
+        std::lock_guard<std::mutex> lock(m.credit_mu);
+        ++m.real_retires;
+        m.EndAdmissionLocked(frame_id);  // cancelled before submission, or already started
     }
 
-    void BeginRealCredit(uint64_t frame_id) {
+    void CancelAdmission(uint64_t frame_id) {
         std::lock_guard<std::mutex> lock(credit_mu);
-        active_real_frames.push_back(frame_id);
-        in_flight_real = static_cast<int32_t>(active_real_frames.size());
-        st_in_flight_real.store(static_cast<uint32_t>(in_flight_real));
+        EndAdmissionLocked(frame_id);
     }
 
-    // Returns true if the credit was still active and cancelled before retirement; false if the presenter already
-    // retired this frame_id (and thus already returned its semaphore credit).
-    bool CancelRealCredit(uint64_t frame_id) {
+    bool WaitForCreditRoom(uint32_t max_ms) {
+        std::unique_lock<std::mutex> lock(credit_mu);
+        const auto has_room = [this]() { return pending_admissions.size() < latency_limit; };
+        if (has_room()) return true;
+        ++credit_waits;
+        if (credit_cv.wait_for(lock, std::chrono::milliseconds(max_ms), has_room)) return true;
+        ++admission_timeouts;
+        return false;
+    }
+
+    bool BeginAdmission(uint64_t frame_id) {
         std::lock_guard<std::mutex> lock(credit_mu);
-        auto it = std::find(active_real_frames.begin(), active_real_frames.end(), frame_id);
-        if (it == active_real_frames.end()) return false;
-        active_real_frames.erase(it);
-        in_flight_real = static_cast<int32_t>(active_real_frames.size());
-        st_in_flight_real.store(static_cast<uint32_t>(in_flight_real));
-        credit_cv.notify_all();
+        if (pending_admissions.size() >= latency_limit) return false;
+        pending_admissions.push_back(frame_id);
+        st_in_flight_real.store(static_cast<uint32_t>(pending_admissions.size()));
         return true;
     }
 
-    void WaitForCreditRoom(uint32_t max_ms) {
-        std::unique_lock<std::mutex> lock(credit_mu);
-        if (in_flight_real < static_cast<int32_t>(latency_limit)) return;
-        ++credit_waits;
-        credit_cv.wait_for(lock, std::chrono::milliseconds(max_ms),
-                           [this]() { return in_flight_real < static_cast<int32_t>(latency_limit); });
-    }
-
-    void ReturnCopyPresentCredit() {
+    void DrainAdmissions() {
         std::lock_guard<std::mutex> lock(credit_mu);
-        ReturnOneCreditLocked();
-    }
-
-    void DrainInFlightCredits() {
-        std::lock_guard<std::mutex> lock(credit_mu);
-        const size_t n = active_real_frames.size();
-        active_real_frames.clear();
-        in_flight_real = 0;
-        for (size_t i = 0; i < n; ++i) ReturnOneCreditLocked();
+        pending_admissions.clear();
         st_in_flight_real.store(0);
+        credit_cv.notify_all();
     }
 
     void ApplyInnerMaxLatency() {
@@ -586,7 +662,7 @@ struct FgAsiSessionHost::Impl {
     }
 
     void ResetDeviceState(bool reset_failures) {
-        DestroySession("device reset");
+        DestroySession("device reset", true);
         if (exec) {
             exec->WaitIdle(kDestroyWaitMs);
             exec.reset();
@@ -622,11 +698,9 @@ struct FgAsiSessionHost::Impl {
                 CloseHandle(latency_sem);
                 latency_sem = nullptr;
             }
-            waitable_handed_out = false;
-            active_real_frames.clear();
-            in_flight_real = 0;
-            credits_to_absorb = 0;
-            skip_next_copy_credit = false;
+            pending_admissions.clear();
+            pending_copy = false;
+            pending_copy_latency = false;
             st_in_flight_real.store(0);
         }
         {
@@ -739,6 +813,7 @@ struct FgAsiSessionHost::Impl {
         facade.clear();
         facade_game_fence.clear();
         facade_copy_fence.clear();
+        facade_compute_fence.clear();
         facade_index = 0;
         stats.facade = false;
     }
@@ -801,6 +876,7 @@ struct FgAsiSessionHost::Impl {
         }
         facade_game_fence.assign(sd.BufferCount, 0);
         facade_copy_fence.assign(sd.BufferCount, 0);
+        facade_compute_fence.assign(sd.BufferCount, 0);
         facade_index = 0;
         stats.facade = true;
         ApplyInnerMaxLatency();
@@ -869,7 +945,8 @@ struct FgAsiSessionHost::Impl {
         }
         ID3D12CommandList* lists[] = {list.Get()};
         cq->ExecuteCommandLists(1, lists);
-        cq->Signal(copy_fence.Get(), ++copy_value);
+        if (FAILED(cq->Signal(copy_fence.Get(), copy_value + 1))) return false;
+        ++copy_value;
         alloc_value[a] = copy_value;
         const UINT fi = facade_index % static_cast<UINT>(facade.size());
         if (fi < facade_copy_fence.size()) facade_copy_fence[fi] = copy_value;
@@ -877,15 +954,25 @@ struct FgAsiSessionHost::Impl {
         return true;
     }
 
-    // A2: advances to the next facade back buffer and gates its reuse on the GPU fences that last read it (never
-    // releases the frame-latency semaphore here — credits return only when the presenter retires a real frame).
-    void AdvanceFacade() {
-        if (facade.empty()) return;
-        facade_index = (facade_index + 1) % static_cast<UINT>(facade.size());
-        if (facade_index < facade_game_fence.size() && facade_game_fence[facade_index] != 0)
-            WaitGameFence(facade_game_fence[facade_index], kLatencyWaitMs);
-        if (facade_index < facade_copy_fence.size() && facade_copy_fence[facade_index] != 0)
-            WaitCopy(facade_copy_fence[facade_index], kLatencyWaitMs);
+    HRESULT GateFacadeReuse(UINT index) {
+        HRESULT hr = S_OK;
+        if (facade_game_fence[index] != 0)
+            hr = queue->Wait(game_fence.Get(), facade_game_fence[index]);
+        if (SUCCEEDED(hr) && facade_copy_fence[index] != 0)
+            hr = queue->Wait(copy_fence.Get(), facade_copy_fence[index]);
+        if (SUCCEEDED(hr) && exec && !exec->GateGameQueueOnCompute(facade_compute_fence[index])) {
+            const HRESULT lost = device->GetDeviceRemovedReason();
+            return FAILED(lost) ? lost : E_FAIL;
+        }
+        return hr;
+    }
+
+    HRESULT AdvanceFacade() {
+        if (facade.empty()) return S_OK;
+        const UINT next = (facade_index + 1) % static_cast<UINT>(facade.size());
+        const HRESULT hr = GateFacadeReuse(next);
+        if (SUCCEEDED(hr)) facade_index = next;
+        return hr;
     }
 
     // N-B3: at most two intervals of executor work in flight on the compute timeline before the next submission.
@@ -898,16 +985,27 @@ struct FgAsiSessionHost::Impl {
         exec->WaitForComputeValue(want, 50);
     }
 
-    void DestroySession(const char* why) {
+    bool DestroySession(const char* why, bool final_detach = false) {
         if (!session) {
             exec_source.reset();
             win_source.reset();
-            DrainInFlightCredits();
-            return;
+            DrainAdmissions();
+            return true;
         }
-        if (registered_worker_tid != 0) {
-            FgSwapChain::UnregisterWorkerThread(registered_worker_tid);
-            registered_worker_tid = 0;
+        if (core) core->set_executor(nullptr);
+        if (wgfg::IFgPresenter* presenter = session->Presenter()) {
+            if (presenter->State() != wgfg::FgPresenterState::Detached) {
+                wgfg::FgStatus detach = presenter->Detach();
+                const ULONGLONG until = GetTickCount64() + kDestroyWaitMs;
+                while (detach == wgfg::FgStatus::Busy && GetTickCount64() < until) {
+                    Sleep(2);
+                    detach = presenter->Detach();
+                }
+                if (detach == wgfg::FgStatus::Busy && !final_detach) {
+                    session_draining = true;
+                    return false;  // the in-flight worker still owns the chain and its buffers
+                }
+            }
         }
         const wgfg::FgSessionCounters sc = session->Counters();
         if (exec) {
@@ -938,7 +1036,7 @@ struct FgAsiSessionHost::Impl {
             char buf[448];
             std::snprintf(buf, sizeof buf,
                           "fg host: presenter stats: displayed_real=%llu displayed_generated=%llu generated_queued=%llu "
-                          "dropped_late=%llu dropped_pressure=%llu cancelled=%llu display_skipped=%llu "
+                          "dropped_late=%llu dropped_pressure=%llu cancelled=%llu skipped_real=%llu skipped_generated=%llu "
                           "max_slip_us=%lld budget_ms=%.1f | funnel: req=%llu sched=%llu res=%llu sub=%llu "
                           "pre_drop=%llu post_drop=%llu real_sub=%llu | sustained_mult=%.2fx display_time=%s "
                           "worker_reentries=%llu",
@@ -948,7 +1046,8 @@ struct FgAsiSessionHost::Impl {
                           static_cast<unsigned long long>(ps.dropped_late),
                           static_cast<unsigned long long>(ps.dropped_pressure),
                           static_cast<unsigned long long>(ps.cancelled),
-                          static_cast<unsigned long long>(ps.display_skipped),
+                          static_cast<unsigned long long>(ps.display_skipped_real),
+                          static_cast<unsigned long long>(ps.display_skipped_generated),
                           static_cast<long long>(ps.max_slip / 10), budget / 10000.0,
                           static_cast<unsigned long long>(ps.generated_requested),
                           static_cast<unsigned long long>(ps.generated_scheduled),
@@ -969,41 +1068,39 @@ struct FgAsiSessionHost::Impl {
             if (const auto* dx = dynamic_cast<const wgfg::FgDxgiPresenter*>(pr)) {
                 const wgfg::FgDxgiPresenterInfo in = dx->Info();
                 reasons += "; dxgi presents=" + std::to_string(in.presents) +
-                       " latency_timeouts=" + std::to_string(in.latency_timeouts);
+                       " latency_timeouts=" + std::to_string(in.latency_timeouts) +
+                       " occlusion_retired_real=" + std::to_string(in.occlusion_retired_real);
             }
-            uint64_t ret = 0, cw = 0;
+            uint64_t ret = 0, cw = 0, timeouts = 0;
             UINT lim = 0;
             {
                 std::lock_guard<std::mutex> clock(credit_mu);
                 ret = real_retires;
                 cw = credit_waits;
+                timeouts = admission_timeouts;
                 lim = latency_limit;
             }
             reasons += "; back-pressure waits=" + std::to_string(back_pressure_waits) +
                        " credit_waits=" + std::to_string(cw) + " real_retires=" + std::to_string(ret) +
-                       " latency_limit=" + std::to_string(lim);
+                       " admission_timeouts=" + std::to_string(timeouts) + " latency_limit=" + std::to_string(lim);
             Log(reasons);
-            LogTraceSummary(why);
         }
-        wgfg::FgSessionResult r = session->Destroy();
-        const ULONGLONG until = GetTickCount64() + kDestroyWaitMs;
-        while (r.error == wgfg::FgSessionError::PresenterBusy && GetTickCount64() < until) {
-            Sleep(2);
-            r = session->Destroy();
-        }
+        const wgfg::FgSessionResult r = session->Destroy();
         Log(std::string("fg host: session destroyed (") + why + "): " + wgfg::FgSessionErrorName(r.error));
-        if (core) core->set_executor(nullptr);
         session.reset();
+        QueueTraceSummary(why, true);
         exec_source.reset();
         win_source.reset();
-        DrainInFlightCredits();
+        DrainAdmissions();
         for (uint64_t& v : last_values) v = 0;
         window_frames = 0;
         window_have = false;
         quiet_windows = 0;
         cap_miss_windows = 0;
         lateness_count_cap = 0;
+        session_draining = false;
         ++stats.sessions_destroyed;
+        return true;
     }
 
     // A4 / O-A7: truthful lateness control using generated_scheduled as denominator (zero double counting),
@@ -1012,10 +1109,6 @@ struct FgAsiSessionHost::Impl {
         if (!session) return;
         const wgfg::IFgPresenter* pr = session->Presenter();
         if (!pr) return;
-        if (++trace_since_summary >= kTraceSummaryInterval) {
-            trace_since_summary = 0;
-            LogTraceSummary("periodic");
-        }
         if (++window_frames < kBudgetWindow) return;
         window_frames = 0;
         const wgfg::FgPresentStats st = pr->Stats();
@@ -1029,7 +1122,7 @@ struct FgAsiSessionHost::Impl {
         const uint64_t disp_r = st.displayed_real - window_base.displayed_real;
         const uint64_t late = st.dropped_late - window_base.dropped_late;
         const uint64_t pressure = st.dropped_pressure - window_base.dropped_pressure;
-        const uint64_t skipped = st.display_skipped - window_base.display_skipped;
+        const uint64_t skipped = st.display_skipped_generated - window_base.display_skipped_generated;
         window_base = st;
         if (disp_r > 0) {
             const uint32_t m100 =
@@ -1037,7 +1130,7 @@ struct FgAsiSessionHost::Impl {
             st_sustained_mult_x100.store(m100);
         }
         if (sched < 10) return;
-        const uint64_t missed = late + pressure;
+        const uint64_t missed = late + pressure + skipped;
         const uint64_t on_time = sched > missed ? sched - missed : 0;
         wgfg::FgTicks next = budget;
         if (missed * 10 > sched) {  // more than 1 in 10 scheduled images missed
@@ -1049,7 +1142,7 @@ struct FgAsiSessionHost::Impl {
             } else if (++cap_miss_windows >= 2) {
                 // O-A7: budget is already at the 8.0 ms ceiling and misses persist -> lower scheduled count
                 cap_miss_windows = 0;
-                const uint32_t cur_n = st_sched_count.load();
+                const uint32_t cur_n = lateness_count_cap ? lateness_count_cap : st_req_count.load();
                 const uint32_t target_cap = cur_n > 1 ? cur_n - 1 : 1u;
                 if (lateness_count_cap == 0 || target_cap < lateness_count_cap) {
                     lateness_count_cap = target_cap;
@@ -1126,7 +1219,7 @@ struct FgAsiSessionHost::Impl {
     }
 
     void TryCreateSession(FgProxy* c) {
-        if (session || stats.gave_up || !c || !c->fg_taken() || !inner || !device || !queue) return;
+        if (session || stats.gave_up || !c || !c->fg_taken() || facade.empty() || !inner || !device || !queue) return;
         WgFgSessionDesc sd = {};
         if (!c->session_desc(&sd)) return;  // options and a latched present first
         // Titles commonly leave options sizes/format at 0 (taken from the swap chain).
@@ -1187,11 +1280,15 @@ struct FgAsiSessionHost::Impl {
         const bool chain_tearing = tearing_supported && (chain_flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0;
         base.display.variable_refresh =
             sd.presenter_mode == WG_FG_PRESENTER_HWFQ ? tearing_supported : chain_tearing;
-        win_source.reset(new (std::nothrow) wgfg::FgWinPresenterSource(base));
-        if (!win_source) return;
-        exec_source.reset(new (std::nothrow) wgfg::FgExecutorPresenterSource(win_source.get(), exec.get()));
+        base.worker_registration = {
+            &FgSwapChain::RegisterWorkerThread, &FgSwapChain::UnregisterWorkerThread,
+            [](void* ctx, DWORD tid, bool priority, bool mmcss) {
+                static_cast<Impl*>(ctx)->Log("fg host: presenter worker tid=" + std::to_string(tid) +
+                    " priority_highest=" + (priority ? "yes" : "no") + " mmcss_games=" + (mmcss ? "yes" : "no"));
+            }, this};
+
         session.reset(new (std::nothrow) wgfg::FgSession());
-        if (!exec_source || !session) {
+        if (!session) {
             DestroySession("allocation");
             return;
         }
@@ -1219,6 +1316,7 @@ struct FgAsiSessionHost::Impl {
             }
             if (refresh_period > 0) {
                 st_refresh_hz.store(refresh_hz);
+                base.display.refresh_period = refresh_period;
                 d.scheduler.display.min_interval = refresh_period + refresh_period / 33;  // ~3% ceiling headroom
                 d.scheduler.display.max_interval =
                     base.display.variable_refresh ? 208333 : 1000000;  // 48 Hz VRR floor vs 10 Hz fixed
@@ -1243,6 +1341,16 @@ struct FgAsiSessionHost::Impl {
                 Log("fg host: the display refresh is not readable; the scheduler's own output window stays");
             }
         }
+        base.min_interval = d.scheduler.display.min_interval;
+        win_source.reset(new (std::nothrow) wgfg::FgWinPresenterSource(base));
+        if (win_source)
+            exec_source.reset(new (std::nothrow) wgfg::FgExecutorPresenterSource(win_source.get(), exec.get()));
+        if (!exec_source) {
+            DestroySession("allocation");
+            return;
+        }
+        d.on_plan = &Impl::OnPlanThunk;
+        d.plan_ctx = this;
         d.executor = exec.get();
         d.presenter_source = exec_source.get();
         d.clock = &HostClock;
@@ -1274,8 +1382,6 @@ struct FgAsiSessionHost::Impl {
                 cp->SetRealRetireCallback(&Impl::OnRealRetireThunk, this);
                 cp->SetTraceCallback(&Impl::OnTraceThunk, this);
             }
-            registered_worker_tid = PresenterWorkerTid(pr);
-            if (registered_worker_tid != 0) FgSwapChain::RegisterWorkerThread(registered_worker_tid);
         }
         WgFgExecutorV1 h = session->ExecutorHandOff();
         c->set_executor(&h);
@@ -1284,7 +1390,9 @@ struct FgAsiSessionHost::Impl {
         st_presenter.store(static_cast<uint32_t>(chosen));
         Log(std::string("fg host: session created, ") + std::to_string(sd.output_width) + " x " +
             std::to_string(sd.output_height) + ", preset " + std::to_string(sd.preset) + ", N up to " +
-            std::to_string(sd.max_generated) + ", net2 " + (cfg.net2_exact ? "exact" : "fast") + ", presenter " +
+            std::to_string(sd.max_generated) + ", net2 " + (cfg.net2_exact ? "exact" : "fast") +
+            ", generated_fences=" + (exec->PerIndexFences() ? "per-index" : "single-batch-when-eligible") +
+            ", presenter " +
             wgfg::FgPresenterChoiceName(chosen) + ", latency_limit=" + std::to_string(st_latency_limit.load()));
     }
 };
@@ -1294,6 +1402,7 @@ FgAsiSessionHost::FgAsiSessionHost(const FgAsiSessionConfig& cfg, std::unique_pt
     impl_->cfg = cfg;
     impl_->weights = std::move(weights);
     impl_->InitTraceCsv();
+    impl_->StartTraceWorker();
 #if defined(WRONGGPU_FG_DEV_QUALIFIED) && WRONGGPU_FG_DEV_QUALIFIED
     // developer frame dumps: only with WRONGGPU_FG_DUMP_DIR naming an existing folder
     char buf[MAX_PATH * 2];
@@ -1313,8 +1422,11 @@ FgAsiSessionHost::FgAsiSessionHost(const FgAsiSessionConfig& cfg, std::unique_pt
 }
 
 FgAsiSessionHost::~FgAsiSessionHost() {
-    std::lock_guard<std::recursive_mutex> lock(impl_->mu);
-    impl_->ResetDeviceState(false);
+    {
+        std::lock_guard<std::recursive_mutex> lock(impl_->mu);
+        impl_->ResetDeviceState(false);
+    }
+    impl_->StopTraceWorker();
     if (impl_->copy_event) CloseHandle(impl_->copy_event);
     if (impl_->game_fence_event) CloseHandle(impl_->game_fence_event);
     if (impl_->wait_timer) CloseHandle(impl_->wait_timer);
@@ -1378,6 +1490,7 @@ FgAsiSessionStats FgAsiSessionHost::Stats() const {
     {
         std::lock_guard<std::mutex> clock(impl_->credit_mu);
         s.credit_waits = impl_->credit_waits;
+        s.admission_timeouts = impl_->admission_timeouts;
         s.real_retires = impl_->real_retires;
     }
     return s;
@@ -1549,24 +1662,40 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
     Impl& m = *self->impl_;
     std::lock_guard<std::recursive_mutex> lock(m.mu);
     m.handled = false;
+    bool admitted = false;
+    WgFgPresentResult local = {};
+    if (!out) out = &local;
     try {
         const bool fg_enabled = core->state().enabled != 0;
         m.TryCreateSession(core);
         // A3: sample game present arrival AFTER one-time session creation (so cold pipeline compilation never poisons
         // frame 1's target/slip) and BEFORE any host credit/slot wait so throttling never perturbs the cadence estimate.
         const wgfg::FgTicks t_arrival = wgfg::FgInterruptNow();
-        // O-A1: enforce the game's frame-latency credit limit even if the game does not wait on the waitable handle.
-        if (m.session) m.WaitForCreditRoom(100);
+        if (m.session_draining) m.DestroySession("previous interval drain");
+        if (m.session && !m.session_draining && desc && !m.WaitForCreditRoom(kLatencyWaitMs)) {
+            if (!m.admission_timeout_logged)
+                m.Log("fg host: Present admission timed out; handing this frame to the real-only copy path");
+            m.admission_timeout_logged = true;
+            // Only one owner may present on the real chain. Discard queued work and drain the in-progress lease
+            // before passing through. The next frame may create a session again.
+            m.DestroySession("admission timeout");
+        } else {
+            m.admission_timeout_logged = false;
+        }
         // N-B3: skip presenter-room back-pressure wait when the in-game FG toggle is OFF.
         if (fg_enabled) m.WaitForPresenterRoom();
         const wgfg::FgTicks t_after_wait = wgfg::FgInterruptNow();
-        if (m.session) m.session->SetNextArrival(t_arrival);
-        // A2: register real credit BEFORE FgSessionPresent so an immediate presenter worker retirement never races it.
-        const bool credit_taken = m.session != nullptr && desc != nullptr;
-        if (credit_taken) m.BeginRealCredit(desc->frame_token);
-        m.skip_next_copy_credit = false;
+        if (m.session && !m.session_draining && desc) {
+            m.session->SetNextArrival(t_arrival, t_after_wait);
+            m.next_trace = {};
+            m.next_trace.t_arrival = t_arrival;
+            m.next_trace.t_after_wait = t_after_wait;
+            m.next_trace.free_slots = PresenterFreeSlots(m.session->Presenter());
+            admitted = m.BeginAdmission(desc->frame_token);
+            if (!admitted) m.DestroySession("admission closed");
+        }
         wgfg::FgSessionResult sr;
-        const int32_t rc = wgfg::FgSessionPresent(core, m.session.get(), desc, out, &sr);
+        const int32_t rc = wgfg::FgSessionPresent(core, m.session_draining ? nullptr : m.session.get(), desc, out, &sr);
         const wgfg::FgTicks t_after_record = wgfg::FgInterruptNow();
         m.st_presents.fetch_add(1);
         m.st_has_mfg_selector.store(core->has_mfg_selector());
@@ -1601,7 +1730,7 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
                 }
                 if (cap_r == kFgCapNone && out->requested_count > out->effective_count) cap_r = kFgCapRoute;
                 m.st_cap_reason.store(cap_r);
-                m.st_phase.store(kFgPhaseGenerating);
+                m.st_phase.store(sr.scheduled != 0 ? kFgPhaseGenerating : kFgPhaseRealOnly);
                 m.ControlLateness();
             } else if (out->status == WG_FG_PRESENT_REAL_ONLY || out->status == WG_FG_PRESENT_REFUSED) {
                 m.st_reason.store(out->reason);
@@ -1613,28 +1742,22 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
                 m.st_phase.store(kFgPhaseWaiting);
             }
         }
-        if (m.session && out) {
+        if (m.session && !m.session_draining && desc) {
             const bool took = out->status == WG_FG_PRESENT_GENERATE || out->status == WG_FG_PRESENT_REAL_ONLY;
             // the session presented the game frame unless it refused before its presenter was reached
             m.handled = took && sr.frame_token == desc->frame_token &&
                         (sr.error == wgfg::FgSessionError::None || sr.error == wgfg::FgSessionError::FrameRefused);
             if (m.handled) {
-                // A2: signal the game-queue read fence for the current facade buffer before AdvanceFacade can reuse it.
-                if (!m.facade.empty()) m.SignalFacadeReadFence(m.facade_index % static_cast<UINT>(m.facade.size()));
-                Impl::IntervalTrace tr;
-                tr.frame_token = desc->frame_token;
-                tr.interval_id = sr.interval_id;
-                tr.requested_n = out->requested_count;
-                tr.scheduled_n = sr.scheduled;
-                tr.in_flight = m.st_in_flight_real.load();
-                tr.free_slots = PresenterFreeSlots(m.session->Presenter());
-                tr.t_arrival = t_arrival;
-                tr.t_after_wait = t_after_wait;
-                tr.t_after_record = t_after_record;
-                m.RecordTraceInterval(tr);
-            } else if (credit_taken) {
-                // If CancelRealCredit returns false, the presenter already retired this frame and returned its credit.
-                if (!m.CancelRealCredit(desc->frame_token)) m.skip_next_copy_credit = true;
+                const UINT index = m.facade_index;
+                m.SignalFacadeReadFence(index);
+                m.facade_compute_fence[index] = m.exec->LastComputeValue();
+                m.FinishTraceInterval(sr.interval_id, out->requested_count, t_after_record);
+                if (++m.trace_since_summary >= kTraceSummaryInterval) {
+                    m.trace_since_summary = 0;
+                    m.QueueTraceSummary("periodic", false);
+                }
+            } else if (admitted) {
+                m.CancelAdmission(desc->frame_token);
             }
             if (took && !m.handled) {
                 m.Log(std::string("fg host: the session did not present a game frame: ") +
@@ -1653,6 +1776,7 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
         }
         return rc;
     } catch (...) {
+        if (admitted && desc) m.CancelAdmission(desc->frame_token);
         m.handled = false;
         return -1;
     }
@@ -1663,70 +1787,93 @@ HRESULT FgAsiSessionHost::PresentInterval(const FgPresentCall& call, IFgInnerPre
     std::lock_guard<std::recursive_mutex> lock(m.mu);
     ++m.stats.intervals;
     if (m.handled && m.session) {
-        // the session's presenter shows this interval (real and generated images) on the real chain; credit returns
-        // asynchronously via OnRealRetireThunk when the real image retires.
+        // The facade hand-off is recorded. Release the game's frame-start token once reuse is GPU-ordered.
         m.handled = false;
         ++m.stats.session_presents;
         m.BoundQueueDepth();
-        m.AdvanceFacade();
+        const HRESULT advance = m.AdvanceFacade();
+        if (SUCCEEDED(advance)) m.ReturnFacadeCredit();
         m.DrainRetiredTags(false);
-        return S_OK;
+        return advance;
     }
     m.handled = false;
     if (m.session) {
         // the copy path presents on the real chain, which the session's presenter must not hold meanwhile
-        m.DestroySession("an interval it did not take");
-        if (++m.stats.session_failures >= kMaxSessionFailures && !m.stats.gave_up) {
+        const bool was_draining = m.session_draining;
+        if (!m.DestroySession("an interval it did not take")) return DXGI_ERROR_WAS_STILL_DRAWING;
+        if (!was_draining) ++m.stats.session_failures;
+        if (m.stats.session_failures >= kMaxSessionFailures && !m.stats.gave_up) {
             m.stats.gave_up = true;
             m.st_phase.store(kFgPhaseStopped);
             m.Log("fg host: frame generation stays off for this run (3 session failures); the game's frames are "
                   "presented as it asks");
         }
     }
-    bool copied = false;
-    if (!m.facade.empty() && !call.retry) {
-        if (m.chain_flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT) {
-            HANDLE w = m.inner ? m.inner->GetFrameLatencyWaitableObject() : nullptr;
+    if (!m.facade.empty() && !m.pending_copy) {
+        if (!m.pending_copy_latency && (m.chain_flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT)) {
+            HANDLE w = m.inner->GetFrameLatencyWaitableObject();
             if (w) {
-                WaitForSingleObject(w, kLatencyWaitMs);
+                const DWORD timeout = call.flags & DXGI_PRESENT_DO_NOT_WAIT ? 0 : kLatencyWaitMs;
+                m.pending_copy_latency = WaitForSingleObject(w, timeout) == WAIT_OBJECT_0;
                 CloseHandle(w);
+                if (!m.pending_copy_latency && (call.flags & DXGI_PRESENT_DO_NOT_WAIT))
+                    return DXGI_ERROR_WAS_STILL_DRAWING;
             }
         }
-        if (m.CopyFacadeToChain()) {
-            copied = true;
-            ++m.stats.copy_presents;
+        if (!m.CopyFacadeToChain()) {
+            const HRESULT lost = m.device->GetDeviceRemovedReason();
+            return FAILED(lost) ? lost : DXGI_ERROR_WAS_STILL_DRAWING;
         }
+        m.pending_copy = true;
+        ++m.stats.copy_presents;
     }
     const HRESULT hr = call.present1 ? inner.Present1(call.sync_interval, call.flags, call.params)
                                      : inner.Present(call.sync_interval, call.flags);
-    // A2: on DXGI_ERROR_WAS_STILL_DRAWING the interval stays open for retry: do not advance facade or return credit.
-    if (hr != DXGI_ERROR_WAS_STILL_DRAWING) {
-        if (copied) m.AdvanceFacade();
-        if (!m.facade.empty()) {
-            if (!m.skip_next_copy_credit) m.ReturnCopyPresentCredit();
-            m.skip_next_copy_credit = false;
-            m.DrainRetiredTags(false);
-        }
+    if (hr == DXGI_ERROR_WAS_STILL_DRAWING) return hr;
+    const bool copied = m.pending_copy;
+    m.pending_copy = false;
+    m.pending_copy_latency = false;
+    if (FAILED(hr)) {
+        if (copied) m.GateFacadeReuse(m.facade_index);
+        m.ReturnFacadeCredit();
+        return hr;
     }
+    const HRESULT advance = copied ? m.AdvanceFacade() : S_OK;
+    if (FAILED(advance)) return advance;
+    m.ReturnFacadeCredit();  // also replenishes handles cached before falling back to native buffers
+    m.DrainRetiredTags(false);
     return hr;
 }
 
-void FgAsiSessionHost::BeforeResize() {
-    std::lock_guard<std::recursive_mutex> lock(impl_->mu);
-    impl_->DestroySession("resize");
-    impl_->WaitCopy(impl_->copy_value, kDestroyWaitMs);
-    impl_->WaitGameFence(impl_->game_value, kDestroyWaitMs);
-    impl_->ReleaseFacade();
-    impl_->DrainRetiredTags(true);
+HRESULT FgAsiSessionHost::BeforeResize() {
+    Impl& m = *impl_;
+    std::lock_guard<std::recursive_mutex> lock(m.mu);
+    if (!m.DestroySession("resize")) return DXGI_ERROR_WAS_STILL_DRAWING;
+    if (!m.WaitCopy(m.copy_value, kDestroyWaitMs) || !m.WaitGameFence(m.game_value, kDestroyWaitMs) ||
+        (m.exec && !m.exec->WaitIdle(kDestroyWaitMs))) {
+        const HRESULT lost = m.device ? m.device->GetDeviceRemovedReason() : S_OK;
+        return FAILED(lost) ? lost : DXGI_ERROR_WAS_STILL_DRAWING;
+    }
+    {
+        std::lock_guard<std::mutex> credit_lock(m.credit_mu);
+        m.RefillWaitableLocked(true);
+    }
+    m.pending_copy = false;
+    m.pending_copy_latency = false;
+    m.DrainRetiredTags(true);
+    return S_OK;
 }
 
 void FgAsiSessionHost::AfterResize(HRESULT hr) {
-    std::lock_guard<std::recursive_mutex> lock(impl_->mu);
+    Impl& m = *impl_;
+    std::lock_guard<std::recursive_mutex> lock(m.mu);
     if (FAILED(hr)) {
-        impl_->Log("fg host: resize failed; facade not recreated");
+        m.Log("fg host: resize failed; previous facade and cached waitable stay active");
         return;
     }
-    if (!impl_->CreateFacade()) impl_->Log("fg host: facade not recreated after the resize");
+    if (!m.CreateFacade()) {
+        m.Log("fg host: facade allocation failed after resize; native buffers with cached waitable replenishment");
+    }
 }
 
 void FgAsiSessionHost::BeforeFullscreen(BOOL fullscreen) {
@@ -1749,6 +1896,12 @@ void FgAsiSessionHost::BeforeFullscreen(BOOL fullscreen) {
             }
         }
     }
+    if (m.pending_copy) {
+        m.GateFacadeReuse(m.facade_index);
+        m.ReturnFacadeCredit();
+    }
+    m.pending_copy = false;
+    m.pending_copy_latency = false;
     m.DestroySession("fullscreen change");
 }
 
@@ -1795,7 +1948,6 @@ bool FgAsiSessionHost::FrameLatencyWaitableObject(HANDLE* handle) {
     std::lock_guard<std::mutex> clock(m.credit_mu);
     m.EnsureLatencySemLocked();
     if (!m.latency_sem) return false;
-    m.waitable_handed_out = true;
     // the caller closes what it gets, as with the chain's own object; underlying handle persists across resizes
     HANDLE dup = nullptr;
     if (!DuplicateHandle(GetCurrentProcess(), m.latency_sem, GetCurrentProcess(), &dup, 0, FALSE,
@@ -1817,21 +1969,9 @@ bool FgAsiSessionHost::SetMaximumFrameLatency(UINT latency, HRESULT* hr) {
     {
         std::lock_guard<std::mutex> clock(m.credit_mu);
         prev_limit = m.latency_limit;
-        int32_t delta = static_cast<int32_t>(latency) - static_cast<int32_t>(m.latency_limit);
         m.latency_limit = latency;
         m.st_latency_limit.store(latency);
-        if (m.latency_sem && m.waitable_handed_out) {
-            if (delta > 0) {
-                const int32_t cancel = delta < m.credits_to_absorb ? delta : m.credits_to_absorb;
-                m.credits_to_absorb -= cancel;
-                delta -= cancel;
-                if (delta > 0) ReleaseSemaphore(m.latency_sem, delta, nullptr);
-            } else if (delta < 0) {
-                int32_t need = -delta;
-                while (need > 0 && WaitForSingleObject(m.latency_sem, 0) == WAIT_OBJECT_0) --need;
-                m.credits_to_absorb += need;
-            }
-        }
+        if (prev_limit != latency) m.RefillWaitableLocked(true);
         m.credit_cv.notify_all();
     }
     if (prev_limit != latency) {
@@ -1901,8 +2041,7 @@ void FgAsiSessionHost::Attached(IDXGISwapChain4* inner, IUnknown* queue) {
         // (1 interval playing out + 1 real frame rendering in parallel).
         m.latency_limit = m.game_requested_waitable ? 1u : 2u;
         m.st_latency_limit.store(m.latency_limit);
-        m.in_flight_real = 0;
-        m.credits_to_absorb = 0;
+        m.pending_admissions.clear();
         m.st_in_flight_real.store(0);
     }
     if (!m.CreateFacade()) {

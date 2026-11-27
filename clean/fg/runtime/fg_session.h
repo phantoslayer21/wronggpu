@@ -231,6 +231,8 @@ struct FgSessionDesc {
     void* clock_ctx = nullptr;
     FgSessionLogFn log = nullptr;          // one line per transition
     void* log_ctx = nullptr;
+    void (*on_plan)(void*, const FgIntervalPlan&) = nullptr;
+    void* plan_ctx = nullptr;
     FgSessionMenuFn on_menu = nullptr;     // every menu decision (and whether the frame's output is a copy)
     void* menu_ctx = nullptr;
 };
@@ -323,9 +325,10 @@ public:
     IFgPresenter* Presenter() const { return presenter_.get(); }
     // Sets the arrival timestamp for the next OnPresent / OnGameFrameOnly call (A3: sampled before any host wait so
     // host throttling never perturbs the scheduler's cadence estimate). Consumed once.
-    void SetNextArrival(FgTicks arrival) {
+    void SetNextArrival(FgTicks arrival, FgTicks budget_origin = 0) {
         has_next_arrival_ = true;
         next_arrival_ = arrival;
+        next_budget_origin_ = budget_origin;
     }
     FgRealOnlyReason LastReductionReason() const {
         return scheduler_ ? scheduler_->LastReductionReason() : FgRealOnlyReason::None;
@@ -347,7 +350,7 @@ private:
     FgSessionResult Lose(FgSessionResult r);
     void Log(const std::string& line);
     FgTicks Now() const;
-    FgTicks TakeArrival();
+    void SetFrameTiming(FgGameFrame* frame);
     FgSessionResult PresentRealOnlyPlan(const FgIntervalPlan& plan, FgSessionResult r,
                                         const FgTextureRef* game_colour = nullptr);
     FgSessionResult RunInterval(const FgFramePacket& packet, const FgIngestResult& ingest, const FgIntervalPlan& plan,
@@ -373,6 +376,7 @@ private:
     FgSessionCounters counters_;
     bool has_next_arrival_ = false;
     FgTicks next_arrival_ = 0;
+    FgTicks next_budget_origin_ = 0;
 };
 
 // ---- transport glue ----------------------------------------------------------------------------------------------

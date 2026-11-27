@@ -145,6 +145,13 @@ public:
 
 // One presenter worker: a std::thread started on a named static entry point (no lambda, so nothing that can throw
 // is copied into a closure under /Zc:lambda), a manual-reset stop event and an auto-reset wake event.
+struct FgWorkerRegistration {
+    void (*register_thread)(DWORD) = nullptr;
+    void (*unregister_thread)(DWORD) = nullptr;
+    void (*report_priority)(void*, DWORD, bool, bool) = nullptr;
+    void* report_ctx = nullptr;
+};
+
 class FgWorkerThread {
 public:
     FgWorkerThread();
@@ -153,7 +160,7 @@ public:
     FgWorkerThread& operator=(const FgWorkerThread&) = delete;
 
     // false when already running, the events are missing or the thread could not start.
-    bool Start(IFgWorkerBody* body, const wchar_t* name);
+    bool Start(IFgWorkerBody* body, const wchar_t* name, FgWorkerRegistration registration = {});
     void Stop();  // idempotent; joins
     void Wake();
     bool Running() const { return running_.load(); }
@@ -167,6 +174,7 @@ private:
     HANDLE wake_ = nullptr;
     IFgWorkerBody* body_ = nullptr;
     const wchar_t* name_ = nullptr;
+    FgWorkerRegistration registration_;
     std::atomic<bool> running_{false};
     std::atomic<DWORD> thread_id_{0};
     std::thread thread_;

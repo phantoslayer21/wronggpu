@@ -63,6 +63,8 @@ FgPresenterSelection FgSelectPresenter(FgPresenterChoice requested, const FgPres
                                        const FgDisplayDesc& display);
 
 struct FgPresenterFactoryDesc {
+    FgWorkerRegistration worker_registration;
+    FgTicks min_interval = 0;
     FgPresenterChoice choice = FgPresenterChoice::Auto;
     FgDisplayDesc display;
     const FgPresenterCapabilities* caps = nullptr;  // null: probed here (needs device)

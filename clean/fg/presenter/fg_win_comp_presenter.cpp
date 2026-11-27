@@ -63,7 +63,6 @@ FgWinResult FgWinCompPresenter::Create(const FgCompPresenterDesc& d, std::unique
     cfg.max_pending_intervals = d.max_pending_intervals >= 1 ? d.max_pending_intervals : 2u;
     cfg.refresh_period = d.refresh_period;
     std::unique_ptr<FgWinCompPresenter> p(new FgWinCompPresenter(d, cfg));
-    p->engine_.SetDisplayTimeMeasured(true);  // A4: compositor / independent-flip statistics report display time
     const FgWinResult r = p->Initialize();
     if (!r.Ok()) return r;
     *out = std::move(p);
@@ -150,7 +149,7 @@ FgWinResult FgWinCompPresenter::Initialize() {
         UpdateGridLocked();  // no worker yet: nothing to lock against
         if (info_.grid.period <= 0) return FgWinFail(FgStatus::Unsupported, FgWinRefusal::RefreshUnknown);
     }
-    if (!worker_.Start(this, L"wg-fg-composition-presenter"))
+    if (!worker_.Start(this, L"wg-fg-composition-presenter", desc_.worker_registration))
         return FgWinFail(FgStatus::Refused, FgWinRefusal::WorkerStart);
     return FgWinOk();
 }
@@ -231,6 +230,12 @@ std::uint32_t FgWinCompPresenter::RegisterFence(ID3D12Fence* fence, FgWinResult*
     if (why) *why = FgWinOk();
     if (!fence) {
         if (why) *why = FgWinFail(FgStatus::InvalidArgument, FgWinRefusal::NullDevice);
+        return 0;
+    }
+    ComPtr<ID3D12Fence1> extended;
+    if (SUCCEEDED(fence->QueryInterface(IID_PPV_ARGS(&extended))) &&
+        !(extended->GetCreationFlags() & D3D12_FENCE_FLAG_SHARED)) {
+        if (why) *why = FgWinFail(FgStatus::InvalidArgument, FgWinRefusal::SharedHandle, E_INVALIDARG);
         return 0;
     }
     std::lock_guard<std::mutex> lock(mutex_);
@@ -565,14 +570,16 @@ void FgWinCompPresenter::DrainStatisticsLocked() {
                 if (FAILED(st.As(&fs))) break;
                 ++info_.indep_flip_frames;
                 if (pid > last_displayed_platform_) last_displayed_platform_ = pid;
+                const FgTicks timestamp = static_cast<FgTicks>(fs->GetDisplayedTime().value);
                 if (EngineIdForPlatform(pid, &eid, true))
-                    engine_.OnPresentDisplayed(eid, static_cast<FgTicks>(fs->GetDisplayedTime().value));
+                    engine_.OnPresentDisplayed(eid, timestamp != 0 ? timestamp : FgInterruptNow(), timestamp != 0);
                 break;
             }
             case PresentStatisticsKind_CompositionFrame: {
                 ComPtr<ICompositionFramePresentStatistics> cs;
                 ++info_.comp_frames;
                 FgTicks displayed_at = FgInterruptNow();
+                bool measured = false;
                 if (SUCCEEDED(st.As(&cs))) {
                     const COMPOSITION_FRAME_ID fid = cs->GetCompositionFrameId();
                     COMPOSITION_FRAME_STATS fst = {};
@@ -582,10 +589,11 @@ void FgWinCompPresenter::DrainStatisticsLocked() {
                     if (SUCCEEDED(FgDCompGetStatistics(fid, &fst, 4, targets, &count)) && count > 0 &&
                         SUCCEEDED(FgDCompGetTargetStatistics(fid, &targets[0], &ts)) && ts.presentTime != 0) {
                         displayed_at = clock_map_.FromQpc(static_cast<std::int64_t>(ts.presentTime));
+                        measured = true;
                     }
                 }
                 if (pid > last_displayed_platform_) last_displayed_platform_ = pid;
-                if (EngineIdForPlatform(pid, &eid, true)) engine_.OnPresentDisplayed(eid, displayed_at);
+                if (EngineIdForPlatform(pid, &eid, true)) engine_.OnPresentDisplayed(eid, displayed_at, measured);
                 break;
             }
             default: break;
@@ -611,8 +619,8 @@ void FgWinCompPresenter::ReleaseSlotsLocked() {
                 const bool occluded_timeout = desc_.bind_window && submitted_[i].target > 0 &&
                                               now > submitted_[i].target + 2500000;
                 boolean available = 0;
-                if ((older_available && SUCCEEDED(buffers_[slot].buffer->IsAvailable(&available)) && available) ||
-                    occluded_timeout) {
+                if ((older_available || occluded_timeout) &&
+                    SUCCEEDED(buffers_[slot].buffer->IsAvailable(&available)) && available) {
                     submitted_.erase(submitted_.begin() + static_cast<std::ptrdiff_t>(i));
                     engine_.OnPresentSkipped(eid);
                 }
@@ -659,20 +667,16 @@ void FgWinCompPresenter::SubmitOutboxLocked() {
         } else {
             // A3: avoid HWFQ VRR target collisions / compositor skips when an earlier generated image is already
             // superseded by the next queued image or collides with the previous effective target.
-            if (!p.real && i + 1 < deferred_.size() && now >= deferred_[i + 1].target - 2500) {
+            const FgTicks gap = desc_.min_interval > 2500 ? desc_.min_interval : 2500;
+            FgTicks effective = when > now ? when : now;
+            if (have_vblank_ && effective < last_vblank_ + desc_.min_interval)
+                effective = last_vblank_ + desc_.min_interval;
+            if (!p.real && i + 1 < deferred_.size() && effective > deferred_[i + 1].target - gap) {
                 engine_.OnPresentDropped(p.present_id, FgDropReason::Late);
                 continue;
             }
-            const FgTicks eff = when > now ? when : now;
-            if (have_vblank_ && eff <= last_vblank_) {
-                if (!p.real) {
-                    engine_.OnPresentDropped(p.present_id, FgDropReason::Pressure);
-                    continue;
-                }
-                when = vblank = last_vblank_ + 1;
-            } else {
-                vblank = eff;
-            }
+            if (have_vblank_ && effective <= last_vblank_) effective = last_vblank_ + 1;
+            when = vblank = effective;
         }
         // GPU-side order: the presentation device waits for the producer fence before the present (already complete
         // on the CPU; this keeps the order explicit on the GPU timeline too).

@@ -41,11 +41,13 @@ enum class FgDxgiPacing : std::uint8_t {
 };
 
 struct FgDxgiPresenterDesc {
+    FgWorkerRegistration worker_registration;
     ID3D12Device* device = nullptr;
     ID3D12CommandQueue* queue = nullptr;  // the queue the swap chain was created on
     IDXGISwapChain4* swap_chain = nullptr;
     FgDxgiPacing pacing = FgDxgiPacing::Tearing;
     FgTicks refresh_period = 0;   // VSync: the scan-out period (0: from the compositor); tearing: optional
+    FgTicks min_interval = 0;    // minimum display interval for tearing pacing
     FgTicks timer_lead = 0;       // wake this much before the present time
     FgTicks late_tolerance = 10000;  // a generated image later than this past its target is dropped
     std::uint32_t max_generated = kFgMaxGenerated;  // 1..5
@@ -63,6 +65,7 @@ struct FgDxgiPresenterInfo {
     std::uint32_t slot_count = 0;
     FgRefreshGrid grid;
     std::uint64_t presents = 0;          // Present calls that succeeded
+    std::uint64_t occlusion_retired_real = 0;
     std::uint64_t latency_timeouts = 0;  // frame-latency waits that timed out
 };
 
@@ -138,12 +141,12 @@ private:
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> list_;
     Microsoft::WRL::ComPtr<ID3D12Fence> copy_fence_;
     std::uint64_t copy_value_ = 0;
+    bool quiesce_fence_signalled_ = false;
     std::uint32_t ring_ = 0;
     HANDLE latency_ = nullptr;
     HANDLE copy_event_ = nullptr;
-    HANDLE alloc_event_ = nullptr;
     HANDLE fence_event_ = nullptr;
-    HANDLE drain_event_ = nullptr;  // DrainQueueLocked only (the worker owns copy_event_ / alloc_event_)
+    HANDLE drain_event_ = nullptr;  // DrainQueueLocked only (the worker owns copy_event_)
     FgD3D12FenceTable fences_;
     FgClockMap clock_map_;
     FgHighResTimer timer_;
@@ -152,7 +155,9 @@ private:
     FgPresentEngine engine_;
     std::deque<FgEnginePresent> local_;  // queued on the engine, not yet presented (present-id order)
     bool latency_credit_ = false;        // a frame-latency count taken but not yet used by a Present
-    bool presenting_ = false;            // true while the worker is executing Present outside mutex_
+    bool presenting_ = false;            // true while the worker holds the engine's present lease
+    bool device_lost_pending_ = false;
+    FgTicks last_issue_ = 0;
     bool have_vblank_ = false;
     FgTicks last_vblank_ = 0;
     FgTicks grid_updated_at_ = 0;

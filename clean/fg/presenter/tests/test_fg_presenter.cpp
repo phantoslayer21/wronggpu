@@ -6,6 +6,7 @@
 // interval estimator, count changes latched at game frames, menu / reset transitions, late drops with held leases,
 // suffix cancellation and the reserved real path, the variable-refresh window with hysteresis, resize / epoch /
 // device loss, refusal without fallback, and mutants (broken plans, a broken spacing oracle) that must be caught.
+#include <deque>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -475,7 +476,8 @@ void TestMenuAndReset() {
         CHECK(r.plans[55].generated_count == 0 && r.plans[55].real_only_reason == FgRealOnlyReason::Reset);
         CHECK(r.plans[56].generated_count == 3);  // the cut frame primed history
         // the cadence held through the menu: no re-anchor, targets continue one period apart
-        CHECK(!r.plans[35].reanchored && !r.plans[41].reanchored);
+        CHECK(!r.plans[35].reanchored);
+        CHECK(r.plans[41].reanchored && r.plans[41].generated_count > 0);
         const FgPresentStats st = r.presenter.Stats();
         CHECK(st.real_only_intervals[static_cast<int>(FgRealOnlyReason::MenuDisabled)] == 10);
         CHECK(st.real_only_intervals[static_cast<int>(FgRealOnlyReason::Reset)] == 1);
@@ -1042,6 +1044,53 @@ void TestMutations() {
 // RC2 (N-B2 / O-A4 / O-A7 / M1): 2-3 ms steady jitter at 6x/60 fps produces 0 reanchors; LatencyCap steps N down
 // instead of dropping straight to 0; SetMaxGeneratedCap clamps & restores cleanly; 360 Hz VRR ceiling (~349 Hz)
 // prevents above-refresh targets while 80 fps 4x runs cleanly.
+void TestFrameStartWaitableCadence() {
+    g_case = "frame-start waitable cadence";
+    constexpr FgTicks kMs = 10000;
+    for (const FgTicks render : {2 * kMs, 4 * kMs, 8 * kMs, 16 * kMs}) {
+        for (const FgTicks budget : {2 * kMs, 4 * kMs, 8 * kMs}) {
+            for (std::uint32_t requested = 0; requested <= 5; ++requested) {
+                for (std::size_t latency = 1; latency <= 3; ++latency) {
+                    FgSchedulerConfig config = DefaultScheduler();
+                    config.first_image_budget = budget;
+                    config.bridge_and_submit_margin = 2500;
+                    config.max_lead = 280000;
+                    config.display.min_interval = 28619;
+                    config.display.margin = 0;
+                    config.adaptive_count = true;
+                    FgTargetScheduler scheduler(config);
+                    CHECK(scheduler.BeginEpoch(1) == FgStatus::Ok);
+                    std::deque<FgTicks> pending;
+                    FgTicks handoff = kSecond;
+                    FgTicks warm_handoff = 0;
+                    for (std::uint64_t frame = 1; frame <= 160; ++frame) {
+                        const FgTicks arrival = handoff + render;
+                        handoff = arrival;
+                        if (pending.size() == latency && pending.front() > handoff) handoff = pending.front();
+                        while (!pending.empty() && pending.front() <= handoff) pending.pop_front();
+                        FgGameFrame game{1, frame, arrival, requested, true, false, handoff};
+                        FgIntervalPlan plan;
+                        CHECK(scheduler.Commit(game, &plan) == FgStatus::Ok);
+                        pending.push_back(plan.targets[0].target);
+                        CHECK(pending.size() <= latency);
+                        if (requested == 0 && frame > 2 &&
+                            render >= config.display.min_interval)
+                            CHECK(plan.targets[0].target - handoff == config.real_min_lead);
+                        if (frame == 40) warm_handoff = handoff;
+                    }
+                    const FgTicks expected = (std::max)({render, budget, config.display.min_interval});
+                    if ((handoff - warm_handoff) * 100 > expected * 120 * 105)
+                        std::printf("  R=%lld B=%lld N=%u L=%zu P=%lld bound=%lld\n",
+                                    static_cast<long long>(render), static_cast<long long>(budget), requested, latency,
+                                    static_cast<long long>((handoff - warm_handoff) / 120),
+                                    static_cast<long long>(expected));
+                    CHECK((handoff - warm_handoff) * 100 <= expected * 120 * 105);
+                }
+            }
+        }
+    }
+}
+
 void TestRc2SchedulerPacing() {
     g_case = "rc2 scheduler pacing";
     {
@@ -1142,6 +1191,7 @@ int main() {
     TestRefusal();
     TestMutations();
     TestRc2SchedulerPacing();
+    TestFrameStartWaitableCadence();
     std::printf("test_fg_presenter: %d checks, %d failure(s)\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

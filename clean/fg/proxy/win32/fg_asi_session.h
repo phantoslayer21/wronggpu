@@ -117,7 +117,7 @@ struct FgAsiSessionStats {
     uint64_t exec_shared = 0, exec_indices = 0, exec_copies = 0, exec_game_colour_copies = 0, exec_net2_fast = 0,
              exec_net2_exact = 0;
     // A2 / N-B3 / N-S3 diagnostics
-    uint64_t back_pressure_waits = 0, credit_waits = 0, real_retires = 0, noop_fullscreen_ignored = 0;
+    uint64_t back_pressure_waits = 0, credit_waits = 0, admission_timeouts = 0, real_retires = 0, noop_fullscreen_ignored = 0;
 };
 
 // What the host's last game present did (FgAsiSessionHost::LiveStatus), for a menu. Plain values.
@@ -144,7 +144,7 @@ struct FgAsiLiveStatus {
     uint32_t presenter = 0;   // wgfg::FgPresenterChoice of the session's presenter (0: none yet)
     uint64_t presents = 0;    // game presents the host saw
     bool host_overlay = false;
-    // M1 / A4 / A2 extensions (appended so existing fields stay ABI/source compatible for Track B's menu card):
+    // M1 / A4 / A2 diagnostics shared with the in-tree menu card.
     uint32_t multiplier_source = 0;      // FgMultiplierSource: 0 = manual, 1 = game
     bool game_has_mfg_selector = false;  // from qualified title binding
     uint32_t requested_count = 0;        // N the game asked for (0..5)
@@ -153,7 +153,7 @@ struct FgAsiLiveStatus {
     uint32_t display_refresh_hz = 0;     // active display refresh rate in Hz (0 if unreadable)
     uint32_t sustained_mult_x100 = 100;  // sustained effective multiplier * 100 (e.g. 396 = 3.96x)
     uint32_t latency_limit = 0;          // active game frame-latency limit (1..16)
-    uint32_t in_flight_real = 0;         // current real frames in flight to the presenter
+    uint32_t in_flight_real = 0;         // accepted intervals that have yet to start presenting
 };
 
 class FgAsiSessionHost final : public IFgPresentCallback {
@@ -187,7 +187,7 @@ public:
     // ---- IFgPresentCallback ----
     void BeginInterval(const FgPresentCall&) override {}
     HRESULT PresentInterval(const FgPresentCall& call, IFgInnerPresenter& inner) override;
-    void BeforeResize() override;
+    HRESULT BeforeResize() override;
     void AfterResize(HRESULT hr) override;
     void BeforeFullscreen(BOOL) override;
     void AfterFullscreen(BOOL, HRESULT hr) override;

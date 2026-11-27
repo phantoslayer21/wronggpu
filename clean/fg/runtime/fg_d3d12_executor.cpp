@@ -2627,7 +2627,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         // Capture linearizes an sRGB SRV, and its float16 conversion quiets signaling NaNs. Only the linear
         // UNORM formats round-trip every input code through capture and pack.
         const DXGI_FORMAT format = linear_copy_format(out.Format);
-        if (linear_copy_format(src.view) != format ||
+        if (src.view != format ||
             (format != DXGI_FORMAT_R8G8B8A8_UNORM && format != DXGI_FORMAT_B8G8R8A8_UNORM &&
              format != DXGI_FORMAT_R10G10B10A2_UNORM))
             return nullptr;
@@ -2963,6 +2963,11 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
 
 FgD3d12Executor::FgD3d12Executor(const FgD3d12ExecutorDesc& desc) : impl_(new Impl()) {
     impl_->desc = desc;
+    char single_fence[2] = {};
+    if (desc.batch == 1 ||
+        (GetEnvironmentVariableA("WG_FG_BATCH_SINGLE_FENCE", single_fence, sizeof(single_fence)) == 1 &&
+         single_fence[0] == '1'))
+        impl_->desc.per_index_fences = false;
     char timing[2] = {};
     impl_->desc.timing |= GetEnvironmentVariableA("WRONGGPU_FG_TIMING", timing, sizeof(timing)) == 1 && timing[0] == '1';
     char kprof[2] = {};
@@ -3504,12 +3509,7 @@ FgExecResult FgD3d12Executor::RecordGeneratedBatch(const FgIndexDispatchDesc* de
     // N-B1: when per_index_fences is enabled (default), submit each generated index with its own fence value so
     // index 1 completes and presents immediately without waiting for indices 2..N of the same interval. An explicit
     // batch=1 override (benchmarks / batch-exactness tests) keeps single-submission layer interleaving.
-    char single_fence_env[2] = {};
-    const bool single_fence =
-        !m.desc.per_index_fences || m.desc.batch == 1 ||
-        (GetEnvironmentVariableA("WG_FG_BATCH_SINGLE_FENCE", single_fence_env, sizeof(single_fence_env)) == 1 &&
-         single_fence_env[0] == '1');
-    if (!single_fence) return one_by_one();
+    if (m.desc.per_index_fences) return one_by_one();
     // Anything that is not the plain case goes one index at a time (which also reports every refusal).
     bool plain = m.batch_on && m.configured && n >= 2 && n <= m.sc_banks && n <= kMaxWrittenSlots && m.target &&
                  m.frame.valid && m.host.InFrame() && m.host.Frame().history;
@@ -3760,6 +3760,8 @@ FgExecResult FgD3d12Executor::Net2SelfTest(uint32_t seed, float t, uint32_t runs
     return FgExecResult::Ok;
 }
 
+bool FgD3d12Executor::PerIndexFences() const { return impl_->desc.per_index_fences; }
+
 uint64_t FgD3d12Executor::LastComputeValue() const { return impl_->next_value; }
 uint64_t FgD3d12Executor::CompletedComputeValue() const {
     if (!impl_->fence) return 0;
@@ -3769,6 +3771,11 @@ uint64_t FgD3d12Executor::CompletedComputeValue() const {
 
 bool FgD3d12Executor::WaitForComputeValue(uint64_t value, uint32_t timeout_ms) {
     return impl_->fence && impl_->WaitValue(value, timeout_ms);
+}
+
+bool FgD3d12Executor::GateGameQueueOnCompute(uint64_t value) {
+    Impl& m = *impl_;
+    return value == 0 || (m.queue && m.fence && SUCCEEDED(m.queue->Wait(m.fence.Get(), value)));
 }
 
 bool FgD3d12Executor::WaitIdle(uint32_t timeout_ms) {

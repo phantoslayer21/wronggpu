@@ -206,15 +206,18 @@ FgWorkerThread::~FgWorkerThread() {
 }
 
 void FgWorkerThread::Entry(FgWorkerThread* self) {
-    self->thread_id_.store(GetCurrentThreadId());
+    const DWORD tid = GetCurrentThreadId();
+    if (self->registration_.register_thread) self->registration_.register_thread(tid);
     if (self->name_) SetThreadDescription(GetCurrentThread(), self->name_);
     // N-S1: elevate presenter worker priority so timer wakes and present copies are not delayed behind game CPU work.
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+    const bool priority_applied = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) != FALSE &&
+                                  GetThreadPriority(GetCurrentThread()) == THREAD_PRIORITY_HIGHEST;
     HANDLE mmcss = nullptr;
     using AvSetFn = HANDLE(WINAPI*)(LPCWSTR, LPDWORD);
     using AvRevFn = BOOL(WINAPI*)(HANDLE);
     AvRevFn av_revert = nullptr;
-    if (HMODULE avrt = LoadLibraryExW(L"avrt.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)) {
+    const HMODULE avrt = LoadLibraryExW(L"avrt.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (avrt) {
         auto av_set = reinterpret_cast<AvSetFn>(reinterpret_cast<void*>(GetProcAddress(avrt, "AvSetMmThreadCharacteristicsW")));
         av_revert = reinterpret_cast<AvRevFn>(reinterpret_cast<void*>(GetProcAddress(avrt, "AvRevertMmThreadCharacteristics")));
         if (av_set) {
@@ -222,20 +225,24 @@ void FgWorkerThread::Entry(FgWorkerThread* self) {
             mmcss = av_set(L"Games", &task_index);
         }
     }
+    if (self->registration_.report_priority)
+        self->registration_.report_priority(self->registration_.report_ctx, tid, priority_applied, mmcss != nullptr);
     self->body_->Run(self->stop_, self->wake_);
     if (mmcss && av_revert) av_revert(mmcss);
-    self->thread_id_.store(0);
+    if (avrt) FreeLibrary(avrt);
     self->running_.store(false);
 }
 
-bool FgWorkerThread::Start(IFgWorkerBody* body, const wchar_t* name) {
+bool FgWorkerThread::Start(IFgWorkerBody* body, const wchar_t* name, FgWorkerRegistration registration) {
     if (!body || !stop_ || !wake_ || thread_.joinable()) return false;
     ResetEvent(stop_);
     body_ = body;
     name_ = name;
+    registration_ = registration;
     running_.store(true);
     try {
         thread_ = std::thread(&FgWorkerThread::Entry, this);
+        thread_id_.store(GetThreadId(thread_.native_handle()));
     } catch (const std::system_error&) {
         running_.store(false);
         return false;
@@ -247,6 +254,8 @@ void FgWorkerThread::Stop() {
     if (!thread_.joinable()) return;
     SetEvent(stop_);
     thread_.join();
+    const DWORD tid = thread_id_.exchange(0);
+    if (tid && registration_.unregister_thread) registration_.unregister_thread(tid);
     running_.store(false);
 }
 

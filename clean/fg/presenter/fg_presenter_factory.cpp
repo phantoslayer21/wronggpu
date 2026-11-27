@@ -161,6 +161,8 @@ FgWinResult FgCreatePresenter(const FgPresenterFactoryDesc& desc, FgCreatedPrese
 
     if (out->selection.chosen == FgPresenterChoice::WindowsCompositionHwfq) {
         FgCompPresenterDesc cd;
+        cd.worker_registration = desc.worker_registration;
+        cd.min_interval = desc.min_interval;
         cd.device = desc.device;
         cd.hwnd = desc.hwnd;
         cd.width = desc.width;
@@ -180,6 +182,8 @@ FgWinResult FgCreatePresenter(const FgPresenterFactoryDesc& desc, FgCreatedPrese
         return FgWinOk();
     }
     FgDxgiPresenterDesc dd;
+    dd.worker_registration = desc.worker_registration;
+    dd.min_interval = desc.min_interval;
     dd.device = desc.device;
     dd.queue = desc.queue;
     dd.swap_chain = desc.swap_chain;

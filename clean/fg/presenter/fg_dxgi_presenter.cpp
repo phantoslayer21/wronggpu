@@ -12,7 +12,7 @@ namespace {
 
 constexpr std::uint32_t kMaxSlots = 32;
 constexpr FgTicks kGridRefresh = 10000000;  // re-read the vblank phase once a second
-constexpr DWORD kLatencyWaitMs = 100;
+constexpr DWORD kLatencyWaitMs = 10;
 
 }  // namespace
 
@@ -33,7 +33,7 @@ FgWinResult FgDxgiPresenter::Create(const FgDxgiPresenterDesc& d, std::unique_pt
     const std::uint32_t slots = d.slot_count ? d.slot_count : default_slots;
     if (slots < FgMinSlotsFor(d.max_generated) || slots > kMaxSlots)
         return FgWinFail(FgStatus::InvalidArgument, FgWinRefusal::SlotCount);
-    if (d.refresh_period < 0 || d.late_tolerance < 0 || d.timer_lead < 0)
+    if (d.refresh_period < 0 || d.min_interval < 0 || d.late_tolerance < 0 || d.timer_lead < 0)
         return FgWinFail(FgStatus::InvalidArgument, FgWinRefusal::RefreshUnknown);
     if (!d.device) return FgWinFail(FgStatus::InvalidArgument, FgWinRefusal::NullDevice);
     if (!d.queue) return FgWinFail(FgStatus::InvalidArgument, FgWinRefusal::NullQueue);
@@ -66,8 +66,9 @@ FgWinResult FgDxgiPresenter::Create(const FgDxgiPresenterDesc& d, std::unique_pt
     cfg.slot_count = slots;
     cfg.max_pending_intervals = d.max_pending_intervals >= 1 ? d.max_pending_intervals : 2u;
     cfg.refresh_period = d.refresh_period;
+    if (d.pacing == FgDxgiPacing::Tearing)
+        cfg.pending_late_tolerance = d.late_tolerance > 40000 ? d.late_tolerance : 40000;
     std::unique_ptr<FgDxgiPresenter> p(new FgDxgiPresenter(d, cfg));
-    p->engine_.SetDisplayTimeMeasured(false);  // A4: DXGI records submit / intended vblank estimate, not scan-out time
     p->info_.tearing_supported = tearing != FALSE;
     const FgWinResult r = p->Initialize();
     if (!r.Ok()) return r;
@@ -78,10 +79,9 @@ FgWinResult FgDxgiPresenter::Create(const FgDxgiPresenterDesc& d, std::unique_pt
 FgWinResult FgDxgiPresenter::Initialize() {
     if (!timer_.Valid()) return FgWinFail(FgStatus::Unsupported, FgWinRefusal::TimerUnavailable);
     copy_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    alloc_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     fence_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     drain_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    if (!copy_event_ || !alloc_event_ || !fence_event_ || !drain_event_)
+    if (!copy_event_ || !fence_event_ || !drain_event_)
         return FgWinFail(FgStatus::Unsupported, FgWinRefusal::ResourceCreation);
     latency_ = swap_->GetFrameLatencyWaitableObject();
     if (!latency_) return FgWinFail(FgStatus::Unsupported, FgWinRefusal::SwapChainNoWaitable);
@@ -94,7 +94,7 @@ FgWinResult FgDxgiPresenter::Initialize() {
             return FgWinFail(FgStatus::Unsupported, FgWinRefusal::RefreshUnknown);
         grid_updated_at_ = FgInterruptNow();
     }
-    if (!worker_.Start(this, L"wg-fg-dxgi-presenter")) return FgWinFail(FgStatus::Refused, FgWinRefusal::WorkerStart);
+    if (!worker_.Start(this, L"wg-fg-dxgi-presenter", desc_.worker_registration)) return FgWinFail(FgStatus::Refused, FgWinRefusal::WorkerStart);
     return FgWinOk();
 }
 
@@ -171,7 +171,6 @@ FgDxgiPresenter::~FgDxgiPresenter() {
     back_buffers_.clear();
     if (latency_) CloseHandle(latency_);
     if (copy_event_) CloseHandle(copy_event_);
-    if (alloc_event_) CloseHandle(alloc_event_);
     if (fence_event_) CloseHandle(fence_event_);
     if (drain_event_) CloseHandle(drain_event_);
 }
@@ -341,12 +340,19 @@ FgStatus FgDxgiPresenter::CompleteResize(bool resize_ok, std::uint64_t new_epoch
         return engine_.Refuse(FgStatus::ResizeFailed);
     }
     have_vblank_ = false;
+    quiesce_fence_signalled_ = false;
+    latency_credit_ = false;
+    last_issue_ = 0;
     local_.clear();
     return s;
 }
 
 FgStatus FgDxgiPresenter::OnDeviceLost() {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (presenting_) {
+        device_lost_pending_ = true;
+        return FgStatus::Ok;
+    }
     const FgStatus s = engine_.OnDeviceLost();
     local_.clear();
     return s;
@@ -431,6 +437,7 @@ void FgDxgiPresenter::ReleaseCopiedSlotsLocked() {
     const std::uint64_t done = copy_fence_ ? copy_fence_->GetCompletedValue() : 0;
     for (std::uint32_t slot = 0; slot < slot_copy_value_.size(); ++slot) {
         const FgEngineSlotState st = engine_.SlotState(slot);
+        if (st == FgEngineSlotState::Presenting) continue;
         if (slot_copy_value_[slot] != 0) {
             // read by a copy: free once that copy finished (whether it is still on screen does not matter, the
             // back buffer holds its own copy)
@@ -449,7 +456,8 @@ void FgDxgiPresenter::StepLocked(FgTicks now) {
         return;
     }
     ReleaseCopiedSlotsLocked();
-    if (desc_.pacing == FgDxgiPacing::Vsync && now - grid_updated_at_ > kGridRefresh) {
+    if (st == FgPresenterState::Attached && desc_.pacing == FgDxgiPacing::Vsync &&
+        now - grid_updated_at_ > kGridRefresh) {
         grid_updated_at_ = now;
         FgRefreshGrid grid;
         DXGI_FRAME_STATISTICS fs = {};
@@ -465,8 +473,19 @@ void FgDxgiPresenter::StepLocked(FgTicks now) {
     std::vector<FgEnginePresent> out;
     engine_.TakeOutbox(&out);
     for (const FgEnginePresent& p : out) local_.push_back(p);
-    // not attached any more: once the copies and any in-flight present finished, release swap chain buffers for resize
-    if (engine_.State() != FgPresenterState::Attached && !presenting_ && CopiesIdleLocked()) back_buffers_.clear();
+    if (engine_.State() != FgPresenterState::Attached && !presenting_ && !back_buffers_.empty()) {
+        // The copy fence was signalled before native Present. Resize also needs completion of work DXGI queued.
+        if (!quiesce_fence_signalled_) {
+            const HRESULT hr = queue_->Signal(copy_fence_.Get(), copy_value_ + 1);
+            if (FAILED(hr)) {
+                LoseLocked();
+                return;
+            }
+            ++copy_value_;
+            quiesce_fence_signalled_ = true;
+        }
+        if (CopiesIdleLocked()) back_buffers_.clear();
+    }
 }
 
 bool FgDxgiPresenter::PlanHeadLocked(FgTicks now, Planned* out) {
@@ -499,7 +518,8 @@ bool FgDxgiPresenter::PlanHeadLocked(FgTicks now, Planned* out) {
             pl.issue_at = submit;
             pl.shown_at = vblank;
         } else {
-            pl.issue_at = p.target;
+            const FgTicks earliest = last_issue_ + desc_.min_interval;
+            pl.issue_at = p.target > earliest ? p.target : earliest;
             pl.shown_at = p.target;
         }
         if (!p.real) {
@@ -517,7 +537,9 @@ bool FgDxgiPresenter::PlanHeadLocked(FgTicks now, Planned* out) {
             bool late = vsync ? now > pl.shown_at : now > pl.shown_at + tol;
             if (!late && !vsync && local_.size() > 1) {
                 const FgEnginePresent& next = local_[1];
-                late = engine_.SlotPresentId(next.slot) == next.present_id && now >= next.target - 2500;
+                const FgTicks issue = now > pl.issue_at ? now : pl.issue_at;
+                const FgTicks gap = desc_.min_interval > 2500 ? desc_.min_interval : 2500;
+                late = engine_.SlotPresentId(next.slot) == next.present_id && issue > next.target - gap;
             }
             if (late) {  // it would be on screen for (almost) no time: drop it, the lease is free at once
                 engine_.OnPresentDropped(p.present_id, FgDropReason::Late);
@@ -548,13 +570,16 @@ bool FgDxgiPresenter::PresentHead(HANDLE stop) {
         if (w != WAIT_OBJECT_0 + 1) {
             std::lock_guard<std::mutex> lock(mutex_);
             ++info_.latency_timeouts;
+            const FgTicks now = FgInterruptNow();
             Planned head;
-            if (engine_.State() == FgPresenterState::Attached && PlanHeadLocked(FgInterruptNow(), &head) &&
-                !head.present.real) {
-                engine_.OnPresentDropped(head.present.present_id, FgDropReason::Pressure);  // no room in time
+            if (engine_.State() == FgPresenterState::Attached && PlanHeadLocked(now, &head) && head.present.real &&
+                now - head.present.target >= 2500000) {
+                ++info_.occlusion_retired_real;
+                engine_.OnPresentSkipped(head.present.present_id);
                 local_.pop_front();
+                ReleaseCopiedSlotsLocked();
             }
-            return true;  // a real image waits and retries
+            return true;  // replan against the current queue and generated deadlines
         }
         std::lock_guard<std::mutex> lock(mutex_);
         latency_credit_ = true;
@@ -569,13 +594,13 @@ bool FgDxgiPresenter::PresentHead(HANDLE stop) {
     ComPtr<ID3D12Fence> producer;
     ComPtr<IDXGISwapChain4> swap;
     std::size_t a = 0;
-    std::uint64_t alloc_wait_val = 0;
     std::uint64_t copy_val = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!latency_credit_) return true;
         const FgTicks now = FgInterruptNow();
         if (engine_.State() != FgPresenterState::Attached || !PlanHeadLocked(now, &head)) return true;
+        if (desc_.pacing == FgDxgiPacing::Tearing && now < last_issue_ + desc_.min_interval) return true;
         if (now + desc_.timer_lead < head.issue_at) return true;  // a new head with a later time: keep the credit
         const UINT bbi = swap_->GetCurrentBackBufferIndex();
         if (bbi >= back_buffers_.size() || !back_buffers_[bbi] || head.present.slot >= slots_.size() ||
@@ -585,8 +610,11 @@ bool FgDxgiPresenter::PresentHead(HANDLE stop) {
             return true;
         }
         a = ring_ % allocators_.size();
+        // Wait for the allocator before taking the lease. The run loop retries while the copy fence drains.
+        if (copy_fence_->GetCompletedValue() < allocator_value_[a]) return true;
+        if (!engine_.LeasePresent(head.present.slot, head.present.present_id)) return true;
+        local_.pop_front();
         alloc = allocators_[a];
-        alloc_wait_val = allocator_value_[a];
         bb = back_buffers_[bbi];
         src = slots_[head.present.slot];
         list = list_;
@@ -600,90 +628,77 @@ bool FgDxgiPresenter::PresentHead(HANDLE stop) {
     }
 
     // ---- Unlocked GPU copy + Present ----
-    HRESULT hr = S_OK;
-    bool alloc_busy = false;
-    if (copy_fence->GetCompletedValue() < alloc_wait_val) {
-        if (SUCCEEDED(copy_fence->SetEventOnCompletion(alloc_wait_val, alloc_event_)))
-            WaitForSingleObject(alloc_event_, 50);
-        if (copy_fence->GetCompletedValue() < alloc_wait_val) alloc_busy = true;
-    }
-    if (!alloc_busy) {
-        hr = alloc->Reset();
-        if (SUCCEEDED(hr)) hr = list->Reset(alloc.Get(), nullptr);
-        if (SUCCEEDED(hr)) {
-            D3D12_RESOURCE_BARRIER b[2] = {};
-            b[0].Type = b[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-            b[0].Transition = {bb.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_PRESENT,
-                               D3D12_RESOURCE_STATE_COPY_DEST};
-            b[1].Transition = {src.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_COMMON,
-                               D3D12_RESOURCE_STATE_COPY_SOURCE};
-            list->ResourceBarrier(2, b);
-            list->CopyResource(bb.Get(), src.Get());
-            for (D3D12_RESOURCE_BARRIER& x : b) {
-                const D3D12_RESOURCE_STATES t = x.Transition.StateBefore;
-                x.Transition.StateBefore = x.Transition.StateAfter;
-                x.Transition.StateAfter = t;
-            }
-            list->ResourceBarrier(2, b);
-            hr = list->Close();
+    HRESULT hr = alloc->Reset();
+    if (SUCCEEDED(hr)) hr = list->Reset(alloc.Get(), nullptr);
+    if (SUCCEEDED(hr)) {
+        D3D12_RESOURCE_BARRIER b[2] = {};
+        b[0].Type = b[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b[0].Transition = {bb.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_PRESENT,
+                           D3D12_RESOURCE_STATE_COPY_DEST};
+        b[1].Transition = {src.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_COMMON,
+                           D3D12_RESOURCE_STATE_COPY_SOURCE};
+        list->ResourceBarrier(2, b);
+        list->CopyResource(bb.Get(), src.Get());
+        for (D3D12_RESOURCE_BARRIER& x : b) {
+            const D3D12_RESOURCE_STATES t = x.Transition.StateBefore;
+            x.Transition.StateBefore = x.Transition.StateAfter;
+            x.Transition.StateAfter = t;
         }
-        if (SUCCEEDED(hr)) {
-            if (producer) queue->Wait(producer.Get(), head.present.fence.value);
-            ID3D12CommandList* lists[] = {list.Get()};
-            queue->ExecuteCommandLists(1, lists);
-            queue->Signal(copy_fence.Get(), copy_val);
-            const bool tearing = desc_.pacing == FgDxgiPacing::Tearing;
-            hr = swap->Present(tearing ? 0 : 1, tearing ? DXGI_PRESENT_ALLOW_TEARING : 0);
-            if (tearing && hr == DXGI_ERROR_INVALID_CALL) {
-                // DXGI_PRESENT_ALLOW_TEARING is invalid in exclusive fullscreen; retry without the tearing flag.
-                hr = swap->Present(0, 0);
-            }
+        list->ResourceBarrier(2, b);
+        hr = list->Close();
+    }
+    if (SUCCEEDED(hr) && producer) hr = queue->Wait(producer.Get(), head.present.fence.value);
+    bool copied = false;
+    if (SUCCEEDED(hr)) {
+        ID3D12CommandList* lists[] = {list.Get()};
+        queue->ExecuteCommandLists(1, lists);
+        copied = true;
+        hr = queue->Signal(copy_fence.Get(), copy_val);
+    }
+    const bool tearing = desc_.pacing == FgDxgiPacing::Tearing;
+    const FgTicks issued = FgInterruptNow();
+    if (SUCCEEDED(hr)) {
+        hr = swap->Present(tearing ? 0 : 1, tearing ? DXGI_PRESENT_ALLOW_TEARING : 0);
+        if (tearing && hr == DXGI_ERROR_INVALID_CALL) {
+            // DXGI_PRESENT_ALLOW_TEARING is invalid in exclusive fullscreen; retry without the tearing flag.
+            hr = swap->Present(0, 0);
         }
     }
     const FgTicks present_done = FgInterruptNow();
 
     std::lock_guard<std::mutex> lock(mutex_);
     presenting_ = false;
-    if (alloc_busy) {
-        // Did not submit on this wake: signal copy_val on fence if needed? No — rewind copy_value_ if untouched.
-        if (copy_value_ == copy_val) --copy_value_;
+    if (copied) {
+        allocator_value_[a] = copy_val;
+        slot_copy_value_[head.present.slot] = copy_val;
+    } else {
+        --copy_value_;
+    }
+    if (device_lost_pending_ || FgIsDeviceLostHr(hr)) {
+        device_lost_pending_ = false;
+        LoseLocked();
         return true;
     }
+    const bool shown = SUCCEEDED(hr) && hr != DXGI_STATUS_OCCLUDED;
+    engine_.FinishLeasedPresent(head.present.slot, SUCCEEDED(hr) ? present_done : 0, tearing ? issued : head.shown_at, shown);
     if (FAILED(hr)) {
-        if (copy_value_ == copy_val && copy_fence_->GetCompletedValue() < copy_val) {
-            // If we failed before ExecuteCommandLists/Signal, avoid stalling CopiesIdleLocked forever.
-            queue_->Signal(copy_fence_.Get(), copy_val);
-        }
-        if (FgIsDeviceLostHr(hr)) {
-            LoseLocked();
-        } else {
-            engine_.MarkFailed();  // a failed present is a hard failure: refuse until Detach, no fallback
-            local_.clear();
-        }
+        engine_.MarkFailed();
+        local_.clear();
         return true;
     }
-    if (a < allocator_value_.size()) allocator_value_[a] = copy_val;
-    if (head.present.slot < slot_copy_value_.size()) slot_copy_value_[head.present.slot] = copy_val;
     ++info_.presents;
-    const bool tearing = desc_.pacing == FgDxgiPacing::Tearing;
+    last_issue_ = issued;
     if (!tearing) {
         have_vblank_ = true;
         last_vblank_ = head.shown_at;
     }
-    // DXGI reports no per-present scan-out time here: tearing records the Present call time, VSync the vblank the
-    // present was issued for (stats_.display_time_measured == false).
-    engine_.OnPresentSubmitted(head.present.present_id, present_done);
-    engine_.OnPresentDisplayed(head.present.present_id, tearing ? present_done : head.shown_at);
     latency_credit_ = false;
-    if (!local_.empty() && local_.front().present_id == head.present.present_id) local_.pop_front();
     return true;
 }
 
 void FgDxgiPresenter::Run(HANDLE stop, HANDLE wake) {
-    constexpr FgTicks kSpinWindow = 5000;  // 0.5 ms: bridge waitable-timer wake jitter without burning CPU
     for (;;) {
         bool present_now = false;
-        FgTicks spin_until = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             const FgTicks now = FgInterruptNow();
@@ -691,13 +706,17 @@ void FgDxgiPresenter::Run(HANDLE stop, HANDLE wake) {
             Planned head;
             if (engine_.State() == FgPresenterState::Attached && PlanHeadLocked(now, &head)) {
                 const FgTicks target_at = head.issue_at - desc_.timer_lead;
-                if (now >= target_at) {
-                    present_now = true;
-                } else if (target_at - now <= kSpinWindow) {
+                // Early timer lead must never issue before the minimum spacing from the previous Present.
+                const FgTicks earliest = last_issue_ + desc_.min_interval;
+                const FgTicks wake_at = desc_.pacing == FgDxgiPacing::Tearing && earliest > target_at
+                                            ? earliest : target_at;
+                const auto next_allocator = ring_ % allocators_.size();
+                if (copy_fence_->GetCompletedValue() < allocator_value_[next_allocator]) {
                     timer_.Cancel();
-                    spin_until = target_at;
+                } else if (now >= wake_at) {
+                    present_now = true;
                 } else {
-                    timer_.ArmAt(target_at - kSpinWindow);
+                    timer_.ArmAt(wake_at);
                 }
             } else {
                 const FgTicks deadline = engine_.NextDeadline();
@@ -711,21 +730,11 @@ void FgDxgiPresenter::Run(HANDLE stop, HANDLE wake) {
             }
             if (!CopiesIdleLocked()) copy_fence_->SetEventOnCompletion(copy_value_, copy_event_);
         }
-        if (spin_until != 0) {
-            while (FgInterruptNow() < spin_until) {
-                if (WaitForSingleObject(stop, 0) == WAIT_OBJECT_0) {
-                    timer_.Cancel();
-                    return;
-                }
-                YieldProcessor();
-            }
-            present_now = true;
-        }
         if (present_now) {
-            if (!PresentHead(stop)) break;
+            if (WaitForSingleObject(stop, 0) == WAIT_OBJECT_0 || !PresentHead(stop)) break;
             continue;
         }
-        HANDLE hs[5] = {stop, wake, timer_.Handle(), fence_event_, copy_event_};
+        HANDLE hs[] = {stop, wake, timer_.Handle(), fence_event_, copy_event_};
         if (WaitForMultipleObjects(5, hs, FALSE, 100) == WAIT_OBJECT_0) break;
     }
     timer_.Cancel();

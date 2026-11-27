@@ -351,7 +351,8 @@ HRESULT FgSwapChain::RawPresent(bool present1, UINT sync_interval, UINT flags, c
     return hr;
 }
 
-HRESULT FgSwapChain::PresentCommon(bool present1, UINT sync_interval, UINT flags, const DXGI_PRESENT_PARAMETERS* params) {
+HRESULT FgSwapChain::PresentCommon(bool present1, UINT sync_interval, UINT flags, const DXGI_PRESENT_PARAMETERS* params,
+                                   void* caller) {
     if (IsRegisteredWorkerThread(GetCurrentThreadId())) {
         // A1 invariant breach: a presenter worker thread should present directly on inner_, never re-enter FgSwapChain.
         const uint64_t cnt = worker_reentries_.fetch_add(1, std::memory_order_acq_rel) + 1;
@@ -367,11 +368,10 @@ HRESULT FgSwapChain::PresentCommon(bool present1, UINT sync_interval, UINT flags
         return RawPresent(present1, sync_interval, flags, params);
     }
     if (!(flags & DXGI_PRESENT_TEST) && !first_present_logged_.exchange(true)) {
-        void* caller = _ReturnAddress();
         void** ivt = *reinterpret_cast<void***>(inner_);
-        void* inner_present = ivt ? ivt[8] : nullptr;
+        void* inner_present = ivt ? ivt[present1 ? 22 : 8] : nullptr;
         Log("fg swap chain: first game Present boundary: caller=" + ModuleLeafOfAddr(caller) +
-            ", inner->Present=" + ModuleLeafOfAddr(inner_present) +
+            (present1 ? ", inner->Present1=" : ", inner->Present=") + ModuleLeafOfAddr(inner_present) +
             ", worker_reentries=" + std::to_string(worker_reentries_.load(std::memory_order_acquire)));
     }
     std::lock_guard<std::recursive_mutex> lock(mu_);
@@ -438,11 +438,11 @@ HRESULT FgSwapChain::PresentCommon(bool present1, UINT sync_interval, UINT flags
 }
 
 HRESULT STDMETHODCALLTYPE FgSwapChain::Present(UINT sync_interval, UINT flags) {
-    return PresentCommon(false, sync_interval, flags, nullptr);
+    return PresentCommon(false, sync_interval, flags, nullptr, _ReturnAddress());
 }
 
 HRESULT STDMETHODCALLTYPE FgSwapChain::Present1(UINT sync_interval, UINT flags, const DXGI_PRESENT_PARAMETERS* params) {
-    return PresentCommon(true, sync_interval, flags, params);
+    return PresentCommon(true, sync_interval, flags, params, _ReturnAddress());
 }
 
 // ---- resize, fullscreen, color space -------------------------------------------------------------------------------
@@ -451,13 +451,15 @@ HRESULT STDMETHODCALLTYPE FgSwapChain::ResizeBuffers(UINT count, UINT width, UIN
     flags |= extra_flags_.load();  // the creation's extra flags stay on the chain
     if (t_callback_depth > 0) return inner_->ResizeBuffers(count, width, height, format, flags);
     std::lock_guard<std::recursive_mutex> lock(mu_);
-    pending_ = false;
     ++stats_.resizes;
     if (callback_) {
         IFgPresentCallback* cb = callback_;
         DepthScope depth;
-        Guard("BeforeResize", [&]() { cb->BeforeResize(); });
+        HRESULT before = S_OK;
+        Guard("BeforeResize", [&]() { before = cb->BeforeResize(); });
+        if (FAILED(before)) return before;
     }
+    pending_ = false;
     const HRESULT hr = inner_->ResizeBuffers(count, width, height, format, flags);
     if (SUCCEEDED(hr)) ++epoch_;
     if (callback_) {
@@ -496,13 +498,15 @@ HRESULT STDMETHODCALLTYPE FgSwapChain::ResizeBuffers1(UINT count, UINT width, UI
         present_queues.assign(count, present_queue_);
         queues = present_queues.data();
     }
-    pending_ = false;
     ++stats_.resizes;
     if (callback_) {
         IFgPresentCallback* cb = callback_;
         DepthScope depth;
-        Guard("BeforeResize", [&]() { cb->BeforeResize(); });
+        HRESULT before = S_OK;
+        Guard("BeforeResize", [&]() { before = cb->BeforeResize(); });
+        if (FAILED(before)) return before;
     }
+    pending_ = false;
     const HRESULT hr = inner_->ResizeBuffers1(count, width, height, format, flags, node_masks, queues);
     if (SUCCEEDED(hr)) ++epoch_;
     if (callback_) {
@@ -516,14 +520,17 @@ HRESULT STDMETHODCALLTYPE FgSwapChain::ResizeBuffers1(UINT count, UINT width, UI
 HRESULT STDMETHODCALLTYPE FgSwapChain::SetFullscreenState(BOOL fullscreen, IDXGIOutput* target) {
     if (t_callback_depth > 0) return inner_->SetFullscreenState(fullscreen, target);
     std::lock_guard<std::recursive_mutex> lock(mu_);
-    pending_ = false;
+    BOOL current_fullscreen = TRUE;
+    const bool noop_windowed = !fullscreen &&
+        SUCCEEDED(inner_->GetFullscreenState(&current_fullscreen, nullptr)) && !current_fullscreen;
+    if (!noop_windowed) pending_ = false;
     if (callback_) {
         IFgPresentCallback* cb = callback_;
         DepthScope depth;
         Guard("BeforeFullscreen", [&]() { cb->BeforeFullscreen(fullscreen); });
     }
     const HRESULT hr = inner_->SetFullscreenState(fullscreen, target);
-    if (SUCCEEDED(hr)) ++epoch_;
+    if (SUCCEEDED(hr) && !noop_windowed) ++epoch_;
     if (callback_) {
         IFgPresentCallback* cb = callback_;
         DepthScope depth;

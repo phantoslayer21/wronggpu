@@ -44,6 +44,8 @@
 namespace wgfg {
 
 struct FgCompPresenterDesc {
+    FgWorkerRegistration worker_registration;
+    FgTicks min_interval = 0;
     ID3D12Device* device = nullptr;  // the game's device: it renders every image into the slots
     HWND hwnd = nullptr;             // the game window the composition visual is bound to (this process)
     // false: headless validation only. The surface is created but bound to no window, so nothing is shown; hwnd must

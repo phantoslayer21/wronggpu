@@ -108,6 +108,7 @@ struct FgGameFrame {
     std::uint32_t requested_count = 0;  // N: 0 = generation off, 1..5
     bool generation_enabled = true;     // menu / game decision for this interval
     bool reset = false;                 // camera cut / history reset on this frame
+    FgTicks budget_origin = 0;          // post-wait submission time (0: use arrival)
 };
 
 class FgTargetScheduler {
@@ -168,7 +169,7 @@ private:
     bool have_target_ = false;
     FgTicks last_real_target_ = 0;
     bool history_valid_ = false;
-    bool generated_in_epoch_ = false;
+    bool last_interval_generated_ = false;
     std::uint32_t last_requested_ = 0;
     std::uint32_t effective_ = 0;
     std::uint32_t bad_run_ = 0;
