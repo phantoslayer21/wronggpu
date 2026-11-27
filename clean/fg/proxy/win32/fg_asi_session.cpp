@@ -1255,13 +1255,14 @@ struct FgAsiSessionHost::Impl {
                                   budget > kBudgetBase + 40000;
         if (!full_window && !fast_probe && !excess_probe) return;
         const wgfg::FgPresentStats st = pr->Stats();
-        const uint64_t sched = st.generated_scheduled - window_base.generated_scheduled;
+        const auto producer_window = ProducerWindow(st, window_base);
+        const uint64_t sched = producer_window.scheduled;
         const uint64_t disp_g = st.displayed_generated - window_base.displayed_generated;
         const uint64_t disp_r = st.displayed_real - window_base.displayed_real;
         const uint64_t late = st.dropped_late - window_base.dropped_late;
         const uint64_t pressure = st.dropped_pressure - window_base.dropped_pressure;
         const uint64_t skipped = st.display_skipped_generated - window_base.display_skipped_generated;
-        const uint64_t missed = st.generated_late_pre_queue - window_base.generated_late_pre_queue;
+        const uint64_t missed = producer_window.missed;
         const bool severe_storm = fast_probe && sched >= 6ull && missed * 5ull > sched;
         const bool clean_excess_check = excess_probe && !severe_storm && sched >= 8ull && missed == 0;
         if (!full_window && !severe_storm && !clean_excess_check) return;
@@ -1342,7 +1343,7 @@ struct FgAsiSessionHost::Impl {
                               st_latency_limit.load());
 
         const uint64_t on_time = sched > missed ? sched - missed : 0;
-        const bool producer_miss_window = missed * 50 > sched;
+        const bool producer_miss_window = producer_window.NeedsBudgetReview();
         const bool need_more_budget = producer_miss_window && (d_origins.Empty() || d_p95 + 2500 > budget);
         if (need_more_budget) budget_limits.RecordMiss(budget);
         const wgfg::FgTicks b_cap = budget_limits.Cap(kBudgetBase, d_p95, producer_miss_window);
@@ -1359,24 +1360,21 @@ struct FgAsiSessionHost::Impl {
             if (want > budget + 500) {
                 next = want;
                 cap_miss_windows = 0;
-            } else if (!severe_storm && missed * 20 > sched && ++cap_miss_windows >= 2) {
+            } else if (const uint32_t target_cap = producer_window.ReducedCount(last_generating_count);
+                       !severe_storm && target_cap > 0 && ++cap_miss_windows >= 2) {
                 // > 5% misses persist at the dynamic ceiling (or budget is no longer limiting): step count cap down
-                // only when requesting > 1 generated image (capping N=1 to 1 is a no-op that blocks easing).
+                // only while the last generating interval scheduled more than one image.
                 cap_miss_windows = 0;
-                const uint32_t cur_n = last_generating_count;
-                if (cur_n > 1) {
-                    const uint32_t target_cap = cur_n - 1;
-                    if (lateness_count_cap == 0 || target_cap < lateness_count_cap) {
-                        lateness_count_cap = target_cap;
-                        session->SetMaxGeneratedCap(lateness_count_cap);
-                        char line[224];
-                        std::snprintf(line, sizeof line,
-                                      "fg host: budget at %.1f ms (cap %.1f ms) with %llu/%llu missed; stepping "
-                                      "generated count cap down to %u",
-                                      budget / 10000.0, b_cap / 10000.0, static_cast<unsigned long long>(missed),
-                                      static_cast<unsigned long long>(sched), lateness_count_cap);
-                        Log(line);
-                    }
+                if (lateness_count_cap == 0 || target_cap < lateness_count_cap) {
+                    lateness_count_cap = target_cap;
+                    session->SetMaxGeneratedCap(lateness_count_cap);
+                    char line[224];
+                    std::snprintf(line, sizeof line,
+                                  "fg host: budget at %.1f ms (cap %.1f ms) with %llu/%llu missed; stepping "
+                                  "generated count cap down to %u",
+                                  budget / 10000.0, b_cap / 10000.0, static_cast<unsigned long long>(missed),
+                                  static_cast<unsigned long long>(sched), lateness_count_cap);
+                    Log(line);
                 }
             }
         } else if (missed * 100 <= sched) {  // <= 1% missed: release count cap first, then ease latency back
@@ -2038,18 +2036,18 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
             m.st_req_count.store(out->requested_count);
             if (out->status == WG_FG_PRESENT_GENERATE) {
                 // N-B7: when switching to a faster preset (e.g. A/B -> C), decay the lateness budget & cap immediately.
-                if (m.have_last_preset && out->effective_preset == WG_FG_PRESET_C && m.last_preset != WG_FG_PRESET_C &&
-                    (m.budget > kBudgetBase || m.lateness_count_cap > 0)) {
+                if (m.have_last_preset && out->effective_preset == WG_FG_PRESET_C && m.last_preset != WG_FG_PRESET_C) {
                     m.budget = kBudgetBase;
                     m.lateness_count_cap = 0;
                     m.cap_miss_windows = 0;
                     m.quiet_windows = 0;
-                    m.budget_limits = {};
                     m.budget_grace_frames = 0;
                     m.window_first = true;
                     m.window_frames = 0;
+                    const auto* presenter = m.session ? m.session->Presenter() : nullptr;
+                    ResetFirstImageBudgetWindow(m.budget_limits, m.window_base,
+                                                presenter ? presenter->Stats() : wgfg::FgPresentStats{});
                     if (m.session) {
-                        if (const auto* presenter = m.session->Presenter()) m.window_base = presenter->Stats();
                         m.session->SetFirstImageBudget(m.budget);
                         m.session->SetMaxGeneratedCap(0);
                     }

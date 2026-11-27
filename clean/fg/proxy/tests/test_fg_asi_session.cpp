@@ -1883,6 +1883,7 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::strin
         uint64_t generating_reanchors = 0;
         double final_budget_ms = 0.0;
         bool saw_stats = false;
+        bool warned_unknown_mode = false;
 
         static bool ParseU64(const char* line, const char* key, uint64_t* out) {
             const char* p = std::strstr(line, key);
@@ -1908,7 +1909,9 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::strin
             if (!ctx || !line) return;
             auto* self = static_cast<SmokeLogCapture*>(ctx);
             std::lock_guard<std::mutex> lock(self->mu);
-            if (std::strstr(line, "fg host: presenter stats:")) {
+            if (std::strstr(line, "unknown WG_FG_ADMISSION value")) {
+                self->warned_unknown_mode = true;
+            } else if (std::strstr(line, "fg host: presenter stats:")) {
                 self->saw_stats = true;
                 ParseU64(line, "sched=", &self->sched);
                 ParseU64(line, "sub=", &self->sub);
@@ -2122,6 +2125,7 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::strin
         uint32_t low_count_frames = 0;
         uint32_t recovered_high = 0;
         int64_t gap_p95_us = 0;
+        bool warned_unknown_mode = false;
     };
 
     auto run_leg = [&](const char* label, bool fg_enable, uint32_t gen_n, int slow_frames, int64_t slow_us,
@@ -2325,6 +2329,7 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::strin
         out.post_drop = cap.post_drop;
         out.real_sub = cap.real_sub;
         out.latency_cap_ro = cap.latency_cap_ro;
+        out.warned_unknown_mode = cap.warned_unknown_mode;
         out.generating_reanchors = cap.generating_reanchors;
         out.gap_p95_us = Percentile(std::move(admission_gaps), 0.95);
         out.final_budget_ms = cap.final_budget_ms;
@@ -2364,9 +2369,10 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::strin
 
     if (only == "admission-policy") {
         char env_mode[16] = {};
-        GetEnvironmentVariableA("WG_FG_ADMISSION", env_mode, sizeof(env_mode));
-        const bool force_present = std::strcmp(env_mode, "present") == 0;
-        const bool force_consumed = std::strcmp(env_mode, "consumed") == 0;
+        const auto length = GetEnvironmentVariableA("WG_FG_ADMISSION", env_mode, sizeof(env_mode));
+        const bool force_present = length == 7 && std::strcmp(env_mode, "present") == 0;
+        const bool force_consumed = length == 8 && std::strcmp(env_mode, "consumed") == 0;
+        const bool explicit_policy = length == 6 && std::strcmp(env_mode, "policy") == 0;
         for (const uint32_t requested : {0u, 1u, 2u, 3u, 5u}) {
             const auto run = run_leg("admission-policy", requested > 0, std::max(1u, requested), 0, 0, 110, 18500, 6500);
             CHECK(run.present_errors == 0 && run.session_failures == 0);
@@ -2379,6 +2385,7 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::strin
             CHECK(run.admission_consumed == 0 || expects_consumed);
             CHECK(run.admission_present > 0);
             CHECK(run.admission_present + run.admission_consumed == run.real_sub);
+            CHECK(run.warned_unknown_mode == (length != 0 && !force_present && !force_consumed && !explicit_policy));
         }
         if (!force_present && !force_consumed) {
             const auto mixed = run_leg("2x-to-4x-to-3x", true, 1u, 0, 0, 112, 18500, 6500, true);
@@ -2531,6 +2538,31 @@ void TestHighCountPresentBudgetEasesInSmallSteps() {
     CHECK(FirstImageFastEaseStepCap(219000, false, 5) == 25000);
 }
 
+void TestBudgetControllerUsesProducerMissesAndResetsItsBaseline() {
+    g_case = "pacing-producer-budget-window";
+    wgfg::FgPresentStats base;
+    base.generated_scheduled = 10;
+    base.generated_late_pre_queue = 1;
+    auto now = base;
+    now.generated_scheduled += 100;
+    now.generated_dropped_post_queue = 30;
+    CHECK(!ProducerWindow(now, base).NeedsBudgetReview());
+    CHECK(ProducerWindow(now, base).ReducedCount(5) == 0);
+    now.generated_late_pre_queue += 6;
+    CHECK(ProducerWindow(now, base).NeedsBudgetReview());
+    CHECK(ProducerWindow(now, base).ReducedCount(2) == 1);
+    CHECK(ProducerWindow(now, base).ReducedCount(1) == 0);
+
+    FirstImageBudgetLimits limits;
+    limits.Observe(6, 120000, 1);
+    limits.RecordMiss(140000);
+    ResetFirstImageBudgetWindow(limits, base, now);
+    CHECK(limits.miss_floor == 0 && limits.sampled_cap == kFirstImageBudgetMax);
+    CHECK(base.generated_scheduled == now.generated_scheduled && base.generated_late_pre_queue == now.generated_late_pre_queue);
+    CHECK(base.generated_dropped_post_queue == now.generated_dropped_post_queue);
+    CHECK(!ProducerWindow(now, base).NeedsBudgetReview() && ProducerWindow(now, base).ReducedCount(5) == 0);
+}
+
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     bool gpu = false;
@@ -2554,6 +2586,7 @@ int main(int argc, char** argv) {
     TestFirstImageBudgetEasingFloor();
     TestBudgetCapNeedsReliableSamplesAndPreservesFloors();
     TestHighCountPresentBudgetEasesInSmallSteps();
+    TestBudgetControllerUsesProducerMissesAndResetsItsBaseline();
     std::printf("cpu: %d checks, %d failed\n", g_checks, g_failed);
     if (gpu) {
         g_case = "gpu-init";

@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "../../presenter/fg_presenter.h"
+
 namespace wgfgp::win32 {
 
 // Readiness samples are paired by frame and their order defines the newest window.
@@ -76,6 +78,26 @@ constexpr int64_t FirstImageFastEaseStepCap(int64_t budget, bool consumed_admiss
     // A first-present gate can hide the producer tail during a high-count downward step.
     if (!consumed_admission && scheduled >= 4 && budget <= 205000) return 10000;
     return budget > 225000 ? 55000 : (budget > 165000 ? 25000 : (budget > 135000 ? 17000 : 10000));
+}
+
+struct FirstImageProducerWindow {
+    uint64_t scheduled;
+    uint64_t missed;
+
+    bool NeedsBudgetReview() const { return missed * 50 > scheduled; }
+    uint32_t ReducedCount(uint32_t last_generating_count) const {
+        return missed * 20 > scheduled && last_generating_count > 1 ? last_generating_count - 1 : 0;
+    }
+};
+
+inline FirstImageProducerWindow ProducerWindow(const wgfg::FgPresentStats& now, const wgfg::FgPresentStats& base) {
+    return {now.generated_scheduled - base.generated_scheduled, now.generated_late_pre_queue - base.generated_late_pre_queue};
+}
+
+inline void ResetFirstImageBudgetWindow(FirstImageBudgetLimits& limits, wgfg::FgPresentStats& baseline,
+                                      const wgfg::FgPresentStats& current) {
+    limits = {};
+    baseline = current;
 }
 
 }  // namespace wgfgp::win32
