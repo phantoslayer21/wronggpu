@@ -1600,6 +1600,7 @@ uint32_t FgAsiTransport::install(const FgAsiConfig& cfg) {
         void* export_addr[kFgSlotCount] = {};
         for (uint32_t i = 0; i < kFgSlotCount; ++i) export_addr[i] = g_genuine[i].load();
         start_routing(cfg, std::move(core));
+        const FgPatchSlotFn patch = cfg.patch_slot ? cfg.patch_slot : &PatchSlot;
         for (const Found& f : found) {
             void* h = handler_for(f.slot.name_index);
             void* original = nullptr;
@@ -1615,7 +1616,7 @@ uint32_t FgAsiTransport::install(const FgAsiConfig& cfg) {
             } else if (!cur && !f.slot.delay_load && original) {
                 g_genuine[f.slot.name_index].store(original);
             }
-            if (PatchSlot(f.slot.slot, h)) {
+            if (patch(f.slot.slot, h)) {
                 patches_.push_back({f.slot.slot, original, h, f.slot.name_index, f.slot.delay_load, f.module});
                 log(std::string("fg transport: patched ") + (f.slot.delay_load ? "delay-load" : "import") + " slot " +
                     FgRoleWord(f.slot.name_index) + " in " + ModuleLeaf(f.module));
@@ -1623,6 +1624,11 @@ uint32_t FgAsiTransport::install(const FgAsiConfig& cfg) {
                 log(std::string("fg transport: FAILED to patch slot ") + FgRoleWord(f.slot.name_index) + " in " +
                     ModuleLeaf(f.module));
             }
+        }
+        // R3A-3: never report kFgInstalled or stay active when zero interface slots were redirected.
+        if (patches_.empty()) {
+            restore();
+            return finish(kFgNothingToPatch, "no import slots redirected");
         }
         // a generic binding whose game does not create its factory through the interface module: the exe's DXGI
         // factory creations carry the swap-chain hook instead

@@ -265,7 +265,9 @@ struct FgAsiSessionHost::Impl {
     std::atomic<bool> st_has_mfg_selector{false};
     std::atomic<uint32_t> st_schedule_reason{0};
     std::atomic<float> st_displayed_fps{0.0f}, st_base_fps{0.0f};
-    uint64_t display_sample_at = 0, display_sample_frames = 0, display_sample_real = 0;
+    std::atomic<uint64_t> st_displayed_generated{0};
+    uint64_t display_sample_at = 0, display_sample_frames = 0, display_sample_real = 0, display_sample_gen = 0;
+    bool display_sample_generating = false;
     bool overlay_choice_logged = false;
     HANDLE wait_timer = nullptr;      // back-pressure waits (high resolution)
     uint64_t back_pressure_waits = 0; // game frames that waited for a presenter slot
@@ -933,6 +935,9 @@ struct FgAsiSessionHost::Impl {
         if (const wgfg::IFgPresenter* pr = session->Presenter()) {
             // A4: truthful per-stage funnel + sustained multiplier + display-time provenance + A1 worker re-entry count
             const wgfg::FgPresentStats ps = pr->Stats();
+            if (ps.displayed_generated > display_sample_gen)
+                st_displayed_generated.fetch_add(ps.displayed_generated - display_sample_gen,
+                                                 std::memory_order_relaxed);
             const double sust =
                 ps.displayed_real > 0
                     ? static_cast<double>(ps.displayed_real + ps.displayed_generated) /
@@ -988,6 +993,13 @@ struct FgAsiSessionHost::Impl {
             Log(reasons);
             LogTraceSummary(why);
         }
+        display_sample_at = 0;
+        display_sample_frames = 0;
+        display_sample_real = 0;
+        display_sample_gen = 0;
+        display_sample_generating = false;
+        st_displayed_fps.store(0.0f);
+        st_base_fps.store(0.0f);
         wgfg::FgSessionResult r = session->Destroy();
         const ULONGLONG until = GetTickCount64() + kDestroyWaitMs;
         while (r.error == wgfg::FgSessionError::PresenterBusy && GetTickCount64() < until) {
@@ -1365,6 +1377,7 @@ FgAsiLiveStatus FgAsiSessionHost::LiveStatus() const {
     s.schedule_reason = m.st_schedule_reason.load();
     s.displayed_fps = m.st_displayed_fps.load();
     s.base_fps = m.st_base_fps.load();
+    s.displayed_generated = m.st_displayed_generated.load();
     return s;
 }
 
@@ -1582,20 +1595,51 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
         const int32_t rc = wgfg::FgSessionPresent(core, m.session.get(), desc, out, &sr);
         const wgfg::FgTicks t_after_record = wgfg::FgInterruptNow();
         const uint64_t now = GetTickCount64();
-        if (const auto* presenter = m.session ? m.session->Presenter() : nullptr;
-            presenter && now - m.display_sample_at >= 250) {
-            const auto shown = presenter->Stats();
-            const uint64_t frames = shown.displayed_real + shown.displayed_generated;
-            const auto rate = [&](uint64_t count, uint64_t last) {
-                return m.display_sample_at && count >= last
-                           ? static_cast<float>(1000.0 * (count - last) / (now - m.display_sample_at))
-                           : 0.0f;
-            };
-            m.st_displayed_fps.store(rate(frames, m.display_sample_frames));
-            m.st_base_fps.store(rate(shown.displayed_real, m.display_sample_real));
-            m.display_sample_frames = frames;
-            m.display_sample_real = shown.displayed_real;
-            m.display_sample_at = now;
+        const bool route_generating = out && out->status == WG_FG_PRESENT_GENERATE;
+        const bool sched_generating = route_generating && sr.scheduled > 0;
+        if (const auto* presenter = m.session ? m.session->Presenter() : nullptr) {
+            if (sched_generating && !m.display_sample_generating) {
+                // R3A-9: start a clean rate window on RealOnly/Waiting -> Generating so no stale 1.0 ratio carries over.
+                const auto shown = presenter->Stats();
+                if (shown.displayed_generated > m.display_sample_gen)
+                    m.st_displayed_generated.fetch_add(shown.displayed_generated - m.display_sample_gen,
+                                                       std::memory_order_relaxed);
+                m.display_sample_frames = shown.displayed_real + shown.displayed_generated;
+                m.display_sample_real = shown.displayed_real;
+                m.display_sample_gen = shown.displayed_generated;
+                m.display_sample_at = now;
+                m.display_sample_generating = true;
+                m.st_displayed_fps.store(0.0f);
+                m.st_base_fps.store(0.0f);
+            } else if (!route_generating && m.display_sample_generating) {
+                m.display_sample_generating = false;
+                m.display_sample_at = 0;
+                m.st_displayed_fps.store(0.0f);
+                m.st_base_fps.store(0.0f);
+            } else if (now - m.display_sample_at >= 250) {
+                const auto shown = presenter->Stats();
+                const uint64_t frames = shown.displayed_real + shown.displayed_generated;
+                const uint64_t gen_delta = shown.displayed_generated >= m.display_sample_gen
+                                               ? shown.displayed_generated - m.display_sample_gen
+                                               : 0;
+                if (gen_delta > 0) m.st_displayed_generated.fetch_add(gen_delta, std::memory_order_relaxed);
+                const auto rate = [&](uint64_t count, uint64_t last) {
+                    return m.display_sample_at && count >= last && now > m.display_sample_at
+                               ? static_cast<float>(1000.0 * (count - last) / (now - m.display_sample_at))
+                               : 0.0f;
+                };
+                if (gen_delta > 0) {
+                    m.st_displayed_fps.store(rate(frames, m.display_sample_frames));
+                    m.st_base_fps.store(rate(shown.displayed_real, m.display_sample_real));
+                } else {
+                    m.st_displayed_fps.store(0.0f);
+                    m.st_base_fps.store(0.0f);
+                }
+                m.display_sample_frames = frames;
+                m.display_sample_real = shown.displayed_real;
+                m.display_sample_gen = shown.displayed_generated;
+                m.display_sample_at = now;
+            }
         }
         m.st_schedule_reason.store(static_cast<uint32_t>(sr.plan_real_only));
         m.st_presents.fetch_add(1);

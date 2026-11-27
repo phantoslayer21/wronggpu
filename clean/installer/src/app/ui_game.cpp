@@ -1814,7 +1814,7 @@ static float FgSection(Gfx& gx, float x, float y, float w) {
         const std::vector<wstring> mult{L"Auto", L"2x", L"3x", L"4x", L"5x", L"6x"};
         const string mv = v.edit.get("fg_multiplier");
         const int mi = mv.size() == 1 && mv[0] >= '2' && mv[0] <= '6' ? mv[0] - '1' : 0;
-        yy += SRow(gx, x, yy, w, false, L"Multiplier", L"Follow the game. This setting applies when the game gives no count.",
+        yy += SRow(gx, x, yy, w, false, L"Multiplier", L"Auto follows the game. Games with an in-game multiplier follow the game; other games use the manual setting.",
                    SegmentedW(gx, mult, 40), 36,
                    [&](const Rc& r) { Segmented(gx, ID_G_FGMULT0, r.r(), r.y, mult, mi, sub, L"Frame generation multiplier", 28, {}, true, 40); }, !sub);
         const std::vector<wstring> pre{L"A", L"B", L"C"};

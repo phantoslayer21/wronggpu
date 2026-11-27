@@ -27,6 +27,26 @@ WgHostMenuPlugin* g_report_plugin = nullptr;
 std::atomic<uint64_t> g_report_sequence{0};
 uint64_t g_published_sequence = 0;
 uint64_t g_report_at = 0;
+uint64_t g_seen_displayed_generated = 0;
+uint64_t g_last_generated_at = 0;
+bool g_have_generated_sample = false;
+uint32_t g_last_generating_count = 0;
+std::string g_last_generating_text;
+bool g_have_reported = false;
+bool g_last_reported_active = false;
+std::string g_last_reported_state;
+
+void ResetReportTrackingLocked() {
+    g_report_at = 0;
+    g_seen_displayed_generated = 0;
+    g_last_generated_at = 0;
+    g_have_generated_sample = false;
+    g_last_generating_count = 0;
+    g_last_generating_text.clear();
+    g_have_reported = false;
+    g_last_reported_active = false;
+    g_last_reported_state.clear();
+}
 
 void Log(const std::string& line) {
     if (g_hooks.log) g_hooks.log(line.c_str());
@@ -214,7 +234,8 @@ void Draw(void*) {
         api->text_disabled("Turn frame generation on in the WrongGPU Launcher; it starts with the next game start.");
         return;
     }
-    const bool good = st.installed && st.have_host && st.live.phase == kFgPhaseGenerating;
+    const bool good = st.installed && st.have_host && st.live.phase == kFgPhaseGenerating &&
+                      (st.live.scheduled_count > 0 || st.live.schedule_reason == 0);
     const bool bad = !st.installed || !st.have_host || st.live.phase == kFgPhaseStopped;
     if (good)
         api->text_colored(0.45f, 0.85f, 0.45f, 1.0f, line.c_str());
@@ -247,8 +268,14 @@ std::string StatusLine(const Status& s, const FgSettings&) {
     if (!s.have_host) return "Not active: no frame generation runtime for this game (see wronggpu-fg.log)";
     switch (s.live.phase) {
         case kFgPhaseGenerating: {
+            if (s.live.scheduled_count == 0 && s.live.schedule_reason != 0) {
+                const auto reason = static_cast<wgfg::FgRealOnlyReason>(s.live.schedule_reason);
+                if (reason == wgfg::FgRealOnlyReason::NotPrimed) return "Waiting for the game";
+                return std::string("Real frames only: ") + wgfg::FgRealOnlyReasonName(reason);
+            }
+            const uint32_t c = s.live.scheduled_count ? s.live.scheduled_count : s.live.count;
             const char* pr = PresenterWords(s.live.presenter);
-            std::string l = "Generating: " + std::to_string(s.live.count + 1) + "x, preset " +
+            std::string l = "Generating: " + std::to_string(c + 1) + "x, preset " +
                             (FgPresetSpelling(s.live.preset) ? FgPresetSpelling(s.live.preset) : "?");
             if (pr) l += std::string(", ") + pr;
             return l;
@@ -332,6 +359,7 @@ bool ClaimOutput(const WgHostMenuApi* api, WgHostMenuPlugin* plugin) {
         return false;
     g_report_api = api;
     g_report_plugin = plugin;
+    ResetReportTrackingLocked();
     return true;
 }
 
@@ -341,34 +369,102 @@ void ReleaseOutput() {
         g_report_api->report_frame_generation(g_report_plugin, nullptr, nullptr, nullptr, nullptr, 0.0f, 0.0f, false);
         g_report_api = nullptr;
         g_report_plugin = nullptr;
-        g_published_sequence = g_report_sequence.load(std::memory_order_relaxed);
-        g_report_at = 0;
+        g_published_sequence = g_report_sequence.load(std::memory_order_acquire);
+        ResetReportTrackingLocked();
     }
 }
 
 uint64_t NextReportSequence() noexcept {
-    return g_report_sequence.fetch_add(1, std::memory_order_relaxed) + 1;
+    return g_report_sequence.fetch_add(1, std::memory_order_acq_rel) + 1;
 }
 
-void Publish(const Status& status, uint64_t sequence, bool immediate) noexcept {
+bool PublishAt(const Status& status, uint64_t sequence, bool immediate, uint64_t now) noexcept {
     try {
         std::lock_guard<std::mutex> lock(g_report_mu);
-        if (!g_report_api || sequence <= g_published_sequence) return;
-        const uint64_t now = GetTickCount64();
-        if (!immediate && now - g_report_at < 100) return;
+        if (!g_report_api || sequence <= g_published_sequence) return true;
+
+        // R3A-1 / N6: report generating only when generated images were actually presented in the activity window,
+        // holding briefly across 250 ms sample spacing and isolated 1-frame scheduler real-only blips.
+        bool generated_presented = false;
+        if (status.live.displayed_generated > g_seen_displayed_generated) {
+            generated_presented = true;
+            g_seen_displayed_generated = status.live.displayed_generated;
+        } else if (status.live.displayed_generated < g_seen_displayed_generated) {
+            g_seen_displayed_generated = status.live.displayed_generated;
+        }
+
+        const bool can_generate = status.enabled && !status.host_conflict && !status.deferred && status.installed &&
+                                  status.have_host && status.live.phase == kFgPhaseGenerating;
+        constexpr uint64_t kGeneratedHoldMs = 500;
+        bool active = false;
+        if (!can_generate) {
+            g_have_generated_sample = false;
+            g_last_generated_at = 0;
+            g_last_generating_count = 0;
+            g_last_generating_text.clear();
+        } else {
+            if (generated_presented) {
+                g_have_generated_sample = true;
+                g_last_generated_at = now;
+            }
+            if (g_have_generated_sample && now >= g_last_generated_at && now - g_last_generated_at < kGeneratedHoldMs) {
+                active = true;
+            } else {
+                g_have_generated_sample = false;
+            }
+        }
+
+        std::string text = FrameGenStatus(status);
+        if (active && status.live.scheduled_count > 0) {
+            g_last_generating_count = status.live.scheduled_count;
+            if (text.rfind("Generating ", 0) == 0) g_last_generating_text = text;
+        }
+
+        std::string state;
+        if (active) {
+            const uint32_t count = status.live.scheduled_count ? status.live.scheduled_count
+                                   : g_last_generating_count   ? g_last_generating_count
+                                                               : (status.live.count ? status.live.count : 1u);
+            state = std::to_string(count + 1) + "x";
+            if (text.rfind("Generating ", 0) != 0)
+                text = !g_last_generating_text.empty() ? g_last_generating_text : ("Generating " + state);
+        } else if (can_generate) {
+            if (text.rfind("Generating ", 0) == 0) {
+                state = "Real only";
+                text = "Real frames only: no generated images presented";
+            } else if (text.rfind("Real frames only:", 0) == 0) {
+                state = "Real only";
+            } else {
+                state = text;
+            }
+        } else {
+            state = text.rfind("Real frames only:", 0) == 0 ? "Real only" : text;
+        }
+
+        // R3A-10: compute active/state before throttling and bypass the 100 ms throttle on any state transition.
+        const bool transitioned =
+            !g_have_reported || active != g_last_reported_active || state != g_last_reported_state;
+        if (!immediate && !transitioned && now >= g_report_at && now - g_report_at < 100) return true;
+
         g_published_sequence = sequence;
         g_report_at = now;
+        g_have_reported = true;
+        g_last_reported_active = active;
+        g_last_reported_state = state;
 
-        const std::string text = FrameGenStatus(status);
-        const bool active = text.rfind("Generating ", 0) == 0;
-        const std::string state = active ? std::to_string(status.live.scheduled_count + 1) + "x"
-                                         : text.rfind("Real frames only:", 0) == 0 ? "Real only" : text;
-        g_report_api->report_frame_generation(g_report_plugin, "WrongGPU", state.c_str(), text.c_str(),
-                                              "DLSS Frame Generation", active ? status.live.displayed_fps : 0.0f,
-                                              active ? status.live.base_fps : 0.0f, active);
+        const bool valid_rates = active && status.live.displayed_fps > 0.0f && status.live.base_fps > 0.0f;
+        return g_report_api->report_frame_generation(g_report_plugin, "WrongGPU", state.c_str(), text.c_str(),
+                                                     "DLSS Frame Generation",
+                                                     valid_rates ? status.live.displayed_fps : 0.0f,
+                                                     valid_rates ? status.live.base_fps : 0.0f, active);
     } catch (...) {
         // Menu telemetry must not affect the game's Present.
+        return true;
     }
+}
+
+bool Publish(const Status& status, uint64_t sequence, bool immediate) noexcept {
+    return PublishAt(status, sequence, immediate, GetTickCount64());
 }
 
 }  // namespace panel

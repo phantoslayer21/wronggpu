@@ -185,6 +185,7 @@ enum FgInstallResult : uint32_t {
 const char* FgInstallResultWord(uint32_t r);
 
 using FgVersionReader = bool (*)(HMODULE module, uint32_t* major, uint32_t* minor);
+using FgPatchSlotFn = bool (*)(void** slot, void* value);
 // F9: the present bridge's call into the core (FgAsiConfig::present_route; null: FgProxy::present). Returns what
 // FgProxy::present returns; *out is the core's result.
 using FgPresentRouteFn = int32_t (*)(void* ctx, FgProxy* core, const WgFgPresentDesc* desc, WgFgPresentResult* out);
@@ -223,6 +224,7 @@ struct FgAsiConfig {
     FgLogFn log = nullptr;
     void* log_ctx = nullptr;
     FgVersionReader read_version = nullptr;  // null: the module's version resource
+    FgPatchSlotFn patch_slot = nullptr;      // null: VirtualProtect + InterlockedExchangePointer (test hook)
     unsigned scan_max_entries = 200000;      // the load scan's budget (rr_guard.h kScanMaxEntries / kScanMaxMs)
     unsigned scan_max_ms = 100;
     bool load_delay_linked = true;      // the exe delay-loads the interface: load the game's own file next to the exe

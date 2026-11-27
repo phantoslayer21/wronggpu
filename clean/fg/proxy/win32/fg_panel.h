@@ -41,7 +41,9 @@ bool ClaimOutput(const WgHostMenuApi* api, WgHostMenuPlugin* plugin);
 void ReleaseOutput();
 // Take this before reading live state, or before routing a present that will publish afterward.
 uint64_t NextReportSequence() noexcept;
-void Publish(const Status& status, uint64_t sequence, bool immediate = false) noexcept;
+bool Publish(const Status& status, uint64_t sequence, bool immediate = false) noexcept;
+// Deterministic clock entry point for unit tests.
+bool PublishAt(const Status& status, uint64_t sequence, bool immediate, uint64_t now_ms) noexcept;
 
 // What the menu's combos do (also called by the tests): the live hook, then settings.ini. Returns the log line;
 // empty: not a valid value (nothing changes).

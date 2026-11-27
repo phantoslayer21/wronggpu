@@ -66,6 +66,7 @@ std::atomic<bool> g_known_multiplier{false};
 std::atomic<bool> g_prepared_by_host{false};
 std::wstring g_legacy_host_ini;
 std::atomic<bool> g_host_conflict{false};
+std::atomic<bool> g_shut_down{false};
 FgAsiTransport* g_transport = nullptr;  // created only with fg=on; never freed while the plugin is loaded
 std::wstring g_log_path;
 
@@ -182,9 +183,9 @@ bool InterfaceLinked(const FgImportBinding& im) {
 
 panel::Status PanelStatus();
 
-void PublishCurrent(bool immediate) {
+bool PublishCurrent(bool immediate) {
     const auto sequence = panel::NextReportSequence();
-    panel::Publish(PanelStatus(), sequence, immediate);
+    return panel::Publish(PanelStatus(), sequence, immediate);
 }
 
 // Keep the menu reporting outside the session's present-thread lock.
@@ -364,7 +365,7 @@ std::string ModulePath(HMODULE m) {
 void OnHostHooked(void* module, uint32_t major, uint32_t minor, uint32_t patch, void*) {
     std::lock_guard<std::recursive_mutex> lock(g_route_mu);
     try {
-        if (!g_transport || !module) return;
+        if (g_shut_down.load() || !g_transport || !module) return;
         const HMODULE m = static_cast<HMODULE>(module);
         LogLine(nullptr, ("fg: OptiScaler hooked the game interface " + ModulePath(m) + ", version " +
                           std::to_string(major) + "." + std::to_string(minor) + "." + std::to_string(patch))
@@ -382,6 +383,11 @@ void OnHostHooked(void* module, uint32_t major, uint32_t minor, uint32_t patch, 
             return;
         }
         g_generic_deferred = false;
+        if (!g_menu_enabled.load()) {
+            LogLine(nullptr, "fg: frame generation disabled before the game interface loaded; nothing installed");
+            PublishCurrent(true);
+            return;
+        }
         if (panel::HasFrameGenApi(g_host_api) && !panel::ClaimOutput(g_host_api, g_host_plugin)) {
             g_host_conflict.store(true);
             LogLine(nullptr, "fg: OptiScaler refused the deferred FG claim; nothing installed");
@@ -395,8 +401,16 @@ void OnHostHooked(void* module, uint32_t major, uint32_t minor, uint32_t patch, 
                 core->update_live_settings(pending.preset, pending.multiplier);
             }
         }
-        if (!g_transport->active()) panel::ReleaseOutput();
-        PublishCurrent(true);
+        if (!g_transport->active()) {
+            panel::ReleaseOutput();
+            PublishCurrent(true);
+        } else if (!PublishCurrent(true)) {
+            g_core.store(nullptr);
+            g_transport->restore();
+            panel::ReleaseOutput();
+            g_host_conflict.store(true);
+            LogLine(nullptr, "fg: OptiScaler revoked the deferred FG claim after swap-chain creation began; routes removed");
+        }
     } catch (...) {
         if (!g_transport || !g_transport->active()) panel::ReleaseOutput();
         LogLine(nullptr, "fg: OptiScaler's interface hook callback failed; nothing more is installed");
@@ -417,16 +431,26 @@ panel::Status PanelStatus() {
     return s;
 }
 
+bool AcquireRouteLockForMenu(std::unique_lock<std::recursive_mutex>& lock) {
+    for (int attempt = 0; attempt < 10; ++attempt) {
+        if (g_shut_down.load()) return false;
+        if (lock.try_lock()) return !g_shut_down.load();
+        Sleep(1);
+    }
+    LogLine(nullptr, "fg menu: route setup busy; change applies on the next game start");
+    return false;
+}
+
 bool PanelApply(uint32_t preset, uint32_t multiplier) {
-    std::unique_lock<std::recursive_mutex> lock(g_route_mu, std::try_to_lock);
-    if (!lock) return false;
+    std::unique_lock<std::recursive_mutex> lock(g_route_mu, std::defer_lock);
+    if (!AcquireRouteLockForMenu(lock)) return false;
     FgProxy* core = g_core.load();
     return core && core->update_live_settings(preset, multiplier);
 }
 
 bool PanelEnable(bool enabled) {
-    std::unique_lock<std::recursive_mutex> lock(g_route_mu, std::try_to_lock);
-    if (!lock) return false;
+    std::unique_lock<std::recursive_mutex> lock(g_route_mu, std::defer_lock);
+    if (!AcquireRouteLockForMenu(lock)) return false;
     auto* core = g_core.load();
     if (!g_settings_enabled.load() || g_host_conflict.load() || (!core && !g_generic_deferred))
         return false;
@@ -515,6 +539,7 @@ __declspec(dllexport) bool OptiPluginInit(const WgHostMenuApi* api, WgHostMenuPl
         return false;
     }
     std::lock_guard<std::recursive_mutex> lock(g_route_mu);
+    if (g_shut_down.load()) return false;
     if (g_host_api) return api == g_host_api && plugin == g_host_plugin && g_host_init_result;
     g_host_api = api;
     g_host_plugin = plugin;
@@ -571,8 +596,15 @@ __declspec(dllexport) bool OptiPluginInit(const WgHostMenuApi* api, WgHostMenuPl
             panel::ReleaseOutput();
             if (g_settings.enabled && !g_host_conflict.load())
                 LogLine(nullptr, "fg: no transport routes installed; OptiScaler's FG output is available");
+        } else if (v6 && !PublishCurrent(true)) {
+            g_core.store(nullptr);
+            g_transport->restore();
+            g_generic_deferred = false;
+            panel::ReleaseOutput();
+            g_host_conflict.store(true);
+            LogLine(nullptr, "fg: OptiScaler revoked the FG claim after swap-chain creation began; routes removed");
+            return g_host_init_result = card;
         }
-        PublishCurrent(true);
         return g_host_init_result = card || routes;
     } catch (...) {
         g_core.store(nullptr);
@@ -584,7 +616,14 @@ __declspec(dllexport) bool OptiPluginInit(const WgHostMenuApi* api, WgHostMenuPl
 }
 
 __declspec(dllexport) void WrongGPU_FgShutdown() {
+    g_shut_down.store(true);
     std::lock_guard<std::recursive_mutex> lock(g_route_mu);
+    g_generic_deferred.store(false);
+    g_menu_enabled.store(false);
+    if (g_host_api && g_host_plugin && g_host_api->version >= 3 &&
+        WG_HOST_MENU_HAS(g_host_api, set_streamline_callback)) {
+        g_host_api->set_streamline_callback(g_host_plugin, nullptr, nullptr);
+    }
     if (g_init.load() != 2) return;
     g_core.store(nullptr);
     if (g_transport) g_transport->restore();

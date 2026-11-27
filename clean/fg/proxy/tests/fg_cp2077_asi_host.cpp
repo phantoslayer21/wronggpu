@@ -35,6 +35,11 @@ int g_checks = 0, g_failed = 0;
     } while (0)
 
 int (*g_query)(WgFgAsiStatus*) = nullptr;
+WgHostMenuInitFn g_plugin_init = nullptr;
+const WgHostMenuApi* g_reenter_api = nullptr;
+WgHostMenuPlugin* g_reenter_plugin = nullptr;
+bool g_reenter_in_report = false;
+bool g_reenter_declined = false;
 bool g_allow_claim = false;
 int g_claims = 0, g_sections = 0, g_releases = 0;
 bool g_claimed = false;
@@ -58,6 +63,10 @@ bool RegisterSection(WgHostMenuPlugin*, WgHostDrawFn draw, void* user) {
 }
 
 bool Report(WgHostMenuPlugin*, const char* name, const char* state, const char*, const char*, float, float, bool) {
+    if (g_reenter_in_report && g_plugin_init && g_reenter_api && g_reenter_plugin) {
+        g_reenter_in_report = false;
+        g_reenter_declined = !g_plugin_init(g_reenter_api, g_reenter_plugin);
+    }
     if (!name) {
         CHECK(g_claimed);
         g_claimed = false;
@@ -181,12 +190,22 @@ int wmain(int argc, wchar_t** argv) {
     auto shutdown = reinterpret_cast<void (*)()>(GetProcAddress(asi, "WrongGPU_FgShutdown"));
     CHECK(init && query && shutdown);
     if (!init || !query || !shutdown) return 1;
-    const bool hosted = leg == L"claim" || leg == L"conflict" || leg == L"truncated";
+    const bool hosted = leg == L"claim" || leg == L"conflict" || leg == L"truncated" || leg == L"overlap";
     if (hosted) {
         const auto prepare = reinterpret_cast<WgHostPrepareAsiFn>(GetProcAddress(asi, WG_HOST_MENU_PREPARE_ASI_EXPORT));
         CHECK(prepare);
         if (!prepare) return 1;
         prepare();
+    }
+    auto api = HostV6();
+    if (leg == L"overlap") {
+        // OptiPluginInit before InitializeASI must be declined cleanly with zero claims/hooks.
+        const auto early_plugin_init = reinterpret_cast<WgHostMenuInitFn>(GetProcAddress(asi, WG_HOST_MENU_INIT_EXPORT));
+        CHECK(early_plugin_init);
+        if (!early_plugin_init) return 1;
+        const auto plugin = reinterpret_cast<WgHostMenuPlugin*>(&api);
+        CHECK(!early_plugin_init(&api, plugin));
+        CHECK(g_claims == 0 && g_sections == 0);
     }
     if (leg == L"nonplugin") {
         if (argc != 4) return 2;
@@ -205,28 +224,34 @@ int wmain(int argc, wchar_t** argv) {
     st.struct_size = sizeof(st);
     CHECK(query(&st) == 1);
     CHECK(st.patched_slots == 0 && st.init_calls == 1);
-    auto api = HostV6();
     if (hosted) {
         CHECK(st.settings_enabled == 1 && st.transport_created == 0 && ReadAll(log).find("title binding") == std::string::npos);
         const auto plugin_init = reinterpret_cast<WgHostMenuInitFn>(GetProcAddress(asi, WG_HOST_MENU_INIT_EXPORT));
         CHECK(plugin_init);
         if (!plugin_init) return 1;
         g_query = query;
-        g_allow_claim = leg == L"claim";
+        g_allow_claim = leg == L"claim" || leg == L"overlap";
         if (leg == L"truncated") {
             api.size = offsetof(WgHostMenuApi, report_frame_generation);
             api.register_custom_card = [](WgHostMenuPlugin*, const char*, WgHostDrawFn, void*) { return true; };
         }
         const auto plugin = reinterpret_cast<WgHostMenuPlugin*>(&api);
+        if (leg == L"overlap") {
+            g_plugin_init = plugin_init;
+            g_reenter_api = &api;
+            g_reenter_plugin = plugin;
+            g_reenter_in_report = true;
+        }
         CHECK(plugin_init(&api, plugin));
+        if (leg == L"overlap") CHECK(g_reenter_declined);
         CHECK(plugin_init(&api, plugin));  // a repeated host call reuses the first registration and claim
         CHECK(g_claims == (leg == L"truncated" ? 0 : 1));
         CHECK(g_sections == (leg == L"truncated" ? 0 : 1));
-        CHECK(g_releases == (leg == L"claim" ? 1 : 0) && !g_claimed);
+        CHECK(g_releases == (leg == L"claim" || leg == L"overlap" ? 1 : 0) && !g_claimed);
         CHECK(query(&st) == 1 && st.transport_created == 0 && st.patched_slots == 0);
     }
     const std::string text = ReadAll(log);
-    if (leg == L"on" || leg == L"claim" || leg == L"nonplugin") {
+    if (leg == L"on" || leg == L"claim" || leg == L"overlap" || leg == L"nonplugin") {
         // the binding was taken; the case folder (LOCALAPPDATA redirected by ctest) has no FG model and the plugin's
         // folder no kernel folder, so the session host's precheck refuses before any transport exists
         CHECK(st.settings_enabled == 1 && st.transport_created == 0);
@@ -234,6 +259,10 @@ int wmain(int argc, wchar_t** argv) {
         CHECK(text.find("title binding cp2077-2.14.1 (Cyberpunk 2077)") != std::string::npos);
         CHECK(text.find("no title binding") == std::string::npos);
         CHECK(text.find("no hooks installed") != std::string::npos);
+        if (leg == L"overlap") {
+            CHECK(text.find("OptiPluginInit overlapped or preceded InitializeASI") != std::string::npos);
+            CHECK(text.find("overlapping OptiPluginInit call declined") != std::string::npos);
+        }
     } else if (leg == L"conflict" || leg == L"truncated") {
         CHECK(text.find("title binding") == std::string::npos);
         CHECK(text.find(leg == L"conflict" ? "could not reserve" : "no exclusive legacy FG route") != std::string::npos);
@@ -244,7 +273,7 @@ int wmain(int argc, wchar_t** argv) {
         CHECK(false);
     }
     shutdown();
-    CHECK(g_releases == (leg == L"claim" ? 1 : 0));
+    CHECK(g_releases == (leg == L"claim" || leg == L"overlap" ? 1 : 0));
     std::printf("cp2077 asi leg %ls: result %u (%s); %d checks, %d failed\n", leg.c_str(), st.result,
                 FgInstallResultWord(st.result), g_checks, g_failed);
     return g_failed == 0 ? 0 : 1;

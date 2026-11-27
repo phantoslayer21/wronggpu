@@ -1337,8 +1337,8 @@ void TestRuntimeContractBridge() {
 #endif
 
 // RC2 (M1 / N-B7): title-binding has_mfg_selector controls whether the game owns the multiplier (Cyberpunk: game
-// controls 2x/3x/4x/6x and fg_multiplier never clamps it); generic titles follow the game by default when fg_multiplier
-// is omitted or set to "auto", and switch to manual when overridden via settings or update_live_settings.
+// controls 2x/3x/4x/6x and fg_multiplier never overrides it); generic titles follow the game when fg_multiplier
+// is omitted or set to "auto", and use the chosen manual multiplier when set via settings or update_live_settings.
 void TestRc2MultiplierCapability() {
     {
         std::vector<FgSettingsIssue> issues;
@@ -1387,7 +1387,7 @@ void TestRc2MultiplierCapability() {
     }
     {
         // Generic title (has_mfg_selector = false) with Auto: honours valid game count 3 (4x),
-        // then switches to manual cap when update_live_settings is called.
+        // then switches to the chosen manual multiplier when update_live_settings is called.
         FgProxyConfig cfg = QualifiedConfig();
         cfg.binding.has_mfg_selector = false;
         cfg.settings.multiplier = kFgAutoMultiplier;

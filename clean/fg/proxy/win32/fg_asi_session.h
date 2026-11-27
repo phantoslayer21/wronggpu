@@ -158,6 +158,7 @@ struct FgAsiLiveStatus {
     uint32_t schedule_reason = 0;   // wgfg::FgRealOnlyReason when the schedule contains only the real frame
     float displayed_fps = 0.0f;     // total reported by the presenter, 0 until sampled
     float base_fps = 0.0f;          // real images from the same sample
+    uint64_t displayed_generated = 0;  // cumulative generated images presented by the session's presenter
 };
 
 class FgAsiSessionHost final : public IFgPresentCallback {

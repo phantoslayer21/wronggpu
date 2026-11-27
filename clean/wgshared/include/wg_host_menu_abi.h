@@ -85,7 +85,7 @@ struct WgHostMenuApi {
   // its extended restore also the root arguments, descriptor heaps and pipeline state) as the game last bound them.
   void (*begin_cmd_list_work)(WgHostMenuPlugin* plugin, void* command_list);
   void (*end_cmd_list_work)(WgHostMenuPlugin* plugin, void* command_list);
-  // Version 6: process-lifetime FG ownership and output FPS. A null name stops reporting activity.
+  // Version 6: exclusive FG ownership and output FPS. A null or empty name releases ownership and clears the report.
   bool (*report_frame_generation)(WgHostMenuPlugin* plugin, const char* name, const char* state, const char* text,
                                   const char* input, float displayed_fps, float base_fps, bool generating);
   bool (*register_frame_gen_section)(WgHostMenuPlugin* plugin, WgHostDrawFn draw, void* user);

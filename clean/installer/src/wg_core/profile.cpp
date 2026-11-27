@@ -77,7 +77,7 @@ const SettingDef kSettings[] = {
      L"from the frame generation library of one of your games (version 310.1 or newer)."},
     {kFgKeyPreset, Layer::Fg, Tier::Basic, "A", "A|B|C", L"Frame generation preset", L"A (default), B or C."},
     {kFgKeyMultiplier, Layer::Fg, Tier::Basic, "auto", "auto|2|3|4|5|6", L"Frame generation multiplier",
-     L"Auto follows the game, or uses 2x if the game gives no count. A manual setting applies when the game gives no count."},
+     L"Auto follows the game (2x if the game gives no count). Games with an in-game multiplier follow the game; other games use the manual setting."},
     {kFgKeyPresenter, Layer::Fg, Tier::Basic, "auto", "auto|hwfq|dxgi_tearing|dxgi_vsync", L"Frame generation presenter",
      L"Auto (default), hwfq, dxgi_tearing or dxgi_vsync."},
 #endif

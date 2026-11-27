@@ -23,6 +23,7 @@
 
 #include "../win32/fg_asi_transport.h"
 #include "../win32/fg_swapchain_hook.h"
+#include "../../../wgshared/include/wg_host_menu_abi.h"
 #include "fg_mock_interposer.h"
 
 using namespace wgfgp;
@@ -162,6 +163,7 @@ FgAsiConfig MakeConfig(MockCodec* codec, FgPresentOwners* owners, bool enabled) 
 }
 
 void MakeTaken(FgProxy* core) {
+    if (!core) return;
     WgFgAdapterIdentity id = {};
     id.struct_size = sizeof(id);
     id.abi_version = WG_FG_ADAPTER_ABI_VERSION;
@@ -747,6 +749,7 @@ void TestCoreReadyAndCallLines(const GameModule& game) {
     FgAsiConfig cfg = MakeConfig(&codec, &owners, true);
     cfg.core_ready = &OnCoreReady;
     CHECK(t.install(cfg) == kFgInstalled);
+    if (!t.core()) return;
     CHECK(g_ready.calls == 1 && g_ready.core == t.core() && g_ready.slots_genuine);
     CHECK(SlotsAreOurs(game) && t.core()->fg_taken());
 
@@ -873,6 +876,7 @@ void TestLazyCoreReady(const GameModule& game) {
         FgAsiConfig cfg = MakeConfig(&codec, &owners, true);
         cfg.core_ready = &OnLazyReady;
         CHECK(t.install(cfg) == kFgInstalled);
+        if (!t.core()) continue;
         CHECK(g_lazy.calls == 1 && !t.core()->fg_taken());  // the install-time probe found nothing
         FgMockRecord* r = fgmock_record();
         bool loaded = false;
@@ -903,6 +907,7 @@ void TestLazyCoreReady(const GameModule& game) {
         FgAsiConfig cfg = MakeConfig(&codec, &owners, true);
         cfg.core_ready = &OnLazyReady;
         CHECK(t.install(cfg) == kFgInstalled);
+        if (!t.core()) return;
         FgMockRecord* r = fgmock_record();
         bool loaded = false;
         CHECK(game.is_supported(kFeatFg, nullptr) == r->result[kMockIsSupported] && g_lazy.calls == 2);
@@ -1233,6 +1238,7 @@ void TestThrowingCodecAndNulls(const GameModule& game) {
     FgPresentOwners owners;
     FgAsiTransport t;
     CHECK(t.install(MakeConfig(&codec, &owners, true)) == kFgInstalled);
+    if (!t.core()) return;
     MakeTaken(t.core());
     FgMockRecord* r = fgmock_record();
     void* fn = nullptr;
@@ -1241,6 +1247,7 @@ void TestThrowingCodecAndNulls(const GameModule& game) {
     void* sfn = nullptr;
     CHECK(game.get_function(kFeatFg, FG_MOCK_FN_FG_STATE, &sfn) == WG_OK);
     const auto state_fn = reinterpret_cast<FgStateFn>(sfn);
+    if (!options_fn || !state_fn) return;
     WgViewport vp = {};
     MockOptions mo = {1, 0, 1};
     MockState ms = {};
@@ -1906,7 +1913,188 @@ struct WgFgAsiStatus {
     uint32_t struct_size, result, settings_enabled, transport_created, patched_slots, init_calls;
 };
 
+void TestZeroPatchInstall(const GameModule& game, const GameModule& delay) {
+    // R3A-3: when every discovered slot skips patching (e.g. already points at handler), install() must not claim
+    // kFgInstalled or stay active with zero patches.
+    fgmock_reset();
+    SetMockResults();
+    MockCodec codec;
+    FgPresentOwners owners;
+    FgAsiConfig cfg = MakeConfig(&codec, &owners, true);
+    std::vector<std::string> names(kRoleNames, kRoleNames + kFgRoleCount);
+    wgrr::guard::Budget b(200000, 100);
+    auto slots_game = FgCollectSlots(game.h, kLeaf, names, b);
+    auto slots_delay = FgCollectSlots(delay.h, kLeaf, names, b);
+    std::vector<std::pair<void**, void*>> saved;
+    auto write_slot = [](void** slot, void* v) {
+        DWORD old = 0;
+        if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old)) return false;
+        InterlockedExchangePointer(slot, v);
+        DWORD ignored = 0;
+        VirtualProtect(slot, sizeof(void*), old, &ignored);
+        return true;
+    };
+    for (const auto& s : slots_game) {
+        saved.push_back({s.slot, *s.slot});
+        CHECK(write_slot(s.slot, FgAsiTransport::handler_for(s.name_index)));
+    }
+    for (const auto& s : slots_delay) {
+        saved.push_back({s.slot, *s.slot});
+        CHECK(write_slot(s.slot, FgAsiTransport::handler_for(s.name_index)));
+    }
+    FgAsiTransport t;
+    const uint32_t r = t.install(cfg);
+    CHECK(r == kFgNothingToPatch && !t.active() && t.patch_count() == 0 && t.core() == nullptr);
+    t.restore();
+    for (const auto& kv : saved) CHECK(write_slot(kv.first, kv.second));
+
+    // Also test every PatchSlot call failing (VirtualProtect failure path) -> kFgNothingToPatch, not active, owner free.
+    FgAsiConfig fail_patch = cfg;
+    fail_patch.patch_slot = [](void**, void*) { return false; };
+    CHECK(t.install(fail_patch) == kFgNothingToPatch && !t.active() && t.patch_count() == 0 && t.core() == nullptr);
+    CHECK(SlotsAreGenuine(game));
+
+    // Verify subsequent install still works (g_owner was released).
+    CHECK(t.install(cfg) == kFgInstalled && t.active());
+    t.restore();
+}
+
+namespace asi_lifecycle {
+int g_claims = 0, g_releases = 0;
+bool g_claimed = false;
+void (*g_sl_cb)(void*, uint32_t, uint32_t, uint32_t, void*) = nullptr;
+void* g_sl_user = nullptr;
+WgHostDrawFn g_draw = nullptr;
+void* g_draw_user = nullptr;
+bool g_uncheck_fg = false;
+
+bool Report(WgHostMenuPlugin*, const char* name, const char*, const char*, const char*, float, float, bool) {
+    if (!name || !*name) {
+        if (g_claimed) {
+            g_claimed = false;
+            ++g_releases;
+        }
+        return true;
+    }
+    if (!g_claimed) {
+        g_claimed = true;
+        ++g_claims;
+    }
+    return true;
+}
+bool RegisterSection(WgHostMenuPlugin*, WgHostDrawFn draw, void* user) {
+    g_draw = draw;
+    g_draw_user = user;
+    return true;
+}
+bool SetSlCb(WgHostMenuPlugin*, void (*cb)(void*, uint32_t, uint32_t, uint32_t, void*), void* user) {
+    g_sl_cb = cb;
+    g_sl_user = user;
+    return true;
+}
+bool Checkbox(const char* label, bool* value) {
+    if (g_uncheck_fg && label && std::strstr(label, "WrongGPU Frame Generation") && value && *value) {
+        *value = false;
+        return true;
+    }
+    return false;
+}
+WgHostMenuApi MakeV6Api() {
+    WgHostMenuApi api{};
+    api.size = sizeof(api);
+    api.version = 6;
+    api.section = [](const char*) {};
+    api.text = [](const char*) {};
+    api.text_disabled = api.text;
+    api.text_colored = [](float, float, float, float, const char*) {};
+    api.item_tooltip = api.text;
+    api.combo = [](const char*, int32_t*, const char* const*, int32_t) { return false; };
+    api.checkbox = &Checkbox;
+    api.register_streamline_routes = [](WgHostMenuPlugin*, const WgHostSlRoute*, uint32_t) { return false; };
+    api.set_streamline_callback = &SetSlCb;
+    api.report_frame_generation = &Report;
+    api.register_frame_gen_section = &RegisterSection;
+    return api;
+}
+}  // namespace asi_lifecycle
+
+int RunAsiDeferredLeg(const char* leg) {
+    wchar_t gdir[MAX_PATH * 2] = {};
+    const DWORD gn = GetEnvironmentVariableW(L"WG_STATE_GAME_DIR", gdir, MAX_PATH * 2);
+    CHECK(gn > 0 && gn < MAX_PATH * 2);
+    if (gn > 0 && gn < MAX_PATH * 2) {
+        const std::wstring setup_dir = std::wstring(gdir, gn) + L"\\wronggpu-setup";
+        CreateDirectoryW(setup_dir.c_str(), nullptr);
+        const std::wstring ini = setup_dir + L"\\settings.ini";
+        HANDLE h = CreateFileW(ini.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h != INVALID_HANDLE_VALUE) {
+            const char content[] = "fg=on\n";
+            DWORD written = 0;
+            WriteFile(h, content, static_cast<DWORD>(sizeof(content) - 1), &written, nullptr);
+            CloseHandle(h);
+        }
+    }
+    HMODULE asi = LoadLibraryW((ExeDir() + L"\\WrongGPU-FG.asi").c_str());
+    CHECK(asi != nullptr);
+    if (!asi) return 1;
+    auto prepare = reinterpret_cast<WgHostPrepareAsiFn>(GetProcAddress(asi, WG_HOST_MENU_PREPARE_ASI_EXPORT));
+    auto init = reinterpret_cast<void (*)()>(GetProcAddress(asi, "InitializeASI"));
+    auto plugin_init = reinterpret_cast<WgHostMenuInitFn>(GetProcAddress(asi, WG_HOST_MENU_INIT_EXPORT));
+    auto shutdown = reinterpret_cast<void (*)()>(GetProcAddress(asi, "WrongGPU_FgShutdown"));
+    CHECK(prepare && init && plugin_init && shutdown);
+    if (!prepare || !init || !plugin_init || !shutdown) return 1;
+
+    asi_lifecycle::g_claims = 0;
+    asi_lifecycle::g_releases = 0;
+    asi_lifecycle::g_claimed = false;
+    asi_lifecycle::g_sl_cb = nullptr;
+    asi_lifecycle::g_sl_user = nullptr;
+    asi_lifecycle::g_draw = nullptr;
+    asi_lifecycle::g_uncheck_fg = false;
+
+    prepare();
+    init();
+    WgHostMenuApi api = asi_lifecycle::MakeV6Api();
+    auto* plugin = reinterpret_cast<WgHostMenuPlugin*>(&api);
+    CHECK(plugin_init(&api, plugin));
+    // Generic deferred route: claimed briefly, no routes installed yet -> claim released!
+    CHECK(asi_lifecycle::g_claims == 1 && asi_lifecycle::g_releases == 1 && !asi_lifecycle::g_claimed);
+    CHECK(asi_lifecycle::g_sl_cb != nullptr);
+
+    // Prepare a real DLL on disk named sl.interposer.dll so OnHostHooked passes the leaf-name check.
+    const std::wstring sl_copy = std::wstring(gdir, gn) + L"\\sl.interposer.dll";
+    CHECK(CopyFileW((ExeDir() + L"\\fg_mock_interposer.dll").c_str(), sl_copy.c_str(), FALSE) != 0);
+    HMODULE sl_mod = LoadLibraryW(sl_copy.c_str());
+    CHECK(sl_mod != nullptr);
+
+    const std::string l = leg;
+    auto saved_cb = asi_lifecycle::g_sl_cb;
+    auto saved_user = asi_lifecycle::g_sl_user;
+    if (l == "deferred-shutdown") {
+        // R3A-3: after WrongGPU_FgShutdown, a late OnHostHooked must NOT reclaim or start transport.
+        shutdown();
+        if (saved_cb && sl_mod) saved_cb(sl_mod, 2, 4, 0, saved_user);
+        CHECK(asi_lifecycle::g_claims == 1 && !asi_lifecycle::g_claimed);
+    } else if (l == "deferred-unchecked") {
+        // if user unchecked WrongGPU FG before sl.interposer loads, OnHostHooked must NOT reclaim.
+        CHECK(asi_lifecycle::g_draw != nullptr);
+        asi_lifecycle::g_uncheck_fg = true;
+        if (asi_lifecycle::g_draw) asi_lifecycle::g_draw(asi_lifecycle::g_draw_user);
+        asi_lifecycle::g_uncheck_fg = false;
+        if (saved_cb && sl_mod) saved_cb(sl_mod, 2, 4, 0, saved_user);
+        CHECK(asi_lifecycle::g_claims == 1 && !asi_lifecycle::g_claimed);
+        shutdown();
+    } else {
+        CHECK(false);
+    }
+    if (sl_mod) FreeLibrary(sl_mod);
+    DeleteFileW(sl_copy.c_str());
+    return g_failed == 0 ? 0 : 1;
+}
+
 int RunAsiLeg(const char* leg) {
+    if (std::strcmp(leg, "deferred-shutdown") == 0 || std::strcmp(leg, "deferred-unchecked") == 0)
+        return RunAsiDeferredLeg(leg);
     GameModule game;
     CHECK(game.load(L"fg_mock_game.dll"));
     fgmock_reset();
@@ -2035,6 +2223,7 @@ int main(int argc, char** argv) {
         TestIatChaining(game);
         TestHostRoutes(game);
         TestThrowingCodecAndNulls(game);
+        TestZeroPatchInstall(game, delay);
     }
     TestSwapChainIdentityAndRefcount();
     TestPresentPaths();
