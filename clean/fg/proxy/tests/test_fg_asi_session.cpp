@@ -1865,6 +1865,11 @@ void TestRc2LatencyAndPacing(Gpu& gpu, const std::string& dxil, bool run_latency
 // of FG-off, and presented output scaling cleanly with N.
 void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::string& only) {
     const bool admission_only = only == "admission";
+    char env_mode[16] = {};
+    const auto length = GetEnvironmentVariableA("WG_FG_ADMISSION", env_mode, sizeof(env_mode));
+    const bool force_present = length == 7 && std::strcmp(env_mode, "present") == 0;
+    const bool force_consumed = length == 8 && std::strcmp(env_mode, "consumed") == 0;
+    const bool explicit_policy = length == 6 && std::strcmp(env_mode, "policy") == 0;
     ComPtr<IDXGIFactory2> f2;
     CHECK(SUCCEEDED(gpu.factory.As(&f2)));
     GameTextures game;
@@ -2374,31 +2379,26 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::strin
 
     if (only == "admission-switch") {
         const auto run = run_leg("active-3-to-2-to-3", true, 3u, 8, 25000, 272, 18500, 6500);
-        std::printf("    active count switch: low=%u wrongly_consumed=%u recovered=%u gap_p95=%lldus reanchors=%llu\n",
+        std::printf("    active count switch: low=%u low_consumed=%u recovered=%u gap_p95=%lldus reanchors=%llu\n",
                     run.low_count_frames, run.low_count_consumed, run.recovered_high,
                     static_cast<long long>(run.gap_p95_us), static_cast<unsigned long long>(run.generating_reanchors));
         CHECK(run.present_errors == 0 && run.session_failures == 0);
         CHECK(run.low_count_frames >= 40);
-        CHECK(run.low_count_consumed == 0);
+        CHECK(force_present ? run.low_count_consumed == 0 : run.low_count_consumed >= 40);
         CHECK(run.recovered_high >= 40);
-        CHECK(run.admission_consumed == 0);
+        CHECK(force_present ? run.admission_consumed == 0 : run.admission_consumed > 200);
         CHECK(run.gap_p95_us < 27000);
         CHECK(run.generating_reanchors < 35);
         return;
     }
 
     if (only == "admission-policy") {
-        char env_mode[16] = {};
-        const auto length = GetEnvironmentVariableA("WG_FG_ADMISSION", env_mode, sizeof(env_mode));
-        const bool force_present = length == 7 && std::strcmp(env_mode, "present") == 0;
-        const bool force_consumed = length == 8 && std::strcmp(env_mode, "consumed") == 0;
-        const bool explicit_policy = length == 6 && std::strcmp(env_mode, "policy") == 0;
         for (const uint32_t requested : {0u, 1u, 2u, 3u, 5u}) {
             const auto run = run_leg("admission-policy", requested > 0, std::max(1u, requested), 0, 0, 110, 18500, 6500);
             CHECK(run.present_errors == 0 && run.session_failures == 0);
             CHECK(run.real_sub >= 105);
             if (requested > 0) CHECK(run.sched >= 75);
-            const bool expects_consumed = requested > 0 && force_consumed;
+            const bool expects_consumed = requested > 0 && !force_present;
             CHECK((run.queue_peak > 0) == expects_consumed);
             CHECK(run.queue_peak <= 2);
             CHECK(run.admission_consumed > 50 || !expects_consumed);
@@ -2411,8 +2411,8 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::strin
         if (!force_present && !force_consumed) {
             const auto mixed = run_leg("2x-to-4x-to-3x", true, 1u, 0, 0, 112, 18500, 6500, true);
             CHECK(mixed.present_errors == 0 && mixed.session_failures == 0);
-            CHECK(mixed.admission_present >= 105 && mixed.admission_consumed == 0);
-            CHECK(mixed.queue_peak == 0);
+            CHECK(mixed.admission_present > 0 && mixed.admission_consumed >= 90);
+            CHECK(mixed.queue_peak == 2);
             CHECK(mixed.admission_present + mixed.admission_consumed == mixed.session_presents);
         }
         return;
@@ -2438,15 +2438,12 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::strin
     }
 
     if (admission_only) {
-        char mode[16] = {};
-        const bool use_consumption = GetEnvironmentVariableA("WG_FG_ADMISSION", mode, sizeof(mode)) == 8 &&
-                                     std::strcmp(mode, "consumed") == 0;
         // A GPU-bound title waits at frame start, records for ~4 ms, and queues 7 ms of GPU work at Present.
         // Warm up at a slower cadence to put the first-image budget above the steady GPU period.
         const SmokeRunResult run = run_leg("admission-7ms", true, 1u, 8, 12000, 320, 7000, 4000);
         CHECK(run.present_errors == 0 && run.session_failures == 0);
         CHECK(run.sched >= 200);
-        if (!use_consumption) {
+        if (force_present) {
             CHECK(run.queue_peak == 0 && run.queue_waits == 0);
             return;
         }

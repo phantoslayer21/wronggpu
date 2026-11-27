@@ -19,8 +19,8 @@
 //    through the swap-chain hook's facade seam: GetBuffer, GetCurrentBackBufferIndex, GetFrameLatencyWaitableObject),
 //    so the presenter's copies and presents into the real chain never race the game's rendering. The facade buffer
 //    the game presents is the colour input of the interval.
-//  - ADMISSION. The default policy and WG_FG_ADMISSION=present use first-present admission.
-//    WG_FG_ADMISSION=consumed enables consumption admission and a two-interval bound on generating plans.
+//  - ADMISSION. The default policy uses consumption admission and a two-interval bound on generating plans.
+//    Real-only plans and the WG_FG_ADMISSION=present override use first-present admission.
 //  - SESSION. Created on the present thread once the core has a session description (options and a latched present),
 //    with one FgD3d12Executor for the host's lifetime (pipelines built once) and the presenter the settings name
 //    (fg_presenter: auto / hwfq / dxgi_tearing / dxgi_vsync, through FgWinPresenterSource). Every game present goes

@@ -52,7 +52,7 @@ constexpr uint32_t kBudgetWindow = 30;
 // Presenter slots: enough for three intervals in flight at 6x (3 * 6 = 18) plus the one on screen and real reserve.
 constexpr uint32_t kPresenterSlots = 20;
 constexpr uint32_t kPresenterMaxPendingIntervals = 3;
-enum class AdmissionMode { Policy, Present, Consumed };
+enum class AdmissionMode { Present, Consumed };
 // Back-pressure: free presenter slots a game frame waits for (its real image and the reserve), at most 50 ms
 constexpr uint32_t kBackPressureSlots = 2;
 constexpr ULONGLONG kBackPressureMs = 50;
@@ -218,7 +218,7 @@ struct FgAsiSessionHost::Impl {
 
     // The waitable paces facade hand-offs. Admission bounds unconsumed game frames and reserves presenter space
     // until the real endpoint retires. Presenter callbacks take only the leaf admission lock.
-    AdmissionMode admission_mode = AdmissionMode::Policy;
+    AdmissionMode admission_mode = AdmissionMode::Consumed;
     bool current_plan_consumed = false;
     mutable std::mutex credit_mu;
     std::condition_variable credit_cv;
@@ -656,7 +656,6 @@ struct FgAsiSessionHost::Impl {
     }
 
     bool ShouldConsume(bool fg_enabled) const {
-        // Policy stays on first-present until active-count transitions can be qualified.
         return fg_enabled && admission_mode == AdmissionMode::Consumed;
     }
 
@@ -1701,8 +1700,7 @@ struct FgAsiSessionHost::Impl {
             ", generated_fences=" + (exec->PerIndexFences() ? "per-index" : "single-batch-when-eligible") +
             ", presenter " +
             wgfg::FgPresenterChoiceName(chosen) + ", latency_limit=" + std::to_string(st_latency_limit.load()) +
-            ", admission=" + (admission_mode == AdmissionMode::Consumed ? "consumed" :
-                              admission_mode == AdmissionMode::Present ? "present" : "policy"));
+            ", admission=" + (admission_mode == AdmissionMode::Consumed ? "consumed" : "present"));
     }
 };
 
@@ -1715,10 +1713,10 @@ FgAsiSessionHost::FgAsiSessionHost(const FgAsiSessionConfig& cfg, std::unique_pt
     const DWORD mode_length = GetEnvironmentVariableA("WG_FG_ADMISSION", admission, sizeof(admission));
     if (mode_length == 7 && std::strcmp(admission, "present") == 0) {
         impl_->admission_mode = AdmissionMode::Present;
-    } else if (mode_length == 8 && std::strcmp(admission, "consumed") == 0) {
-        impl_->admission_mode = AdmissionMode::Consumed;
-    } else if (mode_length != 0 && (mode_length != 6 || std::strcmp(admission, "policy") != 0)) {
-        impl_->Log("fg host: unknown WG_FG_ADMISSION value, using policy");
+    } else if (mode_length != 0 &&
+               !(mode_length == 8 && std::strcmp(admission, "consumed") == 0) &&
+               !(mode_length == 6 && std::strcmp(admission, "policy") == 0)) {
+        impl_->Log("fg host: unknown WG_FG_ADMISSION value, using consumed");
     }
     impl_->weights = std::move(weights);
     impl_->InitTraceCsv();
