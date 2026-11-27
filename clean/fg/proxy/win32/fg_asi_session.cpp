@@ -2,6 +2,7 @@
 // WrongGPU frame generation (issue #96, F9): the FG session host of WrongGPU-FG.asi. See fg_asi_session.h.
 // Written for this project.
 #include "fg_asi_session.h"
+#include "fg_asi_pacing.h"
 #include "fg_asi_transport.h"
 
 #include <wrl/client.h>
@@ -85,12 +86,6 @@ bool QueryMonitorRefresh(HWND hwnd, wgfg::FgTicks* period_out, uint32_t* hz_out)
     return true;
 }
 
-int64_t Percentile(std::vector<int64_t>& v, double pct) {
-    if (v.empty()) return 0;
-    std::sort(v.begin(), v.end());
-    const size_t idx = static_cast<size_t>(pct * static_cast<double>(v.size() - 1));
-    return v[idx < v.size() ? idx : v.size() - 1];
-}
 constexpr DWORD kDestroyWaitMs = 1000;
 constexpr DWORD kLatencyWaitMs = 100;
 constexpr uint32_t kCopyRing = 4;
@@ -1286,7 +1281,7 @@ struct FgAsiSessionHost::Impl {
         if (d_eff_recent.size() > 8) d_eff_recent.erase(d_eff_recent.begin(), d_eff_recent.end() - 8);
         const wgfg::FgTicks d_p50 = Percentile(d_eff_recent, 0.50);
         const wgfg::FgTicks d_p75 = Percentile(d_eff_recent, 0.75);
-        const wgfg::FgTicks d_p90 = Percentile(d_origins, 0.90);
+        const wgfg::FgTicks d_p90 = d_orig_p90_pre;
         const wgfg::FgTicks d_eff_p90 = Percentile(d_effs, 0.90);
         const uint32_t depth = std::min<uint32_t>(std::max<uint32_t>(st_latency_limit.load(), 1u), 2u);
         wgfg::FgTicks b_cap = kBudgetCapMin;

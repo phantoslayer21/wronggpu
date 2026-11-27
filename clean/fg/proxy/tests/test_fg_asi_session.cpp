@@ -40,6 +40,7 @@
 #include "../../runtime/fg_d3d12_executor.h"
 #include "../fg_proxy_core.h"
 #include "../../presenter/fg_presenter_factory.h"
+#include "../win32/fg_asi_pacing.h"
 #include "../win32/fg_asi_session.h"
 #include "../win32/fg_asi_transport.h"
 #include "../win32/fg_panel.h"
@@ -2311,6 +2312,15 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil) {
     CHECK(fg_6x.submitted_mult >= 4.80);
 }
 
+void TestPacingPercentileKeepsFrameOrder() {
+    g_case = "pacing-percentile";
+    // These samples alternate between admission-delayed and active-GPU frames.
+    const std::vector<int64_t> chronological = {80000, 8000, 60000, 10000, 70000};
+    auto origins = chronological;
+    CHECK(Percentile(origins, 0.90) == 70000);
+    CHECK(origins == chronological);
+}
+
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     bool gpu = false;
@@ -2328,6 +2338,7 @@ int main(int argc, char** argv) {
     TestPrecheck(scratch);
     TestFlags();
     TestPanel(scratch);
+    TestPacingPercentileKeepsFrameOrder();
     std::printf("cpu: %d checks, %d failed\n", g_checks, g_failed);
     if (gpu) {
         g_case = "gpu-init";
