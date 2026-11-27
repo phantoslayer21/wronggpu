@@ -273,4 +273,42 @@ bool FgPlanFitsRefresh(const FgIntervalPlan& plan, FgTicks refresh_period);
 // has already come (present at once).
 FgTicks FgTimerDue(FgTicks target, FgTicks now, FgTicks lead);
 
+// R3B-7: tearing / VRR head planning decision shared by FgDxgiPresenter::PlanHeadLocked and
+// FgWinCompPresenter::SubmitOutboxLocked. Enforces >= min_interval spacing via issue_at while giving `next` a bounded
+// slip allowance min(tol/2, slot/2) so near-ceiling VRR output (320-349 Hz) tolerates ordinary 0.3-1.0 ms issue jitter
+// without dropping ready generated images.
+struct FgTearingPlanDecision {
+    FgTicks issue_at = 0;
+    bool drop_late = false;
+};
+
+inline FgTearingPlanDecision FgPlanTearingImage(FgTicks target, bool real, FgTicks now, FgTicks last_issue,
+                                                FgTicks min_interval, FgTicks base_late_tolerance, bool has_next,
+                                                FgTicks next_target) {
+    FgTearingPlanDecision d;
+    const FgTicks earliest = last_issue + min_interval;
+    d.issue_at = target > earliest ? target : earliest;
+    if (real) return d;
+    const FgTicks slot = has_next && next_target > target ? next_target - target : 0;
+    FgTicks tol = base_late_tolerance;
+    if (slot > 0) {
+        const FgTicks half = slot / 2;
+        const FgTicks scaled = half < 15000 ? 15000 : (half > 40000 ? 40000 : half);
+        if (scaled > tol) tol = scaled;
+    }
+    if (now > target + tol) {
+        d.drop_late = true;
+        return d;
+    }
+    if (has_next) {
+        const FgTicks issue = now > d.issue_at ? now : d.issue_at;
+        const FgTicks gap = min_interval > 2500 ? min_interval : 2500;
+        const FgTicks half_tol = tol / 2;
+        const FgTicks half_slot = slot / 2;
+        const FgTicks slip_allow = slot > 0 ? (half_tol < half_slot ? half_tol : half_slot) : 0;
+        if (issue + gap > next_target + slip_allow) d.drop_late = true;
+    }
+    return d;
+}
+
 }  // namespace wgfg

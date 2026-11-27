@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "../fg_fake_presenter.h"
+#include "../fg_present_engine.h"
 #include "../fg_target_scheduler.h"
 
 using namespace wgfg;
@@ -1089,6 +1090,175 @@ void TestFrameStartWaitableCadence() {
             }
         }
     }
+
+    // R3B-5: degraded case where the interval's first generated image is late-dropped. Admission must end when the
+    // first image is submitted OR dropped (trace kind 1, 3, 4, or 7), not hold an L=1 caller until the real image.
+    {
+        struct ScriptedFence final : IFgFenceSource {
+            std::uint64_t done = 0;
+            bool FenceValid(std::uint32_t f) const override { return f == 1; }
+            std::uint64_t FenceCompleted(std::uint32_t f) const override { return f == 1 ? done : 0; }
+        } fence;
+        struct AdmissionTrace {
+            std::deque<std::uint64_t> pending;
+            std::uint64_t drop_releases = 0;
+            std::uint64_t submit_releases = 0;
+            static void OnTrace(void* ctx, std::uint64_t interval_id, std::uint64_t frame_id, std::uint32_t, bool,
+                                std::uint8_t kind, FgTicks, FgTicks) {
+                auto* self = static_cast<AdmissionTrace*>(ctx);
+                if (!self || interval_id == 0) return;
+                if (kind == 1 || kind == 3 || kind == 4 || kind == 7) {
+                    for (auto it = self->pending.begin(); it != self->pending.end(); ++it) {
+                        if (*it == frame_id) {
+                            self->pending.erase(it);
+                            if (kind == 3 || kind == 4) ++self->drop_releases;
+                            else ++self->submit_releases;
+                            break;
+                        }
+                    }
+                }
+            }
+        } trace;
+
+        FgEngineConfig ecfg;
+        ecfg.probe.backend = FgPresenterBackend::DxgiFlip;
+        ecfg.probe.supported = true;
+        ecfg.probe.per_image_target_time = true;
+        ecfg.probe.max_generated = 5;
+        ecfg.slot_count = 20;
+        ecfg.max_pending_intervals = 3;
+        ecfg.pending_late_tolerance = 20000;  // 2.0 ms
+        FgPresentEngine engine(ecfg, &fence);
+        engine.SetTraceCallback(&AdmissionTrace::OnTrace, &trace);
+        CHECK(engine.Attach(1) == FgStatus::Ok);
+
+        FgSchedulerConfig scfg = DefaultScheduler();
+        scfg.first_image_budget = 4 * kMs;
+        scfg.bridge_and_submit_margin = 2500;
+        scfg.max_lead = 280000;
+        scfg.display.min_interval = 28619;
+        scfg.display.margin = 0;
+        scfg.adaptive_count = true;
+        FgTargetScheduler scheduler(scfg);
+        CHECK(scheduler.BeginEpoch(1) == FgStatus::Ok);
+
+        const FgTicks render = 16 * kMs;  // 62.5 fps base, 4x (N=3 -> 4 ms spacing)
+        FgTicks handoff = kSecond;
+        FgTicks prev_release = 0;
+        FgTicks warm_handoff = 0;
+        std::uint64_t fence_val = 0;
+        for (std::uint64_t frame = 1; frame <= 50; ++frame) {
+            const FgTicks arrival = handoff + render;
+            handoff = prev_release > arrival ? prev_release : arrival;
+            FgGameFrame game{1, frame, arrival, 3u, true, false, handoff};
+            FgIntervalPlan plan;
+            CHECK(scheduler.Commit(game, &plan) == FgStatus::Ok);
+            trace.pending.push_back(frame);
+            if (plan.generated_count == 0) {
+                const std::uint64_t rv = ++fence_val;
+                fence.done = rv;
+                FgRealImage ri{1, frame, {1, rv}};
+                CHECK(engine.PresentRealOnly(plan, ri) == FgStatus::Ok);
+                engine.Pump(plan.targets[0].target);
+                std::vector<FgEnginePresent> out;
+                engine.TakeOutbox(&out);
+                for (const auto& p : out) {
+                    CHECK(engine.LeasePresent(p.slot, p.present_id));
+                    engine.FinishLeasedPresent(p.slot, p.target, p.target, true);
+                    CHECK(engine.OnSlotReleased(p.slot, true));
+                }
+                prev_release = plan.targets[0].target;
+            } else {
+                FgIntervalReservation res;
+                CHECK(engine.BeginInterval(plan, handoff, &res) == FgStatus::Ok);
+                FgIntervalSubmission sub;
+                sub.epoch = 1;
+                sub.interval_id = plan.interval_id;
+                sub.count = res.count;
+                const std::uint64_t gen1_val = ++fence_val;
+                const std::uint64_t rest_val = ++fence_val;
+                for (std::uint32_t i = 0; i < res.count; ++i) {
+                    sub.produced[i] = res.slots[i].reserved;
+                    sub.ready[i] = {1, i == 0 ? gen1_val : rest_val};
+                }
+                CHECK(engine.SubmitInterval(sub, handoff) == FgStatus::Ok);
+                // First generated image misses PendingDeadline while real endpoint is far later (~target[3]):
+                // Pump at target[0] + pending_late_tolerance + 1 must drop index 1 (kind 3) and release admission
+                // long before the real endpoint target[3]!
+                const FgTicks drop_at = plan.targets[0].target + ecfg.pending_late_tolerance + 1;
+                CHECK(drop_at < plan.targets[plan.generated_count].target);
+                engine.Pump(drop_at);
+                CHECK(trace.pending.empty());  // released on late drop without waiting for real image!
+                prev_release = drop_at;
+                // Complete remaining images of the interval so slots recycle cleanly.
+                fence.done = rest_val;
+                engine.Pump(plan.targets[plan.generated_count].target);
+                std::vector<FgEnginePresent> out;
+                engine.TakeOutbox(&out);
+                for (const auto& p : out) {
+                    if (!p.real && frame == 20 && p.index == 2) {
+                        // Also prove post-queue drop (kind 4) releases admission cleanly.
+                        trace.pending.push_back(frame);
+                        CHECK(engine.OnPresentDropped(p.present_id, FgDropReason::Late));
+                        CHECK(trace.pending.empty());
+                    } else {
+                        CHECK(engine.LeasePresent(p.slot, p.present_id));
+                        engine.FinishLeasedPresent(p.slot, p.target, p.target, true);
+                        CHECK(engine.OnSlotReleased(p.slot, true));
+                    }
+                }
+            }
+            CHECK(trace.pending.empty());
+            if (frame == 10) warm_handoff = handoff;
+        }
+        CHECK(trace.drop_releases >= 40);
+        // Degraded L=1 cadence stays at max(render, budget + late_tolerance) (~16 ms), NOT stretched to real target!
+        CHECK((handoff - warm_handoff) <= render * 40 * 105 / 100);
+    }
+}
+
+void TestTearingPlanHeadNearCeiling() {
+    g_case = "tearing plan head near VRR ceiling";
+    constexpr FgTicks kMinInterval = 28619;   // ~349.4 Hz ceiling on 360 Hz VRR display
+    constexpr FgTicks kBaseLateTol = 20000;   // 2.0 ms DXGI tearing tolerance
+    // Test both 320 Hz (80 fps @ 4x) and 345 Hz (86.25 fps @ 4x) with 0.3-1.0 ms issue jitter.
+    const FgTicks slots[2] = {31250, 28986};  // 320 Hz, 345 Hz
+    const FgTicks jitters[6] = {3000, 5000, 7500, 10000, 4000, 9000};  // 0.3 ms .. 1.0 ms
+    for (const FgTicks slot : slots) {
+        FgTicks last_issue = 0;
+        FgTicks t0 = kSecond;
+        std::uint32_t dropped = 0;
+        for (int i = 0; i < 60; ++i) {
+            const FgTicks target = t0 + static_cast<FgTicks>(i) * slot;
+            const FgTicks next_target = target + slot;
+            const bool real = (i % 4) == 3;
+            const FgTicks now = target + jitters[i % 6];
+            const FgTearingPlanDecision d =
+                FgPlanTearingImage(target, real, now, last_issue, kMinInterval, kBaseLateTol, true, next_target);
+            if (d.drop_late) {
+                ++dropped;
+            } else {
+                const FgTicks issued = now > d.issue_at ? now : d.issue_at;
+                if (last_issue != 0) CHECK(issued - last_issue >= kMinInterval);
+                last_issue = issued;
+            }
+        }
+        // Ready generated images with 0.3-1.0 ms jitter near the VRR ceiling must NOT be dropped.
+        CHECK(dropped == 0);
+    }
+    // Genuinely late generated image (> 1.5 ms late at 345 Hz) IS dropped; real image is NEVER dropped.
+    {
+        const FgTicks target = kSecond;
+        const FgTicks next_target = target + 28986;
+        const FgTearingPlanDecision gen_late =
+            FgPlanTearingImage(target, false, target + 15000, target - kMinInterval, kMinInterval, kBaseLateTol, true,
+                               next_target);
+        CHECK(gen_late.drop_late);
+        const FgTearingPlanDecision real_late =
+            FgPlanTearingImage(target, true, target + 50000, target - kMinInterval, kMinInterval, kBaseLateTol, true,
+                               next_target);
+        CHECK(!real_late.drop_late && real_late.issue_at >= target);
+    }
 }
 
 void TestRc2SchedulerPacing() {
@@ -1192,6 +1362,7 @@ int main() {
     TestMutations();
     TestRc2SchedulerPacing();
     TestFrameStartWaitableCadence();
+    TestTearingPlanHeadNearCeiling();
     std::printf("test_fg_presenter: %d checks, %d failure(s)\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

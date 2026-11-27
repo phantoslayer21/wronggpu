@@ -98,6 +98,39 @@ bool GameControlsMultiplier(const Status& status) {
     return status.live.multiplier_source == kFgMultSourceGame;
 }
 
+const char* SchedulerReasonWords(wgfg::FgRealOnlyReason reason) {
+    switch (reason) {
+        case wgfg::FgRealOnlyReason::OutOfVrrWindow: return "display cap";
+        case wgfg::FgRealOnlyReason::LatencyCap: return "latency";
+        case wgfg::FgRealOnlyReason::Pressure: return "presenter pressure";
+        case wgfg::FgRealOnlyReason::GenerationOff: return "generation off";
+        case wgfg::FgRealOnlyReason::DeviceLost: return "device lost";
+        default: return wgfg::FgRealOnlyReasonName(reason);
+    }
+}
+
+bool IsActiveSessionReduction(const FgAsiLiveStatus& live) {
+    if (live.scheduled_count != 0) return false;
+    switch (static_cast<wgfg::FgRealOnlyReason>(live.schedule_reason)) {
+        case wgfg::FgRealOnlyReason::OutOfVrrWindow:
+        case wgfg::FgRealOnlyReason::LatencyCap:
+        case wgfg::FgRealOnlyReason::Pressure:
+        case wgfg::FgRealOnlyReason::Reanchor:
+        case wgfg::FgRealOnlyReason::Reset:
+        case wgfg::FgRealOnlyReason::NotPrimed:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool IsTerminalScheduleReason(uint32_t schedule_reason) {
+    const auto reason = static_cast<wgfg::FgRealOnlyReason>(schedule_reason);
+    return reason == wgfg::FgRealOnlyReason::GenerationOff ||
+           reason == wgfg::FgRealOnlyReason::MenuDisabled ||
+           reason == wgfg::FgRealOnlyReason::DeviceLost;
+}
+
 std::string FrameGenStatus(const Status& st) {
     if (!st.enabled) return "Off";
     if (st.host_conflict) return "Real frames only: OptiScaler already owns the FG output";
@@ -106,6 +139,12 @@ std::string FrameGenStatus(const Status& st) {
         return std::string("Real frames only: ") + FgInstallResultWord(st.install_result);
     if (!st.have_host) return "Real frames only: frame generation runtime unavailable";
     if (st.live.phase == kFgPhaseStopped) return "Real frames only: frame generation session could not start";
+    if ((st.live.phase == kFgPhaseGenerating || st.live.phase == kFgPhaseRealOnly) &&
+        IsActiveSessionReduction(st.live)) {
+        const auto reason = static_cast<wgfg::FgRealOnlyReason>(st.live.schedule_reason);
+        if (reason == wgfg::FgRealOnlyReason::NotPrimed) return "Waiting";
+        return std::string("Real frames only: ") + SchedulerReasonWords(reason);
+    }
     if (st.live.phase == kFgPhaseRealOnly) {
         if (!st.live.reason && st.live.real_only == WG_FG_REAL_ONLY_DISABLED) return "Waiting";
         return std::string("Real frames only: ") +
@@ -115,7 +154,7 @@ std::string FrameGenStatus(const Status& st) {
     if (!st.live.scheduled_count) {
         const auto reason = static_cast<wgfg::FgRealOnlyReason>(st.live.schedule_reason);
         if (reason == wgfg::FgRealOnlyReason::None || reason == wgfg::FgRealOnlyReason::NotPrimed) return "Waiting";
-        return std::string("Real frames only: ") + wgfg::FgRealOnlyReasonName(reason);
+        return std::string("Real frames only: ") + SchedulerReasonWords(reason);
     }
     const char* preset = FgPresetSpelling(st.live.preset);
     const char* presenter = PresenterShort(st.live.presenter);
@@ -266,12 +305,18 @@ std::string StatusLine(const Status& s, const FgSettings&) {
     if (!s.installed)
         return std::string("Not active: ") + FgInstallResultWord(s.install_result) + " (see wronggpu-fg.log)";
     if (!s.have_host) return "Not active: no frame generation runtime for this game (see wronggpu-fg.log)";
+    if ((s.live.phase == kFgPhaseGenerating || s.live.phase == kFgPhaseRealOnly) &&
+        IsActiveSessionReduction(s.live)) {
+        const auto reason = static_cast<wgfg::FgRealOnlyReason>(s.live.schedule_reason);
+        if (reason == wgfg::FgRealOnlyReason::NotPrimed) return "Waiting for the game";
+        return std::string("Real frames only: ") + SchedulerReasonWords(reason);
+    }
     switch (s.live.phase) {
         case kFgPhaseGenerating: {
             if (s.live.scheduled_count == 0 && s.live.schedule_reason != 0) {
                 const auto reason = static_cast<wgfg::FgRealOnlyReason>(s.live.schedule_reason);
                 if (reason == wgfg::FgRealOnlyReason::NotPrimed) return "Waiting for the game";
-                return std::string("Real frames only: ") + wgfg::FgRealOnlyReasonName(reason);
+                return std::string("Real frames only: ") + SchedulerReasonWords(reason);
             }
             const uint32_t c = s.live.scheduled_count ? s.live.scheduled_count : s.live.count;
             const char* pr = PresenterWords(s.live.presenter);
@@ -393,8 +438,12 @@ bool PublishAt(const Status& status, uint64_t sequence, bool immediate, uint64_t
             g_seen_displayed_generated = status.live.displayed_generated;
         }
 
+        const bool session_generating =
+            (status.live.phase == kFgPhaseGenerating &&
+             !(status.live.scheduled_count == 0 && IsTerminalScheduleReason(status.live.schedule_reason))) ||
+            (status.live.phase == kFgPhaseRealOnly && IsActiveSessionReduction(status.live));
         const bool can_generate = status.enabled && !status.host_conflict && !status.deferred && status.installed &&
-                                  status.have_host && status.live.phase == kFgPhaseGenerating;
+                                  status.have_host && session_generating;
         constexpr uint64_t kGeneratedHoldMs = 500;
         bool active = false;
         if (!can_generate) {

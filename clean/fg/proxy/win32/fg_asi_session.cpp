@@ -438,7 +438,8 @@ struct FgAsiSessionHost::Impl {
                              wgfg::FgTicks ts, wgfg::FgTicks target) {
         Impl* m = static_cast<Impl*>(ctx);
         if (!m || interval_id == 0) return;
-        if (kind == 1 || kind == 7) m->CancelAdmission(frame_id);  // first native submission, whether generated or real
+        if (kind == 1 || kind == 3 || kind == 4 || kind == 7)
+            m->CancelAdmission(frame_id);  // first image submitted, leased, or dropped (interval has started)
         const wgfg::FgTicks now = ts != 0 ? ts : wgfg::FgInterruptNow();
         std::lock_guard<std::mutex> lock(m->trace_mu);
         // Linear scan of recent entries (at most 32 back — intervals complete in FIFO order).
@@ -671,6 +672,11 @@ struct FgAsiSessionHost::Impl {
         if (exec) {
             exec->WaitIdle(kDestroyWaitMs);
             exec.reset();
+        }
+        ID3D12CommandQueue* const cq = chain_queue ? chain_queue.Get() : queue.Get();
+        if (copy_fence && cq && (!device || device->GetDeviceRemovedReason() == S_OK) &&
+            SUCCEEDED(cq->Signal(copy_fence.Get(), copy_value + 1))) {
+            ++copy_value;
         }
         WaitCopy(copy_value, kDestroyWaitMs);
         WaitGameFence(game_value, kDestroyWaitMs);
@@ -990,6 +996,16 @@ struct FgAsiSessionHost::Impl {
         exec->WaitForComputeValue(want, 50);
     }
 
+    void RecordSessionFailure() {
+        ++stats.session_failures;
+        if (stats.session_failures >= kMaxSessionFailures && !stats.gave_up) {
+            stats.gave_up = true;
+            st_phase.store(kFgPhaseStopped);
+            Log("fg host: frame generation stays off for this run (3 session failures); the game's frames are "
+                "presented as it asks");
+        }
+    }
+
     bool DestroySession(const char* why, bool final_detach = false) {
         if (!session) {
             exec_source.reset();
@@ -1010,6 +1026,14 @@ struct FgAsiSessionHost::Impl {
                     session_draining = true;
                     return false;  // the in-flight worker still owns the chain and its buffers
                 }
+            }
+        }
+        // Wait for the executor's queues (game + async compute + aux) to finish writing into the presenter's slot
+        // textures before destroying the session and releasing those slot resources.
+        if (exec && !exec->WaitIdle(kDestroyWaitMs)) {
+            if (!final_detach) {
+                session_draining = true;
+                return false;
             }
         }
         const wgfg::FgSessionCounters sc = session->Counters();
@@ -1116,6 +1140,7 @@ struct FgAsiSessionHost::Impl {
         st_sched_count.store(0);
         st_cap_reason.store(kFgCapNone);
         st_schedule_reason.store(0);
+        if (st_phase.load() == kFgPhaseGenerating) st_phase.store(kFgPhaseWaiting);
         session_draining = false;
         ++stats.sessions_destroyed;
         return true;
@@ -1699,8 +1724,11 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
             if (!m.admission_timeout_logged)
                 m.Log("fg host: Present admission timed out; handing this frame to the real-only copy path");
             m.admission_timeout_logged = true;
+            // R3B-3: count persistent admission timeouts toward the session failure limit so a stalled presenter
+            // falls back to plain passthrough instead of looping create -> 100 ms stall -> destroy forever.
+            m.RecordSessionFailure();
             // Only one owner may present on the real chain. Discard queued work and drain the in-progress lease
-            // before passing through. The next frame may create a session again.
+            // before passing through. The next frame may create a session again unless the failure limit was reached.
             m.DestroySession("admission timeout");
         } else {
             m.admission_timeout_logged = false;
@@ -1715,7 +1743,10 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
             m.next_trace.t_after_wait = t_after_wait;
             m.next_trace.free_slots = PresenterFreeSlots(m.session->Presenter());
             admitted = m.BeginAdmission(desc->frame_token);
-            if (!admitted) m.DestroySession("admission closed");
+            if (!admitted) {
+                m.RecordSessionFailure();
+                m.DestroySession("admission closed");
+            }
         }
         wgfg::FgSessionResult sr;
         const int32_t rc = wgfg::FgSessionPresent(core, m.session_draining ? nullptr : m.session.get(), desc, out, &sr);
@@ -1767,7 +1798,6 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
                 m.display_sample_at = now;
             }
         }
-        m.st_schedule_reason.store(static_cast<uint32_t>(sr.plan_real_only));
         m.st_presents.fetch_add(1);
         m.st_has_mfg_selector.store(core->has_mfg_selector());
         m.st_mult_source.store(core->multiplier_source());
@@ -1793,25 +1823,38 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
                 m.st_preset.store(out->effective_preset);
                 m.st_count.store(sr.scheduled > 0 ? sr.scheduled : out->effective_count);
                 m.st_sched_count.store(sr.scheduled);
+                m.st_reason.store(0);
+                m.st_real_only.store(0);
+                m.st_schedule_reason.store(static_cast<uint32_t>(sr.plan_real_only));
                 uint32_t cap_r = kFgCapNone;
-                if (m.session) {
-                    const wgfg::FgRealOnlyReason rr = m.session->LastReductionReason();
-                    if (rr == wgfg::FgRealOnlyReason::OutOfVrrWindow) cap_r = kFgCapDisplayVrr;
-                    else if (rr == wgfg::FgRealOnlyReason::LatencyCap) cap_r = kFgCapLatencyCap;
-                    else if (rr == wgfg::FgRealOnlyReason::Pressure) cap_r = kFgCapPressure;
-                }
+                wgfg::FgRealOnlyReason rr = sr.plan_real_only;
+                if (rr == wgfg::FgRealOnlyReason::None && m.session) rr = m.session->LastReductionReason();
+                if (rr == wgfg::FgRealOnlyReason::OutOfVrrWindow) cap_r = kFgCapDisplayVrr;
+                else if (rr == wgfg::FgRealOnlyReason::LatencyCap) cap_r = kFgCapLatencyCap;
+                else if (rr == wgfg::FgRealOnlyReason::Pressure) cap_r = kFgCapPressure;
                 if (cap_r == kFgCapNone && out->requested_count > out->effective_count) cap_r = kFgCapRoute;
                 m.st_cap_reason.store(cap_r);
-                m.st_phase.store(sr.scheduled != 0 ? kFgPhaseGenerating : kFgPhaseRealOnly);
+                // R3B-1: keep phase in Generating across scheduler reductions inside an active session (the panel
+                // reads scheduled_count / schedule_reason and holds recent generating activity across isolated dips);
+                // a lost or inactive session leaves Generating immediately.
+                const bool active_session = m.session != nullptr && !m.session_draining &&
+                                            m.session->State() == wgfg::FgSessionState::Active &&
+                                            sr.error == wgfg::FgSessionError::None;
+                m.st_phase.store(active_session ? kFgPhaseGenerating
+                                                : (m.stats.gave_up ? kFgPhaseStopped : kFgPhaseRealOnly));
                 m.ControlLateness();
             } else if (out->status == WG_FG_PRESENT_REAL_ONLY || out->status == WG_FG_PRESENT_REFUSED) {
                 m.st_reason.store(out->reason);
                 m.st_real_only.store(out->real_only);
+                m.st_schedule_reason.store(0);
                 m.st_sched_count.store(0);
                 m.st_cap_reason.store(kFgCapNone);
-                m.st_phase.store(kFgPhaseRealOnly);
+                m.st_phase.store(m.stats.gave_up ? kFgPhaseStopped : kFgPhaseRealOnly);
             } else {
-                m.st_phase.store(kFgPhaseWaiting);
+                m.st_schedule_reason.store(0);
+                m.st_sched_count.store(0);
+                m.st_cap_reason.store(kFgCapNone);
+                m.st_phase.store(m.stats.gave_up ? kFgPhaseStopped : kFgPhaseWaiting);
             }
         }
         if (m.session && !m.session_draining && desc) {
@@ -1839,10 +1882,7 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
                       (m.exec ? m.exec->LastWhy() : std::string()) + ")");
                 if (m.session->State() != wgfg::FgSessionState::Active) {
                     m.DestroySession("refused");
-                    if (++m.stats.session_failures >= kMaxSessionFailures) {
-                        m.stats.gave_up = true;
-                        m.st_phase.store(kFgPhaseStopped);
-                    }
+                    m.RecordSessionFailure();
                 }
             }
         }
@@ -1850,8 +1890,10 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
     } catch (...) {
         if (admitted && desc) m.CancelAdmission(desc->frame_token);
         m.handled = false;
+        m.st_schedule_reason.store(0);
         m.st_sched_count.store(0);
-        m.st_phase.store(kFgPhaseRealOnly);
+        m.st_cap_reason.store(kFgCapNone);
+        m.st_phase.store(m.stats.gave_up ? kFgPhaseStopped : kFgPhaseRealOnly);
         return -1;
     }
 }
@@ -1874,13 +1916,11 @@ HRESULT FgAsiSessionHost::PresentInterval(const FgPresentCall& call, IFgInnerPre
     if (m.session) {
         // the copy path presents on the real chain, which the session's presenter must not hold meanwhile
         const bool was_draining = m.session_draining;
-        if (!m.DestroySession("an interval it did not take")) return DXGI_ERROR_WAS_STILL_DRAWING;
-        if (!was_draining) ++m.stats.session_failures;
-        if (m.stats.session_failures >= kMaxSessionFailures && !m.stats.gave_up) {
-            m.stats.gave_up = true;
-            m.st_phase.store(kFgPhaseStopped);
-            m.Log("fg host: frame generation stays off for this run (3 session failures); the game's frames are "
-                  "presented as it asks");
+        if (!was_draining) m.RecordSessionFailure();
+        if (!m.DestroySession("an interval it did not take")) {
+            // R3B-4: replenish the game's frame-start credit so an L=1 waitable caller never stalls after a busy drain.
+            m.ReturnFacadeCredit();
+            return DXGI_ERROR_WAS_STILL_DRAWING;
         }
     }
     if (!m.facade.empty() && !m.pending_copy) {
@@ -1895,6 +1935,7 @@ HRESULT FgAsiSessionHost::PresentInterval(const FgPresentCall& call, IFgInnerPre
             }
         }
         if (!m.CopyFacadeToChain()) {
+            m.ReturnFacadeCredit();
             const HRESULT lost = m.device->GetDeviceRemovedReason();
             return FAILED(lost) ? lost : DXGI_ERROR_WAS_STILL_DRAWING;
         }
@@ -1913,7 +1954,10 @@ HRESULT FgAsiSessionHost::PresentInterval(const FgPresentCall& call, IFgInnerPre
         return hr;
     }
     const HRESULT advance = copied ? m.AdvanceFacade() : S_OK;
-    if (FAILED(advance)) return advance;
+    if (FAILED(advance)) {
+        m.ReturnFacadeCredit();
+        return advance;
+    }
     m.ReturnFacadeCredit();  // also replenishes handles cached before falling back to native buffers
     m.DrainRetiredTags(false);
     return hr;
@@ -1922,9 +1966,17 @@ HRESULT FgAsiSessionHost::PresentInterval(const FgPresentCall& call, IFgInnerPre
 HRESULT FgAsiSessionHost::BeforeResize() {
     Impl& m = *impl_;
     std::lock_guard<std::recursive_mutex> lock(m.mu);
-    if (!m.DestroySession("resize")) return DXGI_ERROR_WAS_STILL_DRAWING;
+    if (!m.DestroySession("resize")) {
+        std::lock_guard<std::mutex> credit_lock(m.credit_mu);
+        m.RefillWaitableLocked(true);
+        return DXGI_ERROR_WAS_STILL_DRAWING;
+    }
     if (!m.WaitCopy(m.copy_value, kDestroyWaitMs) || !m.WaitGameFence(m.game_value, kDestroyWaitMs) ||
         (m.exec && !m.exec->WaitIdle(kDestroyWaitMs))) {
+        {
+            std::lock_guard<std::mutex> credit_lock(m.credit_mu);
+            m.RefillWaitableLocked(true);
+        }
         const HRESULT lost = m.device ? m.device->GetDeviceRemovedReason() : S_OK;
         return FAILED(lost) ? lost : DXGI_ERROR_WAS_STILL_DRAWING;
     }

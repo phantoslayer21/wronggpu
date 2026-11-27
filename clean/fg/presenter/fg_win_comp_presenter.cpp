@@ -665,16 +665,17 @@ void FgWinCompPresenter::SubmitOutboxLocked() {
                 when = vblank - info_.grid.period / 2;
             }
         } else {
-            // A3: avoid HWFQ VRR target collisions / compositor skips when an earlier generated image is already
-            // superseded by the next queued image or collides with the previous effective target.
-            const FgTicks gap = desc_.min_interval > 2500 ? desc_.min_interval : 2500;
-            FgTicks effective = when > now ? when : now;
-            if (have_vblank_ && effective < last_vblank_ + desc_.min_interval)
-                effective = last_vblank_ + desc_.min_interval;
-            if (!p.real && i + 1 < deferred_.size() && effective > deferred_[i + 1].target - gap) {
+            // R3B-7: mirror DXGI tearing collision math so near-ceiling VRR output tolerates minor issue slip
+            // without dropping ready generated images while preserving >= min_interval target spacing.
+            const bool has_next = i + 1 < deferred_.size();
+            const FgTicks next_target = has_next ? deferred_[i + 1].target : 0;
+            const FgTearingPlanDecision td = FgPlanTearingImage(
+                p.target, p.real, now, have_vblank_ ? last_vblank_ : 0, desc_.min_interval, 20000, has_next, next_target);
+            if (td.drop_late) {
                 engine_.OnPresentDropped(p.present_id, FgDropReason::Late);
                 continue;
             }
+            FgTicks effective = td.issue_at > now ? td.issue_at : now;
             if (have_vblank_ && effective <= last_vblank_) effective = last_vblank_ + 1;
             when = vblank = effective;
         }

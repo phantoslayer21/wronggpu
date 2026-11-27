@@ -47,6 +47,21 @@ using namespace wgfgp::win32;
 
 namespace {
 
+// High-resolution wait so synthetic 30 fps frame pacing never quantizes to 46.9 ms (3 * 15.625 ms < 48 Hz VRR floor).
+void WaitMsPrecise(DWORD ms) {
+    if (ms == 0) return;
+    HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    if (!timer) {
+        Sleep(ms);
+        return;
+    }
+    LARGE_INTEGER due;
+    due.QuadPart = -static_cast<LONGLONG>(ms) * 10000LL;
+    if (SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) WaitForSingleObject(timer, ms + 50);
+    else Sleep(ms);
+    CloseHandle(timer);
+}
+
 int g_checks = 0, g_failed = 0;
 const char* g_case = "";
 #define CHECK(cond)                                                                    \
@@ -494,7 +509,7 @@ void RunHost(Gpu& gpu, const std::string& dxil, uint32_t preset) {
         FgAsiSessionHost::Route(host.get(), &core, &d, &r);
         const HRESULT hr = chain->Present(0, 0);
         if (FAILED(hr)) ++present_errors;
-        Sleep(33);
+        WaitMsPrecise(33);
     }
     gpu.Wait();
     Sleep(200);
@@ -554,6 +569,7 @@ WgHostDrawFn g_draw = nullptr;
 std::string g_title;
 int g_cards = 0, g_tabs = 0, g_sections = 0;
 std::string g_report_state;
+std::string g_report_text;
 float g_report_rate = 0, g_report_base = 0;
 bool g_report_generating = false;
 bool g_report_accept = true;
@@ -577,10 +593,11 @@ bool RegisterFrameGenSection(WgHostMenuPlugin*, WgHostDrawFn draw, void*) {
     g_draw = draw;
     return true;
 }
-bool ReportFrameGeneration(WgHostMenuPlugin*, const char*, const char* state, const char*, const char*,
+bool ReportFrameGeneration(WgHostMenuPlugin*, const char*, const char* state, const char* text, const char*,
                            float rate, float base, bool generating) {
     if (!g_report_accept) return false;
     g_report_state = state ? state : "";
+    g_report_text = text ? text : "";
     g_report_rate = rate;
     g_report_base = base;
     g_report_generating = generating;
@@ -925,6 +942,84 @@ void TestPanel(const std::string& scratch) {
     CHECK(!panel::PublishAt(g_panel_status, panel::NextReportSequence(), true, 3100));
     fakehost::g_report_accept = true;
 
+    // R3B-1: an isolated scheduler-driven real-only interval (e.g. OutOfVrrWindow display cap) between generating
+    // intervals keeps the 500 ms activity hold without publishing inactive, shows the CURRENT scheduler reduction
+    // reason (display cap / latency / presenter pressure) instead of a stale adapter reason, and a sustained
+    // display-capped run transitions cleanly to Real only after the hold. A lost session ends the hold immediately.
+    {
+        panel::Status r3b = st;
+        r3b.enabled = true;
+        r3b.installed = true;
+        r3b.have_host = true;
+        r3b.live.phase = kFgPhaseGenerating;
+        r3b.live.count = 2;
+        r3b.live.scheduled_count = 2;
+        r3b.live.schedule_reason = 0;
+        r3b.live.displayed_generated = 25;
+        r3b.live.displayed_fps = 180.0f;
+        r3b.live.base_fps = 60.0f;
+        CHECK(panel::PublishAt(r3b, panel::NextReportSequence(), true, 4000));
+        CHECK(fakehost::g_report_generating && fakehost::g_report_state == "3x");
+
+        // Isolated single-interval display cap (OutOfVrrWindow): hold kept, no inactive publish, UI names display cap.
+        panel::Status capped = r3b;
+        capped.live.scheduled_count = 0;
+        capped.live.schedule_reason = static_cast<uint32_t>(wgfg::FgRealOnlyReason::OutOfVrrWindow);
+        g_panel_status = capped;
+        fakehost::g_seen.clear();
+        fakehost::g_draw(nullptr);
+        CHECK(fakehost::Seen("Real frames only: display cap"));
+        CHECK(panel::StatusLine(capped, cur) == "Real frames only: display cap");
+        CHECK(panel::PublishAt(capped, panel::NextReportSequence(), false, 4120));
+        CHECK(fakehost::g_report_generating && fakehost::g_report_state == "3x");
+
+        // Even if a snapshot arrives with kFgPhaseRealOnly + stale adapter WG_FG_REAL_ONLY_DISABLED alongside an
+        // active scheduler reduction, the current reduction reason wins and the hold is kept.
+        panel::Status stale_adapter = capped;
+        stale_adapter.live.phase = kFgPhaseRealOnly;
+        stale_adapter.live.reason = 0;
+        stale_adapter.live.real_only = WG_FG_REAL_ONLY_DISABLED;
+        g_panel_status = stale_adapter;
+        fakehost::g_seen.clear();
+        fakehost::g_draw(nullptr);
+        CHECK(fakehost::Seen("Real frames only: display cap") && !fakehost::Seen("Waiting"));
+        CHECK(panel::StatusLine(stale_adapter, cur) == "Real frames only: display cap");
+        CHECK(panel::PublishAt(stale_adapter, panel::NextReportSequence(), false, 4200));
+        CHECK(fakehost::g_report_generating && fakehost::g_report_state == "3x");
+
+        // LatencyCap and Pressure spellings.
+        capped.live.schedule_reason = static_cast<uint32_t>(wgfg::FgRealOnlyReason::LatencyCap);
+        CHECK(panel::StatusLine(capped, cur) == "Real frames only: latency");
+        capped.live.schedule_reason = static_cast<uint32_t>(wgfg::FgRealOnlyReason::Pressure);
+        CHECK(panel::StatusLine(capped, cur) == "Real frames only: presenter pressure");
+
+        // Next generating interval refreshes the hold seamlessly with zero inactive publish in between.
+        r3b.live.displayed_generated = 27;
+        CHECK(panel::PublishAt(r3b, panel::NextReportSequence(), false, 4250));
+        CHECK(fakehost::g_report_generating && fakehost::g_report_state == "3x");
+
+        // Sustained display-capped run: held inside 500 ms, then transitions cleanly to Real only at 500 ms.
+        capped.live.schedule_reason = static_cast<uint32_t>(wgfg::FgRealOnlyReason::OutOfVrrWindow);
+        capped.live.displayed_generated = 27;
+        CHECK(panel::PublishAt(capped, panel::NextReportSequence(), false, 4600));
+        CHECK(fakehost::g_report_generating && fakehost::g_report_state == "3x");
+        CHECK(panel::PublishAt(capped, panel::NextReportSequence(), false, 4750));
+        CHECK(!fakehost::g_report_generating && fakehost::g_report_state == "Real only");
+        CHECK(fakehost::g_report_text == "Real frames only: display cap");
+        CHECK(fakehost::g_report_rate == 0.0f && fakehost::g_report_base == 0.0f);
+
+        // Lost session (phase Waiting, schedule_reason 0) ends the hold immediately even within 10 ms.
+        r3b.live.displayed_generated = 30;
+        CHECK(panel::PublishAt(r3b, panel::NextReportSequence(), true, 5000));
+        CHECK(fakehost::g_report_generating && fakehost::g_report_state == "3x");
+        panel::Status lost = r3b;
+        lost.live.phase = kFgPhaseWaiting;
+        lost.live.scheduled_count = 0;
+        lost.live.schedule_reason = 0;
+        CHECK(panel::PublishAt(lost, panel::NextReportSequence(), false, 5010));
+        CHECK(!fakehost::g_report_generating && fakehost::g_report_state == "Waiting");
+    }
+
     panel::ReleaseOutput();
 }
 
@@ -1061,6 +1156,49 @@ void TestFacadeCopyRetryAndReuse(Gpu& gpu) {
     host.AfterResize(DXGI_ERROR_INVALID_CALL);
     CHECK(host.CurrentBackBufferIndex(&index) && index == 0);
     host.Detached();
+
+    // R3B-4: when BeforeResize returns DXGI_ERROR_WAS_STILL_DRAWING on a busy waitable L=1 chain, it must replenish
+    // the game's frame-start waitable credit so an L=1 caller never deadlocks.
+    {
+        DXGI_SWAP_CHAIN_DESC1 wdesc = desc;
+        wdesc.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+        ComPtr<IDXGISwapChain1> wbase;
+        ComPtr<IDXGISwapChain4> wnative;
+        CHECK(SUCCEEDED(factory->CreateSwapChainForComposition(chain_queue.Get(), &wdesc, nullptr, &wbase)));
+        if (wbase && SUCCEEDED(wbase.As(&wnative))) {
+            FgAsiSessionHost whost(config, nullptr);
+            whost.AttachedPresentQueue(chain_queue.Get());
+            whost.SetGameWaitable(true);
+            whost.Attached(wnative.Get(), gpu.queue.Get());
+            HRESULT lhr = E_FAIL;
+            CHECK(whost.SetMaximumFrameLatency(1, &lhr) && SUCCEEDED(lhr));
+            HANDLE wh = nullptr;
+            CHECK(whost.FrameLatencyWaitableObject(&wh) && wh != nullptr);
+            if (wh) {
+                CHECK(WaitForSingleObject(wh, 0) == WAIT_OBJECT_0);
+                CHECK(WaitForSingleObject(wh, 0) == WAIT_TIMEOUT);  // L=1 credit consumed
+                ComPtr<ID3D12Fence> gate2;
+                CHECK(SUCCEEDED(gpu.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gate2))));
+                if (gate2) {
+                    CHECK(SUCCEEDED(chain_queue->Wait(gate2.Get(), 1)));
+                    RetryInner winner;
+                    winner.chain = wnative.Get();
+                    winner.retry = false;
+                    FgPresentCall wcall;
+                    CHECK(whost.PresentInterval(wcall, winner) == S_OK);
+                    CHECK(WaitForSingleObject(wh, 0) == WAIT_OBJECT_0);  // credit returned on present
+                    CHECK(WaitForSingleObject(wh, 0) == WAIT_TIMEOUT);   // consume again before busy resize
+                    CHECK(whost.BeforeResize() == DXGI_ERROR_WAS_STILL_DRAWING);
+                    CHECK(WaitForSingleObject(wh, 0) == WAIT_OBJECT_0);  // R3B-4: replenished on busy resize
+                    CHECK(SUCCEEDED(gate2->Signal(1)));
+                    CHECK(gpu.Wait());
+                    CHECK(whost.BeforeResize() == S_OK);
+                }
+                CloseHandle(wh);
+            }
+            whost.Detached();
+        }
+    }
     if (g_debug_layer) CHECK(gpu.DebugErrors() == 0);
 }
 
@@ -1297,6 +1435,161 @@ void TestRc2LatencyAndPacing(Gpu& gpu, const std::string& dxil, bool run_latency
                 if (dbg >= 0) CHECK(dbg == 0);
             }
         }
+
+        // R3B-3: persistent admission timeouts count toward kMaxSessionFailures (3) and fall back to plain passthrough
+        // instead of looping create -> 100 ms stall -> destroy forever.
+        {
+            FgPresentOwners owners;
+            FakeInterface iface;
+            FgProxyConfig pcfg = CoreConfig(2);
+            pcfg.binding.has_mfg_selector = true;
+            FgProxy core(pcfg, &owners, &PrintLog, nullptr);
+            const WgFgChainV1 ct = iface.table();
+            CHECK(core.attach_interposer(&ct, 2, 14) == WG_FG_REASON_NONE);
+            core.set_feature_function("fgTestSetOptions", &g_fn_a);
+            core.set_feature_function("fgTestGetState", &g_fn_b);
+
+            FgAsiSessionConfig hc;
+            hc.settings = pcfg.settings;
+            hc.dxil_dir = dxil;
+            hc.log = &PrintLog;
+            std::unique_ptr<wgfg::FgExecWeights> w(new wgfg::FgExecWeights());
+            wgfg::FgExecSyntheticWeights(11, w.get());
+            std::unique_ptr<FgAsiSessionHost> host(new FgAsiSessionHost(hc, std::move(w)));
+            host->OnInstalled(&core);
+            FgAsiSessionHost::FactoryNote(host.get(), &core, gpu.factory.Get());
+
+            DXGI_SWAP_CHAIN_DESC1 sd = {};
+            sd.Width = kW;
+            sd.Height = kH;
+            sd.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            sd.SampleDesc.Count = 1;
+            sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+            sd.BufferCount = 3;
+            sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+            sd.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+            sd.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+            const UINT extra = host->ExtraSwapChainFlags(sd);
+            sd.Flags |= extra;
+            IDXGISwapChain1* sc1 = nullptr;
+            CHECK(SUCCEEDED(f2->CreateSwapChainForComposition(gpu.queue.Get(), &sd, nullptr, &sc1)) && sc1);
+            FgSwapChain* chain = nullptr;
+            if (sc1) CHECK(SUCCEEDED(FgSwapChain::Create(sc1, gpu.queue.Get(), &PrintLog, nullptr, &chain)) && chain);
+            if (chain) {
+                chain->SetExtraFlags(extra & ~DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT);
+                host->SetGameWaitable(true);
+                CHECK(chain->Attach(host.get(), &core, &owners, WG_FG_OWNER_SWAPCHAIN_WRAPPER) == WG_FG_REASON_NONE);
+                host->Attached(chain->Inner(), chain->Queue());
+                CHECK(chain->SetMaximumFrameLatency(1) == S_OK);
+                WgFgOptions on = Options(true, 2);
+                on.generated_count = 1;
+                core.set_options(WG_FEAT_FRAME_GENERATION, 1, &on, &on);
+
+                uint64_t tok = 1;
+                auto submit_frame = [&](ID3D12Fence* stall_fence, uint64_t stall_val, bool render) {
+                    const UINT bi = chain->GetCurrentBackBufferIndex();
+                    ComPtr<ID3D12Resource> bb;
+                    CHECK(SUCCEEDED(chain->GetBuffer(bi, IID_PPV_ARGS(&bb))) && bb);
+                    if (!bb) return;
+                    if (render) CHECK(game.Render(gpu, static_cast<int>(tok), bb.Get()));
+                    if (stall_fence) CHECK(SUCCEEDED(gpu.queue->Wait(stall_fence, stall_val)));
+                    WgFgTag tags[2] = {};
+                    ID3D12Resource* res[2] = {game.motion.Get(), game.depth.Get()};
+                    const uint32_t nts[2] = {kNtMotion, kNtDepth};
+                    const uint32_t fm[2] = {DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R32_FLOAT};
+                    for (int t = 0; t < 2; ++t) {
+                        tags[t].struct_size = sizeof(WgFgTag);
+                        tags[t].native_type = nts[t];
+                        tags[t].texture.resource = res[t];
+                        tags[t].texture.format = fm[t];
+                        tags[t].texture.width = kW;
+                        tags[t].texture.height = kH;
+                        tags[t].texture.state = D3D12_RESOURCE_STATE_COMMON;
+                        tags[t].texture.frame_token = tok;
+                        tags[t].texture.viewport_id = 1;
+                        tags[t].texture.producer_epoch = 3;
+                        tags[t].texture.rect = {0, 0, kW, kH};
+                    }
+                    core.tag(tags, 2, tags);
+                    WgFgConstants k = {};
+                    k.struct_size = sizeof(k);
+                    k.abi_version = WG_FG_ADAPTER_ABI_VERSION;
+                    k.frame_token = tok;
+                    k.viewport_id = 1;
+                    for (int i = 0; i < 4; ++i) k.camera_current[5 * i] = k.camera_previous[5 * i] = 1.0f;
+                    k.motion_scale_x = k.motion_scale_y = 1.0f;
+                    k.render_rect = {0, 0, kW, kH};
+                    k.output_rect = {0, 0, kW, kH};
+                    core.constants(&k, &k);
+                    WgFgPresentDesc d = {};
+                    d.struct_size = sizeof(d);
+                    d.abi_version = WG_FG_ADAPTER_ABI_VERSION;
+                    d.owner = WG_FG_OWNER_SWAPCHAIN_WRAPPER;
+                    d.viewport_id = 1;
+                    d.frame_token = tok;
+                    d.swapchain_id = chain->Id();
+                    d.swapchain_epoch = chain->Epoch();
+                    d.window_id = 0x77;
+                    d.luid.low = gpu.desc.AdapterLuid.LowPart;
+                    d.luid.high = gpu.desc.AdapterLuid.HighPart;
+                    d.backbuffer.resource = bb.Get();
+                    d.backbuffer.format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                    d.backbuffer.width = kW;
+                    d.backbuffer.height = kH;
+                    d.backbuffer.frame_token = tok;
+                    d.backbuffer.viewport_id = 1;
+                    d.backbuffer.rect = {0, 0, kW, kH};
+                    bb.Reset();
+                    WgFgPresentResult r = {};
+                    r.struct_size = sizeof(r);
+                    r.abi_version = WG_FG_ADAPTER_ABI_VERSION;
+                    FgAsiSessionHost::Route(host.get(), &core, &d, &r);
+                    CHECK(SUCCEEDED(chain->Present(0, 0)));
+                    ++tok;
+                };
+
+                // First frame establishes the session description.
+                submit_frame(nullptr, 0, true);
+                // Three consecutive admission timeouts must hit kMaxSessionFailures and give up.
+                for (int round = 0; round < 3; ++round) {
+                    // Create the session cleanly on an unstalled queue before stalling the admitted frame.
+                    submit_frame(nullptr, 0, true);
+                    ComPtr<ID3D12Fence> stall;
+                    CHECK(SUCCEEDED(gpu.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&stall))));
+                    submit_frame(stall.Get(), 1, true);   // admits and stalls GPU queue
+                    // Start the unblock timer AFTER submission so setup never eats the stall.
+                    std::thread release([fence = stall]() {
+                        Sleep(220);
+                        fence->Signal(1);
+                    });
+                    submit_frame(nullptr, 0, false);      // skip game.Render (which calls gpu.Wait) -> hits 100 ms timeout
+                    release.join();
+                    gpu.Wait();
+                }
+                const FgAsiSessionStats gave_st = host->Stats();
+                std::printf("    r3b3 persistent-stall: timeouts=%llu failures=%llu gave_up=%d created=%llu phase=%u\n",
+                            static_cast<unsigned long long>(gave_st.admission_timeouts),
+                            static_cast<unsigned long long>(gave_st.session_failures), gave_st.gave_up ? 1 : 0,
+                            static_cast<unsigned long long>(gave_st.sessions_created), host->LiveStatus().phase);
+                CHECK(gave_st.admission_timeouts == 3);
+                CHECK(gave_st.session_failures == 3 && gave_st.gave_up);
+                CHECK(host->LiveStatus().phase == kFgPhaseStopped);
+                const uint64_t created_before = gave_st.sessions_created;
+                // Subsequent presents must stay on plain passthrough with zero new sessions or admission timeouts.
+                for (int extra_f = 0; extra_f < 4; ++extra_f) submit_frame(nullptr, 0, true);
+                const FgAsiSessionStats after_st = host->Stats();
+                CHECK(after_st.sessions_created == created_before);
+                CHECK(after_st.admission_timeouts == 3 && after_st.gave_up);
+                CHECK(host->LiveStatus().phase == kFgPhaseStopped);
+
+                CHECK(gpu.Wait());
+                chain->Release();
+                CHECK(gpu.Wait());
+                host.reset();
+                const int64_t dbg = gpu.DebugErrors();
+                if (dbg >= 0) CHECK(dbg == 0);
+            }
+        }
     }
 
     // Part 2: synthetic 2x (120 fps -> 240 Hz) and 4x (80 fps -> 320 Hz) GPU pacing runs (Preset C, DXGI tearing)
@@ -1436,6 +1729,115 @@ void TestRc2LatencyAndPacing(Gpu& gpu, const std::string& dxil, bool run_latency
         CHECK(live.displayed_generated > 0);
         CHECK(live.displayed_fps > live.base_fps && live.base_fps > 0.0f);
         CHECK(chain->Stats().worker_reentries == 0);
+
+        // R3B-1 end-to-end: route a scheduler-driven real-only frame through FgAsiSessionHost::Route() -> LiveStatus()
+        // -> panel::PublishAt() on an active session and confirm kFgPhaseGenerating + activity hold are preserved.
+        if (cad.gen_n == 1u) {
+            static WgHostMenuApi v6_live = fakehost::Api(true);
+            v6_live.version = 6;
+            v6_live.checkbox = &fakehost::Checkbox;
+            v6_live.report_frame_generation = &fakehost::ReportFrameGeneration;
+            v6_live.register_frame_gen_section = &fakehost::RegisterFrameGenSection;
+            CHECK(panel::ClaimOutput(&v6_live, nullptr));
+            panel::Status ps;
+            ps.enabled = true;
+            ps.installed = true;
+            ps.have_host = true;
+            ps.live = host->LiveStatus();
+            CHECK(ps.live.phase == kFgPhaseGenerating && ps.live.displayed_generated > 0);
+            CHECK(panel::PublishAt(ps, panel::NextReportSequence(), true, 10000));
+            CHECK(fakehost::g_report_generating);
+
+            // Drive a short zero-sleep burst (>360 Hz base) so the scheduler drops scheduled_count to 0 inside the
+            // active session (re-anchor / not-primed / out-of-vrr-window).
+            bool saw_sched_real_only = false;
+            panel::Status reduced = ps;
+            for (int bf = 0; bf < 12; ++bf) {
+                const uint64_t tok = static_cast<uint64_t>(frames + bf) + 1;
+                const UINT bi = chain->GetCurrentBackBufferIndex();
+                ComPtr<ID3D12Resource> bb;
+                CHECK(SUCCEEDED(chain->GetBuffer(bi, IID_PPV_ARGS(&bb))) && bb);
+                if (!bb) break;
+                CHECK(game.Render(gpu, frames + bf, bb.Get()));
+                WgFgTag tags[2] = {};
+                ID3D12Resource* res[2] = {game.motion.Get(), game.depth.Get()};
+                const uint32_t nts[2] = {kNtMotion, kNtDepth};
+                const uint32_t fm[2] = {DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R32_FLOAT};
+                for (int t = 0; t < 2; ++t) {
+                    tags[t].struct_size = sizeof(WgFgTag);
+                    tags[t].native_type = nts[t];
+                    tags[t].texture.resource = res[t];
+                    tags[t].texture.format = fm[t];
+                    tags[t].texture.width = kW;
+                    tags[t].texture.height = kH;
+                    tags[t].texture.state = D3D12_RESOURCE_STATE_COMMON;
+                    tags[t].texture.frame_token = tok;
+                    tags[t].texture.viewport_id = 1;
+                    tags[t].texture.producer_epoch = 3;
+                    tags[t].texture.rect = {0, 0, kW, kH};
+                }
+                core.tag(tags, 2, tags);
+                WgFgConstants k = {};
+                k.struct_size = sizeof(k);
+                k.abi_version = WG_FG_ADAPTER_ABI_VERSION;
+                k.frame_token = tok;
+                k.viewport_id = 1;
+                for (int i = 0; i < 4; ++i) k.camera_current[5 * i] = k.camera_previous[5 * i] = 1.0f;
+                k.motion_scale_x = k.motion_scale_y = 1.0f;
+                k.render_rect = {0, 0, kW, kH};
+                k.output_rect = {0, 0, kW, kH};
+                core.constants(&k, &k);
+                WgFgPresentDesc d = {};
+                d.struct_size = sizeof(d);
+                d.abi_version = WG_FG_ADAPTER_ABI_VERSION;
+                d.owner = WG_FG_OWNER_SWAPCHAIN_WRAPPER;
+                d.viewport_id = 1;
+                d.frame_token = tok;
+                d.swapchain_id = chain->Id();
+                d.swapchain_epoch = chain->Epoch();
+                d.window_id = 0x77;
+                d.luid.low = gpu.desc.AdapterLuid.LowPart;
+                d.luid.high = gpu.desc.AdapterLuid.HighPart;
+                d.backbuffer.resource = bb.Get();
+                d.backbuffer.format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                d.backbuffer.width = kW;
+                d.backbuffer.height = kH;
+                d.backbuffer.frame_token = tok;
+                d.backbuffer.viewport_id = 1;
+                d.backbuffer.rect = {0, 0, kW, kH};
+                bb.Reset();
+                WgFgPresentResult r = {};
+                r.struct_size = sizeof(r);
+                r.abi_version = WG_FG_ADAPTER_ABI_VERSION;
+                FgAsiSessionHost::Route(host.get(), &core, &d, &r);
+                const FgAsiLiveStatus cur_live = host->LiveStatus();
+                if (SUCCEEDED(chain->Present(0, 0)) && r.status == WG_FG_PRESENT_GENERATE &&
+                    cur_live.scheduled_count == 0 && cur_live.schedule_reason != 0) {
+                    const bool is_non_priming =
+                        static_cast<wgfg::FgRealOnlyReason>(cur_live.schedule_reason) !=
+                        wgfg::FgRealOnlyReason::NotPrimed;
+                    if (!saw_sched_real_only || is_non_priming) {
+                        saw_sched_real_only = true;
+                        reduced.live = cur_live;
+                    }
+                    if (is_non_priming) break;
+                }
+            }
+            CHECK(saw_sched_real_only);
+            if (saw_sched_real_only) {
+                CHECK(reduced.live.phase == kFgPhaseGenerating);
+                if (static_cast<wgfg::FgRealOnlyReason>(reduced.live.schedule_reason) ==
+                    wgfg::FgRealOnlyReason::OutOfVrrWindow) {
+                    CHECK(panel::StatusLine(reduced, pcfg.settings) == "Real frames only: display cap");
+                }
+                CHECK(panel::PublishAt(reduced, panel::NextReportSequence(), false, 10100));
+                CHECK(fakehost::g_report_generating);  // activity hold preserved across live scheduler reduction
+                CHECK(panel::PublishAt(reduced, panel::NextReportSequence(), false, 10600));
+                CHECK(!fakehost::g_report_generating);  // expires cleanly after 500 ms
+            }
+            panel::ReleaseOutput();
+        }
+
         chain->Release();
         CHECK(gpu.Wait());
         host.reset();
@@ -1445,6 +1847,7 @@ void TestRc2LatencyAndPacing(Gpu& gpu, const std::string& dxil, bool run_latency
 }
 
 int main(int argc, char** argv) {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
     bool gpu = false;
     std::string dxil, scratch = ".", only;
     int preset = -1;
