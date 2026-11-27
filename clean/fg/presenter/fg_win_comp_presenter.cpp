@@ -672,7 +672,7 @@ void FgWinCompPresenter::SubmitOutboxLocked() {
             const FgTearingPlanDecision td = FgPlanTearingImage(
                 p.target, p.real, now, earliest, desc_.min_interval, 20000,
                 next_target > p.target, next_target);
-            if (td.drop_late) {
+            if (td.DropLate()) {
                 engine_.OnPresentDropped(p.present_id, FgDropReason::Late);
                 continue;
             }

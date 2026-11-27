@@ -68,6 +68,9 @@ struct FgDxgiPresenterInfo {
     FgTicks present_call_total = 0;     // successful CPU call time, including an outer swap-chain wrapper
     FgTicks present_call_max = 0;
     FgTicks present_call_p85_smoothed = 0;
+    std::uint64_t tearing_drop_deadline = 0;
+    std::uint64_t tearing_drop_collision = 0;
+    std::uint64_t tearing_collision_completion_floor = 0;  // subset requiring the actual completion floor
     std::uint64_t occlusion_retired_real = 0;
     std::uint64_t latency_timeouts = 0;  // frame-latency waits that timed out
 };

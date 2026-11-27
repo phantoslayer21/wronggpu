@@ -1239,7 +1239,10 @@ struct FgAsiSessionHost::Impl {
                        std::to_string(in.presents ? static_cast<uint64_t>(in.present_call_total) / in.presents / 10 : 0) +
                        " present_call_us_max=" + std::to_string(in.present_call_max / 10) +
                        " present_call_p85_smoothed_us=" + std::to_string(in.present_call_p85_smoothed / 10) +
-                       " scheduler_tearing_min_us=" + std::to_string(tearing_schedule_interval / 10);
+                       " scheduler_tearing_min_us=" + std::to_string(tearing_schedule_interval / 10) +
+                       " tearing_drop_deadline=" + std::to_string(in.tearing_drop_deadline) +
+                       " tearing_drop_collision=" + std::to_string(in.tearing_drop_collision) +
+                       " tearing_collision_completion_floor=" + std::to_string(in.tearing_collision_completion_floor);
             }
             uint64_t ret = 0, cw = 0, timeouts = 0, qw = 0;
             size_t queue_peak = 0;

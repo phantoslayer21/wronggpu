@@ -1295,7 +1295,7 @@ void TestTearingPlanHeadNearCeiling() {
             const FgTearingPlanDecision d =
                 FgPlanTearingImage(target, real, now, last_issue + kMinInterval, kMinInterval, kBaseLateTol, true,
                                    next_target);
-            if (d.drop_late) {
+            if (d.DropLate()) {
                 ++dropped;
             } else {
                 const FgTicks issued = now > d.issue_at ? now : d.issue_at;
@@ -1313,15 +1313,19 @@ void TestTearingPlanHeadNearCeiling() {
         const FgTearingPlanDecision gen_ready =
             FgPlanTearingImage(target, false, target + 24000, target, kMinInterval, kBaseLateTol, true,
                                next_target);
-        CHECK(!gen_ready.drop_late);
+        CHECK(!gen_ready.DropLate());
         const FgTearingPlanDecision gen_late =
             FgPlanTearingImage(target, false, target + 27000, target, kMinInterval, kBaseLateTol, true,
                                next_target);
-        CHECK(gen_late.drop_late);
+        CHECK(gen_late.drop == FgTearingDrop::Deadline);
+        const FgTearingPlanDecision collision =
+            FgPlanTearingImage(target, false, target + 24000, target + 27000, kMinInterval, kBaseLateTol, true,
+                               next_target);
+        CHECK(collision.drop == FgTearingDrop::Collision);
         const FgTearingPlanDecision real_late =
             FgPlanTearingImage(target, true, target + 50000, target, kMinInterval, kBaseLateTol, true,
                                next_target);
-        CHECK(!real_late.drop_late && real_late.issue_at >= target);
+        CHECK(!real_late.DropLate() && real_late.issue_at >= target);
     }
 }
 
@@ -1345,7 +1349,7 @@ void TestTearingAtFiveImagesPerInterval() {
                                         : call_done + min_interval;
             const auto decision =
                 FgPlanTearingImage(target, real, now, earliest, min_interval, 20000, true, target + slot);
-            if (decision.drop_late) {
+            if (decision.DropLate()) {
                 CHECK(!real);
                 ++dropped;
                 continue;
@@ -1508,6 +1512,95 @@ void TestRtOffTearingFloorReplay() {
           bounded.reanchors == x2.reanchors);
 }
 
+void TestRtOffWrappedPresentReplay() {
+    g_case = "RT-off wrapped Present spikes";
+    constexpr FgTicks physical = 27778;
+    constexpr FgTicks configured = 28619;
+    struct ReplayResult {
+        uint32_t generating = 0;
+        uint32_t pre_late = 0;
+        uint32_t deadline = 0;
+        uint32_t collision = 0;
+        uint32_t completion_floor = 0;
+    };
+    const auto replay = [&](uint32_t requested, bool bounded, bool spikes) {
+        auto config = DefaultScheduler();
+        config.first_image_budget = 83000;
+        config.bridge_and_submit_margin = 2500;
+        config.adaptive_count = true;
+        FgTargetScheduler scheduler(config);
+        CHECK(scheduler.BeginEpoch(1) == FgStatus::Ok);
+        ReplayResult result;
+        FgTicks arrival = kSecond;
+        FgTicks last_start = 0, last_done = 0;
+        for (uint32_t i = 1; i <= 4096; ++i) {
+            // Alternate the faster and slower cadence phases observed at RT-off. Hold the
+            // scheduler's p85 inputs constant across runs independently of each modeled call.
+            const bool high_report = i % 1024 >= 512 && i % 1024 < 576;
+            const FgTicks call_p85 = high_report ? 21000 : 4900;
+            scheduler.SetDisplayMinInterval(bounded ? FgTearingScheduledMinInterval(configured, physical, call_p85)
+                                                    : std::max(configured, physical + call_p85));
+            const FgTicks cadence = i % 512 < 120 ? 64700 : 86200;
+            arrival += cadence + (static_cast<FgTicks>((i * 17) % 19) - 9) * 1400;
+            const FgTicks origin = arrival + (i % 72 == 53 || i % 72 == 54 ? 36000 : 0);
+            FgIntervalPlan plan;
+            CHECK(scheduler.Commit({1, i, arrival, requested, true, false, origin}, &plan) == FgStatus::Ok);
+            const FgTicks ready = origin + std::min(config.first_image_budget, cadence) +
+                                  (static_cast<FgTicks>(i % 7) - 3) * 1100;
+            for (uint32_t k = 0; k < plan.target_count; ++k) {
+                const auto& image = plan.targets[k];
+                const auto now = std::max(ready, last_done) + 1000;
+                const auto earliest = FgTearingEarliestIssue(last_start, last_done, configured, physical);
+                if (!image.real) {
+                    ++result.generating;
+                    if (!image.admitted || ready > image.target + 40000) {
+                        ++result.pre_late;
+                        continue;
+                    }
+                    const FgTicks next_target = plan.targets[k + 1].target;
+                    const auto decision =
+                        FgPlanTearingImage(image.target, false, now, earliest, configured, 20000, true, next_target);
+                    if (decision.DropLate()) {
+                        if (decision.drop == FgTearingDrop::Deadline) {
+                            ++result.deadline;
+                        } else {
+                            ++result.collision;
+                            const FgTicks start_floor = last_start + configured;
+                            if (earliest > start_floor &&
+                                !FgPlanTearingImage(image.target, false, now, start_floor, configured, 20000, true,
+                                                    next_target).DropLate()) {
+                                ++result.completion_floor;
+                            }
+                        }
+                        continue;
+                    }
+                }
+                const FgTicks issue = std::max({now, image.target, earliest});
+                FgTicks call = 4200 + (i % 5) * 350;
+                if (spikes && image.real && (i % 16 == 0 || i % 117 == 41)) call = 25000 + (i % 7) * 4000;
+                if (spikes && high_report && i % 3 == 0) call = 21000;
+                CHECK(last_done == 0 || issue + call - last_done >= physical);
+                last_start = issue;
+                last_done = issue + call;
+            }
+        }
+        std::printf("    RT-off Present replay N=%u bounded=%d spikes=%d gen=%u pre=%u "
+                    "deadline/collision/completion-floor=%u/%u/%u\n",
+                    requested, bounded, spikes, result.generating, result.pre_late, result.deadline,
+                    result.collision, result.completion_floor);
+        return result;
+    };
+    for (const uint32_t requested : {1u, 2u, 3u, 5u}) {
+        for (const bool bounded : {false, true}) {
+            const auto routine = replay(requested, bounded, false);
+            const auto spiked = replay(requested, bounded, true);
+            CHECK(spiked.generating == routine.generating && spiked.pre_late == routine.pre_late);
+            CHECK(spiked.collision > routine.collision);
+            CHECK(spiked.completion_floor > routine.completion_floor);
+        }
+    }
+}
+
 void TestRtOffAdmissionWaitKeepsProducerLead() {
     g_case = "RT-off producer lead after admission waits";
     constexpr FgTicks physical = 27778;
@@ -1539,7 +1632,7 @@ void TestRtOffAdmissionWaitKeepsProducerLead() {
         if (!image.admitted || ready > image.target + 40000) {
             ++pre_late;
         } else if (FgPlanTearingImage(image.target, false, ready, 0, configured,
-                                     20000, true, plan.targets[1].target).drop_late) {
+                                     20000, true, plan.targets[1].target).DropLate()) {
             ++post_late;
         }
     }
@@ -1832,6 +1925,7 @@ int main() {
     TestFixedGridCountCandidateRestartsItsStreak();
     TestSchedulerReportsReanchorCauses();
     TestRtOffTearingFloorReplay();
+    TestRtOffWrappedPresentReplay();
     TestRtOffAdmissionWaitKeepsProducerLead();
     std::printf("test_fg_presenter: %d checks, %d failure(s)\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

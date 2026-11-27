@@ -530,7 +530,18 @@ bool FgDxgiPresenter::PlanHeadLocked(FgTicks now, Planned* out) {
                                                             desc_.refresh_period);
             const FgTearingPlanDecision td = FgPlanTearingImage(p.target, p.real, now, earliest, desc_.min_interval,
                                                                 desc_.late_tolerance, next_target > p.target, next_target);
-            if (td.drop_late) {  // past tolerance or would push next past its slip allowance: drop and free lease
+            if (td.DropLate()) {
+                if (td.drop == FgTearingDrop::Deadline) {
+                    ++info_.tearing_drop_deadline;
+                } else {
+                    ++info_.tearing_drop_collision;
+                    const FgTicks start_floor = last_present_start_ + desc_.min_interval;
+                    if (earliest > start_floor &&
+                        !FgPlanTearingImage(p.target, false, now, start_floor, desc_.min_interval,
+                                            desc_.late_tolerance, true, next_target).DropLate()) {
+                        ++info_.tearing_collision_completion_floor;
+                    }
+                }
                 engine_.OnPresentDropped(p.present_id, FgDropReason::Late);
                 local_.pop_front();
                 continue;

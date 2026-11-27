@@ -287,9 +287,13 @@ FgTicks FgTimerDue(FgTicks target, FgTicks now, FgTicks lead);
 // R3B-7: tearing / VRR head planning decision shared by FgDxgiPresenter::PlanHeadLocked and
 // FgWinCompPresenter::SubmitOutboxLocked. Enforces >= min_interval between issue anchors and gives the next image
 // a fraction of one slot to absorb submission jitter without accumulating arbitrary delay.
+enum class FgTearingDrop : std::uint8_t { None, Deadline, Collision };
+
 struct FgTearingPlanDecision {
     FgTicks issue_at = 0;
-    bool drop_late = false;
+    FgTearingDrop drop = FgTearingDrop::None;
+
+    bool DropLate() const { return drop != FgTearingDrop::None; }
 };
 
 inline FgTicks FgTearingEarliestIssue(FgTicks started, FgTicks completed, FgTicks scheduled_interval,
@@ -344,7 +348,7 @@ inline FgTearingPlanDecision FgPlanTearingImage(FgTicks target, bool real, FgTic
         if (scaled > tol) tol = scaled;
     }
     if (now > target + tol) {
-        d.drop_late = true;
+        d.drop = FgTearingDrop::Deadline;
         return d;
     }
     if (has_next) {
@@ -352,7 +356,7 @@ inline FgTearingPlanDecision FgPlanTearingImage(FgTicks target, bool real, FgTic
         const FgTicks gap = min_interval > 2500 ? min_interval : 2500;
         // Absorb submission jitter without reducing the physical minimum gap between issues.
         const FgTicks slip_allow = tol < slot_allow ? tol : slot_allow;
-        if (issue + gap > next_target + slip_allow) d.drop_late = true;
+        if (issue + gap > next_target + slip_allow) d.drop = FgTearingDrop::Collision;
     }
     return d;
 }
