@@ -2119,6 +2119,7 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::strin
         uint64_t queue_waits = 0;
         uint32_t queue_peak = 0;
         uint64_t admission_present = 0, admission_consumed = 0;
+        uint64_t session_presents = 0;
         uint32_t steady_max_scheduled = 0;
         uint64_t generating_reanchors = 0;
         uint32_t low_count_consumed = 0;
@@ -2313,6 +2314,7 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::strin
         out.queue_peak = st.presenter_queue_peak;
         out.admission_present = st.admission_present_intervals;
         out.admission_consumed = st.admission_consumed_intervals;
+        out.session_presents = st.session_presents;
         if (st.generated_scheduled > steady_stats.generated_scheduled && st.generated_late >= steady_stats.generated_late)
             out.steady_late_drop_pct = 100.0 * static_cast<double>(st.generated_late - steady_stats.generated_late) /
                                       static_cast<double>(st.generated_scheduled - steady_stats.generated_scheduled);
@@ -2384,7 +2386,8 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::strin
             CHECK(run.admission_consumed > 50 || !expects_consumed);
             CHECK(run.admission_consumed == 0 || expects_consumed);
             CHECK(run.admission_present > 0);
-            CHECK(run.admission_present + run.admission_consumed == run.real_sub);
+            // The host counts acceptance. Teardown may cancel the last accepted endpoint before DXGI submission.
+            CHECK(run.admission_present + run.admission_consumed == run.session_presents);
             CHECK(run.warned_unknown_mode == (length != 0 && !force_present && !force_consumed && !explicit_policy));
         }
         if (!force_present && !force_consumed) {
@@ -2392,7 +2395,7 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::strin
             CHECK(mixed.present_errors == 0 && mixed.session_failures == 0);
             CHECK(mixed.admission_present >= 105 && mixed.admission_consumed == 0);
             CHECK(mixed.queue_peak == 0);
-            CHECK(mixed.admission_present + mixed.admission_consumed == mixed.real_sub);
+            CHECK(mixed.admission_present + mixed.admission_consumed == mixed.session_presents);
         }
         return;
     }
