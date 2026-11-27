@@ -1298,6 +1298,10 @@ void TestRc2LatencyAndPacing(Gpu& gpu, const std::string& dxil, bool run_latency
                 CHECK(SUCCEEDED(gpu.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&stalled_game))));
                 for (int f = 0; f < total_frames; ++f) {
                     const uint64_t tok = static_cast<uint64_t>(f) + 1;
+                    if (!wait_on_game && f == stall_frame)
+                        core.set_options(WG_FEAT_FRAME_GENERATION, 1, &off, &off);
+                    if (!wait_on_game && f == stall_end + 1)
+                        core.set_options(WG_FEAT_FRAME_GENERATION, 1, &on, &on);
                     if (f == 6) {
                         // N-S3: no-op SetFullscreenState(FALSE) on already-windowed chain must not tear down the session
                         BOOL cur_fs = FALSE;
@@ -1341,6 +1345,7 @@ void TestRc2LatencyAndPacing(Gpu& gpu, const std::string& dxil, bool run_latency
                     if (stalled_game && f == stall_frame) {
                         CHECK(SUCCEEDED(gpu.queue->Wait(stalled_game.Get(), 1)));
                         if (!wait_on_game) {
+                            // A real-only stall cannot release first-present admission via a generated late drop.
                             unblock = std::thread([fence = stalled_game]() {
                                 Sleep(420);
                                 fence->Signal(1);
