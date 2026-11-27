@@ -309,8 +309,12 @@ std::uint32_t FgTargetScheduler::UpdateCount(std::uint32_t requested, FgTicks pe
             effective_ = adaptive ? Largest(effective_ - 1, period) : 0;
         }
     }
-    const std::uint32_t up = adaptive ? (effective_ < requested ? effective_ + 1 : 0) : (effective_ == 0 ? requested : 0);
+    std::uint32_t up = adaptive ? (effective_ < requested ? effective_ + 1 : 0) : (effective_ == 0 ? requested : 0);
     if (up > 0) {
+        // A fixed grid can support 2x and 4x with no legal 3x plan.
+        if (adaptive && config_.fixed_refresh_period > 0) {
+            while (up < requested && !Fits(up, period, w.hysteresis)) ++up;
+        }
         if (Fits(up, period, w.hysteresis)) {
             if (++good_run_ >= w.reenter_intervals) {
                 effective_ = up;
@@ -562,6 +566,9 @@ FgStatus FgTargetScheduler::CommitImpl(const FgGameFrame& frame, FgIntervalPlan*
                 period = period_estimate;
             } else {
                 while (n > 0 && !FitsRaw(n, period)) --n;
+                effective_ = n;
+                bad_run_ = 0;
+                good_run_ = 0;
                 last_reduction_reason_ = FgRealOnlyReason::OutOfVrrWindow;
                 if (n == 0 && reason == FgRealOnlyReason::None) reason = last_reduction_reason_;
             }

@@ -1385,6 +1385,33 @@ void TestTearingPhysicalGapAfterSlowCall() {
 void TestRc2SchedulerPacing() {
     g_case = "rc2 scheduler pacing";
     {
+        // At 30 fps on a 120 Hz grid, 4x and 2x fit exactly. A temporary cap at 3x skips the unsupported count.
+        FgSchedulerConfig sc = DefaultScheduler();
+        sc.fixed_refresh_period = 83333;
+        sc.display.min_interval = sc.fixed_refresh_period;
+        sc.display.margin = 0;
+        sc.display.hysteresis = 0;
+        sc.adaptive_count = true;
+        sc.first_image_budget = 40000;
+        Rig r(sc, DefaultFake());
+        FgTicks t = kSecond;
+        bool stepped_down = false;
+        for (int i = 0; i < 64; ++i) {
+            t += 333332;
+            if (i == 20) r.scheduler.SetMaxGeneratedCap(2);
+            if (i == 30) r.scheduler.SetMaxGeneratedCap(0);
+            r.Frame(t, 3);
+            if (i >= 20 && i < 30 && r.plans.back().generated_count == 1) {
+                stepped_down = true;
+                CHECK(r.scheduler.EffectiveCount() == 1);
+            }
+        }
+        r.RunUntil(t + 700000);
+        CHECK(stepped_down);
+        CHECK(r.scheduler.EffectiveCount() == 3 && r.plans.back().generated_count == 3);
+        CHECK(AllOk(r));
+    }
+    {
         // Drain extra lead at 30 fps without emitting a plan the 120 Hz presenter would reject.
         FgSchedulerConfig sc = DefaultScheduler();
         sc.fixed_refresh_period = 83333;
