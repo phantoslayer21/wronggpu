@@ -136,21 +136,17 @@ struct OverflowDelivery {
     uint32_t cap = 0;
     uint32_t clean_windows = 0;
     uint32_t bad_windows = 0;
-    uint32_t fill_windows = 0;
     bool ready = false;
-    bool fill_ready = false;
 
     void Observe(uint64_t offered, uint64_t missed, uint32_t active, uint32_t requested, bool overflow,
-                 bool has_headroom, bool has_fill_headroom, bool full_window, bool comfortable = false) {
+                 bool has_headroom, bool full_window) {
         if (offered == 0 || active == 0) return;
         if (missed * 100 >= offered) {
             ready = false;
-            fill_ready = false;
             clean_windows = 0;
-            fill_windows = 0;
-            const bool severe = missed >= 3 && missed * 100 >= offered * (comfortable ? 12 : 8);
+            const bool severe = missed >= 3 && missed * 100 >= offered * 8;
             if (full_window) ++bad_windows;
-            if (overflow && active > 1 && (severe || bad_windows >= (comfortable ? 4u : 2u))) {
+            if (overflow && active > 1 && (severe || bad_windows >= 2)) {
                 const uint32_t next = active - 1;
                 if (cap == 0 || next < cap) {
                     cap = next;
@@ -159,12 +155,6 @@ struct OverflowDelivery {
             }
         } else if (full_window) {
             bad_windows = 0;
-            if (!has_fill_headroom) {
-                fill_ready = false;
-                fill_windows = 0;
-            } else if (fill_windows < 4 && ++fill_windows == 4) {
-                fill_ready = true;
-            }
             if (!has_headroom) {
                 ready = false;
                 clean_windows = 0;
@@ -176,11 +166,6 @@ struct OverflowDelivery {
         }
     }
 };
-
-inline bool HasOverflowSlotRoom(wgfg::FgTicks period, wgfg::FgTicks min_interval, uint32_t count) {
-    return count > 1 && period / 4 >= min_interval &&
-           period / (static_cast<wgfg::FgTicks>(count) + 1) >= min_interval + 2500;
-}
 
 inline bool HasActiveProducerTail(bool consumed, std::size_t samples, int64_t readiness_p95, int64_t budget) {
     return consumed && samples >= 6 && readiness_p95 + 12500 >= budget;

@@ -1492,7 +1492,7 @@ struct FgAsiSessionHost::Impl {
         if (!generating || requested != delivery_requested || result.plan_real_only == wgfg::FgRealOnlyReason::Reset) {
             if (delivery_requested || delivery.cap || delivery.ready) {
                 delivery = {};
-                session->SetOverflowReady(false, false);
+                session->SetOverflowReady(false);
                 session->SetConsumedLeadProtection(false);
                 ApplyCountCaps();
             }
@@ -1519,11 +1519,7 @@ struct FgAsiSessionHost::Impl {
         const auto offered = current.generated_scheduled - delivery_base.generated_scheduled;
         const auto missed = current.dropped_late - delivery_base.dropped_late +
                             current.dropped_pressure - delivery_base.dropped_pressure;
-        const auto* scheduler = session->Scheduler();
-        const auto period = scheduler ? scheduler->Estimator().Period() : 0;
-        const auto interval = scheduler ? scheduler->Config().display.min_interval : 0;
-        const bool comfortable = HasOverflowSlotRoom(period, interval, delivery_active);
-        if (!full && (missed < 3 || missed * 100 < offered * (comfortable ? 12 : 8))) return;
+        if (!full && (missed < 3 || missed * 100 < offered * 8)) return;
         PacingSamples<kBudgetWindow> margins;
         {
             std::lock_guard<std::mutex> lock(trace_mu);
@@ -1534,24 +1530,19 @@ struct FgAsiSessionHost::Impl {
                     margins.Append(tr.min_gen_headroom);
             }
         }
-        const auto margin = margins.Percentile(0.10);
-        const bool next_has_room = HasOverflowSlotRoom(period, interval, delivery_active + 1);
-        const bool headroom = margins.Size() >= 12 && margin >= (next_has_room ? 2500 : 10000);
-        const bool fill_headroom = margins.Size() >= 12 && margin >= 10000;
+        const bool headroom = margins.Size() >= 12 && margins.Percentile(0.10) >= 10000;
         const auto old_cap = delivery.cap;
         const auto old_ready = delivery.ready;
-        const auto old_fill_ready = delivery.fill_ready;
         const bool overflow = delivery_fill || delivery_overflow_frames * 2 > delivery_frames || delivery.cap != 0;
         delivery.Observe(offered, missed, delivery_active, requested, overflow,
-                         headroom, fill_headroom, full, comfortable);
+                         headroom, full);
         if (old_cap != delivery.cap) {
             if (delivery.cap != 0 && (old_cap == 0 || delivery.cap < old_cap)) ++delivery_cap_steps;
             ApplyCountCaps();
             // Wait for both outstanding intervals to drain before attributing misses to the new count.
             delivery_drain_frames = 2;
         }
-        if (old_ready != delivery.ready || old_fill_ready != delivery.fill_ready)
-            session->SetOverflowReady(delivery.ready, delivery.fill_ready);
+        if (old_ready != delivery.ready) session->SetOverflowReady(delivery.ready);
         delivery_base = current;
         delivery_frames = delivery_active = 0;
         delivery_overflow_frames = 0;

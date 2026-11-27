@@ -216,7 +216,7 @@ FgStatus FgTargetScheduler::BeginEpoch(std::uint64_t epoch) {
     playout_period_ = 0;
     protect_consumed_lead_ = false;
     fill_requested_ = fill_count_ = fill_overrun_ = 0;
-    overflow_ready_ = fill_ready_ = false;
+    overflow_ready_ = false;
     anchored_ = false;
     have_target_ = false;
     last_real_target_ = 0;
@@ -351,7 +351,7 @@ FgTargetScheduler::FillPlan FgTargetScheduler::UpdateFill(std::uint32_t requeste
     const bool changed = requested != fill_requested_;
     fill_requested_ = requested;
     const FgTicks uncapped = uncapped_estimator_.Period();
-    if (!eligible || changed || (config_.guard_overflow_delivery && !fill_ready_) ||
+    if (!eligible || changed || (config_.guard_overflow_delivery && !overflow_ready_) ||
         uncapped <= 0 || latest_uncapped <= 0) {
         fill_count_ = fill_overrun_ = 0;
         return {};
