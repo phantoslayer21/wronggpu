@@ -102,7 +102,10 @@ const wchar_t* const kFgPresenterHelp[] = {L"Recommended. WrongGPU picks the way
                                            L"Through DXGI, in step with the display's refresh (VSync).",
                                            L"Through the hardware flip queue."};
 wstring SettingWords(const string& key, const string& value) {
-    if (key == "fg_multiplier" && value.size() == 1 && value[0] >= '2' && value[0] <= '6') return FromUtf8(value) + L"x";
+    if (key == "fg_multiplier") {
+        if (value == "auto") return L"Auto";
+        if (value.size() == 1 && value[0] >= '2' && value[0] <= '6') return FromUtf8(value) + L"x";
+    }
     if (key == "fg_presenter")
         for (size_t i = 0; i < 4; ++i) if (value == kFgPresenter[i]) return kFgPresenterNames[i];
     static const std::pair<const char*, const wchar_t*> w[] = {{"on", L"On"}, {"off", L"Off"}, {"auto", L"Auto"}, {"dx12", L"Direct3D 12"}, {"hip", L"HIP"},
@@ -1808,11 +1811,10 @@ static float FgSection(Gfx& gx, float x, float y, float w) {
                    [&](const Rc& r) { Switch(gx, ID_G_FGON, r, on, en, L"Use WrongGPU (Frame generation)"); }, !en);
         // the three settings apply only while it is on: dimmed and unavailable while it is off
         const bool sub = en && on;
-        const std::vector<wstring> mult{L"2x", L"3x", L"4x", L"5x", L"6x"};
+        const std::vector<wstring> mult{L"Auto", L"2x", L"3x", L"4x", L"5x", L"6x"};
         const string mv = v.edit.get("fg_multiplier");
-        const int mi = mv.size() == 1 && mv[0] >= '2' && mv[0] <= '6' ? mv[0] - '2' : 0;
-        yy += SRow(gx, x, yy, w, false, L"Multiplier", mi == 0 ? L"One generated frame for each frame the game draws. Recommended."
-                                                                : std::to_wstring(mi + 1) + L" generated frames for each frame the game draws.",
+        const int mi = mv.size() == 1 && mv[0] >= '2' && mv[0] <= '6' ? mv[0] - '1' : 0;
+        yy += SRow(gx, x, yy, w, false, L"Multiplier", L"Follow the game. This setting applies when the game gives no count.",
                    SegmentedW(gx, mult, 40), 36,
                    [&](const Rc& r) { Segmented(gx, ID_G_FGMULT0, r.r(), r.y, mult, mi, sub, L"Frame generation multiplier", 28, {}, true, 40); }, !sub);
         const std::vector<wstring> pre{L"A", L"B", L"C"};

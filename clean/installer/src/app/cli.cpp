@@ -679,8 +679,10 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
             o.j.B("data_ready", ready).S("data_why", ready ? wstring() : dataWhy);
             o.j.Key("issues").Arr(); for (auto& s : fs.issues) o.j.Str(s); o.j.End();
             o.j.End();
+            const auto& multiplier = fs.v.at(kFgKeyMultiplier);
+            const wstring multiplierText = multiplier == "auto" ? L"auto" : FromUtf8(multiplier) + L"x";
             Print(L"  frame generation: " + FromUtf8(fs.v.at(kFgKeyEnable)) + L" (preset " + FromUtf8(fs.v.at(kFgKeyPreset)) + L", " +
-                  FromUtf8(fs.v.at(kFgKeyMultiplier)) + L"x, presenter " + FromUtf8(fs.v.at(kFgKeyPresenter)) + L"; data " +
+                  multiplierText + L", presenter " + FromUtf8(fs.v.at(kFgKeyPresenter)) + L"; data " +
                   (ready ? wstring(L"ready") : L"not ready: " + dataWhy) + L")");
             for (auto& s : fs.issues) Print(L"  " + s);
         }
