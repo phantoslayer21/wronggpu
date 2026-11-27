@@ -196,6 +196,8 @@ struct FgD3d12ExecutorDesc {
     //    off whatever the mask says). The default mask is 593 = 17 + 64 + 512 (paired ABBA at 1440p: 128 and 256 regress, 1024
     //    is neutral); 2001 is 17 + all of Wave 2 and 2047 is every lever.
     int batch = -1, hoist = -1, dualq = -1, fuse = -1, fuse2 = -1;
+    // Post-composite HUD restoration when a HUD-less buffer is tagged (-1: WG_FG_UI, default on; 0: off; 1: on).
+    int ui_composite = -1;
     // N-B1: per-index fence completion for RecordGeneratedBatch (true: each index signals its own producer fence so
     // index 1 can present immediately without waiting for indices 2..N; false: single-submission interleaved batch).
     bool per_index_fences = true;
@@ -233,6 +235,7 @@ struct FgExecCounters {
     uint64_t game_colour_copies = 0;   // real-only frames copied from the game's back buffer (no shared work)
     uint64_t net2_fast = 0, net2_exact = 0;  // net2 recordings per path
     uint64_t net2_z_launches = 0, net2_z_saved = 0;   // A18: z-sliced net2 launches recorded, and the launches they replaced (nf - 1 each)
+    uint64_t ui_composites = 0;        // generated frames composited with the post-composite HUD pass
 };
 
 enum class FgExecStage : uint32_t {
@@ -304,6 +307,7 @@ public:
     // pairs, 4 upwarp in L14, 8 blend weights, 16 pyramid tail, 32 X0 / X1 as RGB); 0 when off or their kernels are missing.
     uint32_t Fuse2Active() const;
     bool DualQueueActive() const;
+    bool UiCompositeActive() const;
     uint32_t ScratchBanks() const;
     // keep_outputs: waits idle and moves the host copies out (oldest first).
     bool TakeOutputs(std::vector<FgExecOutputRecord>* out);

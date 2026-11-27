@@ -1509,6 +1509,62 @@ void TestMotionFormats() {
     CHECK(!FgD3d12MotionFormatAccepted(DXGI_FORMAT_BC1_UNORM));
 }
 
+void TestUiMaskCpu() {
+    g_case = "ui-mask-cpu";
+    // WG_FG_UI environment parsing: default on, off/0/false/no disables (case-insensitive, whitespace trimmed).
+    CHECK(FgParseUiCompositeEnv(nullptr));
+    CHECK(FgParseUiCompositeEnv(""));
+    CHECK(FgParseUiCompositeEnv("on"));
+    CHECK(FgParseUiCompositeEnv("1"));
+    CHECK(!FgParseUiCompositeEnv("off"));
+    CHECK(!FgParseUiCompositeEnv("OFF"));
+    CHECK(!FgParseUiCompositeEnv("Off"));
+    CHECK(!FgParseUiCompositeEnv(" 0 "));
+    CHECK(!FgParseUiCompositeEnv("false"));
+    CHECK(!FgParseUiCompositeEnv("no"));
+
+    // Pixel difference: zero when equal, HDR-safe scaling, non-finite safe.
+    const float a[3] = {0.2f, 0.5f, 0.8f};
+    CHECK(FgUiPixelDiff(a, a) == 0.0f);
+    const float b[3] = {0.2f, 0.5f, 0.9f};
+    CHECK(std::fabs(FgUiPixelDiff(a, b) - 0.1f) < 1e-6f);
+    const float hdr_a[3] = {4.0f, 4.0f, 4.0f}, hdr_b[3] = {4.4f, 4.0f, 4.0f};
+    CHECK(std::fabs(FgUiPixelDiff(hdr_a, hdr_b) - (0.4f / 4.4f)) < 1e-6f);
+    const float bad[3] = {NAN, 0.5f, 0.5f}, infv[3] = {INFINITY, 0.0f, 0.0f};
+    CHECK(FgUiPixelDiff(bad, a) == 0.0f && FgUiPixelDiff(a, infv) == 0.0f);
+
+    // Mask: zero when equal, rejects <= 4/255 dither, closes 1-px interior gap without outer dilation, smooth AA edge.
+    constexpr uint32_t W = 16, H = 16;
+    std::vector<float> bg(3 * W * H, 0.25f), fg = bg, mask;
+    FgUiMaskCpu(fg.data(), bg.data(), W, H, &mask);
+    bool all_zero = mask.size() == W * H;
+    for (float v : mask) all_zero = all_zero && v == 0.0f;
+    CHECK(all_zero);
+
+    // 4/255 uniform dither across the whole image stays 0.
+    for (size_t i = 0; i < bg.size(); ++i) fg[i] = bg[i] + 4.0f / 255.0f;
+    FgUiMaskCpu(fg.data(), bg.data(), W, H, &mask);
+    all_zero = true;
+    for (float v : mask) all_zero = all_zero && v == 0.0f;
+    CHECK(all_zero);
+
+    // Solid UI 5x5 block at [4..8, 4..8] with a 1-px interior white-on-white hole at (6, 6) and a 15/255 AA pixel at (9, 6).
+    fg = bg;
+    for (uint32_t y = 4; y <= 8; ++y)
+        for (uint32_t x = 4; x <= 8; ++x) {
+            if (x == 6 && y == 6) continue;  // 1-px interior hole where colour == hudless
+            fg[3 * (y * W + x) + 0] = 0.95f;
+            fg[3 * (y * W + x) + 1] = 0.95f;
+            fg[3 * (y * W + x) + 2] = 0.95f;
+        }
+    fg[3 * (6 * W + 9) + 0] = bg[3 * (6 * W + 9) + 0] + 15.0f / 255.0f;
+    FgUiMaskCpu(fg.data(), bg.data(), W, H, &mask);
+    CHECK(mask[6 * W + 6] == 1.0f);                                // 1-px interior hole closed
+    CHECK(mask[4 * W + 4] == 1.0f && mask[8 * W + 8] == 1.0f);     // solid glyph interior
+    CHECK(mask[6 * W + 9] > 0.2f && mask[6 * W + 9] < 0.8f);       // smooth AA transition
+    CHECK(mask[6 * W + 3] == 0.0f && mask[3 * W + 6] == 0.0f && mask[9 * W + 6] == 0.0f);  // zero outer dilation
+}
+
 struct ExecutorSlots final : IFgSlotTarget {
     ComPtr<ID3D12Resource> textures[8];  // the generated indices' slots and the real endpoint's (benchmarks use up to 6)
     ID3D12Resource* SlotResource(uint32_t slot) const override {
@@ -2165,11 +2221,329 @@ void TestPerIndexFences(Gpu& gpu, const std::string& dxil, const FgExecWeights& 
     if (errs >= 0) CHECK(errs == 0);
 }
 
+// Read back a single texture (COMMON state) tightly into RGBA8 / RGBA16F host bytes (stride = width * bpp).
+bool ReadTextureTight(Gpu& gpu, ID3D12Resource* tex, std::vector<uint8_t>* out, uint32_t* bpp_out) {
+    const auto d = tex->GetDesc();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp = {};
+    UINT rows = 0;
+    UINT64 row_bytes = 0, total = 0;
+    gpu.device->GetCopyableFootprints(&d, 0, 1, 0, &fp, &rows, &row_bytes, &total);
+    D3D12_HEAP_PROPERTIES hp = {};
+    hp.Type = D3D12_HEAP_TYPE_READBACK;
+    D3D12_RESOURCE_DESC bd = {};
+    bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    bd.Width = total;
+    bd.Height = 1;
+    bd.DepthOrArraySize = 1;
+    bd.MipLevels = 1;
+    bd.SampleDesc.Count = 1;
+    bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> rb;
+    if (FAILED(gpu.device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                   nullptr, IID_PPV_ARGS(&rb))) ||
+        FAILED(gpu.alloc->Reset()) || FAILED(gpu.list->Reset(gpu.alloc.Get(), nullptr)))
+        return false;
+    D3D12_TEXTURE_COPY_LOCATION src = {}, dst = {};
+    src.pResource = tex;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dst.pResource = rb.Get();
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint = fp;
+    gpu.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    if (FAILED(gpu.list->Close())) return false;
+    ID3D12CommandList* lists[] = {gpu.list.Get()};
+    gpu.queue->ExecuteCommandLists(1, lists);
+    if (!gpu.Wait()) return false;
+    void* p = nullptr;
+    if (FAILED(rb->Map(0, nullptr, &p))) return false;
+    out->resize(static_cast<size_t>(row_bytes) * rows);
+    for (UINT y = 0; y < rows; ++y)
+        std::memcpy(out->data() + y * row_bytes,
+                    static_cast<const uint8_t*>(p) + fp.Offset + y * fp.Footprint.RowPitch,
+                    static_cast<size_t>(row_bytes));
+    const D3D12_RANGE none = {0, 0};
+    rb->Unmap(0, &none);
+    if (bpp_out) *bpp_out = static_cast<uint32_t>(row_bytes / d.Width);
+    return true;
+}
+
+// Post-composite HUD fix (WG_FG_UI):
+//  1) No change (0 byte differences vs off) when hudless == back buffer.
+//  2) Never activates (ui_composites == 0, 0 byte differences) when hudless is not tagged.
+//  3) Restores crisp HUD pixels (including a 1-px interior gap) on moving scenes with zero ghosting outside the HUD.
+//  4) WG_FG_UI=off env var disables it and logs once; default on logs once.
+void TestUiComposite(Gpu& gpu, const std::string& dxil, const FgExecWeights& weights) {
+    g_case = "gpu-ui-composite";
+    constexpr uint32_t W = 320, H = 180;
+    const auto upload_scene = [&](Game& game, uint32_t frame, bool with_hud, bool first) -> bool {
+        uint8_t* base = nullptr;
+        if (FAILED(game.upload->Map(0, nullptr, reinterpret_cast<void**>(&base)))) return false;
+        const uint32_t p8 = (W * 8 + 255) & ~255u, p4 = (W * 4 + 255) & ~255u, region = p8 * H;
+        uint8_t* col_bytes = base;
+        uint16_t* hud = reinterpret_cast<uint16_t*>(base + region);
+        uint16_t* uim = reinterpret_cast<uint16_t*>(base + 2 * region);
+        float* dep = reinterpret_cast<float*>(base + 3 * region);
+        uint16_t* mot = reinterpret_cast<uint16_t*>(base + 4 * region);
+        const bool c8 = game.colour_format == DXGI_FORMAT_B8G8R8A8_UNORM;
+        const float pan = 12.0f * static_cast<float>(frame);
+        for (uint32_t y = 0; y < H; ++y) {
+            for (uint32_t x = 0; x < W; ++x) {
+                const float fx = static_cast<float>(x) + pan, fy = static_cast<float>(y);
+                float bg[3] = {0.25f + 0.18f * std::sin(fx * 0.09f) * std::cos(fy * 0.08f),
+                               0.22f + 0.16f * std::cos(fx * 0.07f + fy * 0.05f),
+                               0.28f + 0.18f * std::sin(fy * 0.11f - fx * 0.06f)};
+                // Match background to the HUD colour at (40, 32) unconditionally so hudless is identical between
+                // with_hud=true and with_hud=false while creating a 1-px colour-matched interior hole in the HUD diff.
+                const float ui_col[3] = {0.10f, 0.92f, 0.96f};
+                if (x == 40 && y == 32) {
+                    for (int c = 0; c < 3; ++c) bg[c] = ui_col[c];
+                }
+                const bool in_hud = with_hud && x >= 24 && x < 72 && y >= 16 && y < 48;
+                float fg[3] = {bg[0], bg[1], bg[2]};
+                if (in_hud) {
+                    for (int c = 0; c < 3; ++c) fg[c] = ui_col[c];
+                }
+                uint16_t* hp = hud + (y * p8 / 2) + 4 * x;
+                uint16_t* up = uim + (y * p8 / 2) + 4 * x;
+                for (int c = 0; c < 3; ++c) {
+                    const uint8_t q_bg = static_cast<uint8_t>(std::floor(std::fmin(std::fmax(bg[c], 0.0f), 1.0f) * 255.0f + 0.5f));
+                    const uint8_t q_fg = static_cast<uint8_t>(std::floor(std::fmin(std::fmax(fg[c], 0.0f), 1.0f) * 255.0f + 0.5f));
+                    const float v_bg = c8 ? (static_cast<float>(q_bg) / 255.0f) : bg[c];
+                    hp[c] = FgExecHalfBits(v_bg);
+                    if (c8) {
+                        col_bytes[y * p4 + 4 * x + (2 - c)] = q_fg;
+                    } else {
+                        reinterpret_cast<uint16_t*>(col_bytes + y * p8)[4 * x + c] = FgExecHalfBits(fg[c]);
+                    }
+                    up[c] = 0;
+                }
+                hp[3] = 0x3C00;
+                up[3] = 0;
+                if (c8) col_bytes[y * p4 + 4 * x + 3] = 255;
+                else reinterpret_cast<uint16_t*>(col_bytes + y * p8)[4 * x + 3] = 0x3C00;
+                dep[y * p4 / 4 + x] = 0.5f;
+                mot[y * p4 / 2 + 2 * x] = FgExecHalfBits(12.0f);
+                mot[y * p4 / 2 + 2 * x + 1] = FgExecHalfBits(0.0f);
+            }
+        }
+        game.upload->Unmap(0, nullptr);
+        gpu.alloc->Reset();
+        gpu.list->Reset(gpu.alloc.Get(), nullptr);
+        ID3D12Resource* texs[5] = {game.colour.Get(), game.hudless.Get(), game.ui.Get(), game.depth.Get(), game.motion.Get()};
+        const DXGI_FORMAT fmts[5] = {game.colour_format, DXGI_FORMAT_R16G16B16A16_FLOAT,
+                                     DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R16G16_FLOAT};
+        const uint32_t pitches[5] = {c8 ? p4 : p8, p8, p8, p4, p4};
+        for (int t = 0; t < 5; ++t) {
+            const D3D12_RESOURCE_STATES st = t == 0 ? game.colour_state : game.other_state;
+            D3D12_RESOURCE_BARRIER b = {};
+            b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            b.Transition = {texs[t], D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                            first ? D3D12_RESOURCE_STATE_COMMON : st, D3D12_RESOURCE_STATE_COPY_DEST};
+            gpu.list->ResourceBarrier(1, &b);
+            D3D12_TEXTURE_COPY_LOCATION dst = {}, src = {};
+            dst.pResource = texs[t];
+            dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            src.pResource = game.upload.Get();
+            src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            src.PlacedFootprint.Offset = static_cast<uint64_t>(t) * region;
+            src.PlacedFootprint.Footprint = {fmts[t], W, H, 1, pitches[t]};
+            gpu.list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+            b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+            b.Transition.StateAfter = st;
+            gpu.list->ResourceBarrier(1, &b);
+        }
+        gpu.list->Close();
+        ID3D12CommandList* l[] = {gpu.list.Get()};
+        gpu.queue->ExecuteCommandLists(1, l);
+        return gpu.Wait();
+    };
+
+    const auto run_pair = [&](FgPreset preset, bool with_hud, bool tag_hudless, int ui_on,
+                              Game& game, ExecutorSlots& slots, uint64_t* composites_out, bool* active_out) -> bool {
+        FgD3d12ExecutorDesc ed;
+        ed.dxil_dir = dxil;
+        ed.weights = &weights;
+        ed.enable_full = preset != FgPreset::C;
+        ed.ui_composite = ui_on;
+        FgD3d12Executor exec(ed);
+        FgCreateDesc create = CpuCreate(W, H);
+        create.device = gpu.device.Get();
+        create.queue = gpu.queue.Get();
+        create.preset = preset;
+        create.max_generated = 1;
+        if (exec.Configure(create, 3) != FgExecResult::Ok || !exec.BindSlotTarget(&slots)) return false;
+        if (active_out) *active_out = exec.UiCompositeActive();
+        for (uint64_t tok = 1; tok <= 2; ++tok) {
+            if (!upload_scene(game, static_cast<uint32_t>(tok), with_hud, false)) return false;
+            FgFramePacket pkt = game.Packet();
+            pkt.frame_token = tok;
+            pkt.optional_present = tag_hudless ? FgOptBit(kFgOptHudless) : 0u;
+            FgSharedDispatchDesc sh;
+            sh.frame_token = tok;
+            sh.preset = preset;
+            sh.has_previous = tok > 1;
+            sh.generated_count = 1;
+            sh.generates = tok > 1;
+            sh.packet = &pkt;
+            FgSharedResult sr;
+            if (exec.RecordSharedGameFrame(sh, &sr) != FgExecResult::Ok) return false;
+            FgReadyFence rf;
+            if (tok > 1) {
+                FgIndexDispatchDesc gd;
+                gd.frame_token = tok;
+                gd.index = gd.generated_count = 1;
+                gd.is_last_index = true;
+                gd.preset = preset;
+                gd.t = 0.5f;
+                gd.slot.slot = 0;
+                gd.slot.reserved = true;
+                if (exec.RecordGeneratedIndex(gd, &rf) != FgExecResult::Ok) return false;
+            }
+            FgRealDispatchDesc rd;
+            rd.frame_token = tok;
+            rd.slot.slot = 1;
+            rd.slot.reserved = true;
+            if (exec.RecordRealEndpoint(rd, &rf) != FgExecResult::Ok) return false;
+        }
+        if (!exec.WaitIdle(15000)) return false;
+        if (composites_out) *composites_out = exec.Counters().ui_composites;
+        return true;
+    };
+
+    struct Case {
+        const char* name;
+        FgPreset preset;
+        DXGI_FORMAT fmt;
+    };
+    const Case cases[] = {
+        {"preset C BGRA8", FgPreset::C, DXGI_FORMAT_B8G8R8A8_UNORM},
+        {"preset C RGBA16F", FgPreset::C, DXGI_FORMAT_R16G16B16A16_FLOAT},
+        {"preset A BGRA8", FgPreset::A, DXGI_FORMAT_B8G8R8A8_UNORM},
+    };
+    for (const Case& c : cases) {
+        Game game;
+        CHECK(game.Init(&gpu, c.fmt, W, H) && upload_scene(game, 0, false, true));
+        ExecutorSlots on_slots, off_slots, clean_slots;
+        for (int i = 0; i < 2; ++i) {
+            on_slots.textures[i] = game.Tex(c.fmt);
+            off_slots.textures[i] = game.Tex(c.fmt);
+            clean_slots.textures[i] = game.Tex(c.fmt);
+        }
+
+        // 1) Equal back buffer and hudless: 0 byte differences vs WG_FG_UI=off.
+        uint64_t comp_on = 0, comp_off = 0;
+        bool act_on = false, act_off = true;
+        CHECK(run_pair(c.preset, false, true, 1, game, on_slots, &comp_on, &act_on));
+        CHECK(run_pair(c.preset, false, true, 0, game, off_slots, &comp_off, &act_off));
+        CHECK(act_on && !act_off && comp_on == 1 && comp_off == 0);
+        CHECK(SlotsMatch(gpu, on_slots, off_slots, 2));
+
+        // 2) No hudless tagged: never activates, 0 byte differences.
+        CHECK(run_pair(c.preset, true, false, 1, game, on_slots, &comp_on, nullptr));
+        CHECK(run_pair(c.preset, true, false, 0, game, off_slots, &comp_off, nullptr));
+        CHECK(comp_on == 0 && comp_off == 0);
+        CHECK(SlotsMatch(gpu, on_slots, off_slots, 2));
+
+        // 3) Moving scene with HUD on colour only: HUD restored crisply (incl. 1-px hole), zero ghosting outside HUD.
+        CHECK(run_pair(c.preset, true, true, 1, game, on_slots, &comp_on, nullptr));
+        CHECK(run_pair(c.preset, false, true, 0, game, clean_slots, nullptr, nullptr));
+        CHECK(comp_on == 1);
+        std::vector<uint8_t> gen_on, real_bb, gen_clean;
+        uint32_t bpp = 0;
+        CHECK(ReadTextureTight(gpu, on_slots.textures[0].Get(), &gen_on, &bpp));
+        CHECK(ReadTextureTight(gpu, on_slots.textures[1].Get(), &real_bb, &bpp));
+        CHECK(ReadTextureTight(gpu, clean_slots.textures[0].Get(), &gen_clean, &bpp));
+        const auto ch = [&](const std::vector<uint8_t>& buf, uint32_t x, uint32_t y, int k) -> float {
+            if (bpp == 4) return static_cast<float>(buf[(y * W + x) * 4 + k]) / 255.0f;
+            uint16_t h = 0;
+            std::memcpy(&h, &buf[(y * W + x) * 8 + 2 * k], 2);
+            return FgExecHalfToFloat(h);
+        };
+        float max_hud_err = 0.0f, max_bg_err = 0.0f, hole_err = 0.0f;
+        for (uint32_t y = 18; y < 46; ++y) {
+            for (uint32_t x = 26; x < 70; ++x) {
+                for (int k = 0; k < 3; ++k) {
+                    const float e = std::fabs(ch(gen_on, x, y, k) - ch(real_bb, x, y, k));
+                    max_hud_err = std::max(max_hud_err, e);
+                    if (x == 40 && y == 32) hole_err = std::max(hole_err, e);
+                }
+            }
+        }
+        // Adjacent motion wake outside the HUD [74..100, 16..48] must match the HUD-free generated scene exactly.
+        for (uint32_t y = 16; y < 48; ++y) {
+            for (uint32_t x = 74; x < 100; ++x) {
+                for (int k = 0; k < 3; ++k) {
+                    max_bg_err = std::max(max_bg_err, std::fabs(ch(gen_on, x, y, k) - ch(gen_clean, x, y, k)));
+                }
+            }
+        }
+        std::printf("  ui-composite %s: hud_err=%.5f hole_err=%.5f wake_err=%.5f\n", c.name, max_hud_err, hole_err,
+                    max_bg_err);
+        CHECK(max_hud_err <= 1.0f / 255.0f + 1e-4f);
+        CHECK(hole_err <= 1.0f / 255.0f + 1e-4f);
+        CHECK(max_bg_err <= 1e-4f);
+    }
+
+    // 4) Environment variable WG_FG_UI=off read at session creation and logged once.
+    char saved_env[64] = {};
+    const DWORD saved_n = GetEnvironmentVariableA("WG_FG_UI", saved_env, sizeof(saved_env));
+    std::vector<std::string> logs;
+    auto collect_log = [](void* ctx, const char* line) {
+        static_cast<std::vector<std::string>*>(ctx)->emplace_back(line ? line : "");
+    };
+    SetEnvironmentVariableA("WG_FG_UI", "off");
+    {
+        FgD3d12ExecutorDesc ed;
+        ed.dxil_dir = dxil;
+        ed.weights = &weights;
+        ed.enable_full = false;
+        ed.dump_log = collect_log;
+        ed.dump_log_ctx = &logs;
+        FgD3d12Executor exec(ed);
+        FgCreateDesc create = CpuCreate(W, H);
+        create.device = gpu.device.Get();
+        create.queue = gpu.queue.Get();
+        CHECK(exec.Configure(create, 3) == FgExecResult::Ok);
+        CHECK(exec.Configure(create, 3) == FgExecResult::Ok);  // second Configure must not duplicate the log
+        CHECK(!exec.UiCompositeActive());
+    }
+    int off_logs = 0;
+    for (const std::string& s : logs)
+        if (s.find("fg ui composite: off") != std::string::npos) ++off_logs;
+    CHECK(off_logs == 1);
+
+    logs.clear();
+    SetEnvironmentVariableA("WG_FG_UI", nullptr);
+    {
+        FgD3d12ExecutorDesc ed;
+        ed.dxil_dir = dxil;
+        ed.weights = &weights;
+        ed.enable_full = false;
+        ed.dump_log = collect_log;
+        ed.dump_log_ctx = &logs;
+        FgD3d12Executor exec(ed);
+        FgCreateDesc create = CpuCreate(W, H);
+        create.device = gpu.device.Get();
+        create.queue = gpu.queue.Get();
+        CHECK(exec.Configure(create, 3) == FgExecResult::Ok);
+        CHECK(exec.Configure(create, 3) == FgExecResult::Ok);
+        CHECK(exec.UiCompositeActive());
+    }
+    int on_logs = 0;
+    for (const std::string& s : logs)
+        if (s.find("fg ui composite: on") != std::string::npos) ++on_logs;
+    CHECK(on_logs == 1);
+    SetEnvironmentVariableA("WG_FG_UI", saved_n > 0 ? saved_env : nullptr);
+
+    const int64_t errs = gpu.DebugErrors();
+    if (errs >= 0) CHECK(errs == 0);
+}
+
 struct BenchOptions {
     uint32_t gen = 1, warmup = 8, timed = 30;
     std::string presets = "AC";
     bool kprof = false;
-    int batch = -1, hoist = -1, dualq = -1, fuse = -1, fuse2 = -1;  // -1: the environment (default on)
+    int batch = -1, hoist = -1, dualq = -1, fuse = -1, fuse2 = -1, ui = -1;  // -1: the environment (default on)
 };
 
 bool RunBench(Gpu& gpu, const std::string& dxil, const FgExecWeights& weights, FgPreset preset,
@@ -2198,6 +2572,7 @@ bool RunBench(Gpu& gpu, const std::string& dxil, const FgExecWeights& weights, F
     ed.dualq = bo.dualq;
     ed.fuse = bo.fuse;
     ed.fuse2 = bo.fuse2;
+    ed.ui_composite = bo.ui;
     FgD3d12Executor exec(ed);
     const auto ok = [&](FgExecResult s) {
         if (s == FgExecResult::Ok) return true;
@@ -2272,8 +2647,9 @@ bool RunBench(Gpu& gpu, const std::string& dxil, const FgExecWeights& weights, F
                 gen_count + 1, gen_count, width, height, warmup, timed);
     std::printf("  generated fences: %s\n",
                 exec.PerIndexFences() ? "per-index" : "single-batch-when-eligible");
-    std::printf("  levers: batch %s, hoist %s, dualq %s, scratch banks %u, fuse2 mask 0x%x\n", exec.BatchActive() ? "on" : "off",
-                exec.HoistActive() ? "on" : "off", exec.DualQueueActive() ? "on" : "off", exec.ScratchBanks(),
+    std::printf("  levers: batch %s, hoist %s, dualq %s, ui %s, scratch banks %u, fuse2 mask 0x%x\n",
+                exec.BatchActive() ? "on" : "off", exec.HoistActive() ? "on" : "off",
+                exec.DualQueueActive() ? "on" : "off", exec.UiCompositeActive() ? "on" : "off", exec.ScratchBanks(),
                 exec.Fuse2Active());
     std::printf("  net2 z-batching: %llu z launches recorded, %llu launches saved (A18, fuse2 bit 1024, WG_FG_NET2_BATCH)\n",
                 static_cast<unsigned long long>(exec.Counters().net2_z_launches),
@@ -2332,6 +2708,7 @@ int main(int argc, char** argv) {
         if (std::strcmp(argv[i], "--dualq") == 0 && i + 1 < argc) bo.dualq = std::atoi(argv[++i]);
         if (std::strcmp(argv[i], "--fuse") == 0 && i + 1 < argc) bo.fuse = std::atoi(argv[++i]);
         if (std::strcmp(argv[i], "--fuse2") == 0 && i + 1 < argc) bo.fuse2 = static_cast<int>(std::strtol(argv[++i], nullptr, 0));
+        if (std::strcmp(argv[i], "--ui") == 0 && i + 1 < argc) bo.ui = std::atoi(argv[++i]);
         if (std::strcmp(argv[i], "--dxil") == 0 && i + 1 < argc) dxil = argv[++i];
         if (std::strcmp(argv[i], "--reference-dxil") == 0 && i + 1 < argc) reference_dxil = argv[++i];
         if (std::strcmp(argv[i], "--scratch") == 0 && i + 1 < argc) scratch = argv[++i];
@@ -2368,6 +2745,7 @@ int main(int argc, char** argv) {
     TestNet2FastPlan();
     TestRefusals(weights);
     TestMotionFormats();
+    TestUiMaskCpu();
     std::printf("cpu: %d checks, %d failed\n", g_checks, g_failed);
     if (gpu) {
         Gpu g;
@@ -2432,6 +2810,8 @@ int main(int argc, char** argv) {
             }
             if (only.empty() || only.find("per-index") != std::string::npos)
                 TestPerIndexFences(g, dxil, weights);
+            if (only.empty() || only.find("ui-composite") != std::string::npos)
+                TestUiComposite(g, dxil, weights);
             if (only.empty()) TestBrokenKernels(g, dxil, weights, scratch);
         }
     }

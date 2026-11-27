@@ -3,6 +3,7 @@
 #include "fg_d3d12_executor.h"
 
 #include <d3d12.h>
+#include <d3dcompiler.h>
 #include <dxgi1_6.h>
 #include <windows.h>
 #include <wrl/client.h>
@@ -18,6 +19,7 @@
 #include <unordered_map>
 
 #include "fg_frame_dump.h"
+#include "fg_ui_composite_hlsl.h"
 
 #include "../presenter/fg_dxgi_presenter.h"
 #include "../presenter/fg_win_comp_presenter.h"
@@ -61,6 +63,7 @@ enum Kernel : uint32_t {
     kOutPullB, kOutPullPackB, kOutPullQ, kOutPullPackQ, kOutPullBQ, kOutPullPackBQ,     // A16 (B) / A17 (Q)
     kN2zm1b1, kN2zm1b2, kN2zm2b1, kN2zm2b2, kN2zm2b4, kN2zm1b4s, kN2zm1b2s, kN2zm1b1u, kN2zm1b2u, kN2zm2b4u,
     kN2zm3b2u, kN2zm3b4u, kN2zh3b1u, kN2zh3b1uS3,                                       // A18: z-sliced net2 convolutions
+    kUiMaskSrv, kUiMaskBuf, kUiCompF16, kUiCompPack,                                    // HUD post-composite (inline HLSL)
     kKernelCount,
 };
 // the Wave 1B levers (bits of FgD3d12ExecutorDesc::fuse2 when it is a mask)
@@ -79,6 +82,7 @@ enum Fuse2Bit : uint32_t {
 constexpr uint32_t kFirstTurbo = kFineMask;  // a pipeline of these that the device refuses is dropped, not fatal
 constexpr uint32_t kFirstFull = kFullBlend;
 constexpr uint32_t kFirstOptional = kMConv2Narrow;
+constexpr uint32_t kFirstInline = kUiMaskSrv;  // compiled inline at pipeline creation, not read from dxil_dir
 
 // The fast net2 convolution variants (clean/dx12/kernels/fg_net2_mconv.hlsl declarations, in the order
 // clean/fg/runner/fg_net2_mma.py VARIANTS lists them): output tiles per wave, 16-channel blocks per tap, upsample
@@ -165,6 +169,7 @@ const char* const kKernelNames[kKernelCount] = {
     "fg_net2_mconv_m2b4_z", "fg_net2_mconv_m1b4s_z", "fg_net2_mconv_m1b2s_z", "fg_net2_mconv_m1b1u_z",
     "fg_net2_mconv_m1b2u_z", "fg_net2_mconv_m2b4u_z", "fg_net2_mconv_m3b2u_z", "fg_net2_mconv_m3b4u_z",
     "fg_net2_mconv_h3b1u_z", "fg_net2_mconv_h3b1u_s3_z",
+    "fg_ui_mask_srv", "fg_ui_mask_buf", "fg_ui_comp_f16", "fg_ui_comp_pack",
 };
 static_assert(sizeof(kKernelNames) / sizeof(*kKernelNames) == kKernelCount, "one name per kernel");
 
@@ -565,6 +570,7 @@ struct FrameCtx {
     FgPreset preset = FgPreset::C;
     bool lite = true;
     bool hud = false, ui4 = false, ui1 = false;
+    bool ui_comp = false;
     InputTex colour, depth, motion, hudless, alpha;
     uint32_t alpha_kind = 4, alpha_channel = 3;
     bool inverted = false;
@@ -714,6 +720,8 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
     // Turbo v2 levers (fg_d3d12_executor.h FgD3d12ExecutorDesc): wanted at construction, active after Configure.
     bool want_batch = true, want_hoist = true, want_dualq = true, want_fuse = true;
     bool batch_on = false, hoist_on = false, dualq_on = false;
+    bool want_ui_comp = true, ui_comp_ready = false, ui_comp_logged = false;
+    bool prev_ui_comp_valid = false, prev_ui_comp = false;
     // Wave 1B (fuse2 bits wanted; the *_on flags are decided in Layout from the kernels that are present)
     uint32_t want_fuse2 = kF2Default;
     bool Fused2(uint32_t bit, uint32_t k) const { return (want_fuse2 & bit) != 0 && pso[k] != nullptr; }
@@ -765,6 +773,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
     uint32_t role_off[kRoleCount] = {};
     uint32_t ps_off[12] = {};
     uint32_t detres_off = 0, dis_off = 0;
+    uint32_t ui_flags_off = 0, ui_slot_code = 0;
     uint32_t cap_colour = 0, cap_hud = 0, cap_ui4 = 0, cap_ui1 = 0, cap_depth = 0, cap_motion = 0;
     uint32_t out_off = 0, out_stride = 0;       // generated image (float16 x 4), stride in texels
     uint32_t pack_off = 0, pack_pitch = 0;      // packed slot rows
@@ -919,7 +928,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
     FgExecResult LoadKernels() {
         if (desc.dxil_dir.empty() || !dir_exists(desc.dxil_dir))
             return Fail(FgExecRefusal::DxilDirMissing, "kernel folder '" + desc.dxil_dir + "' missing");
-        for (uint32_t k = 0; k < kKernelCount; ++k) {
+        for (uint32_t k = 0; k < kFirstInline; ++k) {
             if (!KernelNeeded(k, desc.enable_full, desc.net2)) continue;
             const std::string path = desc.dxil_dir + "\\" + kKernelNames[k] + ".dxil";
             std::vector<char> c;
@@ -932,6 +941,79 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
             code[k] = std::move(c);
         }
         return FgExecResult::Ok;
+    }
+
+    void BuildUiCompositePipelines() {
+        ui_comp_ready = false;
+        if (!want_ui_comp) return;
+        HMODULE mod = LoadLibraryA("d3dcompiler_47.dll");
+        if (!mod) {
+            DumpLog("fg ui composite: d3dcompiler_47.dll unavailable");
+            return;
+        }
+        const auto compile = reinterpret_cast<pD3DCompile>(GetProcAddress(mod, "D3DCompile"));
+        if (!compile) {
+            FreeLibrary(mod);
+            DumpLog("fg ui composite: D3DCompile export missing");
+            return;
+        }
+        struct Spec {
+            uint32_t kernel;
+            const char* m0;
+            const char* m1;
+        };
+        const Spec specs[4] = {
+            {kUiMaskSrv, "UI_MASK", "UI_SRV"},
+            {kUiMaskBuf, "UI_MASK", nullptr},
+            {kUiCompF16, "UI_COMP", nullptr},
+            {kUiCompPack, "UI_COMP", "UI_PACK"},
+        };
+        const size_t src_len = std::strlen(kFgUiCompositeHlsl);
+        const UINT flags = D3DCOMPILE_IEEE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3;
+        bool all_ok = true;
+        for (const Spec& sp : specs) {
+            D3D_SHADER_MACRO macros[3] = {};
+            uint32_t mc = 0;
+            macros[mc++] = {sp.m0, "1"};
+            if (sp.m1) macros[mc++] = {sp.m1, "1"};
+            macros[mc] = {nullptr, nullptr};
+            std::vector<char> bytes;
+            std::string err_msg;
+            {
+                ComPtr<ID3DBlob> bin, err;
+                const HRESULT hr = compile(kFgUiCompositeHlsl, src_len, kKernelNames[sp.kernel], macros, nullptr,
+                                           "main", "cs_5_1", flags, 0, &bin, &err);
+                if (FAILED(hr) || !bin) {
+                    if (err && err->GetBufferPointer() && err->GetBufferSize())
+                        err_msg.assign(static_cast<const char*>(err->GetBufferPointer()), err->GetBufferSize());
+                    all_ok = false;
+                } else {
+                    const auto* p = static_cast<const char*>(bin->GetBufferPointer());
+                    bytes.assign(p, p + bin->GetBufferSize());
+                }
+            }
+            if (!bytes.empty()) {
+                D3D12_COMPUTE_PIPELINE_STATE_DESC pd = {};
+                pd.pRootSignature = root.Get();
+                pd.CS.pShaderBytecode = bytes.data();
+                pd.CS.BytecodeLength = bytes.size();
+                if (SUCCEEDED(device->CreateComputePipelineState(&pd, IID_PPV_ARGS(&pso[sp.kernel])))) {
+                    code[sp.kernel] = std::move(bytes);
+                } else {
+                    all_ok = false;
+                }
+            } else if (!err_msg.empty()) {
+                DumpLog(std::string("fg ui composite: compile ") + kKernelNames[sp.kernel] + " failed: " + err_msg);
+            }
+        }
+        FreeLibrary(mod);
+        if (!all_ok) {
+            for (const Spec& sp : specs) {
+                pso[sp.kernel].Reset();
+                code[sp.kernel].clear();
+            }
+        }
+        ui_comp_ready = all_ok && pso[kUiMaskSrv] && pso[kUiMaskBuf] && pso[kUiCompF16] && pso[kUiCompPack];
     }
 
     FgExecResult BuildPipelines() {
@@ -960,7 +1042,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
             FAILED(device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
                                                IID_PPV_ARGS(&root))))
             return Fail(FgExecRefusal::RootSignature, "root signature creation failed");
-        for (uint32_t k = 0; k < kKernelCount; ++k) {
+        for (uint32_t k = 0; k < kFirstInline; ++k) {
             if (code[k].empty()) continue;
             D3D12_COMPUTE_PIPELINE_STATE_DESC pd = {};
             pd.pRootSignature = root.Get();
@@ -975,6 +1057,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                 return Fail(FgExecRefusal::PipelineFailed, std::string("pipeline ") + kKernelNames[k]);
             }
         }
+        BuildUiCompositePipelines();
         pipelines_built = true;
         return FgExecResult::Ok;
     }
@@ -1076,6 +1159,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         for (uint32_t l = 1; l <= g.top; ++l) ps_off[l] = Alloc(12ull * g.lw[l] * g.lh[l]);
         detres_off = Alloc(32);
         dis_off = detres_off + 16;
+        ui_flags_off = Alloc(4ull * cdiv(g.wo, 16) * cdiv(g.ho, 16));
         const uint64_t cap = static_cast<uint64_t>(cap_w) * cap_h;
         cap_colour = Alloc(cap * 8);
         cap_hud = Alloc(cap * 8);
@@ -1922,29 +2006,51 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
             case FgOp::Downsample: {
                 uint32_t a[44];
                 uint32_t n = 0;
-                const uint32_t h1[7] = {col, ctw, cr.region.bx, cr.region.by, hud, hw, hh};
+                const InputTex& dsrc = f.ui_comp ? f.hudless : cr;
+                const uint32_t dcol = f.ui_comp ? cap_hud : col;
+                const uint32_t r3_bits = f.ui_comp ? 0u : host.Frame().r3_bits;
+                const uint32_t h1[7] = {dcol, dsrc.w, dsrc.region.bx, dsrc.region.by,
+                                        f.ui_comp ? 0u : hud, f.ui_comp ? 0u : hw, f.ui_comp ? 0u : hh};
                 for (uint32_t x : h1) a[n++] = x;
-                for (uint32_t x : hreg) a[n++] = x;
-                const uint32_t h2[5] = {aid, aw, ah, f.alpha_kind, f.alpha_channel};
+                for (uint32_t x : hreg) a[n++] = f.ui_comp ? 0u : x;
+                const uint32_t h2[5] = {f.ui_comp ? 0u : aid, f.ui_comp ? 0u : aw, f.ui_comp ? 0u : ah,
+                                        f.ui_comp ? 0u : f.alpha_kind, f.ui_comp ? 0u : f.alpha_channel};
                 for (uint32_t x : h2) a[n++] = x;
-                for (uint32_t x : areg) a[n++] = x;
+                for (uint32_t x : areg) a[n++] = f.ui_comp ? 0u : x;
                 const uint32_t h3[12] = {R(kRoleCp), R(kRoleCc), R(kRoleUc), R(kRoleLc), R(kRoleDc), R(kRoleLd),
-                                         R(kRoleUm), g.wo, g.ho, g.wd, g.hd, host.Frame().r3_bits};
+                                         R(kRoleUm), g.wo, g.ho, g.wd, g.hd, r3_bits};
                 for (uint32_t x : h3) a[n++] = x;
                 const uint64_t nb = static_cast<uint64_t>(cdiv(g.wo, g.d)) * cdiv(g.ho, g.d);
                 // A reset cleared the history/UI roles this dispatch accesses. With history, the preceding
                 // SetDisable writes a separate word, or the detector already ended its own submission.
                 if (input_srvs)
-                    BindInputs(r, {&cr, f.hud ? &f.hudless : nullptr, alpha ? &f.alpha : nullptr});
+                    BindInputs(r, {&dsrc, (!f.ui_comp && f.hud) ? &f.hudless : nullptr,
+                                   (!f.ui_comp && alpha) ? &f.alpha : nullptr});
                 uint32_t kernel = input_srvs ? (g.d == 4 ? kDown4Srv : kDown2Srv) : (g.d == 4 ? kDown4 : kDown2);
                 uint32_t groups = groups_for(nb);
                 const auto& hr = f.hudless.region;
-                if (kernel == kDown2Srv && pso[kDown2HudTile] && (host.Frame().r3_bits & 16u) &&
+                if (kernel == kDown2Srv && pso[kDown2HudTile] && (r3_bits & 16u) &&
                     hw == g.wo && hh == g.ho && !hr.bx && !hr.by && hr.ew == hw && hr.eh == hh) {
                     kernel = kDown2HudTile;
                     groups = cdiv(g.wo, 32) * cdiv(g.ho, 8);
                 }
                 Dispatch(r, kernel, groups, a, n, !host.Frame().history);
+                if (f.ui_comp && host.Frame().history) {
+                    const uint32_t tiles = cdiv(g.wo, 16) * cdiv(g.ho, 16);
+                    if (input_srvs) {
+                        BindInputs(r, {&cr, &f.hudless});
+                        D(r, kUiMaskSrv, tiles,
+                          {cr.region.bx, cr.region.by, f.hudless.region.bx, f.hudless.region.by, R(kRoleUc),
+                           ui_flags_off, g.wo, g.ho},
+                          false);
+                        SetTable(r, 0);
+                    } else {
+                        D(r, kUiMaskBuf, tiles,
+                          {col, ctw, cr.region.bx, cr.region.by, hud, hw, f.hudless.region.bx, f.hudless.region.by,
+                           R(kRoleUc), ui_flags_off, g.wo, g.ho},
+                          false);
+                    }
+                }
                 return true;
             }
             case FgOp::Mvec: {
@@ -2104,7 +2210,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
             case FgOp::Net1Output:
                 D(r, kNet1Output, groups_for(static_cast<uint64_t>(g.wd) * g.hd),
                   {n1_out, R(kRoleOm), R(kRoleUm), R(kRoleUmp), R(kRoleNA), R(kRoleNB), R(kRoleM), g.wd, g.hd,
-                   g.pad_l, g.pad_t, g.W0, g.H0, 1u, 16u, op.ui_forcing ? 1u : 0u});
+                   g.pad_l, g.pad_t, g.W0, g.H0, 1u, 16u, (op.ui_forcing && !f.ui_comp) ? 1u : 0u});
                 return true;
             case FgOp::Interm: {
                 if (Fused(kInterm2)) {
@@ -2144,7 +2250,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
                 const uint32_t h[20] = {R(kRoleCp), R(kRoleCc), R(kRoleMA), R(kRoleMB), R(kRoleW), R(kRoleUp),
                                         R(kRoleUc), R(kRoleLp), R(kRoleLc), packed ? pack_off : out_off,
                                         packed ? pack_pitch : out_stride, packed ? fuse_pack : 0u, 0, g.wo, g.ho,
-                                        g.w1, g.h1, fb(op.t), op.flag1 ? 1u : 0u, op.flag2 ? 1u : 0u};
+                                        g.w1, g.h1, fb(op.t), op.flag1 ? 1u : 0u, (op.flag2 && !f.ui_comp) ? 1u : 0u};
                 for (uint32_t x : h) a[n++] = x;
                 for (uint32_t x : rg) a[n++] = x;
                 if (lite_weights_on) {
@@ -2943,6 +3049,26 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
         return true;
     }
 
+    uint32_t SlotPackCode(uint32_t slot) const {
+        if (!target) return 0;
+        ID3D12Resource* res = target->SlotResource(slot);
+        if (!res) return 0;
+        uint32_t bpp = 0;
+        const int c = pack_code(res->GetDesc().Format, &bpp);
+        return c > 0 ? static_cast<uint32_t>(c) : 0u;
+    }
+
+    void RecordUiComposite(Rec& r) {
+        if (!frame.ui_comp || !host.Frame().history) return;
+        const uint32_t tiles = cdiv(g.wo, 16) * cdiv(g.ho, 16);
+        if (fuse_pack != 0) {
+            D(r, kUiCompPack, tiles, {R(kRoleUc), ui_flags_off, pack_off, pack_pitch, g.wo, g.ho, fuse_pack});
+        } else {
+            D(r, kUiCompF16, tiles, {R(kRoleUc), ui_flags_off, out_off, out_stride, g.wo, g.ho, ui_slot_code});
+        }
+        ++counters.ui_composites;
+    }
+
     // Launches recorded for one index, the shared part of RecordGeneratedIndex and RecordGeneratedBatch.
     bool RecordIndexOps(Rec& r, const std::vector<FgExecOp>& ops, bool skip_hoisted) {
         FgExecStage stage = FgExecStage::GenPreNet2;
@@ -2954,6 +3080,7 @@ struct FgD3d12Executor::Impl final : public IFgComputeRecorder {
             r.defer_stage = stage;
             TimeStage(r, stage);   // a no-op while the launches are only being kept
             if (!RecordOp(r, op)) return false;
+            if (op.op == FgOp::LiteBlend || op.op == FgOp::OutPyramid) RecordUiComposite(r);
         }
         return true;
     }
@@ -2985,6 +3112,13 @@ FgD3d12Executor::FgD3d12Executor(const FgD3d12ExecutorDesc& desc) : impl_(new Im
     impl_->want_dualq = lever(desc.dualq, "WG_FG_DUALQ");
     impl_->want_fuse = lever(desc.fuse, "WG_FG_FUSE");
     impl_->want_netz_env = lever(-1, "WG_FG_NET2_BATCH");   // A18 (also needs the fuse2 bit 1024 and the batch lever)
+    if (desc.ui_composite >= 0) {
+        impl_->want_ui_comp = desc.ui_composite != 0;
+    } else {
+        char ui_env[32] = {};
+        const DWORD n = GetEnvironmentVariableA("WG_FG_UI", ui_env, sizeof(ui_env));
+        impl_->want_ui_comp = (n > 0 && n < sizeof(ui_env)) ? FgParseUiCompositeEnv(ui_env) : true;
+    }
     // Wave 1B: 0 off, 1 (or unset) the default levers (net1 cells + pyramid tail), any other value a mask of the levers (1 net1
     // cells, 2 net2 pairs, 4 upwarp in L14, 8 W in the blends, 16 pyramid tail, 32 X0 / X1 as RGB; 63 = every lever)
     {
@@ -3020,6 +3154,8 @@ FgExecResult FgD3d12Executor::Configure(const FgCreateDesc& cd, uint32_t /*histo
     Impl& m = *impl_;
     m.configured = false;
     m.frame = FrameCtx();
+    m.prev_ui_comp_valid = false;
+    m.prev_ui_comp = false;
     // Checks that need no device come first: size, weights, then the device and queue, then the kernel files.
     FgExecGeometry g;
     std::string w;
@@ -3100,6 +3236,16 @@ FgExecResult FgD3d12Executor::Configure(const FgCreateDesc& cd, uint32_t /*histo
     if (!m.pipelines_built) {
         const FgExecResult p = m.BuildPipelines();
         if (p != FgExecResult::Ok) return p;
+    }
+    if (!m.ui_comp_logged) {
+        m.ui_comp_logged = true;
+        if (!m.want_ui_comp) {
+            m.DumpLog("fg ui composite: off (WG_FG_UI=off)");
+        } else if (m.ui_comp_ready) {
+            m.DumpLog("fg ui composite: on (default; active when hudless is tagged)");
+        } else {
+            m.DumpLog("fg ui composite: off (shader compiler unavailable)");
+        }
     }
     // The second compute queue (the hoisted per-index work) is optional: without it the lever is simply off.
     if (m.want_hoist) {
@@ -3253,9 +3399,16 @@ FgExecResult FgD3d12Executor::RecordSharedGameFrame(const FgSharedDispatchDesc& 
     std::vector<uint32_t> pairs;
     m.host.EndFrame(&pairs);
     for (size_t i = 0; i + 1 < pairs.size(); i += 2) std::swap(m.role_off[pairs[i]], m.role_off[pairs[i + 1]]);
+    const FgExecFlags preview =
+        FgExecDerivedFlags(m.desc.settings, f.lite, d.preset == FgPreset::B, f.hud, f.ui4, f.ui1, false);
+    f.ui_comp = m.ui_comp_ready && preview.hudless && !(FgExecR3Bits(preview) & 1u) &&
+                f.hudless.region.ew == m.g.wo && f.hudless.region.eh == m.g.ho;
     std::vector<FgExecOp> ops;
-    const bool reset = !d.has_previous || (p.flags & kFgFlagReset) != 0;
+    const bool reset =
+        !d.has_previous || (p.flags & kFgFlagReset) != 0 || (m.prev_ui_comp_valid && m.prev_ui_comp != f.ui_comp);
     m.host.BeginFrame(f.lite, d.preset == FgPreset::B, f.hud, f.ui4, f.ui1, reset, &ops);
+    m.prev_ui_comp_valid = true;
+    m.prev_ui_comp = f.ui_comp;
     m.frame = f;
     m.hole_fused = false;
     if (f.lite)
@@ -3444,6 +3597,7 @@ FgExecResult FgD3d12Executor::RecordGeneratedIndex(const FgIndexDispatchDesc& d,
     std::vector<FgExecOp> ops;
     m.host.IndexOps(d.t, m.frame.hud, m.frame.ui4, false, &ops);
     m.fuse_pack = m.PackFusion(ops, d.slot.slot);
+    m.ui_slot_code = m.SlotPackCode(d.slot.slot);
     const bool capture = !m.frame.colour_captured && std::any_of(ops.begin(), ops.end(), [](const FgExecOp& op) {
         return op.op == FgOp::FinalCopy || op.op == FgOp::Prefill;
     });
@@ -3469,7 +3623,9 @@ FgExecResult FgD3d12Executor::RecordGeneratedIndex(const FgIndexDispatchDesc& d,
         m.TimeStage(r, FgExecStage::GenPreNet2);
         m.CaptureColour(r);
     }
-    if (!m.RecordIndexOps(r, ops, hoisted)) return FgExecResult::Refused;
+    const bool ok_ops = m.RecordIndexOps(r, ops, hoisted);
+    m.ui_slot_code = 0;
+    if (!ok_ops) return FgExecResult::Refused;
     m.TimeStage(r, FgExecStage::PackCopy);
     s = m.WriteSlot(r, d.slot.slot, 'g', d.frame_token, d.index);
     if (s != FgExecResult::Ok) return s;
@@ -3492,6 +3648,7 @@ uint32_t FgD3d12Executor::Fuse2Active() const {
 bool FgD3d12Executor::BatchActive() const { return impl_->batch_on; }
 bool FgD3d12Executor::HoistActive() const { return impl_->hoist_on; }
 bool FgD3d12Executor::DualQueueActive() const { return impl_->dualq_on; }
+bool FgD3d12Executor::UiCompositeActive() const { return impl_->ui_comp_ready; }
 uint32_t FgD3d12Executor::ScratchBanks() const { return impl_->sc_banks; }
 
 FgExecResult FgD3d12Executor::RecordGeneratedBatch(const FgIndexDispatchDesc* descs, uint32_t n, FgReadyFence* ready,
@@ -3540,16 +3697,19 @@ FgExecResult FgD3d12Executor::RecordGeneratedBatch(const FgIndexDispatchDesc* de
     for (uint32_t k = 0; k < n; ++k) {
         Impl::BankScope bank(m, m.BankFor(descs[k].index));
         m.fuse_pack = fuse[k];
+        m.ui_slot_code = m.SlotPackCode(descs[k].slot.slot);
         const bool hoisted = m.HoistedFor(descs[k], ops[k]);
         r.defer = &lists[k];
         const bool recorded = m.RecordIndexOps(r, ops[k], hoisted);
         r.defer = nullptr;
         if (!recorded) {
             m.fuse_pack = 0;
+            m.ui_slot_code = 0;
             return FgExecResult::Refused;
         }
     }
     m.fuse_pack = 0;
+    m.ui_slot_code = 0;
     m.EmitFrames(r, lists);
     for (uint32_t k = 0; k < n; ++k) {
         Impl::BankScope bank(m, m.BankFor(descs[k].index));

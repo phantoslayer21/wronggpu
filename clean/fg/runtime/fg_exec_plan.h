@@ -214,4 +214,12 @@ struct FgNet2Layer {
 inline constexpr uint32_t kFgNet2Layers = 25;
 const FgNet2Layer* FgNet2Layers();
 
+// Post-composite UI restoration (WG_FG_UI): parses the environment variable (default on; "off"/"0"/"false"/"no"
+// disables, case-insensitive) and exposes the CPU reference for the HDR-safe difference and 1-px opposite-neighbor
+// closing mask used by the D3D12 executor.
+bool FgParseUiCompositeEnv(const char* value);
+float FgUiPixelDiff(const float back_rgb[3], const float hudless_rgb[3]);
+void FgUiMaskCpu(const float* back_rgb, const float* hudless_rgb, uint32_t w, uint32_t h,
+                 std::vector<float>* mask_out);
+
 }  // namespace wgfg
