@@ -2403,9 +2403,9 @@ int main() {
                 const EditionInfo pin = PinnedEdition();
                 require(wstring(kEditionPage).find(L"wronggpu-edition-20261127.1") != wstring::npos &&
                         pin.file == L"OptiScaler_v10.0.0-pre1_20261127_WrongGPU-edition-v6.zip" &&
-                        pin.size == 185382527ull &&
-                        IEq(pin.sha256, L"848f073c28e571f93e0ab1b33c88fda0a67f48947db94c76725397fcd4c2f1b9") &&
-                        IEq(pin.dllSha256, L"45d199738b88500a303f3ebb859c17289f48ec6b09c799319b5e982c8647f4eb") &&
+                        pin.size == 185383587ull &&
+                        IEq(pin.sha256, L"1876b742ac5b20b35eee161df223ec02c9cdb71274c7a1e3a7028a9bfcf7fca4") &&
+                        IEq(pin.dllSha256, L"d377dfb47a4d635c8fa7adc71845cee5018d0507f054cd12a74e1039709727ab") &&
                         pin.version.find(L"v6") != wstring::npos,
                         "PinnedEdition pins WrongGPU edition v6 (tag, file, size, archive sha256, DLL sha256, version)");
                 const wstring ed = pin.dllSha256;
