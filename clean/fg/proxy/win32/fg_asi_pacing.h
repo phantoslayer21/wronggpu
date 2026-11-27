@@ -2,6 +2,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -14,6 +15,27 @@ inline int64_t Percentile(std::vector<int64_t> v, double pct) {
     const auto idx = static_cast<std::size_t>(pct * static_cast<double>(v.size() - 1));
     return v[std::min(idx, v.size() - 1)];
 }
+
+template <std::size_t Capacity>
+class PacingSamples {
+public:
+    void Append(int64_t sample) { samples_[size_++] = sample; }
+    bool Empty() const { return size_ == 0; }
+
+    int64_t Percentile(double pct, std::size_t newest = Capacity) const {
+        const std::size_t count = std::min(size_, newest);
+        if (count == 0) return 0;
+        auto sorted = samples_;
+        const auto first = sorted.begin() + (size_ - count);
+        std::sort(first, sorted.begin() + size_);
+        const auto idx = static_cast<std::size_t>(pct * static_cast<double>(count - 1));
+        return *(first + idx);
+    }
+
+private:
+    std::array<int64_t, Capacity> samples_ = {};
+    std::size_t size_ = 0;
+};
 
 constexpr int64_t FirstImageBudgetCap(int64_t ready_lag, uint32_t latency_limit) {
     constexpr int64_t min_cap = 80000;   // 8 ms

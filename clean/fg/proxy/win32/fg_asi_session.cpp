@@ -1194,15 +1194,13 @@ struct FgAsiSessionHost::Impl {
         if (!full_window && !severe_storm && !clean_excess_check) return;
 
         // Read recent base_dt and generating-interval readiness from trace_ring under the leaf lock.
-        std::vector<int64_t> base_dts;
-        std::vector<int64_t> d_origins;
-        std::vector<int64_t> unthrottled_readiness;
+        PacingSamples<kBudgetWindow> base_dts;
+        PacingSamples<kBudgetWindow> d_origins;
+        PacingSamples<kBudgetWindow> unthrottled_readiness;
         {
             std::lock_guard<std::mutex> lock(trace_mu);
-            const uint32_t want_scan = std::max<uint32_t>(window_frames, 12u);
+            const uint32_t want_scan = std::clamp(window_frames, 12u, kBudgetWindow);
             const uint32_t n_scan = trace_count < want_scan ? trace_count : want_scan;
-            base_dts.reserve(n_scan);
-            d_origins.reserve(n_scan);
             wgfg::FgTicks prev_arr = 0;
             for (uint32_t k = 0; k < n_scan; ++k) {
                 const uint32_t idx = (trace_head + kTraceRingSize - n_scan + k) % kTraceRingSize;
@@ -1210,7 +1208,7 @@ struct FgAsiSessionHost::Impl {
                 if (tr.t_arrival > 0) {
                     if (prev_arr > 0 && tr.t_arrival > prev_arr) {
                         const int64_t dt = tr.t_arrival - prev_arr;
-                        if (dt >= 10000 && dt <= 2500000) base_dts.push_back(dt);
+                        if (dt >= 10000 && dt <= 2500000) base_dts.Append(dt);
                     }
                     prev_arr = tr.t_arrival;
                 }
@@ -1220,9 +1218,9 @@ struct FgAsiSessionHost::Impl {
                     if (ready_ts > tr.t_after_wait) {
                         const int64_t d = ready_ts - tr.t_after_wait;
                         if (d > 0 && d <= 1000000) {
-                            d_origins.push_back(d);
+                            d_origins.Append(d);
                             if (tr.t_arrival > 0 && tr.t_after_wait - tr.t_arrival <= 5000)
-                                unthrottled_readiness.push_back(d);
+                                unthrottled_readiness.Append(d);
                         }
                     }
                 }
@@ -1231,13 +1229,11 @@ struct FgAsiSessionHost::Impl {
         // If this was only a mid-window excess-slack probe, proceed only when d_origin proves the GPU finished well
         // before WaitForCreditRoom returned (d_p90 is below the slack threshold) and the newest cadence caught up to the
         // current budget (p_med <= budget + 3.5 ms) so we never stack downward steps across phase lag.
-        const wgfg::FgTicks d_orig_p90_pre = Percentile(d_origins, 0.90);
-        const wgfg::FgTicks slack_threshold = st_req_count.load() == 1 ? 35000 : 18000;
-        std::vector<int64_t> tail_dts = base_dts;
-        if (tail_dts.size() > 4) tail_dts.erase(tail_dts.begin(), tail_dts.end() - 4);
-        const wgfg::FgTicks p_med_pre = Percentile(tail_dts, 0.50);
+        const wgfg::FgTicks d_orig_p90_pre = d_origins.Percentile(0.90);
+        const wgfg::FgTicks slack_threshold = 35000;
+        const wgfg::FgTicks p_med_pre = base_dts.Percentile(0.50, 4);
         if (clean_excess_check &&
-            (d_origins.empty() || d_orig_p90_pre > slack_threshold || budget <= kBudgetBase + 40000 ||
+            (d_origins.Empty() || d_orig_p90_pre > slack_threshold || budget <= kBudgetBase + 40000 ||
              (p_med_pre > 0 && p_med_pre > budget + 35000) ||
              (budget_miss_floor > 0 && budget <= budget_miss_floor + 40000))) {
             return;
@@ -1260,22 +1256,15 @@ struct FgAsiSessionHost::Impl {
         window_base = st;
 
         // Use the newest half of base_dts on cold start / fast probe so startup slow frames age out immediately.
-        std::vector<int64_t> recent_dts = base_dts;
-        if ((was_first || severe_storm) && recent_dts.size() > 6)
-            recent_dts.erase(recent_dts.begin(), recent_dts.end() - 6);
-        const wgfg::FgTicks p_med = Percentile(recent_dts, 0.50);
+        const wgfg::FgTicks p_med = base_dts.Percentile(0.50, was_first || severe_storm ? 6u : kBudgetWindow);
         // Targets use the post-wait origin. Use that same origin for both raising and easing the budget.
-        std::vector<int64_t> d_recent = d_origins;
-        if (d_recent.size() > 8) d_recent.erase(d_recent.begin(), d_recent.end() - 8);
-        const wgfg::FgTicks d_p50 = Percentile(d_recent, 0.50);
-        const wgfg::FgTicks d_recent_p95 = Percentile(d_recent, 0.95);
+        const wgfg::FgTicks d_p50 = d_origins.Percentile(0.50, 8);
+        const wgfg::FgTicks d_recent_p95 = d_origins.Percentile(0.95, 8);
         const wgfg::FgTicks d_p90 = d_orig_p90_pre;
-        const wgfg::FgTicks d_p95 = Percentile(d_origins, 0.95);
+        const wgfg::FgTicks d_p95 = d_origins.Percentile(0.95);
         // A rate observed after admission blocked is paced by the budget itself. Use producer readiness from
         // intervals with at most 0.5 ms admission/slot wait, and leave the dynamic cap unknown without such data.
-        if (unthrottled_readiness.size() > 8)
-            unthrottled_readiness.erase(unthrottled_readiness.begin(), unthrottled_readiness.end() - 8);
-        const wgfg::FgTicks b_cap = FirstImageBudgetCap(Percentile(unthrottled_readiness, 0.75),
+        const wgfg::FgTicks b_cap = FirstImageBudgetCap(unthrottled_readiness.Percentile(0.75, 8),
                                                        st_latency_limit.load());
         budget_miss_floor = std::min(budget_miss_floor, b_cap);
 
@@ -1283,12 +1272,12 @@ struct FgAsiSessionHost::Impl {
         wgfg::FgTicks next = budget;
         if (missed * 50 > sched) {  // > 2% of scheduled generated images missed
             quiet_windows = 0;
-            const bool need_more_budget = d_origins.empty() || d_p95 + 2500 > budget;
+            const bool need_more_budget = d_origins.Empty() || d_p95 + 2500 > budget;
             if (need_more_budget) budget_miss_floor = std::min(b_cap, std::max(budget_miss_floor, budget));
             wgfg::FgTicks want = budget;
             if (need_more_budget && budget < b_cap) {
                 const wgfg::FgTicks measured_target =
-                    !d_recent.empty() ? ((was_first ? d_p50 : d_recent_p95) + 12000) : 0;
+                    !d_origins.Empty() ? ((was_first ? d_p50 : d_recent_p95) + 12000) : 0;
                 const wgfg::FgTicks min_step = severe_storm ? 10000 : kBudgetStepMin;
                 want = std::min(b_cap, std::max(budget + min_step, measured_target));
             }
@@ -1320,7 +1309,7 @@ struct FgAsiSessionHost::Impl {
             const wgfg::FgTicks floor_b = FirstImageBudgetFloor(kBudgetBase, d_p95, budget_miss_floor);
             const bool far_above_miss = budget_miss_floor == 0 || budget > budget_miss_floor + 7500;
             const bool cadence_caught_up = p_med_pre == 0 || p_med_pre <= budget + 35000;
-            const bool large_excess = !d_origins.empty() && d_p90 <= slack_threshold && cadence_caught_up &&
+            const bool large_excess = !d_origins.Empty() && d_p90 <= slack_threshold && cadence_caught_up &&
                                       budget > floor_b + 30000 &&
                                       (budget_miss_floor == 0 || budget > budget_miss_floor + 30000);
             const uint32_t need_wins = large_excess ? 1u : (far_above_miss ? 2u : 5u);
@@ -1339,7 +1328,7 @@ struct FgAsiSessionHost::Impl {
                     Log(line);
                 } else {
                     const wgfg::FgTicks excess_cap =
-                        budget > 225000 ? 55000 : (budget > 165000 ? 35000 : (budget > 135000 ? 17000 : 10000));
+                        budget > 225000 ? 55000 : (budget > 165000 ? 25000 : (budget > 135000 ? 17000 : 10000));
                     const wgfg::FgTicks step =
                         large_excess ? std::min<wgfg::FgTicks>(excess_cap, std::max(kBudgetEaseFast, (budget - floor_b) / 2))
                                      : (far_above_miss ? kBudgetEaseFast : kBudgetEaseProbe);
