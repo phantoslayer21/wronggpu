@@ -1494,7 +1494,6 @@ struct FgAsiSessionHost::Impl {
         base.slot_count = kPresenterSlots;
         base.max_pending_intervals = kPresenterMaxPendingIntervals;  // N-B3: aligned to 20 slots (3 full 6x intervals)
         base.dxgi_timer_lead = 2000;                                 // 0.2 ms wake lead for DXGI tearing
-        base.dxgi_pace_generated_intervals_from_start = !admission_until_present;
         base.dxgi_late_tolerance = 20000;                            // 2.0 ms base tolerance (scaled per slot in worker)
         base.device = device.Get();
         base.queue = chain_queue ? chain_queue.Get() : queue.Get();  // the queue the real chain presents on

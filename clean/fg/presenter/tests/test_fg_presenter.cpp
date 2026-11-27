@@ -1293,7 +1293,8 @@ void TestTearingPlanHeadNearCeiling() {
             const bool real = (i % 4) == 3;
             const FgTicks now = target + jitters[i % 6];
             const FgTearingPlanDecision d =
-                FgPlanTearingImage(target, real, now, last_issue, kMinInterval, kBaseLateTol, true, next_target);
+                FgPlanTearingImage(target, real, now, last_issue + kMinInterval, kMinInterval, kBaseLateTol, true,
+                                   next_target);
             if (d.drop_late) {
                 ++dropped;
             } else {
@@ -1310,15 +1311,15 @@ void TestTearingPlanHeadNearCeiling() {
         const FgTicks target = kSecond;
         const FgTicks next_target = target + 28986;
         const FgTearingPlanDecision gen_ready =
-            FgPlanTearingImage(target, false, target + 24000, target - kMinInterval, kMinInterval, kBaseLateTol, true,
+            FgPlanTearingImage(target, false, target + 24000, target, kMinInterval, kBaseLateTol, true,
                                next_target);
         CHECK(!gen_ready.drop_late);
         const FgTearingPlanDecision gen_late =
-            FgPlanTearingImage(target, false, target + 27000, target - kMinInterval, kMinInterval, kBaseLateTol, true,
+            FgPlanTearingImage(target, false, target + 27000, target, kMinInterval, kBaseLateTol, true,
                                next_target);
         CHECK(gen_late.drop_late);
         const FgTearingPlanDecision real_late =
-            FgPlanTearingImage(target, true, target + 50000, target - kMinInterval, kMinInterval, kBaseLateTol, true,
+            FgPlanTearingImage(target, true, target + 50000, target, kMinInterval, kBaseLateTol, true,
                                next_target);
         CHECK(!real_late.drop_late && real_late.issue_at >= target);
     }
@@ -1329,8 +1330,8 @@ void TestTearingAtFiveImagesPerInterval() {
     constexpr FgTicks slot = 31600;        // the x6 request scheduled four generated and one real at 15.8 ms
     constexpr FgTicks min_interval = 28619;
     constexpr FgTicks call_duration = 3600;  // sensitivity case: 0.36 ms of synchronous wrapper/Present work
-    auto run = [&](bool admission_consumed) {
-        FgTicks last_anchor = 0;
+    constexpr FgTicks physical_period = 27778;
+    auto run = [&](bool corrected_pacing) {
         FgTicks last_start = 0;
         FgTicks call_done = 0;
         uint32_t dropped = 0;
@@ -1339,8 +1340,11 @@ void TestTearingAtFiveImagesPerInterval() {
             const bool real = i % 5 == 4;
             const FgTicks ready = target + (real ? 25000 : 0);  // real-frame slip in the live burst's median range
             const FgTicks now = std::max(ready, call_done);
+            const FgTicks earliest = corrected_pacing
+                                        ? FgTearingEarliestIssue(last_start, call_done, min_interval, physical_period)
+                                        : call_done + min_interval;
             const auto decision =
-                FgPlanTearingImage(target, real, now, last_anchor, min_interval, 20000, true, target + slot);
+                FgPlanTearingImage(target, real, now, earliest, min_interval, 20000, true, target + slot);
             if (decision.drop_late) {
                 CHECK(!real);
                 ++dropped;
@@ -1348,18 +1352,34 @@ void TestTearingAtFiveImagesPerInterval() {
             }
             const FgTicks start = std::max(now, decision.issue_at);
             if (last_start > 0) CHECK(start - last_start >= min_interval);
+            if (call_done > 0) CHECK(start + call_duration - call_done >= physical_period);
             last_start = start;
             call_done = start + call_duration;
-            last_anchor = FgTearingPacingAnchor(start, call_done, admission_consumed);
         }
         return dropped;
     };
     const uint32_t legacy = run(false);
-    const uint32_t consumed = run(true);
-    std::printf("    five-image cadence: %u/%u generated images late (present/consumed), 480 scheduled\n",
-                legacy, consumed);
+    const uint32_t corrected = run(true);
+    std::printf("    five-image cadence: %u/%u generated images late (previous/corrected), 480 scheduled\n",
+                legacy, corrected);
     CHECK(legacy >= 36);    // the replay is sensitive to charging service time to each slot
-    CHECK(consumed < 24);   // under 5% generated images late
+    CHECK(corrected < 24);  // under 5% generated images late
+}
+
+void TestTearingPhysicalGapAfterSlowCall() {
+    g_case = "tearing completion gap after a slow call";
+    constexpr FgTicks physical_period = 27778;
+    constexpr FgTicks scheduled_interval = 28619;
+    constexpr FgTicks first_start = kSecond;
+    for (const FgTicks service_time : {FgTicks{4000}, FgTicks{570000}, FgTicks{870000}}) {
+        const FgTicks first_done = first_start + service_time;
+        const FgTicks next_start = std::max(first_done,
+            FgTearingEarliestIssue(first_start, first_done, scheduled_interval, physical_period));
+        const FgTicks next_done = next_start + 500;
+        CHECK(next_done - first_done >= physical_period);
+        CHECK(next_start - first_start >= scheduled_interval);
+        CHECK(next_start < first_done + scheduled_interval);
+    }
 }
 
 void TestRc2SchedulerPacing() {
@@ -1613,6 +1633,7 @@ int main() {
     TestRealConsumptionBeforePresentation();
     TestTearingPlanHeadNearCeiling();
     TestTearingAtFiveImagesPerInterval();
+    TestTearingPhysicalGapAfterSlowCall();
     std::printf("test_fg_presenter: %d checks, %d failure(s)\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

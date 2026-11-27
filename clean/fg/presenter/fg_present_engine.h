@@ -287,15 +287,18 @@ struct FgTearingPlanDecision {
     bool drop_late = false;
 };
 
-inline FgTicks FgTearingPacingAnchor(FgTicks started, FgTicks completed, bool pace_from_start) {
-    return pace_from_start ? started : completed;
+inline FgTicks FgTearingEarliestIssue(FgTicks started, FgTicks completed, FgTicks scheduled_interval,
+                                     FgTicks physical_period) {
+    if (completed == 0) return 0;
+    const FgTicks completion_floor = completed + (physical_period > 0 ? physical_period : scheduled_interval);
+    const FgTicks issue_floor = started + scheduled_interval;
+    return issue_floor > completion_floor ? issue_floor : completion_floor;
 }
 
-inline FgTearingPlanDecision FgPlanTearingImage(FgTicks target, bool real, FgTicks now, FgTicks last_issue,
+inline FgTearingPlanDecision FgPlanTearingImage(FgTicks target, bool real, FgTicks now, FgTicks earliest,
                                                 FgTicks min_interval, FgTicks base_late_tolerance, bool has_next,
                                                 FgTicks next_target) {
     FgTearingPlanDecision d;
-    const FgTicks earliest = last_issue + min_interval;
     d.issue_at = target > earliest ? target : earliest;
     if (real) return d;
     const FgTicks slot = has_next && next_target > target ? next_target - target : 0;

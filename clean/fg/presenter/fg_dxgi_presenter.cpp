@@ -342,7 +342,8 @@ FgStatus FgDxgiPresenter::CompleteResize(bool resize_ok, std::uint64_t new_epoch
     have_vblank_ = false;
     quiesce_fence_signalled_ = false;
     latency_credit_ = false;
-    last_issue_ = 0;
+    last_present_start_ = 0;
+    last_present_done_ = 0;
     local_.clear();
     return s;
 }
@@ -521,7 +522,9 @@ bool FgDxgiPresenter::PlanHeadLocked(FgTicks now, Planned* out) {
             const bool next_ready =
                 local_.size() > 1 && engine_.SlotPresentId(local_[1].slot) == local_[1].present_id;
             const FgTicks next_target = next_ready ? local_[1].target : engine_.HeadPendingTarget();
-            const FgTearingPlanDecision td = FgPlanTearingImage(p.target, p.real, now, last_issue_, desc_.min_interval,
+            const FgTicks earliest = FgTearingEarliestIssue(last_present_start_, last_present_done_, desc_.min_interval,
+                                                            desc_.refresh_period);
+            const FgTearingPlanDecision td = FgPlanTearingImage(p.target, p.real, now, earliest, desc_.min_interval,
                                                                 desc_.late_tolerance, next_target > p.target, next_target);
             if (td.drop_late) {  // past tolerance or would push next past its slip allowance: drop and free lease
                 engine_.OnPresentDropped(p.present_id, FgDropReason::Late);
@@ -590,10 +593,10 @@ bool FgDxgiPresenter::PresentHead(HANDLE stop) {
         if (!latency_credit_) return true;
         const FgTicks now = FgInterruptNow();
         if (engine_.State() != FgPresenterState::Attached || !PlanHeadLocked(now, &head)) return true;
-        // R3B-8: keep timer_lead even when head.issue_at is clamped to earliest (last_issue_ + min_interval) so GPU
-        // copy recording runs ahead of the present time instead of adding permanent drift.
+        // Keep the wake lead even when the spacing floor controls so copy recording can start early.
         if (now + desc_.timer_lead < head.issue_at) return true;  // a new head with a later time: keep the credit
-        min_present_at = last_issue_ != 0 ? last_issue_ + desc_.min_interval : 0;
+        min_present_at = FgTearingEarliestIssue(last_present_start_, last_present_done_, desc_.min_interval,
+                                                desc_.refresh_period);
         const UINT bbi = swap_->GetCurrentBackBufferIndex();
         if (bbi >= back_buffers_.size() || !back_buffers_[bbi] || head.present.slot >= slots_.size() ||
             allocators_.empty()) {
@@ -649,12 +652,8 @@ bool FgDxgiPresenter::PresentHead(HANDLE stop) {
     }
     const bool tearing = desc_.pacing == FgDxgiPacing::Tearing;
     if (SUCCEEDED(hr) && tearing && min_present_at != 0) {
-        // Bounded yield (at most timer_lead) if GPU copy recording finished ahead of min_interval.
-        while (true) {
-            const FgTicks t = FgInterruptNow();
-            if (t >= min_present_at || min_present_at - t > desc_.timer_lead + 5000) break;
-            YieldProcessor();
-        }
+        // The lease is taken at most timer_lead before issue. Copy preparation can overlap that wait.
+        while (FgInterruptNow() < min_present_at) YieldProcessor();
     }
     FgTicks present_started = 0;
     if (SUCCEEDED(hr)) {
@@ -694,11 +693,8 @@ bool FgDxgiPresenter::PresentHead(HANDLE stop) {
     const FgTicks duration = present_done - present_started;
     info_.present_call_total += duration;
     if (duration > info_.present_call_max) info_.present_call_max = duration;
-    // The worker serializes calls. Time spent inside Present already uses part of the interval between issue starts.
-    // A real-only interval has a single real image at index 1 and keeps the original completion-based pacing.
-    const bool generating_interval = !head.present.real || head.present.index > 1;
-    last_issue_ = FgTearingPacingAnchor(present_started, present_done,
-                                      tearing && desc_.pace_generated_intervals_from_start && generating_interval);
+    last_present_start_ = present_started;
+    last_present_done_ = present_done;
     if (!tearing) {
         have_vblank_ = true;
         last_vblank_ = head.shown_at;
@@ -716,10 +712,10 @@ void FgDxgiPresenter::Run(HANDLE stop, HANDLE wake) {
             StepLocked(now);
             Planned head;
             if (engine_.State() == FgPresenterState::Attached && PlanHeadLocked(now, &head)) {
-                // R3B-8: head.issue_at is already >= earliest; keep timer_lead for the wake (never before last_issue_).
+                // head.issue_at already includes both spacing floors.
                 const FgTicks target_at = head.issue_at > desc_.timer_lead ? head.issue_at - desc_.timer_lead : 0;
                 const FgTicks wake_at =
-                    desc_.pacing == FgDxgiPacing::Tearing && last_issue_ > target_at ? last_issue_ : target_at;
+                    desc_.pacing == FgDxgiPacing::Tearing && last_present_done_ > target_at ? last_present_done_ : target_at;
                 const auto next_allocator = ring_ % allocators_.size();
                 if (copy_fence_->GetCompletedValue() < allocator_value_[next_allocator]) {
                     timer_.Cancel();

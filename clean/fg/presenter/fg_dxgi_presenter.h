@@ -50,7 +50,6 @@ struct FgDxgiPresenterDesc {
     FgTicks min_interval = 0;    // minimum display interval for tearing pacing
     FgTicks timer_lead = 0;       // wake this much before the present time
     FgTicks late_tolerance = 10000;  // a generated image later than this past its target is dropped
-    bool pace_generated_intervals_from_start = false;
     std::uint32_t max_generated = kFgMaxGenerated;  // 1..5
     std::uint32_t slot_count = 0;  // 0: max_generated + 3; below that is refused
     std::uint32_t max_pending_intervals = 2;  // intervals with generated images pending in the engine
@@ -160,7 +159,8 @@ private:
     bool latency_credit_ = false;        // a frame-latency count taken but not yet used by a Present
     bool presenting_ = false;            // true while the worker holds the engine's present lease
     bool device_lost_pending_ = false;
-    FgTicks last_issue_ = 0;
+    FgTicks last_present_start_ = 0;
+    FgTicks last_present_done_ = 0;
     bool have_vblank_ = false;
     FgTicks last_vblank_ = 0;
     FgTicks grid_updated_at_ = 0;

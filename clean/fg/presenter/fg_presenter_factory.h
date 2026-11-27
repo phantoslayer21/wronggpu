@@ -83,7 +83,6 @@ struct FgPresenterFactoryDesc {
     std::uint32_t max_pending_intervals = 2;
     FgTicks dxgi_timer_lead = 0;
     FgTicks dxgi_late_tolerance = 10000;
-    bool dxgi_pace_generated_intervals_from_start = false;
 };
 
 struct FgCreatedPresenter {
