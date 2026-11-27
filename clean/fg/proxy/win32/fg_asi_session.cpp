@@ -220,6 +220,7 @@ struct FgAsiSessionHost::Impl {
     // The waitable paces facade hand-offs. Admission bounds unconsumed game frames and reserves presenter space
     // until the real endpoint retires. Presenter callbacks take only the leaf admission lock.
     AdmissionMode admission_mode = AdmissionMode::Policy;
+    bool current_plan_consumed = false;
     mutable std::mutex credit_mu;
     std::condition_variable credit_cv;
     HANDLE latency_sem = nullptr;
@@ -432,15 +433,16 @@ struct FgAsiSessionHost::Impl {
         if (plan.generated_count > 0) {
             m.last_generating_count = plan.generated_count;
             if (plan.reanchored) ++m.generating_reanchors;
-        } else if (m.admission_mode != AdmissionMode::Present) {
-            // A real-only interval uses the original first-present boundary. A copy accepted into the GPU
-            // FIFO can still be waiting for all of the game's rendering, so it must not open the next admission.
+        }
+        if (m.admission_mode == AdmissionMode::Consumed) {
+            // A real-only plan returns admission at first present even if the request was higher.
             std::lock_guard<std::mutex> lock(m.credit_mu);
             const auto it = m.FindPresenterIntervalLocked(plan.real_frame_id);
-            if (it != m.presenter_intervals.end() && it->consumed) {
+            if (it != m.presenter_intervals.end() && it->consumed && plan.generated_count == 0) {
                 it->consumed = false;
                 m.credit_cv.notify_all();
             }
+            m.current_plan_consumed = it != m.presenter_intervals.end() && it->consumed;
         }
         IntervalTrace tr = m.next_trace;
         tr.frame_token = plan.real_frame_id;
@@ -465,7 +467,7 @@ struct FgAsiSessionHost::Impl {
         Impl* m = static_cast<Impl*>(ctx);
         if (!m || interval_id == 0) return;
         if (kind == wgfg::kFgTraceRealConsumed) {
-            if (m->admission_mode != AdmissionMode::Present) m->EndAdmissionAt(frame_id, true);
+            if (m->admission_mode == AdmissionMode::Consumed) m->EndAdmissionAt(frame_id, true);
             return;
         }
         if (kind == 1 || kind == 3 || kind == 4 || kind == 7) m->EndAdmissionAt(frame_id, false);
@@ -620,9 +622,9 @@ struct FgAsiSessionHost::Impl {
         CancelAdmissionLocked(frame_id);
     }
 
-    bool ShouldConsume(bool fg_enabled, uint32_t requested) const {
-        return fg_enabled && (admission_mode == AdmissionMode::Consumed ||
-                              (admission_mode == AdmissionMode::Policy && requested >= 3));
+    bool ShouldConsume(bool fg_enabled) const {
+        // Policy stays on first-present until active-count transitions can be qualified.
+        return fg_enabled && admission_mode == AdmissionMode::Consumed;
     }
 
     bool PresenterAdmissionFullLocked(bool consume) const {
@@ -644,9 +646,9 @@ struct FgAsiSessionHost::Impl {
         return false;
     }
 
-    bool BeginAdmission(uint64_t frame_id, bool fg_enabled, uint32_t requested) {
+    bool BeginAdmission(uint64_t frame_id, bool fg_enabled) {
         std::lock_guard<std::mutex> lock(credit_mu);
-        const bool consume = ShouldConsume(fg_enabled, requested);
+        const bool consume = ShouldConsume(fg_enabled);
         if (pending_admissions.size() >= latency_limit || PresenterAdmissionFullLocked(consume))
             return false;
         pending_admissions.push_back(frame_id);
@@ -1657,8 +1659,13 @@ FgAsiSessionHost::FgAsiSessionHost(const FgAsiSessionConfig& cfg, std::unique_pt
     impl_->presenter_intervals.reserve(kPresenterSlots + 1);
     char admission[16] = {};
     const DWORD mode_length = GetEnvironmentVariableA("WG_FG_ADMISSION", admission, sizeof(admission));
-    if (mode_length == 7 && std::strcmp(admission, "present") == 0) impl_->admission_mode = AdmissionMode::Present;
-    if (mode_length == 8 && std::strcmp(admission, "consumed") == 0) impl_->admission_mode = AdmissionMode::Consumed;
+    if (mode_length == 7 && std::strcmp(admission, "present") == 0) {
+        impl_->admission_mode = AdmissionMode::Present;
+    } else if (mode_length == 8 && std::strcmp(admission, "consumed") == 0) {
+        impl_->admission_mode = AdmissionMode::Consumed;
+    } else if (mode_length != 0 && (mode_length != 6 || std::strcmp(admission, "policy") != 0)) {
+        impl_->Log("fg host: unknown WG_FG_ADMISSION value, using policy");
+    }
     impl_->weights = std::move(weights);
     impl_->InitTraceCsv();
     impl_->StartTraceWorker();
@@ -1933,13 +1940,13 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
     Impl& m = *self->impl_;
     std::lock_guard<std::recursive_mutex> lock(m.mu);
     m.handled = false;
+    m.current_plan_consumed = false;
     bool admitted = false;
     WgFgPresentResult local = {};
     if (!out) out = &local;
     try {
         const bool fg_enabled = core->state().enabled != 0;
-        const uint32_t requested = core->requested_count();
-        const bool consume = m.ShouldConsume(fg_enabled, requested);
+        const bool consume = m.ShouldConsume(fg_enabled);
         m.TryCreateSession(core);
         // A3: sample game present arrival AFTER one-time session creation (so cold pipeline compilation never poisons
         // frame 1's target/slip) and BEFORE any host credit/slot wait so throttling never perturbs the cadence estimate.
@@ -1967,7 +1974,7 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
             m.next_trace.t_arrival = t_arrival;
             m.next_trace.t_after_wait = t_after_wait;
             m.next_trace.free_slots = PresenterFreeSlots(m.session->Presenter());
-            admitted = m.BeginAdmission(desc->frame_token, fg_enabled, requested);
+            admitted = m.BeginAdmission(desc->frame_token, fg_enabled);
             if (!admitted) {
                 m.RecordSessionFailure();
                 m.DestroySession("admission closed");
@@ -2072,7 +2079,7 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
                                             sr.error == wgfg::FgSessionError::None;
                 m.st_phase.store(active_session ? kFgPhaseGenerating
                                                 : (m.stats.gave_up ? kFgPhaseStopped : kFgPhaseRealOnly));
-                m.ControlLateness(consume && sr.scheduled > 0);
+                m.ControlLateness(m.current_plan_consumed);
             } else if (out->status == WG_FG_PRESENT_REAL_ONLY || out->status == WG_FG_PRESENT_REFUSED) {
                 m.st_reason.store(out->reason);
                 m.st_real_only.store(out->real_only);
@@ -2093,7 +2100,7 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
             m.handled = took && sr.frame_token == desc->frame_token &&
                         (sr.error == wgfg::FgSessionError::None || sr.error == wgfg::FgSessionError::FrameRefused);
             if (m.handled) {
-                if (consume && sr.scheduled > 0) ++m.stats.admission_consumed_intervals;
+                if (m.current_plan_consumed) ++m.stats.admission_consumed_intervals;
                 else ++m.stats.admission_present_intervals;
                 const UINT index = m.facade_index;
                 m.SignalFacadeReadFence(index);

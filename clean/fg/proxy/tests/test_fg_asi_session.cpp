@@ -1880,6 +1880,7 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::strin
         uint64_t post_drop = 0;
         uint64_t real_sub = 0;
         uint64_t latency_cap_ro = 0;
+        uint64_t generating_reanchors = 0;
         double final_budget_ms = 0.0;
         bool saw_stats = false;
 
@@ -1919,6 +1920,7 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::strin
                 std::printf("      log: %s\n", line);
             } else if (std::strstr(line, "fg host: real-only intervals:")) {
                 ParseU64(line, "latency-cap=", &self->latency_cap_ro);
+                ParseU64(line, "generating_reanchors=", &self->generating_reanchors);
                 std::printf("      log: %s\n", line);
             } else if (std::strstr(line, "first-image budget") || std::strstr(line, "generated count cap") ||
                        std::strstr(line, "trace summary")) {
@@ -2115,6 +2117,11 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::strin
         uint32_t queue_peak = 0;
         uint64_t admission_present = 0, admission_consumed = 0;
         uint32_t steady_max_scheduled = 0;
+        uint64_t generating_reanchors = 0;
+        uint32_t low_count_consumed = 0;
+        uint32_t low_count_frames = 0;
+        uint32_t recovered_high = 0;
+        int64_t gap_p95_us = 0;
     };
 
     auto run_leg = [&](const char* label, bool fg_enable, uint32_t gen_n, int slow_frames, int64_t slow_us,
@@ -2186,7 +2193,15 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::strin
         std::chrono::steady_clock::time_point steady_t0{};
         int steady_count = 0;
         FgAsiSessionStats steady_stats;
+        uint64_t last_consumed_count = 0;
+        std::vector<int64_t> admission_gaps;
+        auto previous_present = std::chrono::steady_clock::now();
+        const bool switch_cadence = only == "admission-switch";
         for (int f = 0; f < total_frames; ++f) {
+            if (switch_cadence && (f == 80 || f == 180)) {
+                opt.generated_count = f == 80 ? 2u : 3u;
+                core.set_options(WG_FEAT_FRAME_GENERATION, 1, &opt, &opt);
+            }
             if (switch_counts && (f == 35 || f == 75)) {
                 opt.generated_count = f == 35 ? 3u : 2u;
                 core.set_options(WG_FEAT_FRAME_GENERATION, 1, &opt, &opt);
@@ -2257,6 +2272,19 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::strin
             r.abi_version = WG_FG_ADAPTER_ABI_VERSION;
             FgAsiSessionHost::Route(host.get(), &core, &d, &r);
             if (FAILED(chain->Present(0, 0))) ++out.present_errors;
+            if (switch_cadence) {
+                const auto present = std::chrono::steady_clock::now();
+                if (f >= 65)
+                    admission_gaps.push_back(std::chrono::duration_cast<std::chrono::microseconds>(
+                                                 present - previous_present).count());
+                previous_present = present;
+                const auto current = host->Stats().admission_consumed_intervals;
+                const auto scheduled = host->LiveStatus().scheduled_count;
+                if (f >= 100 && f < 180 && scheduled > 0 && scheduled < 3) ++out.low_count_frames;
+                if (scheduled < 3 && current > last_consumed_count) ++out.low_count_consumed;
+                if (f >= 200 && scheduled >= 3) ++out.recovered_high;
+                last_consumed_count = current;
+            }
             if (admission_only) CHECK(host->LiveStatus().in_flight_real <= 1);
             if (f == steady_from) {
                 steady_t0 = std::chrono::steady_clock::now();
@@ -2297,6 +2325,8 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::strin
         out.post_drop = cap.post_drop;
         out.real_sub = cap.real_sub;
         out.latency_cap_ro = cap.latency_cap_ro;
+        out.generating_reanchors = cap.generating_reanchors;
+        out.gap_p95_us = Percentile(std::move(admission_gaps), 0.95);
         out.final_budget_ms = cap.final_budget_ms;
         if (cap.sched > 0)
             out.late_drop_pct = 100.0 * static_cast<double>(cap.dropped_late) / static_cast<double>(cap.sched);
@@ -2317,6 +2347,21 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::strin
         return out;
     };
 
+    if (only == "admission-switch") {
+        const auto run = run_leg("active-3-to-2-to-3", true, 3u, 8, 25000, 272, 18500, 6500);
+        std::printf("    active count switch: low=%u wrongly_consumed=%u recovered=%u gap_p95=%lldus reanchors=%llu\n",
+                    run.low_count_frames, run.low_count_consumed, run.recovered_high,
+                    static_cast<long long>(run.gap_p95_us), static_cast<unsigned long long>(run.generating_reanchors));
+        CHECK(run.present_errors == 0 && run.session_failures == 0);
+        CHECK(run.low_count_frames >= 40);
+        CHECK(run.low_count_consumed == 0);
+        CHECK(run.recovered_high >= 40);
+        CHECK(run.admission_consumed == 0);
+        CHECK(run.gap_p95_us < 27000);
+        CHECK(run.generating_reanchors < 35);
+        return;
+    }
+
     if (only == "admission-policy") {
         char env_mode[16] = {};
         GetEnvironmentVariableA("WG_FG_ADMISSION", env_mode, sizeof(env_mode));
@@ -2327,7 +2372,7 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::strin
             CHECK(run.present_errors == 0 && run.session_failures == 0);
             CHECK(run.real_sub >= 105);
             if (requested > 0) CHECK(run.sched >= 75);
-            const bool expects_consumed = requested > 0 && !force_present && (force_consumed || requested >= 3);
+            const bool expects_consumed = requested > 0 && force_consumed;
             CHECK((run.queue_peak > 0) == expects_consumed);
             CHECK(run.queue_peak <= 2);
             CHECK(run.admission_consumed > 50 || !expects_consumed);
@@ -2338,8 +2383,8 @@ void TestSmokeGpuBoundPacing(Gpu& gpu, const std::string& dxil, const std::strin
         if (!force_present && !force_consumed) {
             const auto mixed = run_leg("2x-to-4x-to-3x", true, 1u, 0, 0, 112, 18500, 6500, true);
             CHECK(mixed.present_errors == 0 && mixed.session_failures == 0);
-            CHECK(mixed.admission_present >= 65 && mixed.admission_consumed >= 30);
-            CHECK(mixed.queue_peak == 2);
+            CHECK(mixed.admission_present >= 105 && mixed.admission_consumed == 0);
+            CHECK(mixed.queue_peak == 0);
             CHECK(mixed.admission_present + mixed.admission_consumed == mixed.real_sub);
         }
         return;
@@ -2541,7 +2586,7 @@ int main(int argc, char** argv) {
                 }
                 if (preset < 0 && (only.empty() || only == "smoke" || only == "admission" ||
                                    only == "real-only-admission" || only == "consumed-6x" ||
-                                   only == "admission-policy")) {
+                                   only == "admission-policy" || only == "admission-switch")) {
                     g_case = "gpu-smoke-pacing";
                     TestSmokeGpuBoundPacing(g, dxil, only);
                 }
