@@ -2541,6 +2541,15 @@ void TestHighCountPresentBudgetEasesInSmallSteps() {
     CHECK(FirstImageFastEaseStepCap(219000, false, 5) == 25000);
 }
 
+void TestBudgetNeedsTwoMissesToRaise() {
+    g_case = "pacing-single-miss";
+    const FirstImageProducerWindow single{30, 1};
+    CHECK(single.NeedsBudgetReview());
+    CHECK(!single.ShouldRaiseBudget());
+    CHECK((FirstImageProducerWindow{30, 2}.ShouldRaiseBudget()));
+    CHECK((!FirstImageProducerWindow{120, 2}.ShouldRaiseBudget()));
+}
+
 void TestMissFloorDecaysAfterCleanWindows() {
     g_case = "pacing-miss-floor-decay";
     FirstImageBudgetLimits limits;
@@ -2607,6 +2616,7 @@ int main(int argc, char** argv) {
     TestHighCountPresentBudgetEasesInSmallSteps();
     TestBudgetControllerUsesProducerMissesAndResetsItsBaseline();
     TestMissFloorDecaysAfterCleanWindows();
+    TestBudgetNeedsTwoMissesToRaise();
     std::printf("cpu: %d checks, %d failed\n", g_checks, g_failed);
     if (gpu) {
         g_case = "gpu-init";

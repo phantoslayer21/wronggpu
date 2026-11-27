@@ -1345,7 +1345,7 @@ struct FgAsiSessionHost::Impl {
 
         const uint64_t on_time = sched > missed ? sched - missed : 0;
         const bool producer_miss_window = producer_window.NeedsBudgetReview();
-        const bool need_more_budget = producer_miss_window && (d_origins.Empty() || d_p95 + 2500 > budget);
+        const bool need_more_budget = producer_window.ShouldRaiseBudget() && (d_origins.Empty() || d_p95 + 2500 > budget);
         if (need_more_budget) budget_limits.RecordMiss(budget);
         const wgfg::FgTicks b_cap = budget_limits.Cap(kBudgetBase, d_p95, producer_miss_window);
         wgfg::FgTicks next = budget;

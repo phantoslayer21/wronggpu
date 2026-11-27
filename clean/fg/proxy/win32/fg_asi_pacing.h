@@ -98,6 +98,7 @@ struct FirstImageProducerWindow {
     uint64_t missed;
 
     bool NeedsBudgetReview() const { return missed * 50 > scheduled; }
+    bool ShouldRaiseBudget() const { return missed >= 2 && NeedsBudgetReview(); }
     uint32_t ReducedCount(uint32_t last_generating_count) const {
         return missed * 20 > scheduled && last_generating_count > 1 ? last_generating_count - 1 : 0;
     }
