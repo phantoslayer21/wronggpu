@@ -121,6 +121,7 @@ bool LoadRecord(const wstring& path, Record& m) {
             else if (f[0] == L"model") m.model = f[1];
             else if (f[0] == L"model-m") m.modelM = f[1];
             else if (!m.legacy && f[0] == L"restorer-sha") m.restorerSha = f[1];
+            else if (!m.legacy && f[0] == L"install-pending") m.installPending = f[1] == L"1";
             else if (!m.legacy && f[0] == L"install-id") m.installId = f[1];
             else if (!m.legacy && f[0] == L"rrconfig-backup") m.rrconfig.backupSha = f[1];
             else if (!m.legacy) m.extra.push_back(line);
@@ -168,6 +169,9 @@ bool LoadRecord(const wstring& path, Record& m) {
                 e.published = {static_cast<DWORD>(_wcstoui64(item[1].c_str(), nullptr, 10)), _wcstoui64(item[2].c_str(), nullptr, 10)};
                 break;
             }
+    // Earlier prepared records used the restorer placeholder. Their rollback records may also hold publication IDs.
+    m.installPending = m.installPending || m.restorerSha == L"-" ||
+        std::any_of(m.e.begin(), m.e.end(), [](const Entry& e) { return e.published.index != 0; });
     // rc6 L1: the record of a game folder that was moved names the old folder; read from <dir>\wronggpu-setup\install.record
     // it is the record of dir (its entries are relative to it, its backup is next to it): rebased to dir
     if ((!m.exe.empty() && !GamePathAllowed(m.exe)) || (!m.game.empty() && !GamePathAllowed(m.game)) ||
@@ -184,6 +188,7 @@ void SaveRecord(const wstring& path, const Record& m, bool create, RunJournal* j
                 L"\r\nregkey\t" + m.regkey + L"\r\nmodel\t" + m.model + L"\r\n";
     if (!m.modelM.empty()) t += L"model-m\t" + m.modelM + L"\r\n";
     if (!m.restorerSha.empty()) t += L"restorer-sha\t" + m.restorerSha + L"\r\n";
+    if (m.installPending) t += L"install-pending\t1\r\n";
     if (!m.installId.empty()) t += L"install-id\t" + m.installId + L"\r\n";
     auto dash = [](const wstring& s) { return s.empty() ? wstring(L"-") : s; };
     if (!m.payloadVersion.empty())
@@ -282,6 +287,7 @@ HKEY UninstallHive() {
 #ifndef WRONGGPU_TESTING
     return g_uninstallHive ? g_uninstallHive : HKEY_CURRENT_USER;
 #else
+    if (g_uninstallHive) return g_uninstallHive;  // a unit test's private app hive
     if (DataOverride().empty()) return nullptr;
     std::lock_guard<std::mutex> guard(g_privateHiveLock);
     auto& hive = g_privateHive;
@@ -706,12 +712,12 @@ bool FileIdentity::Matches(const wstring& path) const {
     return Matches(file);
 }
 
-Holds WhatIsThere(Context& ctx, const wstring& dir, const Entry& e, const wstring& h) {
+Holds WhatIsThere(Context& ctx, const wstring& dir, const Entry& e, const wstring& h, bool requirePublication) {
     if (h.empty()) return Holds::Missing;
     if (e.action == L"disable") return IEq(h, e.orig) ? Holds::Original : Holds::Other;
     if (e.action == L"rename") return IEq(h, e.inst) ? Holds::Original : Holds::Other;  // the game's own file, renamed aside
     if (e.action != L"copy") return Holds::Other;
-    if (!e.published.Matches(Target(dir, e.rel)))
+    if ((requirePublication && !e.published.index) || !e.published.Matches(Target(dir, e.rel)))
         return e.existed && IEq(h, e.orig) ? Holds::Original : Holds::Other;
     if (!e.inst.empty() && IEq(h, e.inst)) return Holds::Ours;
     if (e.existed && !e.orig.empty() && IEq(h, e.orig)) return Holds::Original;
@@ -883,7 +889,7 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
         const Fingerprint fp = e.action == L"copy" && !IsSlotName(e.rel) && !settingsFile ? IdentifyFile(t) : Fingerprint();
         wstring w;
         if (linked) w = L"Left in place (the file has another name, a hard link; writing through it would change that name too): " + e.rel;
-        else if (e.action == L"copy" && IsSlotName(e.rel)) w = L"The game replaced " + e.rel + L" (probably an update); its new file was kept.";
+        else if (e.action == L"copy" && IsSlotName(e.rel)) w = L"Another file is at " + e.rel + L". It was left in place.";
         else if (e.action == L"disable") w = e.rel + L" exists again with different content; it was left as it is.";
         else if (fp.tool == Tool::OptiScaler) w = L"Left in place: " + e.rel + L" is now another setup's OptiScaler (not the file WrongGPU installed).";
         else w = L"Left in place (changed since install): " + e.rel;
@@ -917,7 +923,7 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
             }
             if (expectedOpti && IEq(e.rel, L"OptiScaler.ini") && !IEq(*expectedOpti, p.now))
                 Fail(L"OptiScaler.ini changed before it could be replaced. Its current contents were kept.", EXIT_REFUSED);
-            const Holds holds = WhatIsThere(ctx, dir, e, p.now);
+            const Holds holds = WhatIsThere(ctx, dir, e, p.now, m.installPending);
             if (e.action == L"rename") {  // the renamed game file: handled with its slot below
                 if (Exists(t) && !Replaceable(t)) Fail(L"Cannot change " + e.rel + L": another program has it open (the game?). Close it and try again. Nothing was changed.", EXIT_REFUSED);
                 continue;
@@ -946,7 +952,7 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
             const wstring t = Target(dir, e.rel);
             if (Exists(t)) p.now = Sha256File(t);
             if (Exists(t) && p.now.empty()) { p.what = Do::Leave; p.keep = hasOriginal && Exists(p.source); continue; }  // unreadable: not touched
-            switch (WhatIsThere(ctx, dir, e, p.now)) {
+            switch (WhatIsThere(ctx, dir, e, p.now, true)) {
                 case Holds::Ours: p.what = hasOriginal ? Do::PutBack : Do::Remove; break;
                 case Holds::Missing: p.what = hasOriginal ? Do::PutBack : Do::Nothing; break;
                 case Holds::Original: p.what = Do::Nothing; break;
@@ -1000,8 +1006,8 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
                     if (original.IsOpen() && !e.inst.empty()) {
                         if (!IEq(Sha256File(slot), sha)) {
                             const wstring keptAt = KeptOriginal(dir, sl->name, t, sha, &original);
-                            warnings.push_back(kPartlyRestored + wstring(L"The game replaced ") + sl->name +
-                                               L" (probably an update); its new file was kept. The " + sl->name +
+                            warnings.push_back(kPartlyRestored + wstring(L"Another file is at ") + sl->name +
+                                               L". It was left in place. The " + sl->name +
                                                L" from before WrongGPU is kept in " + keptAt);
                         }
                         DWORD deleteError = 0;

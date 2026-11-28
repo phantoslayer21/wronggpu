@@ -101,4 +101,81 @@ void VerifyPublishedBinaryPin() {
     require(mapped && refused, "re-opening a published binary refuses a mapped image");
 }
 
+void VerifyAdoptionRecordLock() {
+    const wstring folder = TempFolder();
+    const wstring record = RecordPath(folder);
+    Record initial;
+    initial.game = folder;
+    initial.exe = Join(folder, L"Game.exe");
+    initial.version = L"before update";
+    EnsureDir(StateDir(folder));
+    SaveRecord(record, initial);
+    SaveProfile(ProfilePath(folder), DefaultProfile());
+
+    const HANDLE locked = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    const HANDLE adopted = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    require(locked && adopted, "adoption interleaving events created");
+    bool updateHeld = false, updateSaved = false;
+    std::thread update([&] {
+        wgstate::StateLock lock(folder);
+        updateHeld = lock.held();
+        SetEvent(locked);
+        if (!updateHeld) return;
+        WaitForSingleObject(adopted, 1200);
+        Record later = initial;
+        later.version = L"concurrent update";
+        later.extra.push_back(L"fixture-field\tpublished by update");
+        try {
+            SaveRecord(record, later);
+            updateSaved = true;
+        } catch (const SetupError&) {}
+    });
+    WaitForSingleObject(locked, 5000);
+    const string restorer = "fixture restorer";
+    Context ctx;
+    ctx.restorer = restorer.data();
+    ctx.restorerSize = restorer.size();
+    bool adoptedOK = false;
+    try { AdoptInstall(ctx, folder); adoptedOK = true; } catch (const SetupError&) {}
+    SetEvent(adopted);
+    update.join();
+    CloseHandle(adopted);
+    CloseHandle(locked);
+
+    Record actual;
+    const bool correct = LoadRecord(record, actual) && actual.version == L"concurrent update" &&
+        actual.restorerSha == Sha256Bytes(restorer.data(), restorer.size()) &&
+        actual.extra == std::vector<wstring>{L"fixture-field\tpublished by update"};
+    RemoveTree(folder);
+    require(updateHeld && updateSaved && adoptedOK && correct, "adoption waits for an update and saves its restorer hash on the updated record");
+}
+
+#ifdef WRONGGPU_TESTING
+void VerifyScopedUninstallSnapshot(const wstring& fixture) {
+    const wstring root = Join(fixture, L"scoped-uninstall");
+    EnsureDir(root);
+    wstring why;
+    require(SetDataOverride(root, why, true), "managed list race uses its own data root");
+    const wstring program = Join(root, L"portable.exe");
+    const wstring list = Join(root, L"managed-games.txt");
+    const wstring other = Join(root, L"player-list.txt");
+    WriteFileAtomic(program, "MZ", 2);
+    WriteFileAtomic(list, "; empty\n", 8);
+    WriteFileAtomic(other, "; preserve\n", 11);
+    bool swapped = false;
+    LauncherPaths paths;
+    paths.custom = true; paths.dataDir = root; paths.exe = program;
+    Context ctx;
+    Ui quiet{[](int, int, const wstring&) {}, [](const wstring&) {}};
+    const bool ok = SelfUninstall(ctx, paths, false, L"-", quiet, &why,
+        [&](const std::vector<OpRequest>&) {
+            swapped = DeleteFileW(list.c_str()) && CreateHardLinkW(list.c_str(), other.c_str(), nullptr);
+            return std::vector<OpResult>{};
+        });
+    string bytes;
+    require(swapped && ok && !IsFile(program) && ReadAll(other, bytes) && bytes == "; preserve\n" && IsFile(list),
+            "scoped uninstall uses its preflight snapshot if the list is swapped during the game operations");
+}
+#endif
+
 }  // namespace

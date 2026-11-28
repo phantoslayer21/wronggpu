@@ -333,7 +333,8 @@ LauncherUninstallLook LookBeforeLauncherUninstall(Context& ctx);
 // RR data, the notes and lists the games' uninstallers read) goes. Refused while a game has WrongGPU (it reads the model data
 // when it runs; its last uninstall removes the data once no launcher uses it), and while the launcher is installed for this
 // user (its own uninstall removes it). All or nothing: the folder is moved aside first, and a file in use there stops it with
-// nothing removed. Never throws. look: what it finds (there: the folder is there; anyGame: as LookBeforeLauncherUninstall;
+// nothing removed. The lookup can throw if an explicit data root has an unsafe managed-games list.
+// look: what it finds (there: the folder is there; anyGame: as LookBeforeLauncherUninstall;
 // installed: the installed launcher, or its settings, use the folder).
 struct SharedDataLook { bool there = false, anyGame = false, installed = false, modelData = false, rrData = false; };
 SharedDataLook LookAtSharedData(Context& ctx);

@@ -671,7 +671,7 @@ void HandOverToInstalled(HANDLE& one, const wstring& installedExe, const wchar_t
 }
 // Before and after a replace: the other launcher windows were asked to close; true while one is still open after `ms` (busy, or asking
 // about its unsaved changes). This window keeps painting meanwhile.
-bool LauncherWindowRuns(HWND hwnd, const wstring& program) {
+bool LauncherWindowRuns(HWND hwnd, const wstring& program, bool includeRenamed) {
     DWORD pid = 0;
     GetWindowThreadProcessId(hwnd, &pid);
     HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
@@ -680,24 +680,35 @@ bool LauncherWindowRuns(HWND hwnd, const wstring& program) {
     DWORD size = static_cast<DWORD>(std::size(exe));
     const bool got = QueryFullProcessImageNameW(process, 0, exe, &size) != 0;
     CloseHandle(process);
-    return got && OwnsLauncherRegistration(true, ResolvedPath(program), ResolvedPath(wstring(exe, size)));
+    if (!got) return false;
+    const wstring image = ResolvedPath(wstring(exe, size));
+    return OwnsLauncherRegistration(true, ResolvedPath(program), image) ||
+        (includeRenamed && OwnsLauncherRegistration(true, ResolvedPath(program + L".old"), image));
 }
 
-static std::vector<HWND> OtherLauncherWindows(const wstring& installedExe) {
-    std::vector<HWND> windows;
-    for (HWND w = nullptr; (w = FindWindowExW(nullptr, w, nullptr, nullptr)) != nullptr;) {
-        if (w == lui::v.hwnd) continue;
-        wchar_t name[256] = {};
-        if (!GetClassNameW(w, name, static_cast<int>(std::size(name)))) continue;
-        if (IEq(name, L"WrongGPULauncher") ||
-            (StartsWithI(name, L"WrongGPULauncher.") && LauncherWindowRuns(w, installedExe)))
-            windows.push_back(w);
-    }
-    return windows;
+static std::vector<HWND> OtherLauncherWindows(const wstring& installedExe, bool includeRenamed = false) {
+    struct Search {
+        const wstring& installedExe;
+        bool includeRenamed;
+        std::vector<HWND> windows;
+
+        static BOOL CALLBACK Visit(HWND window, LPARAM param) {
+            auto& search = *reinterpret_cast<Search*>(param);
+            if (window == lui::v.hwnd) return TRUE;
+            wchar_t name[256] = {};
+            if (!GetClassNameW(window, name, static_cast<int>(std::size(name)))) return TRUE;
+            if (IEq(name, L"WrongGPULauncher") ||
+                (StartsWithI(name, L"WrongGPULauncher.") && LauncherWindowRuns(window, search.installedExe, search.includeRenamed)))
+                search.windows.push_back(window);
+            return TRUE;
+        }
+    } search{installedExe, includeRenamed, {}};
+    EnumWindows(Search::Visit, reinterpret_cast<LPARAM>(&search));
+    return search.windows;
 }
 
-static bool WaitOtherWindowsClosed(const wstring& installedExe, DWORD ms) {
-    auto other = [&] { return !OtherLauncherWindows(installedExe).empty(); };
+static bool WaitOtherWindowsClosed(const wstring& installedExe, DWORD ms, bool includeRenamed = false) {
+    auto other = [&] { return !OtherLauncherWindows(installedExe, includeRenamed).empty(); };
     const ULONGLONG until = GetTickCount64() + ms;
     while (other() && GetTickCount64() < until) {
         MsgWaitForMultipleObjects(0, nullptr, FALSE, 50, QS_ALLINPUT);
@@ -757,8 +768,8 @@ bool AnswerReplaceOffer(HANDLE& one, const wstring& installedExe, const wstring&
         // a window of the older copy opened since (from Start, while this asked) closes too, as above
         bool otherOpen = false;
         if (replaced) {
-            for (HWND w : OtherLauncherWindows(installedExe)) PostMessageW(w, WM_CLOSE, 0, 0);
-            otherOpen = WaitOtherWindowsClosed(installedExe, 3000);
+            for (HWND w : OtherLauncherWindows(installedExe, true)) PostMessageW(w, WM_CLOSE, 0, 0);
+            otherOpen = WaitOtherWindowsClosed(installedExe, 3000, true);
         }
         const wstring then = otherOpen ? L"The WrongGPU window that was open is still busy or has unsaved changes. Close it, then open WrongGPU from Start."
                                        : L"WrongGPU opens now. Next time, open it from Start as before.";

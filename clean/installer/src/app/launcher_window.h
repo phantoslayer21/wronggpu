@@ -83,7 +83,7 @@ bool WaitForRead(const wstring& dir, const wstring& verb, int task, std::functio
 void InformDetails(const wstring& text, int icon, const wstring& details);
 void CollectLogsBeforeUninstall();
 bool FirstRunPortable();  // ui_words.cpp: the first run's "portable" choice (false: refused, a note said why)
-bool LauncherWindowRuns(HWND hwnd, const wstring& program);
+bool LauncherWindowRuns(HWND hwnd, const wstring& program, bool includeRenamed = false);
 void HandOverToInstalled(HANDLE& one, const wstring& installedExe, const wchar_t* why);  // ui_words.cpp: a newer download, its question answered
 bool AnswerReplaceOffer(HANDLE& one, const wstring& installedExe, const wstring& have, const LauncherStartDecision& start);  // ui_words.cpp: "Update WrongGPU to X?"; true: Not now, this copy runs (rc5)
 void RemoveDataAsked();  // ui_words.cpp: a portable copy's Settings > Remove data... (RemoveSharedData)

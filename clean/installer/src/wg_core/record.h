@@ -79,6 +79,7 @@ struct Record {
     wstring installId;  // this install's id (32 hex digits; kept by repair and update): WrongGPU's stamp on its state files names it
     std::vector<Entry> e;
     bool legacy = false;
+    bool installPending = false;  // the install plan or a recovery record, before successful publication
     int format = 1;                                   // 1: 0.5.x setup, 2: the launcher
     wstring payloadVersion, runtimeSha, frontEndSha, pluginSha, proxy, proxyReason;
     wstring rrPluginSha;                              // the payload line's sixth field (empty: no RR files, or a record before rc6)
@@ -164,7 +165,7 @@ bool HostedRecord(const Record& m);
 // version-resource check reads the held file by its path (the held file cannot change meanwhile).
 enum class Holds { Missing, Ours, Original, Other };
 // What the path of entry `e` holds now (h: its current SHA-256; empty when missing).
-Holds WhatIsThere(Context& ctx, const wstring& dir, const Entry& e, const wstring& h);
+Holds WhatIsThere(Context& ctx, const wstring& dir, const Entry& e, const wstring& h, bool requirePublication);
 // The warnings of files a restore could not put back or had to leave begin with this ("partly" in the result).
 extern const wchar_t* const kPartlyRestored;
 bool AnyPartly(const std::vector<wstring>& warnings);

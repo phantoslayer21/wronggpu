@@ -719,6 +719,26 @@ def round_three(t, opti, m):
                 direct == undo == 0 and read(slot) == replacement and any(read(p) == original for p in kept),
                 (direct, undo, kept, t.j, t.logtail()))
 
+        root, b, exe = fixture("Unpublished Direct Copy")
+        slot = os.path.join(b, "amd_fidelityfx_dx12.dll")
+        original = read(slot)
+        rc = t.raw([t.exe, "/S", "/FORCE", "/NOSCAN", "/EXPERIMENTAL", "/DIRECTFSR",
+                    "/DIR=" + root, "/LOG=" + t.log])
+        assert rc == 0, t.logtail()
+        coincident = read(slot)
+        record = os.path.join(b, "wronggpu-setup", "install.record")
+        saved = read(record)
+        assert any(slot_copy(line) for line in saved.splitlines()) and b"published\t" not in saved
+        write(record, saved + b"install-pending\t1\r\n")
+        source = os.path.join(t.work, "unpublished-slot.dll")
+        write(source, coincident)
+        os.replace(source, slot)
+        rc = t.run("uninstall", exe, "--noscan")
+        kept = glob.glob(os.path.join(b, "WrongGPU-originals", "*", "amd_fidelityfx_dx12.dll"))
+        t.check("recovery keeps a different file that matches a copy entry with no publication ID",
+                rc == 0 and read(slot) == coincident and any(read(p) == original for p in kept) and
+                "left in place" in str(t.j), (rc, kept, t.j, t.logtail()))
+
     _, b, exe = fixture("Round Three Adopt")
     assert t.run("install", exe, *args) == 0, t.j
     state = os.path.join(b, "wronggpu-setup")

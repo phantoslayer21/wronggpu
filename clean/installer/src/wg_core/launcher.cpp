@@ -1453,6 +1453,7 @@ void ApplyOptiTab(Context& ctx, const wstring& dir, const OpRequest& r, std::vec
 }
 
 std::vector<wstring> AdoptInstall(Context& ctx, const wstring& dir, bool* repair) {
+    const auto operation = GuardOperation(dir, nullptr);
     std::vector<wstring> notes;
     Record m;
     if (!LoadRecord(RecordPath(dir), m) || m.legacy) Fail(L"No WrongGPU installation record was found in " + dir + L".", EXIT_NOT_INSTALLED);
@@ -2323,6 +2324,19 @@ static void LeaveProgramDirectory(const wstring& dir) {
     }
 }
 
+static LONG CheckLauncherRegistrationRemoval(HKEY hive, const wstring& key) {
+    if (!hive) return ERROR_FILE_NOT_FOUND;
+    HKEY entry = nullptr;
+    const LONG opened = RegOpenKeyExW(hive, key.c_str(), 0, DELETE | KEY_QUERY_VALUE, &entry);
+    if (opened != ERROR_SUCCESS) return opened;
+    DWORD subkeys = 0;
+    const LONG queried = RegQueryInfoKeyW(entry, nullptr, nullptr, nullptr, &subkeys, nullptr, nullptr,
+                                         nullptr, nullptr, nullptr, nullptr, nullptr);
+    RegCloseKey(entry);
+    if (queried != ERROR_SUCCESS) return queried;
+    return subkeys ? ERROR_ACCESS_DENIED : ERROR_SUCCESS;
+}
+
 bool SelfUninstall(Context& ctx, const LauncherPaths& p, bool removeGames, const wstring& startMenu, Ui& ui, wstring* why, const GameOps& gameOps,
                    std::vector<wstring>* unreachable) {
     try {
@@ -2330,9 +2344,15 @@ bool SelfUninstall(Context& ctx, const LauncherPaths& p, bool removeGames, const
         const bool installed = LauncherInstalled(&installedExe);
         const bool ownsRegistration = OwnsLauncherRegistration(p.custom, ResolvedPath(p.exe), installed ? ResolvedPath(installedExe) : wstring());
         const wstring key = LauncherEntryKey();
-        const wstring lnk = ownsRegistration ? RegString(UninstallHive(), key.c_str(), L"StartMenuShortcut") : wstring();
-        const wstring madeAbove = ownsRegistration ? RegString(UninstallHive(), key.c_str(), kMadeFolder) : wstring();
-        const wstring registeredLocation = p.custom && ownsRegistration ? RegString(UninstallHive(), key.c_str(), L"InstallLocation") : wstring();
+        const HKEY hive = UninstallHive();
+        if (ownsRegistration) {
+            const LONG check = CheckLauncherRegistrationRemoval(hive, key);
+            if (check != ERROR_SUCCESS && check != ERROR_FILE_NOT_FOUND)
+                Fail(L"Could not remove the launcher from Apps & features: " + ErrText(check), EXIT_REFUSED);
+        }
+        const wstring lnk = ownsRegistration ? RegString(hive, key.c_str(), L"StartMenuShortcut") : wstring();
+        const wstring madeAbove = ownsRegistration ? RegString(hive, key.c_str(), kMadeFolder) : wstring();
+        const wstring registeredLocation = p.custom && ownsRegistration ? RegString(hive, key.c_str(), L"InstallLocation") : wstring();
         auto nameOf = [](const wstring& dir, const Record& m) { return m.exe.empty() ? dir : GameDisplayName(m.exe); };
         // 1. The games, before anything of the launcher changes. A game that cannot be done stops it there: the launcher
         //    stays installed with all its settings, the games done so far stay done, and trying again carries on.
@@ -2444,9 +2464,9 @@ bool SelfUninstall(Context& ctx, const LauncherPaths& p, bool removeGames, const
             }
             if (!retired.empty()) LogLine(ctx, L"retired launcher program at " + retired);
         }
-        if (ownsRegistration && (!p.custom || IEq(registeredLocation, RegString(UninstallHive(), key.c_str(), L"InstallLocation")))) {
-            const LONG removed = RegDeleteKeyW(UninstallHive(), key.c_str());
-            if (p.custom && removed != ERROR_SUCCESS && removed != ERROR_FILE_NOT_FOUND) {
+        if (ownsRegistration && hive && (!p.custom || IEq(registeredLocation, RegString(hive, key.c_str(), L"InstallLocation")))) {
+            const LONG removed = RegDeleteKeyW(hive, key.c_str());
+            if (removed != ERROR_SUCCESS && removed != ERROR_FILE_NOT_FOUND) {
                 wstring message = L"Could not remove the launcher from Apps & features: " + ErrText(removed);
                 if (!retired.empty() && !MoveFileExW(retired.c_str(), program.c_str(), MOVEFILE_WRITE_THROUGH))
                     message += L". The retired program is at " + retired;
@@ -2476,7 +2496,8 @@ bool SelfUninstall(Context& ctx, const LauncherPaths& p, bool removeGames, const
         // under it (it is noted in the shared folder while it is there with its marker)
         const bool portableUses = PortableLauncherUsesSharedData();
         if (portableUses) LogLine(ctx, L"launcher uninstall: the shared model data stays (a portable launcher uses it)");
-        const bool gamesLeft = (p.custom ? !ManagedGames().empty() : AnyGameHasWrongGPU()) || !offline.empty() || portableUses;
+        // Every game operation succeeded. Scoped cleanup uses the preflight list and the action just taken.
+        const bool gamesLeft = (p.custom ? !removeGames && !games.empty() : AnyGameHasWrongGPU()) || !offline.empty() || portableUses;
         const wstring trash = shared.empty() ? wstring() : shared + L".removed-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
         bool trashMade = false;
         wstring listLeftIn;  // the player's ignore list when it could not leave the trash (PutIgnoreListBack): kept there

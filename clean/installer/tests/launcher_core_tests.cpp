@@ -114,6 +114,7 @@ int main() {
         VerifyIniEncoding();
         VerifyLauncherScope();
         VerifyPublishedBinaryPin();
+        VerifyAdoptionRecordLock();
 
         // ---- 0.6.1: Collect logs in uninstall.exe (no converter data) never claims the map is invalid ----------------
         {
@@ -2967,6 +2968,9 @@ int main() {
             }
         }
 
+#ifdef WRONGGPU_TESTING
+        VerifyScopedUninstallSnapshot(dir);
+#endif
         RemoveTree(dir);
         std::printf("launcher-core: %d checks passed\n", checks);
         return 0;

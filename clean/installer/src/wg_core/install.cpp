@@ -1013,6 +1013,7 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
 
     const wstring state = StateDir(dir), rpath = RecordPath(dir);
     m.restorerSha = L"-";
+    m.installPending = true;
     JournalDirectory(journal, state);
     bool recorded = false;
     std::map<wstring, std::unique_ptr<PinnedFile>> pins;
@@ -1219,7 +1220,6 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
             if (error != ERROR_SUCCESS) Fail(L"Cannot create " + uninstaller + L": " + ErrText(error));
         }
         m.restorerSha = wantedRestorer;
-        SaveRecord(rpath, m);
         if (ctx.perGameEntry) RegisterUninstall(ctx, m, state, target.name);
         const wstring owned = Join(state, L"owned-files.json");
         if (IsFile(owned)) WriteOwnedFiles(dir, m);
@@ -1230,6 +1230,8 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
             if (published.published) JournalCreated(journal, owned, published.identity);
             if (error) Fail(L"Cannot create " + owned + L": " + ErrText(error));
         }
+        m.installPending = false;
+        SaveRecord(rpath, m);
         RestoreStep("installed");  // (tests: a failure after everything was written: the rollback takes back what this run made)
         ui.log(L"WrongGPU installed in " + dir + L" (" + m.status + L"); model data: " + ModelFile(ctx));
         ui.step(total, total, L"Done");
@@ -1240,6 +1242,7 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
         try {
             // An entry planned but never applied is not owned by this run, even if a new file has the same bytes.
             if (recorded) {
+                m.installPending = true;
                 std::map<wstring, FileIdentity> published;
                 for (const auto& file : journal.created)
                     if (!file.folder) published[Lower(FullPath(file.path))] = {file.volume, file.id};
