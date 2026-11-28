@@ -21,7 +21,7 @@
 //    entries against a budget (200000 entries / 100 ms by default). A scan over its budget patches nothing: the game
 //    keeps its genuine interface for every call.
 //  - FEATURE-SCOPED ROUTING. Each handler passes the game's call to the core, which answers only the FG feature and
-//    only while FG is taken; every other call (super resolution, ray reconstruction, the latency features, unknown
+//    only while FG is taken; every other feature (super resolution, ray reconstruction, unknown
 //    ids, and FG itself while not taken) reaches the genuine export with the game's own arguments and its result is
 //    returned unchanged. Forwarding calls the genuine export resolved by name, the same address the slot held, so a
 //    host's inline patch on the export stays in the chain.
@@ -215,6 +215,8 @@ struct FgRoute {
 // lives).
 using FgRouteRegisterFn = bool (*)(void* ctx, const FgRoute* routes, uint32_t count);
 
+class IFgLatencyRoute;
+
 struct FgAsiConfig {
     FgSettings settings;                // the player's per-game FG settings (fg_settings.h)
     FgImportBinding imports;            // the interface binding (export names, file version)
@@ -242,6 +244,7 @@ struct FgAsiConfig {
     void* core_ready_ctx = nullptr;
     FgTagRetainFn tag_retain = nullptr;  // F9: the session host's D3D12 tag copy (null in synthetic unit tests)
     void* tag_retain_ctx = nullptr;
+    IFgLatencyRoute* latency = nullptr;  // owned by the session host
 };
 
 // What the present bridge saw (the transport's swap-chain sink and present callback; the process's one transport).

@@ -104,11 +104,14 @@ it into a header in the build tree, so no interface name appears in the code.
 - **Present.** Each game present on a claimed chain hands the interval to the core first, with the buffer being presented
   as colour input, then the presenter (`FgAsiConfig::presenter`) presents; a retry after `DXGI_ERROR_WAS_STILL_DRAWING`
   submits nothing again.
-- **Everything else forwards.** Super resolution, ray reconstruction, NIS, the latency features and unknown ids keep the
+- **Everything else forwards.** Super resolution, ray reconstruction, NIS, and unknown ids keep the
   genuine path with the game's own arguments; feature 1000 is never evaluated by the game, and an FG evaluate is
   acknowledged without reaching the genuine feature while FG is taken.
+- **Latency.** Reflex and PC Latency calls forward by default. With the low-latency switch on, the Win32 transport
+  routes the documented sleep, options, state and marker calls to the session host while it generates frames.
+  [Low-latency design](../docs/low-latency.md)
 - **Not settled here.** A chain created before FG is taken stays a pass-through (it is claimed at creation only); the
-  per-frame match through the latency markers is not decoded (the present-interval clock assumes a frame's inputs arrive
+  per-frame resource match uses the present-interval clock (a frame's inputs arrive
   before its present); which optional inputs the game sends once 1000 reports supported needs a probe run.
 
 ## Rules the core enforces

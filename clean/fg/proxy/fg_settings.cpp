@@ -39,7 +39,8 @@ void Say(std::string* why, const char* text) {
 }  // namespace
 
 bool FgIsSettingsKey(const std::string& key) {
-    return key == kFgKeyEnable || key == kFgKeyPreset || key == kFgKeyMultiplier || key == kFgKeyPresenter;
+    return key == kFgKeyEnable || key == kFgKeyPreset || key == kFgKeyMultiplier || key == kFgKeyPresenter ||
+           key == kFgKeyLowLatency;
 }
 
 bool FgParseSetting(const std::string& key, const std::string& value, FgSettings* s, std::string* why) {
@@ -59,6 +60,14 @@ bool FgParseSetting(const std::string& key, const std::string& value, FgSettings
             Say(why, "fg takes off or on");
             return false;
         }
+        return true;
+    }
+    if (key == kFgKeyLowLatency) {
+        if (value != "off" && value != "on") {
+            Say(why, "fg_low_latency takes off or on");
+            return false;
+        }
+        s->low_latency = value == "on";
         return true;
     }
     if (key == kFgKeyPreset) {
@@ -91,10 +100,10 @@ bool FgParseSetting(const std::string& key, const std::string& value, FgSettings
 
 FgSettings FgSettingsFromKeyValues(const FgKeyValues& kv, std::vector<FgSettingsIssue>* issues) {
     FgSettings s;
-    bool seen[4] = {false, false, false, false};
-    const char* keys[4] = {kFgKeyEnable, kFgKeyPreset, kFgKeyMultiplier, kFgKeyPresenter};
+    constexpr const char* keys[] = {kFgKeyEnable, kFgKeyPreset, kFgKeyMultiplier, kFgKeyPresenter, kFgKeyLowLatency};
+    bool seen[sizeof(keys) / sizeof(*keys)] = {};
     for (const auto& p : kv) {
-        for (int k = 0; k < 4; ++k) {
+        for (size_t k = 0; k < sizeof(keys) / sizeof(*keys); ++k) {
             if (p.first != keys[k] || seen[k]) continue;
             seen[k] = true;  // a key's first line counts
             std::string why;
@@ -116,12 +125,22 @@ FgKeyValues FgSettingsToKeyValues(const FgSettings& s) {
     kv.emplace_back(kFgKeyPreset, FgPresetSpelling(s.preset));
     kv.emplace_back(kFgKeyMultiplier, SpellingOf(kMultipliers, s.multiplier));
     kv.emplace_back(kFgKeyPresenter, FgPresenterSpelling(s.presenter));
+    if (s.low_latency) kv.emplace_back(kFgKeyLowLatency, "on");
     return kv;
 }
 
 bool FgApplySettings(const FgSettings& s, FgKeyValues* kv) {
     if (!kv || !FgSettingsValid(s)) return false;
-    for (const auto& want : FgSettingsToKeyValues(s)) {
+    auto settings = FgSettingsToKeyValues(s);
+    if (!s.low_latency) {
+        for (const auto& have : *kv) {
+            if (have.first == kFgKeyLowLatency) {
+                settings.emplace_back(kFgKeyLowLatency, "off");
+                break;
+            }
+        }
+    }
+    for (const auto& want : settings) {
         bool replaced = false;
         for (auto& have : *kv)
             if (have.first == want.first) {

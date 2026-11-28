@@ -361,7 +361,7 @@ int DriveFeature(Rig& rig, uint32_t feature) {
 void TestSettingsDefaultsAndParse() {
     FgSettings d;
     CHECK(!d.enabled && d.preset == 0 && d.multiplier == kFgAutoMultiplier && d.presenter == FgPresenterChoice::Auto);
-    CHECK(FgSettingsValid(d));
+    CHECK(FgSettingsValid(d) && !d.low_latency);
     std::vector<FgSettingsIssue> issues;
     FgSettings e = FgSettingsFromKeyValues({}, &issues);
     CHECK(!e.enabled && e.preset == 0 && e.multiplier == kFgAutoMultiplier && e.presenter == FgPresenterChoice::Auto && issues.empty());
@@ -374,6 +374,14 @@ void TestSettingsDefaultsAndParse() {
     CHECK(s.presenter == FgPresenterChoice::DxgiTearing);
     s = FgSettingsFromKeyValues({{"fg_presenter", "dxgi_vsync"}, {"fg", "off"}}, nullptr);
     CHECK(s.presenter == FgPresenterChoice::DxgiVsync && !s.enabled);
+
+    s = FgSettingsFromKeyValues({{"fg_low_latency", "on"}, {"fg_low_latency", "off"}}, &issues);
+    CHECK(s.low_latency && issues.empty() && FgSettingsToKeyValues(s).back() == FgKeyValues::value_type("fg_low_latency", "on"));
+    auto opt_in = FgSettingsToKeyValues(s);
+    CHECK(FgApplySettings(d, &opt_in) && opt_in.back() == FgKeyValues::value_type("fg_low_latency", "off"));
+    s = FgSettingsFromKeyValues({{"fg_low_latency", "ON"}}, &issues);
+    CHECK(!s.low_latency && issues.size() == 1 && issues[0].key == "fg_low_latency");
+    issues.clear();
 
     // strict spellings: every one of these is refused, reported, and leaves the default
     const char* bad_fg[] = {"On", "ON", "1", "true", "yes", "", "of", "onn"};

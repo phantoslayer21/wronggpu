@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "../win32/fg_asi_transport.h"
+#include "../win32/fg_latency_route.h"
 #include "../win32/fg_swapchain_hook.h"
 #include "../../../wgshared/include/wg_host_menu_abi.h"
 #include "fg_mock_interposer.h"
@@ -1043,6 +1044,136 @@ struct FakeRouteHost {
         return nullptr;
     }
 };
+
+class FakeLatencyRoute final : public IFgLatencyRoute {
+public:
+    bool active = true;
+    unsigned sleeps = 0, markers = 0;
+    uint32_t frame = 0;
+    wgfg::FgLatencyMarker marker = wgfg::FgLatencyMarker::Other;
+
+    bool LatencyActive() override { return active; }
+    bool LatencySleep(FgProxy&, uint32_t index, bool allow_local) override {
+        if (!allow_local) return false;
+        ++sleeps;
+        frame = index;
+        return true;
+    }
+    void LatencyOptions(bool, uint32_t) override {}
+    void LatencyMarker(uint32_t index, wgfg::FgLatencyMarker value) override {
+        ++markers;
+        frame = index;
+        marker = value;
+    }
+    void LatencyPresent(uint64_t, std::optional<uint32_t>) override {}
+};
+
+const WgFrameToken* g_latency_token = nullptr;
+const WgHeader* g_latency_data = nullptr;
+uint32_t g_latency_marker = 0;
+
+WgResultCode NextLatencySleep(const WgFrameToken* token) {
+    g_latency_token = token;
+    return 43;
+}
+
+WgResultCode NextLatencyMarker(uint32_t marker, const WgFrameToken* token) {
+    g_latency_token = token;
+    g_latency_marker = marker;
+    return 44;
+}
+
+WgResultCode NextLatencyData(WgHeader* data) {
+    g_latency_data = data;
+    return 45;
+}
+
+WgResultCode NextLatencyFunction(uint32_t feature, const char* name, void** out) {
+    if (feature == kFeatLatency && std::strcmp(name, "slReflexSleep") == 0) {
+        *out = reinterpret_cast<void*>(&NextLatencySleep);
+    } else if (feature == kFeatPcLatency && std::strcmp(name, "slPCLSetMarker") == 0) {
+        *out = reinterpret_cast<void*>(&NextLatencyMarker);
+    } else if (feature == kFeatPcLatency && std::strcmp(name, "slPCLGetState") == 0) {
+        *out = reinterpret_cast<void*>(&NextLatencyData);
+    } else {
+        return WG_E_FEATURE_MISSING;
+    }
+    return WG_OK;
+}
+
+uint32_t MockLatencyIndex(const WgFrameToken*) { return 19; }
+
+void TestLatencyRoutes() {
+    const WgFrameTokenIndexFn index = &MockLatencyIndex;
+    WgFrameToken token{&index, {}};
+    for (bool opt_in : {false, true}) {
+        MockCodec codec;
+        FgPresentOwners owners;
+        FakeLatencyRoute latency;
+        FgAsiTransport transport;
+        FgAsiConfig config = MakeConfig(&codec, &owners, true);
+        config.settings.low_latency = opt_in;
+        config.latency = &latency;
+        FakeRouteHost host;
+        CHECK(transport.install_routes(config, GetModuleHandleA(kLeaf), 3, 1,
+                                       &FakeRouteHost::Register, &host) == kFgInstalled);
+        for (const auto& route : host.routes) {
+            if (std::strcmp(route.export_name, kRoleNames[kFgRoleGetFunction]) == 0)
+                *route.next = reinterpret_cast<void*>(&NextLatencyFunction);
+        }
+        const auto lookup = host.handler<FgGetFunctionFn>(kFgRoleGetFunction);
+        CHECK(lookup);
+        if (!lookup) continue;
+        void* sleep = nullptr;
+        void* marker = nullptr;
+        void* state = nullptr;
+        CHECK(lookup(kFeatLatency, "slReflexSleep", &sleep) == WG_OK);
+        CHECK(lookup(kFeatPcLatency, "slPCLSetMarker", &marker) == WG_OK);
+        CHECK(lookup(kFeatPcLatency, "slPCLGetState", &state) == WG_OK);
+        if (!sleep || !marker || !state) continue;
+        const auto call_sleep = reinterpret_cast<decltype(&NextLatencySleep)>(sleep);
+        const auto call_marker = reinterpret_cast<decltype(&NextLatencyMarker)>(marker);
+        const auto call_state = reinterpret_cast<decltype(&NextLatencyData)>(state);
+        struct {
+            WgHeader header;
+            uint32_t stats_message;
+        } pcl{{nullptr, {{0x9b, 0x2f, 0xa3, 0xcf, 0x3c, 0x02, 0x0e, 0x42,
+                         0x90, 0x56, 0x68, 0x32, 0xb7, 0x4f, 0x89, 0xb5}}, 1}, 90};
+        g_latency_token = nullptr;
+        g_latency_data = nullptr;
+        CHECK(call_sleep(&token) == 43 && g_latency_token == &token && latency.sleeps == 0);
+        CHECK(call_marker(3, &token) == 44 && g_latency_token == &token && g_latency_marker == 3);
+        CHECK(call_state(&pcl.header) == 45 && g_latency_data == &pcl.header && pcl.stats_message == 90);
+        CHECK((sleep == reinterpret_cast<void*>(&NextLatencySleep)) == !opt_in);
+
+        MakeTaken(transport.core());
+        WgFgOptions options{};
+        options.struct_size = sizeof(options);
+        options.abi_version = WG_FG_ADAPTER_ABI_VERSION;
+        options.enable = 1;
+        options.generated_count = 1;
+        options.preset = WG_FG_PRESET_NOT_SET;
+        CHECK(transport.core()->set_options(kFeatFg, 0, &options, nullptr) == WG_OK);
+        if (opt_in) {
+            g_latency_token = nullptr;
+            g_latency_data = nullptr;
+            CHECK(call_sleep(&token) == WG_OK && latency.sleeps == 1 && latency.frame == 19 && !g_latency_token);
+            CHECK(call_marker(4, &token) == WG_OK && latency.markers == 2 && !g_latency_token);
+            CHECK(latency.marker == wgfg::FgLatencyMarker::PresentStart);
+            CHECK(call_state(&pcl.header) == WG_OK && pcl.stats_message == 0 && !g_latency_data);
+            transport.core()->enable_generation(false);
+            CHECK(call_sleep(&token) == 43 && latency.sleeps == 1 && g_latency_token == &token);
+            CHECK(call_marker(3, &token) == 44 && g_latency_marker == 3);
+            CHECK(call_state(&pcl.header) == 45 && g_latency_data == &pcl.header);
+        } else {
+            CHECK(call_sleep(&token) == 43 && latency.sleeps == 0 && g_latency_token == &token);
+            CHECK(call_marker(3, &token) == 44 && latency.markers == 0 && g_latency_marker == 3);
+            CHECK(call_state(&pcl.header) == 45 && g_latency_data == &pcl.header && pcl.stats_message == 90);
+        }
+        transport.restore();
+        CHECK(call_sleep(&token) == 43 && g_latency_token == &token);
+    }
+}
 
 bool VersionThree_Four(HMODULE, uint32_t* major, uint32_t* minor) {
     *major = 3;
@@ -2229,6 +2360,7 @@ int main(int argc, char** argv) {
         TestLazyCoreReady(game);
         TestIatChaining(game);
         TestHostRoutes(game);
+        TestLatencyRoutes();
         TestThrowingCodecAndNulls(game);
         TestZeroPatchInstall(game, delay);
     }
