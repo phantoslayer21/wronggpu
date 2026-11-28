@@ -10,6 +10,43 @@ namespace {
 string LowerA(string s) { for (auto& c : s) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a'); return s; }
 bool IEqA(const string& a, const string& b) { return LowerA(a) == LowerA(b); }
 bool Space(char c) { return c == ' ' || c == '\t'; }
+constexpr unsigned kUtf16LE = 1, kUtf16BE = 2;
+string Decode(const string& bytes, unsigned encoding) {
+    if (!encoding) return bytes;
+    if (bytes.size() % 2) Fail(L"OptiScaler.ini has incomplete UTF-16 data.");
+    wstring units;
+    for (size_t i = 0; i < bytes.size(); i += 2) {
+        const size_t low = i + (encoding == kUtf16BE ? 1 : 0), high = i + (encoding == kUtf16LE ? 1 : 0);
+        units.push_back(static_cast<unsigned char>(bytes[low]) | (static_cast<unsigned char>(bytes[high]) << 8));
+    }
+    return ToUtf8(units);
+}
+string Encode(const string& text, unsigned encoding) {
+    if (!encoding) return text;
+    string bytes;
+    for (wchar_t c : FromUtf8(text)) {
+        const char low = static_cast<char>(c & 255), high = static_cast<char>(c >> 8);
+        bytes.push_back(encoding == kUtf16LE ? low : high);
+        bytes.push_back(encoding == kUtf16LE ? high : low);
+    }
+    return bytes;
+}
+struct IniText {
+    unsigned encoding = 0;
+    size_t bom = 0;
+    string text;
+    explicit IniText(const string& bytes) {
+        if (bytes.compare(0, 3, "\xef\xbb\xbf") == 0) bom = 3;
+        else if (bytes.compare(0, 2, "\xff\xfe") == 0) { bom = 2; encoding = kUtf16LE; }
+        else if (bytes.compare(0, 2, "\xfe\xff") == 0) { bom = 2; encoding = kUtf16BE; }
+        text = Decode(bytes.substr(bom), encoding);
+    }
+    size_t Raw(size_t i) const { return bom + (encoding ? FromUtf8(text.substr(0, i)).size() * 2 : i); }
+};
+[[noreturn]] void Duplicate(const string& section, const string& key) {
+    Fail(L"OptiScaler.ini has more than one [" + FromUtf8(section) + L"] " + FromUtf8(key) +
+         L" entry. Remove the duplicate and try again.", EXIT_REFUSED);
+}
 // One physical line: [begin, end) without its '\n'; content end excludes a trailing '\r'.
 struct Line { size_t begin, end, contentEnd; };
 std::vector<Line> Lines(const string& t) {
@@ -44,6 +81,8 @@ template <typename F> void ForEachKey(const string& t, F f) {
         s.found = true; s.lineBegin = l.begin; s.lineEnd = l.end;
         size_t vb = eq + 1, ve = e;
         while (vb < ve && Space(t[vb])) ++vb;
+        for (size_t i = vb; i < ve; ++i)
+            if ((t[i] == ';' || t[i] == '#') && i > eq + 1 && Space(t[i - 1])) { ve = i; break; }
         while (ve > vb && Space(t[ve - 1])) --ve;
         s.valueBegin = vb; s.valueEnd = ve;
         if (!f(section, t.substr(a, ke - a), s)) return;
@@ -52,26 +91,73 @@ template <typename F> void ForEachKey(const string& t, F f) {
 }  // namespace
 
 IniSpan IniFind(const string& text, const string& section, const string& key) {
+    const IniText decoded(text);
     IniSpan r;
-    ForEachKey(text, [&](const string& sec, const string& k, const IniSpan& s) {
-        if (IEqA(sec, section) && IEqA(k, key)) { r = s; return false; }
+    ForEachKey(decoded.text, [&](const string& sec, const string& k, const IniSpan& s) {
+        if (!IEqA(sec, section) || !IEqA(k, key)) return true;
+        if (r.found) Duplicate(section, key);
+        r = s;
         return true;
     });
+    if (r.found) {
+        r.encoding = decoded.encoding;
+        r.lineBegin = decoded.Raw(r.lineBegin);
+        r.lineEnd = decoded.Raw(std::min(r.lineEnd + 1, decoded.text.size()));
+        r.valueBegin = decoded.Raw(r.valueBegin);
+        r.valueEnd = decoded.Raw(r.valueEnd);
+    }
     return r;
 }
-string IniValueAt(const string& text, const IniSpan& s) { return s.found ? text.substr(s.valueBegin, s.valueEnd - s.valueBegin) : string(); }
+string IniValueAt(const string& text, const IniSpan& s) {
+    return s.found ? Decode(text.substr(s.valueBegin, s.valueEnd - s.valueBegin), s.encoding) : string();
+}
 string IniReplaceValue(const string& text, const IniSpan& s, const string& value) {
     if (!s.found) return text;
-    return text.substr(0, s.valueBegin) + value + text.substr(s.valueEnd);
+    return text.substr(0, s.valueBegin) + Encode(value, s.encoding) + text.substr(s.valueEnd);
 }
 std::vector<IniEntry> IniEntries(const string& text) {
     std::vector<IniEntry> v;
     std::set<string> seen;
-    ForEachKey(text, [&](const string& sec, const string& k, const IniSpan& s) {
-        if (seen.insert(LowerA(sec) + "\n" + LowerA(k)).second) v.push_back({sec, k, IniValueAt(text, s)});
+    const IniText decoded(text);
+    ForEachKey(decoded.text, [&](const string& sec, const string& k, const IniSpan& s) {
+        if (!seen.insert(LowerA(sec) + "\n" + LowerA(k)).second) Duplicate(sec, k);
+        v.push_back({sec, k, IniValueAt(decoded.text, s)});
         return true;
     });
     return v;
+}
+
+bool IniHasKey(const string& text, const string& section, const string& key, string* value) {
+    const IniSpan span = IniFind(text, section, key);
+    if (value && span.found) *value = IniValueAt(text, span);
+    return span.found;
+}
+
+string IniSet(const string& text, const string& section, const string& key, const string& value) {
+    const IniSpan span = IniFind(text, section, key);
+    if (span.found) return IniReplaceValue(text, span, value);
+    const IniText decoded(text);
+    const string& body = decoded.text;
+    const string eol = body.empty() || body.find("\r\n") != string::npos ? "\r\n" : "\n";
+    const string line = key + "=" + value;
+    const string header = "[" + section + "]";
+    size_t insert = body.size();
+    bool in = false;
+    for (const auto& ln : Lines(body)) {
+        size_t first = ln.begin;
+        while (first < ln.contentEnd && Space(body[first])) ++first;
+        if (first == ln.contentEnd || body[first] != '[') continue;
+        if (in) { insert = ln.begin; break; }
+        const size_t close = body.find(']', first + 1);
+        in = close < ln.contentEnd && IEqA(body.substr(first, close - first + 1), header);
+    }
+    string addition;
+    if (insert > 0 && body[insert - 1] != '\n') addition += eol;
+    if (!in) addition += (body.empty() ? string() : eol) + header + eol;
+    addition += line;
+    if (insert < body.size() || !in || (!body.empty() && body.back() == '\n')) addition += eol;
+    const size_t at = decoded.Raw(insert);
+    return text.substr(0, at) + Encode(addition, decoded.encoding) + text.substr(at);
 }
 
 // ---- the keys -------------------------------------------------------------------------------------------------------------
@@ -242,7 +328,7 @@ string RevertJournal(const string& text, const std::vector<IniKeyChange>& journa
         if (!s.found) { if (notes) notes->push_back(L"[" + FromUtf8(c.section) + L"] " + FromUtf8(c.key) + L" is not in the file any more"); continue; }
         if (notes && IniValueAt(t, s) != c.ours)
             notes->push_back(L"[" + FromUtf8(c.section) + L"] " + FromUtf8(c.key) + L" had been changed outside the launcher (" + FromUtf8(IniValueAt(t, s)) + L")");
-        if (c.absent) t = t.substr(0, s.lineBegin) + (s.lineEnd < t.size() ? t.substr(s.lineEnd + 1) : string());  // the line WrongGPU added
+        if (c.absent) t = t.substr(0, s.lineBegin) + t.substr(s.lineEnd);  // the line WrongGPU added
         else t = IniReplaceValue(t, s, c.original);
     }
     return t;
@@ -265,6 +351,7 @@ string ReplayJournal(const string& fresh, const std::vector<IniKeyChange>& old, 
         const IniSpan s = IniFind(t, c.section, c.key);
         if (!s.found) { if (notes) notes->push_back(L"OptiScaler.ini: [" + FromUtf8(c.section) + L"] " + FromUtf8(c.key) + L" is not in this OptiScaler build; your value was not carried over"); continue; }
         if (IniValueAt(t, s) != c.ours) t = IniReplaceValue(t, s, c.ours);
+        else if ((c.absent || c.original != c.ours) && !FindChange(journal, file, c.section, c.key)) journal.push_back(c);
     }
     JournalChanges(journal, file, fresh, t);
     return t;

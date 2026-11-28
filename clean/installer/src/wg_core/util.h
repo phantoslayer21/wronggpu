@@ -92,7 +92,7 @@ public:
     bool ReadBytes(string& out);  // all of the bytes through the handle (false: cannot be read)
     // Copies the bytes through the handle into a new file dst (created only where nothing is, as Create); *sha: the SHA-256 of
     // the bytes copied. false: err holds why (a partly written dst is removed).
-    bool CopyOut(const wstring& dst, wstring* sha, DWORD* err = nullptr);
+    bool CopyOut(const wstring& dst, wstring* sha, DWORD* err = nullptr, PinnedFile* created = nullptr);
     // Sets or clears the read-only attribute through the handle (the other attributes stay); what Open cleared for a write is
     // then not put back on Close.
     bool SetReadOnly(bool on, DWORD* err = nullptr);
@@ -106,6 +106,10 @@ public:
     // older FileDispositionInfo where that is not supported) and closes it. The name is free when this returns true.
     bool Delete(DWORD* err = nullptr);
     bool RenameNew(const wstring& path, DWORD* err = nullptr);
+    bool ReplaceWith(PinnedFile& stage, const wstring& path, DWORD* err = nullptr);
+    bool WriteChunk(const void* data, DWORD size, DWORD* err = nullptr);
+    // Publish complete replacement bytes while this handle still pins the old file.
+    bool ReplaceBytes(const wstring& path, const void* data, size_t size, DWORD* err = nullptr, bool failWrite = false);
     HANDLE Release();  // transfers the pin to the operation's binary guard
     // Replaces the bytes through the handle (forWrite) with src's, which are hashed first and must be `srcSha` (nothing is
     // touched otherwise); the attributes and times of src are put on the file. false: err holds why (ERROR_FILE_CORRUPT when
@@ -124,7 +128,7 @@ public:
     bool ReadOnlyLost() const { return readOnlyLost_; }
 
 private:
-    bool CopyFrom(HANDLE src, const wstring& srcSha, DWORD* err);
+    bool RenameReplace(const wstring& path, DWORD* err);    bool CopyFrom(HANDLE src, const wstring& srcSha, DWORD* err);
     HANDLE h_ = INVALID_HANDLE_VALUE;
     DWORD restoreAttrs_ = 0;
     bool readOnlyLost_ = false;  // the attributes to put back on Close (a read-only file that Open made writable); 0: none
@@ -159,6 +163,8 @@ std::vector<wstring> FindFilesNamed(const wstring& root, const wchar_t* name, si
 //   leaves a line, so the guard can tell a run that logged nothing). LibraryAccessCount counts the questions (every build).
 // - TestLibraries(folder): such a test build (WRONGGPU_TEST_LIBRARIES set, its value in folder); false in other builds.
 // Component-wise containment; requirePlain additionally rejects links and hard links along the path.
+wstring ResolvedHandlePath(HANDLE file);
+wstring ResolvedPath(const wstring& path);
 bool PathWithin(const wstring& path, const wstring& root, bool requirePlain = false);
 bool LibraryAccess(const wstring& path);
 bool LibraryRegistryAccess(const wchar_t* what);

@@ -107,9 +107,10 @@ def run(t, exe, b, gpu_opt_in=False):
             rc == 1 and rp.get("result") == 3 and ("the helper ended with 7" in why or "the helper ended with 8" in why) and
             "prepare.log" in why and rp.get("ready") is False and not os.path.isfile(os.path.join(prep_dir, "prepared.txt")), (rc, rp))
     seen = read(envlog).decode("utf-8", "replace").splitlines() if os.path.isfile(envlog) else []
-    t.check("rr-prepare: the helper kept the suite's redirected LOCALAPPDATA, also when the caller's environment had "
+    scoped_local = os.path.join(t.data, "localappdata")
+    t.check("rr-prepare: the helper used the scoped LOCALAPPDATA, also when the caller's environment had "
             "WRONGGPU_TEST_REAL_DRIVER_CACHE=1 (stripped before any launcher call)",
-            stripped and seen == ["LOCALAPPDATA=" + t.env["LOCALAPPDATA"]], (stripped, seen, t.env["LOCALAPPDATA"]))
+            stripped and seen == ["LOCALAPPDATA=" + scoped_local], (stripped, seen, scoped_local))
     t.check("rr-prepare: the helper copy is gone, nothing new in the game's folder (the runtime log went to the data folder)",
             _helper_gone(os.path.join(prep_dir, "run")) and (read(glog) if os.path.exists(glog) else None) == glog_before and
             sorted(os.listdir(b)) == game_before, (os.listdir(prep_dir) if os.path.isdir(prep_dir) else None, os.listdir(b)))

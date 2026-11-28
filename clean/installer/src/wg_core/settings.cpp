@@ -7,7 +7,7 @@ namespace wg {
 
 // key=value in [section] of an INI text: the existing line replaced, else added at the end of the section (or a new
 // section at the end of the file).
-string IniSet(const string& text, const string& section, const string& key, const string& value) {
+string SetFrontEndKey(const string& text, const string& section, const string& key, const string& value) {
     const bool hasBom = text.size() >= 3 && static_cast<unsigned char>(text[0]) == 0xEF &&
                         static_cast<unsigned char>(text[1]) == 0xBB && static_cast<unsigned char>(text[2]) == 0xBF;
     const string bom = hasBom ? text.substr(0, 3) : string();
@@ -80,35 +80,6 @@ bool IniGetFrontEnd(const string& text, const string& key, string* value, string
     }
     return found;
 }
-// Whether [section] has `key` (section and key compared without case); *value: its last value.
-bool IniHasKey(const string& text, const string& section, const string& key, string* value) {
-    const wstring head = L"[" + Lower(FromUtf8(section)) + L"]", lkey = Lower(FromUtf8(key));
-    bool in = false, found = false;
-    for (size_t a = 0; a < text.size();) {
-        size_t e = text.find('\n', a);
-        if (e == string::npos) e = text.size();
-        wstring t = FromUtf8(text.substr(a, e - a));
-        a = e + 1;
-        while (!t.empty() && (t.back() == L'\r' || t.back() == L' ' || t.back() == L'\t')) t.pop_back();
-        size_t i = 0; while (i < t.size() && (t[i] == L' ' || t[i] == L'\t')) ++i;
-        t = t.substr(i);
-        if (t.empty() || t[0] == L';' || t[0] == L'#') continue;
-        if (t[0] == L'[') { in = Lower(t) == head; continue; }
-        if (!in) continue;
-        const size_t eq = t.find(L'=');
-        if (eq == wstring::npos) continue;
-        wstring k = t.substr(0, eq);
-        while (!k.empty() && (k.back() == L' ' || k.back() == L'\t')) k.pop_back();
-        if (Lower(k) != lkey) continue;
-        found = true;
-        if (value) {
-            wstring v = t.substr(eq + 1);
-            size_t s = 0; while (s < v.size() && (v[s] == L' ' || v[s] == L'\t')) ++s;
-            *value = ToUtf8(v.substr(s));
-        }
-    }
-    return found;
-}
 // Every line of `key` the front end would read (before any section, [wronggpu], [fsr]; key without case) removed.
 string IniRemoveFrontEnd(const string& text, const string& key) {
     string out, sec;
@@ -161,7 +132,7 @@ void MigrateSettings(Context& ctx, const wstring& dir, const wstring& oldVersion
     for (auto& s : kStaleDefaults) {
         string value, section;
         if (!VersionAtMost(oldVersion, s.upTo) || !IniGetFrontEnd(changed, s.key, &value, &section) || value != s.old) continue;
-        changed = IniSet(changed, section, s.key, s.now);
+        changed = SetFrontEndKey(changed, section, s.key, s.now);
         ui.log(L"wronggpu.ini: " + FromUtf8(s.key) + L" = " + FromUtf8(s.old) + L" was the default of WrongGPU " + oldVersion + L" (" + s.why +
                L"); set to " + FromUtf8(s.now) + L".");
     }

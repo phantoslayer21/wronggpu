@@ -39,16 +39,12 @@ static wstring Trimmed(wstring s) { while (!s.empty() && (s.back() == L'\\' || s
 #endif
 
 wstring PlayerDocumentsDir(Context& ctx) {
+#ifdef WRONGGPU_TESTING
     if (!DataOverride().empty()) {
-        if (!ctx.playerDocuments.empty() && PathWithin(ctx.playerDocuments, DataOverride(), true)) return ctx.playerDocuments;
-#ifdef WRONGGPU_TESTING
+        if (!ctx.playerDocuments.empty() && GamePathAllowed(ctx.playerDocuments)) return ctx.playerDocuments;
         const wstring fixture = EnvVar(L"WRONGGPU_TEST_DOCUMENTS");
-        return PathWithin(fixture, DataOverride(), true) ? fixture : wstring();
-#else
-        return Join(DataOverride(), L"Documents");
-#endif
+        return GamePathAllowed(fixture) ? fixture : wstring();
     }
-#ifdef WRONGGPU_TESTING
     // a test root only (the job's, else WRONGGPU_TEST_DOCUMENTS), never this PC's Documents
     const wstring t = !ctx.playerDocuments.empty() ? ctx.playerDocuments : EnvVar(L"WRONGGPU_TEST_DOCUMENTS");
     if (t.empty() || IEq(Trimmed(FullPath(t)), Trimmed(KnownFolder(FOLDERID_Documents)))) return L"";
@@ -60,9 +56,9 @@ wstring PlayerDocumentsDir(Context& ctx) {
 }
 
 static wstring LocalAppDataDir() {
-    if (!DataOverride().empty()) return DataOverride();
     const wstring l = EnvVar(L"LOCALAPPDATA");  // the elevated worker sets the player's from its job
 #ifdef WRONGGPU_TESTING
+    if (!DataOverride().empty()) return DataOverride();
     if (l.empty() || IEq(Trimmed(FullPath(l)), Trimmed(KnownFolder(FOLDERID_LocalAppData)))) return L"";  // a test root only
 #endif
     return l;
@@ -285,6 +281,8 @@ bool ApplyRrConfig(Context& ctx, const wstring& dir, Record& m, std::vector<wstr
         return false;
     }
     RrConfigFix& fix = m.rrconfig;
+    if ((fix.present && (!GamePathAllowed(fix.path) || (!fix.folder.empty() && !GamePathAllowed(fix.folder)))) || !GamePathAllowed(RrConfigBackupPath(dir)))
+        Fail(L"The Ray Reconstruction settings or backup path resolves outside the launcher fixture.");
     bool known = false;
     wstring why;
     const wstring found = RrConfigFile(ctx, *g, &why, &known);
@@ -297,6 +295,8 @@ bool ApplyRrConfig(Context& ctx, const wstring& dir, Record& m, std::vector<wstr
         moved = true;
     }
     const wstring file = fix.present ? fix.path : found;
+    if (!file.empty() && !GamePathAllowed(file))
+        Fail(L"The Ray Reconstruction settings path resolves outside the launcher fixture.");
     if (file.empty()) {
         warnings.push_back(L"Ray Reconstruction setting not added for " + wstring(g->name) + L": " + why + L". You can add it yourself (the release notes have the steps).");
         return moved;
@@ -514,6 +514,8 @@ static Replaced ReplaceEngineIni(Context& ctx, const wstring& file, PinnedFile& 
 void RevertRrConfig(Context& ctx, const wstring& dir, Record& m, std::vector<wstring>& notes, std::vector<wstring>& warnings, const string* backupBytes) {
     RrConfigFix fix = m.rrconfig;
     if (!fix.present) return;
+    if (!GamePathAllowed(fix.path) || (!fix.folder.empty() && !GamePathAllowed(fix.folder)) || !GamePathAllowed(RrConfigBackupPath(dir)))
+        Fail(L"The Ray Reconstruction settings or backup path resolves outside the launcher fixture.");
     const wstring& file = fix.path;
     try {
         string backup;

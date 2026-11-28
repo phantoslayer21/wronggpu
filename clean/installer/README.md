@@ -604,7 +604,10 @@ Reconstruction data; the window, the install, `model convert`, `rr-data convert`
 - `%LOCALAPPDATA%\WrongGPU\ignore-files.txt` (the one an installer writes to; it creates the folder if needed and adds its
   lines, keeping the lines already there);
 - `ignore-files.txt` in the launcher's own data folder when that is another folder: `WrongGPU-data\ignore-files.txt` next to
-  a portable launcher, or the `--data=` folder.
+  a portable launcher, or the `--data=` folder. In a release build, `--data=<folder>`
+  moves the launcher's own data, including its installed-games list, models, logs and package cache.
+  Game folders, Windows Apps & features, and HIP detection work as usual. Test builds require an isolated
+  data folder and use a private uninstall registry. An empty `--data=` is rejected.
 
 `model convert` and `rr-data convert` add `--ignore-list=<file>` (repeatable; read once, by the same bounded reader as the
 well-known lists, so a file of 16 MB or more is refused before it is read; a file that can't be read stops the command,

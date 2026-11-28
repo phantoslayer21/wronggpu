@@ -3,6 +3,7 @@
 // this project.
 #include "util.h"
 #include "context.h"
+#include "../../../wgshared/include/wg_state.h"
 
 #include <atomic>
 
@@ -240,8 +241,13 @@ HANDLE PinnedFile::Release() {
     return h;
 }
 
+static wstring NtRenamePath(const wstring& path) {
+    const wstring extended = wgstate::ExtendedPath(FullPath(path));
+    return extended.rfind(L"\\\\?\\", 0) == 0 ? L"\\??\\" + extended.substr(4) : extended;
+}
 bool PinnedFile::RenameNew(const wstring& path, DWORD* err) {
-    const wstring name = L"\\??\\" + FullPath(path);
+    if (h_ == INVALID_HANDLE_VALUE) { if (err) *err = ERROR_INVALID_HANDLE; return false; }
+    const wstring name = NtRenamePath(path);
     const size_t size = sizeof(FILE_RENAME_INFO) + name.size() * sizeof(wchar_t);
     std::vector<unsigned char> storage(size, 0);
     auto* info = reinterpret_cast<FILE_RENAME_INFO*>(storage.data());
@@ -250,6 +256,71 @@ bool PinnedFile::RenameNew(const wstring& path, DWORD* err) {
     if (SetFileInformationByHandle(h_, FileRenameInfo, info, static_cast<DWORD>(size))) return true;
     if (err) *err = GetLastError();
     return false;
+}
+
+bool PinnedFile::ReplaceBytes(const wstring& path, const void* data, size_t size, DWORD* err, bool failWrite) {
+    if (h_ == INVALID_HANDLE_VALUE) { if (err) *err = ERROR_INVALID_HANDLE; return false; }
+    static volatile LONG serial = 0;
+    PinnedFile stage;
+    const wstring temp = path + L".wronggpu-tmp-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+                         std::to_wstring(InterlockedIncrement(&serial));
+    if (!stage.Create(temp, err)) return false;
+    auto fail = [&](DWORD e) { stage.Delete(); if (err) *err = e; return false; };
+    DWORD error = 0;
+    if (!stage.OverwriteBytes(data, failWrite ? size / 2 : size, &error) || !stage.Flush(&error)) return fail(error);
+    if (failWrite) return fail(ERROR_DISK_FULL);
+    if (!ReplaceWith(stage, path, &error)) return fail(error);
+    return true;
+}
+bool PinnedFile::WriteChunk(const void* data, DWORD size, DWORD* err) {
+    DWORD written = 0, error = ERROR_SUCCESS;
+    if (h_ == INVALID_HANDLE_VALUE) error = ERROR_INVALID_HANDLE;
+    else if (!WriteFile(h_, data, size, &written, nullptr)) error = GetLastError();
+    else if (written != size) error = ERROR_WRITE_FAULT;
+    if (err) *err = error;
+    return error == ERROR_SUCCESS;
+}
+bool PinnedFile::ReplaceWith(PinnedFile& stage, const wstring& path, DWORD* err) {
+    if (h_ == INVALID_HANDLE_VALUE || !stage.IsOpen()) { if (err) *err = ERROR_INVALID_HANDLE; return false; }
+    DWORD error = 0;
+    if (stage.RenameReplace(path, &error)) return true;
+    if (error != ERROR_SHARING_VIOLATION && error != ERROR_NOT_SUPPORTED &&
+        error != ERROR_INVALID_PARAMETER && error != ERROR_ACCESS_DENIED) {
+        if (err) *err = error;
+        return false;
+    }
+    // Some filesystems reject a POSIX replace over a delete-denying pin. Move the verified
+    // file by handle, publish the complete sibling with no replace, and retain the old name
+    // if a competing creator prevents recovery.
+    static volatile LONG serial = 0;
+    const wstring saved = path + L".wronggpu-old-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+                          std::to_wstring(InterlockedIncrement(&serial));
+    if (!RenameNew(saved, &error)) { if (err) *err = error; return false; }
+    if (!stage.RenameNew(path, &error)) {
+        DWORD restoreError = 0;
+        if (!RenameNew(path, &restoreError)) error = restoreError;
+        if (err) *err = error;
+        return false;
+    }
+    Delete();
+    return true;
+}
+bool PinnedFile::RenameReplace(const wstring& path, DWORD* err) {
+    if (h_ == INVALID_HANDLE_VALUE) { if (err) *err = ERROR_INVALID_HANDLE; return false; }
+    const wstring name = NtRenamePath(path);
+    const size_t bytes = sizeof(FILE_RENAME_INFO) + name.size() * sizeof(wchar_t);
+    std::vector<unsigned char> storage(bytes, 0);
+    auto* info = reinterpret_cast<FILE_RENAME_INFO*>(storage.data());
+    // FileRenameInfoEx, REPLACE_IF_EXISTS | POSIX_SEMANTICS. The old handle remains valid through the swap.
+    const DWORD flags = 0x1 | 0x2;
+    memcpy(storage.data(), &flags, sizeof flags);
+    info->FileNameLength = static_cast<DWORD>(name.size() * sizeof(wchar_t));
+    memcpy(info->FileName, name.data(), info->FileNameLength);
+    if (!SetFileInformationByHandle(h_, static_cast<FILE_INFO_BY_HANDLE_CLASS>(22), info, static_cast<DWORD>(bytes))) {
+        if (err) *err = GetLastError();
+        return false;
+    }
+    return true;
 }
 
 wstring PinnedFile::Sha256() { return h_ == INVALID_HANDLE_VALUE ? wstring() : HashHandle(h_); }
@@ -346,10 +417,11 @@ bool PinnedFile::ReadBytes(string& out) {
         out.append(buf.data(), n);
     }
 }
-bool PinnedFile::CopyOut(const wstring& dst, wstring* sha, DWORD* err) {
+bool PinnedFile::CopyOut(const wstring& dst, wstring* sha, DWORD* err, PinnedFile* created) {
     auto fail = [&](DWORD e) { if (err) *err = e; return false; };
     if (h_ == INVALID_HANDLE_VALUE) return fail(ERROR_INVALID_HANDLE);
-    PinnedFile out;
+    PinnedFile local;
+    PinnedFile& out = created ? *created : local;
     if (!out.Create(dst, err)) return false;
     LARGE_INTEGER zero{};
     if (!SetFilePointerEx(h_, zero, nullptr, FILE_BEGIN)) { const DWORD e = GetLastError(); out.Delete(); return fail(e); }
@@ -555,16 +627,38 @@ static bool TestAccessLine(const wstring& line) {
 
 #endif
 
+wstring ResolvedHandlePath(HANDLE file) {
+    if (file == INVALID_HANDLE_VALUE) return L"";
+    wchar_t buf[MAX_PATH * 4] = {};
+    const DWORD n = GetFinalPathNameByHandleW(file, buf, (DWORD)(sizeof buf / sizeof buf[0]), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    return n > 0 && n < sizeof buf / sizeof buf[0] ? ScopeForm(buf) : L"";
+}
 // The final form of a path that exists: the name Windows resolves it to (every junction and link above it followed), as
 // C:\... or \\server\...; empty when it cannot be opened.
 static wstring FinalForm(const wstring& p) {
     const HANDLE h = CreateFileW(p.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
                                  FILE_FLAG_BACKUP_SEMANTICS, nullptr);
     if (h == INVALID_HANDLE_VALUE) return L"";
-    wchar_t buf[MAX_PATH * 4] = {};
-    const DWORD n = GetFinalPathNameByHandleW(h, buf, (DWORD)(sizeof buf / sizeof buf[0]), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    const wstring resolved = ResolvedHandlePath(h);
     CloseHandle(h);
-    return n > 0 && n < sizeof buf / sizeof buf[0] ? ScopeForm(buf) : L"";
+    return resolved;
+}
+// Resolve the existing ancestor of a new path before adding the still-missing names.
+wstring ResolvedPath(const wstring& path) {
+    wstring p = ScopeForm(path), suffix;
+    while (!p.empty()) {
+        if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            const wstring final = FinalForm(p);
+            return final.empty() || suffix.empty() ? final : ScopeForm(Join(final, suffix));
+        }
+        const DWORD error = GetLastError();
+        if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) return L"";
+        const wstring up = Parent(p);
+        if (up.empty() || up == p) break;
+        suffix = suffix.empty() ? BaseName(p) : Join(BaseName(p), suffix);
+        p = up;
+    }
+    return L"";
 }
 // The long lexical form of a path that exists (8.3 names expanded), for comparing with its final form.
 static wstring LongForm(const wstring& p) {
@@ -579,7 +673,7 @@ static bool RealPathOk(const wstring& lexical, const wchar_t** why) {
     wstring probe = lexical;
     while (!probe.empty() && GetFileAttributesW(probe.c_str()) == INVALID_FILE_ATTRIBUTES) {
         const wstring up = Parent(probe);
-        if (up == probe || up.empty()) return true;  // nothing of it exists: nothing to read
+        if (up == probe || up.empty()) { *why = L"cannot be resolved"; return false; }
         probe = up;
     }
     if (probe.empty()) return true;
@@ -602,8 +696,14 @@ static bool RealPathOk(const wstring& lexical, const wchar_t** why) {
 bool PathWithin(const wstring& path, const wstring& root, bool requirePlain) {
     if (path.empty() || root.empty()) return false;
     const wstring p = ScopeForm(path), r = ScopeForm(root);
-    if (r.size() < 3 || r[1] != L':' || p.size() < 3 || p[1] != L':' ||
-        p.find(L':', 2) != wstring::npos || r.find(L':', 2) != wstring::npos) return false;
+    auto absolute = [](const wstring& s) {
+        if (s.size() >= 3 && s[1] == L':' && s[2] == L'\\') return s.find(L':', 2) == wstring::npos;
+        const auto serverEnd = s.find(L'\\', 2);
+        return StartsWithI(s, L"\\\\") && !StartsWithI(s, L"\\\\.\\") &&
+               serverEnd != wstring::npos && serverEnd > 2 && serverEnd + 1 < s.size() &&
+               s.find(L':') == wstring::npos;
+    };
+    if (!absolute(p) || !absolute(r)) return false;
     const bool inside = IEq(p, r) || (p.size() > r.size() && StartsWithI(p, r) && (p[r.size()] == L'\\' || r.back() == L'\\'));
     const wchar_t* why = nullptr;
     return inside && (!requirePlain || (RealPathOk(r, &why) && RealPathOk(p, &why)));
@@ -644,7 +744,7 @@ bool LibraryRegistryAccess(const wchar_t* what) {
     return false;
 #else
     (void)what;
-    return DataOverride().empty();
+    return true;
 #endif
 }
 

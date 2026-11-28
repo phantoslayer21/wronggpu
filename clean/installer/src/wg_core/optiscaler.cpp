@@ -5,14 +5,21 @@
 
 #include "coexist.h"
 #include "optiedition.h"
+#include "optikeys.h"
 #include "pe.h"
+#include "settings.h"
 
 namespace wg {
 
 static wstring OptiScratch() {
     if (!DataOverride().empty()) {
         const wstring requested = EnvVar(L"TEMP");
-        return PathWithin(requested, DataOverride(), true) ? requested : Join(DataOverride(), L"temp");
+#ifdef WRONGGPU_TESTING
+        if (GamePathAllowed(requested)) return requested;
+#else
+        if (PathWithin(requested, DataOverride(), true)) return requested;
+#endif
+        return Join(DataOverride(), L"temp");
     }
     wchar_t tmp[MAX_PATH] = {};
     GetTempPathW(MAX_PATH, tmp);
@@ -66,14 +73,24 @@ OptiPackage PrepareOptiScaler(Context& ctx, const wstring& chosen) {
     }
     if (!IsFile(Join(root, L"OptiScaler.dll")))
         for (auto& d : ListDirs(root)) if (IsFile(Join(d, L"OptiScaler.dll"))) { root = d; break; }
-    if (!IsFile(Join(root, L"OptiScaler.dll")) || !IsFile(Join(root, L"OptiScaler.ini"))) {
+    const wstring dll = Join(root, L"OptiScaler.dll"), config = Join(root, L"OptiScaler.ini");
+    if (!GamePathAllowed(dll) || !GamePathAllowed(config)) {
+        p.error = L"OptiScaler's package files resolve outside the launcher fixture.";
+        return p;
+    }
+    if (!IsFile(dll) || !IsFile(config)) {
         p.error = L"No OptiScaler.dll and OptiScaler.ini in " + BaseName(p.source) + L" - is this OptiScaler's release?";
         return p;
     }
     string ini;
-    ReadAll(Join(root, L"OptiScaler.ini"), ini);
-    if (ini.find("FfxDx12SRPath") == string::npos) {
-        p.error = L"This OptiScaler is too old for WrongGPU (no FfxDx12SRPath setting) - use " + wstring(kOptiTested) + L" or newer";
+    try {
+        if (!ReadAll(config, ini) || !IniHasKey(ini, "Libraries", "FfxDx12SRPath")) {
+            p.error = L"This OptiScaler is too old for WrongGPU (no FfxDx12SRPath setting) - use " + wstring(kOptiTested) + L" or newer";
+            return p;
+        }
+        IniEntries(ini);
+    } catch (const SetupError& error) {
+        p.error = error.msg;
         return p;
     }
     p.dir = root;

@@ -71,6 +71,7 @@ struct Record {
     wstring payloadVersion, runtimeSha, frontEndSha, pluginSha, proxy, proxyReason;
     wstring rrPluginSha;                              // the payload line's sixth field (empty: no RR files, or a record before rc6)
     std::vector<wstring> extra;                       // lines this version does not know (written back unchanged)
+    std::vector<IniEntry> optiDefaults;
     std::vector<IniKeyChange> inikeys;                // the OptiScaler.ini journal
     struct CoexistLine { wstring tool, fingerprint, decision; };
     std::vector<CoexistLine> coexist;
@@ -124,7 +125,7 @@ wstring LegacyBackupPath(const wstring& dir, const wstring& rel);
 // Reads a record. One read from <dir>\wronggpu-setup\install.record that names another folder is the record of dir all the
 // same (a moved game folder): rebased to dir in memory (Record::movedFrom), never refused for it.
 bool LoadRecord(const wstring& path, Record& m);
-void SaveRecord(const wstring& path, const Record& m, bool create = false);
+void SaveRecord(const wstring& path, const Record& m, bool create = false, RunJournal* journal = nullptr);
 // rc6 L1: a rebased record (movedFrom) written in its folder: OptiScaler.ini's paths into the old folder (its front end, its
 // plugins folder) pointed at the new one, the record and owned-files.json saved, the game's own Apps & features entry (a
 // record with a regkey) pointed at the new folder, and on the managed list the new folder in the old one's place (the old
@@ -182,6 +183,9 @@ bool TestFault(const char* name);
 // the player's hive, HKEY_USERS\<sid>).
 HKEY UninstallHive();
 void SetUninstallHive(HKEY hive);
+#ifdef WRONGGPU_TESTING
+void RemoveTestUninstallHive();
+#endif
 wstring RegKeyFor(const wstring& dir, const wchar_t* prefix = kRegPrefix);
 void RegisterUninstall(Context& ctx, const Record& m, const wstring& state, const wstring& displayName);
 std::vector<wstring> RegisteredInstalls();
@@ -276,10 +280,10 @@ std::unique_ptr<OperationGate> GuardOperation(const wstring& dir, const Record* 
 bool IsBinaryName(const wstring& rel);  // .dll / .asi: what a game loads
 bool GateHolds(const wstring& path);
 void ReleaseRestoreBinaries();
-void PutBinary(const wstring& path, const void* data, size_t size, PinnedFile* held = nullptr);
+void PutBinary(const wstring& path, const void* data, size_t size, PinnedFile* held = nullptr, RunJournal* journal = nullptr);
 DWORD DeleteHeldBinary(const wstring& path);  // ERROR_SUCCESS, ERROR_NOT_FOUND (not held), or the delete's error
 std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool failedInstall, bool keepState,
-                               std::map<wstring, wstring>* keptWarnings = nullptr);
+                               std::map<wstring, wstring>* keptWarnings = nullptr, const wstring* expectedOpti = nullptr);
 // rc6 L4: the player's things in the state folder that a failed install or update never removes when they were there before
 // it: profile.ini (the game's settings), previous\ (the version Roll back goes to) and rr-config\ (the Engine.ini fix's backup);
 // since 0.6.5 also the state files settings.ini and model-choice.ini (wg_state.h).
@@ -289,8 +293,17 @@ wstring NewInstallId();
 // What an install run creates, written down BEFORE each create (a file or a folder that was not there), so a failed run takes
 // back only what it made: RollbackCreated deletes those files (newest first) and removes those folders when empty. Everything
 // else stays: it is logged and returned (paths relative to `state`). Never throws (a destructor calls it).
-struct RunJournal { std::vector<std::pair<wstring, bool>> created; bool done = false; };  // (path, is a folder); done: rolled back
-void JournalCreate(RunJournal& j, const wstring& path, bool folder);    // only when nothing is at path; parents first
+struct CreatedPath {
+    wstring path;
+    bool folder;
+    DWORD volume = 0;
+    ULONGLONG id = 0;
+};
+struct RunJournal { std::vector<CreatedPath> created; bool done = false; };
+void JournalDirectory(RunJournal& j, const wstring& path);
+void RollbackNewGameFiles(const wstring& state, RunJournal& journal);
+void JournalCreated(RunJournal& j, const wstring& path, const BY_HANDLE_FILE_INFORMATION& file);
+void JournalCreated(RunJournal& j, const wstring& path, const PinnedFile& file);
 std::vector<wstring> RollbackCreated(Context& ctx, const wstring& state, RunJournal& j);
 std::vector<wstring> LegacyRestore(Context& ctx, const wstring& dir, Ui& ui);
 }  // namespace wg

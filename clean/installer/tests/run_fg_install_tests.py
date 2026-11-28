@@ -87,7 +87,7 @@ def install(t, exe, opti, *more):
 def drop_entries(t, under):
     for k, v in t.reg_keys().items():
         if k.startswith("WrongGPU-") and v.get("InstallLocation", "").lower().startswith(under.lower()):
-            lt.safety_registry.delete(t.data, t.uninstall + "\\" + k)
+            lt.safety_registry.delete(t.registry, t.uninstall + "\\" + k)
 
 
 def page_of(d, name):

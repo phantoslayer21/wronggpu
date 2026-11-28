@@ -29,6 +29,8 @@ def relative(key):
     return child
 
 def entries(data, key):
+    if not os.path.isfile(os.path.join(data, "launcher-registry.hiv")):
+        return {}
     with open_hive(data) as hive:
         try:
             branch = winreg.OpenKey(hive, relative(key))

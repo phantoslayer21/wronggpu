@@ -1062,7 +1062,7 @@ string WithFrontEndState(const string& wronggpuIni, const std::vector<std::pair<
     for (auto& kv : state) {
         if (kv.first == "upscaler") {
             string cur, sec;
-            t = IniGetFrontEnd(t, "upscaler", &cur, &sec) ? IniSet(t, sec, "upscaler", kv.second) : IniSet(t, "fsr", "upscaler", kv.second);
+            t = IniGetFrontEnd(t, "upscaler", &cur, &sec) ? SetFrontEndKey(t, sec, "upscaler", kv.second) : SetFrontEndKey(t, "fsr", "upscaler", kv.second);
         } else if (kv.first.rfind("rr_", 0) != 0 && kv.first != "model" && !IsFgKey(kv.first) &&  // (frame generation's keys: fg.h)
                    kv.first != "m_mode" && kv.first != "k_mode" && kv.first != "l_mode") {      // (the SR modes: never runtime_options)
             items.push_back(kv);
@@ -1080,7 +1080,7 @@ string WithFrontEndState(const string& wronggpuIni, const std::vector<std::pair<
         if (!overridden) kept.push_back(kv);
     }
     for (auto& s : items) { t = IniRemoveFrontEnd(t, s.first); kept.push_back(s); }
-    return IniSet(t, had ? section : "fsr", "runtime_options", JoinOptions(kept));
+    return SetFrontEndKey(t, had ? section : "fsr", "runtime_options", JoinOptions(kept));
 }
 
 string EffectiveWronggpuIni(const wstring& dir) {
@@ -1201,21 +1201,23 @@ void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vecto
         const wstring path = Join(dir, name);
         string in;
         PinnedFile file;
-        if (!file.Open(path, true) || !file.ReadBytes(in)) {  // missing or unreadable: never created here; a model choice saved without it is said
-            if (forcedEntry) {
-                const wstring w = L"OptiScaler's list couldn't be updated; the model choice is saved (" + wstring(name) +
-                                  (IsFile(path) ? L" could not be read)." : L" is missing).");
-                LogLine(ctx, w);
-                notes.push_back(w);
-                if (warnings) warnings->push_back(w);
-            }
+        if (!file.Open(path, true) || !file.ReadBytes(in)) {
+            const wstring w = L"OptiScaler.ini couldn't be updated; the other settings are saved (" + wstring(name) +
+                              (IsFile(path) ? L" could not be read)." : L" is missing).");
+            LogLine(ctx, w);
+            notes.push_back(w);
+            if (warnings) warnings->push_back(w);
             return;
         }
         if (installing) {
             const wstring current = Sha256Bytes(in.data(), in.size());
             for (const auto& e : m.e)
-                if (e.action == L"copy" && IEq(e.rel, name) && !IEq(e.inst, current))
-                    Fail(L"OptiScaler.ini changed after installation and was kept.", EXIT_REFUSED);
+                if (e.action == L"copy" && IEq(e.rel, name) && !IEq(e.inst, current)) {
+                    const wstring w = L"OptiScaler.ini changed after installation. Its current contents were kept.";
+                    notes.push_back(w);
+                    if (warnings) warnings->push_back(w);
+                    return;
+                }
         }
         string out;
         RenderOptiIni(q, in, out, &notes);
@@ -1228,7 +1230,7 @@ void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vecto
         recordChanged = recordChanged || out != in;
         if (out == in) return;
         DWORD err = 0;
-        if (!file.OverwriteBytes(out.data(), out.size(), &err)) Fail(L"Cannot write " + path + L": " + ErrText(err));
+        if (!file.ReplaceBytes(path, out.data(), out.size(), &err)) Fail(L"Cannot write " + path + L": " + ErrText(err));
         const wstring h = Sha256Bytes(out.data(), out.size());
         for (auto& e : m.e) if (e.action == L"copy" && IEq(e.rel, name) && e.inst != h) { e.inst = h; recordChanged = true; }
         notes.push_back(wstring(name) + L" written");
@@ -1330,6 +1332,10 @@ void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vecto
         if (EnvVar(L"WRONGGPU_TEST_FAIL_RR_STATE") == L"1") { w = -1; why = L"the settings file could not be written (test)"; } else
 #endif
         w = WriteRrState(ctx, dir, p, RrDataValid(ctx), &why, hadBefore ? &prevMode : nullptr);
+        if (w > 0 && !why.empty()) {
+            notes.push_back(why);
+            if (warnings) warnings->push_back(why);
+        }
         if (w < 0) {
             notApplied.push_back(L"the Ray Reconstruction settings (" + why + L")");
             if (applied.empty()) Fail(L"Settings not applied: " + why, EXIT_REFUSED);
@@ -1403,7 +1409,10 @@ void ApplyOptiTab(Context& ctx, const wstring& dir, const OpRequest& r, std::vec
     const wchar_t* const file = L"OptiScaler.ini";
     const wstring path = Join(dir, file);
     string in;
-    if (!ReadAll(path, in)) Fail(L"OptiScaler.ini is missing in " + dir + L": Repair puts it back.", EXIT_FAILED);
+    PinnedFile pinned;
+    DWORD error = 0;
+    if (!pinned.Open(path, true, &error) || !pinned.ReadBytes(in))
+        Fail(L"Cannot secure " + path + L": " + ErrText(error), EXIT_REFUSED);
     string text = in;
     if (r.optiReset) {  // the editable keys back to what the install wrote, byte for byte (locked keys stay as they are)
         std::vector<IniKeyChange> mine, rest;
@@ -1431,7 +1440,7 @@ void ApplyOptiTab(Context& ctx, const wstring& dir, const OpRequest& r, std::vec
         text = out;
     }
     if (text != in) {
-        WriteFileAtomic(path, text.data(), text.size());
+        if (!pinned.ReplaceBytes(path, text.data(), text.size(), &error)) Fail(L"Cannot write " + path + L": " + ErrText(error));
         notes.push_back(L"OptiScaler.ini written");
     }
     const wstring h = Sha256Bytes(text.data(), text.size());
@@ -1586,24 +1595,13 @@ static void InstallOp(Context& ctx, const OpRequest& r, Ui& ui, OpResult& res) {
     FoldSrFromGame(dir, profile);  // so do the model and the SR modes chosen in the game (OptiScaler's list, WrongGPU.asi's card)
     FoldFgFromGame(dir, profile);  // and frame generation's settings as the state folder has them
     if (target.installed && !target.record.version.empty() && ctx.data && !IEq(target.record.version, ctx.data->version)) SavePrevious(ctx, dir, target.record, ui);
-    std::vector<IniKeyChange> oldJournal = target.installed ? target.record.inikeys : !wrongDir.empty() ? wrong.inikeys : std::vector<IniKeyChange>{};
+    const auto priorJournal = target.installed ? target.record.inikeys : !wrongDir.empty() ? wrong.inikeys : std::vector<IniKeyChange>{};
+    std::vector<IniKeyChange> oldJournal = !target.installed && !wrongDir.empty() ? wrong.inikeys : std::vector<IniKeyChange>{};
     // Carry the original values of WrongGPU's opt-in keys so ApplyProfile can undo a disabled option.
     std::vector<IniKeyChange> optIn;
-    for (const auto& change : oldJournal)
+    for (const auto& change : priorJournal)
         if (OptInKey(target.exe, change)) optIn.push_back(change);
     oldJournal.erase(std::remove_if(oldJournal.begin(), oldJournal.end(), [&](const IniKeyChange& c) { return OptInKey(target.exe, c); }), oldJournal.end());
-    // rc6 L5: values OptiScaler's own menu saved over the launcher's (the journal's keys, JournalOutside) carry over to the new
-    // OptiScaler.ini as the player's choices, as the OptiScaler tab's Keep would make them (locked keys stay WrongGPU's)
-    if (target.installed && HostedRecord(target.record) && OptiSetupIsOurs(dir, target.record)) {  // (0.6.1: never another setup's values)
-        string current;
-        if (ReadAll(Join(dir, L"OptiScaler.ini"), current))
-            for (auto& o : JournalOutside(current, oldJournal, L"OptiScaler.ini")) {
-                if (o.fileValue == "(missing)" || IsOptiLocked(o.section, o.key)) continue;
-                for (auto& j : oldJournal)
-                    if (IEq(j.file, L"OptiScaler.ini") && j.section == o.section && j.key == o.key) j.ours = o.fileValue;
-                LogLine(ctx, L"OptiScaler.ini: [" + FromUtf8(o.section) + L"] " + FromUtf8(o.key) + L" = " + FromUtf8(o.fileValue) + L" (saved by OptiScaler's menu) carried over");
-            }
-    }
     // the game's Engine.ini fix (rrconfig.h) is not in the game folder: its record line and backup go over to the new record
     const RrConfigFix keepFix = target.installed ? target.record.rrconfig : !wrongDir.empty() ? wrong.rrconfig : RrConfigFix();
     string keepBackup = wrongDir.empty() ? string() : wrongFixBackup;
@@ -1641,22 +1639,22 @@ static void InstallOp(Context& ctx, const OpRequest& r, Ui& ui, OpResult& res) {
         string fresh;
         const wstring path = Join(dir, L"OptiScaler.ini");
         PinnedFile file;
-        if (LoadRecord(RecordPath(dir), m) && HostedRecord(m) && file.Open(path, true) && file.ReadBytes(fresh)) {
-            const wstring current = Sha256Bytes(fresh.data(), fresh.size());
-            for (const auto& e : m.e)
-                if (e.action == L"copy" && IEq(e.rel, L"OptiScaler.ini") && !IEq(e.inst, current))
-                    Fail(L"OptiScaler.ini changed after installation and was kept.", EXIT_REFUSED);
+        if (LoadRecord(RecordPath(dir), m) && HostedRecord(m) && file.Open(path, true) && file.ReadBytes(fresh) &&
+            std::any_of(m.e.begin(), m.e.end(), [&](const Entry& e) {
+                return e.action == L"copy" && IEq(e.rel, L"OptiScaler.ini") &&
+                       IEq(e.inst, Sha256Bytes(fresh.data(), fresh.size()));
+            })) {
             const string out = ReplayJournal(fresh, oldJournal, L"OptiScaler.ini", m.inikeys, &res.notes);
             if (out != fresh) {
                 DWORD err = 0;
-                if (!file.OverwriteBytes(out.data(), out.size(), &err)) Fail(L"Cannot write " + path + L": " + ErrText(err));
+                if (!file.ReplaceBytes(path, out.data(), out.size(), &err)) Fail(L"Cannot write " + path + L": " + ErrText(err));
                 const wstring h = Sha256Bytes(out.data(), out.size());
                 for (auto& e : m.e) if (e.action == L"copy" && IEq(e.rel, L"OptiScaler.ini")) e.inst = h;
                 res.notes.push_back(L"your OptiScaler settings were carried over");
             }
             SaveRecord(RecordPath(dir), m);
             WriteOwnedFiles(dir, m);
-        }
+        } else res.warnings.push_back(L"OptiScaler.ini could not be secured for carrying over the previous folder's settings. Its current contents were kept.");
     }
     AddManagedGame(dir);
     const wstring ver = ctx.data ? ctx.data->version : L"", was = target.installed ? target.record.version : L"";
@@ -1882,7 +1880,10 @@ bool ParseResult(const string& text, OpResult& res) {
 // ---- the launcher's own install ------------------------------------------------------------------------------------
 static wstring StartMenuDir(const wstring& startMenu) {
     if (startMenu == L"-") return L"";
-    if (!startMenu.empty()) return startMenu;
+    if (!startMenu.empty()) {
+        if (!GamePathAllowed(startMenu)) Fail(L"The Start menu path resolves outside the launcher fixture.");
+        return startMenu;
+    }
     if (!DataOverride().empty()) return Join(DataOverride(), L"StartMenu");
 #ifdef WRONGGPU_TESTING
     // test builds (their Apps & features entries go to the test registry root) never touch the player's Start menu: a
@@ -2141,11 +2142,17 @@ bool SelfInstall(Context& ctx, const wstring& selfExe, const wstring& dirIn, con
 
 // The launcher's own files in its data folder, by their names only (a --data folder may hold other things).
 static void RemoveLauncherFiles(const wstring& dir) {
-    for (auto n : {L"launcher.ini", L"launcher.log", L"library-list.txt"}) DeleteFileW(Join(dir, n).c_str());  // library-list.txt: the window's last list
+    for (auto n : {L"launcher.ini", L"launcher.log", L"library-list.txt"}) {
+        const wstring path = Join(dir, n);
+        if (PathWithin(path, dir, true)) DeleteFileW(path.c_str());
+    }
     const std::pair<const wchar_t*, std::vector<const wchar_t*>> sub[] = {{L"logs", {L"last-operation.log", L"elevated-*.log"}}, {L"jobs", {L"job-*.txt", L"result-*.txt", L"batch-*.txt"}}};
     for (auto& s : sub) {
         const wstring d = Join(dir, s.first);
-        for (auto pat : s.second) for (auto& f : ListFiles(d, pat)) DeleteFileW(f.c_str());
+        if (!PathWithin(d, dir, true)) continue;
+        for (auto pat : s.second)
+            for (auto& f : ListFiles(d, pat))
+                if (PathWithin(f, dir, true)) DeleteFileW(f.c_str());
         RemoveDirectoryW(d.c_str());
     }
 }
@@ -2165,6 +2172,15 @@ static void RemoveScopedDataFiles(const wstring& root) {
         }
         if (PathWithin(folder, root, true)) RemoveDirectoryW(folder.c_str());
     }
+    for (const auto* name : {L"Programs", L"StartMenu", L"temp", L"optiscaler", L"localappdata", L"Documents",
+                            L"rr-prepare\\run", L"rr-prepare"}) {
+        const wstring path = Join(root, name);
+        if (PathWithin(path, root, true)) RemoveDirectoryW(path.c_str());
+    }
+#ifdef WRONGGPU_TESTING
+    if (IEq(root, DataOverride())) RemoveTestUninstallHive();
+#endif
+    RemoveDirectoryW(root.c_str());
 }
 
 bool AnyGameHasWrongGPU() { return !OtherGameWithWrongGPU(L"").empty(); }
@@ -2404,7 +2420,6 @@ bool SelfUninstall(Context& ctx, const LauncherPaths& p, bool removeGames, const
         const bool portableUses = PortableLauncherUsesSharedData();
         if (portableUses) LogLine(ctx, L"launcher uninstall: the shared model data stays (a portable launcher uses it)");
         const bool gamesLeft = AnyGameHasWrongGPU() || !offline.empty() || portableUses;
-        if (p.custom && !gamesLeft) RemoveScopedDataFiles(p.dataDir);
         const wstring trash = shared.empty() ? wstring() : shared + L".removed-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
         bool trashMade = false;
         wstring listLeftIn;  // the player's ignore list when it could not leave the trash (PutIgnoreListBack): kept there
@@ -2445,7 +2460,9 @@ bool SelfUninstall(Context& ctx, const LauncherPaths& p, bool removeGames, const
         //    its own window uninstalls it), the folder removed; the hidden cleanup deletes it once it no longer runs.
         wstring exeDirLeft;  // the install folder when it could not go at once (the hidden cleanup removes it, once empty)
         // the topmost folder above the install folder that the first install made, when the install folder is under it
-        const wstring upTo = installed && !madeAbove.empty() && StartsWithI(FullPath(Parent(installedExe)), FullPath(madeAbove) + L"\\") ? madeAbove : wstring();
+        wstring upTo = installed && !madeAbove.empty() && StartsWithI(FullPath(Parent(installedExe)), FullPath(madeAbove) + L"\\") ? madeAbove : wstring();
+        if (p.custom && !gamesLeft && installed && PathWithin(Parent(installedExe), p.dataDir, true))
+            upTo = p.dataDir;
         if (installed) {
             const wstring exeDir = Parent(installedExe);
             // a launcher started from its Start-menu shortcut runs with its install folder as the current directory, and
@@ -2487,6 +2504,7 @@ bool SelfUninstall(Context& ctx, const LauncherPaths& p, bool removeGames, const
             }
         }
         if (!exeDirLeft.empty() && !IsDir(trash)) RemoveEmptyUpTo(exeDirLeft, upTo);
+        if (p.custom && !gamesLeft) RemoveScopedDataFiles(p.dataDir);
         return true;
     } catch (const SetupError& e) { if (why) *why = e.msg; return false; }
 }

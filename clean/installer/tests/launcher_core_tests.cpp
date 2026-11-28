@@ -108,6 +108,30 @@ string MockDll(const std::vector<std::pair<wstring, wstring>>& strings, const st
 }  // namespace
 
 int main() {
+    auto verifyIniEncoding = [] {
+        const string from = "[FrameGen]\r\n\tFGOutput \t= auto \t; player's note\r\nKeep=1\n";
+        const string to = "[FrameGen]\r\n\tFGOutput \t= dlssg \t; player's note\r\nKeep=1\n";
+        auto wide = [](const string& text, bool bigEndian) {
+            string bytes = bigEndian ? "\xfe\xff" : "\xff\xfe";
+            for (char c : text) {
+                bytes.push_back(bigEndian ? '\0' : c);
+                bytes.push_back(bigEndian ? c : '\0');
+            }
+            return bytes;
+        };
+        for (const auto& pair : {std::make_pair(from, to), std::make_pair("\xef\xbb\xbf" + from, "\xef\xbb\xbf" + to),
+                                 std::make_pair(wide(from, false), wide(to, false)), std::make_pair(wide(from, true), wide(to, true))}) {
+            string value;
+            require(IniHasKey(pair.first, "framegen", "fgoutput", &value) && value == "auto" &&
+                    IniSet(pair.first, "FrameGen", "FGOutput", "dlssg") == pair.second,
+                    "OptiScaler INI editing preserves BOM, line endings, indentation and inline comments");
+        }
+        bool refused = false;
+        try { IniSet(from + "[FrameGen]\r\nFGOutput=other\r\n", "FrameGen", "FGOutput", "dlssg"); }
+        catch (const SetupError& error) { refused = error.msg.find(L"duplicate") != wstring::npos; }
+        require(refused, "duplicate OptiScaler keys are refused with a clear error");
+    };
+    verifyIniEncoding();
     try {
         // ---- 0.6.1: Collect logs in uninstall.exe (no converter data) never claims the map is invalid ----------------
         {
@@ -1746,16 +1770,33 @@ int main() {
             require(cpEntries == 1, "the scan lists the game once: the wrong-place install's entry, not the game a second time");
             RemoveTree(cp); RemoveManagedGame(cp);
 
-            // ---- a failed install or update takes back only what THIS run made (the run journal, written before each create);
+            // ---- a failed install or update takes back only what this run created by file identity;
             // everything else in the state folder stays and is listed: never a removal of the whole folder ----------------------
             const wstring fs = Join(dir, L"failed-state");
             require(!StateHasSettings(fs), "L4: no state folder, no settings");
             {
+                const wstring path = Join(dir, L"binary-reopen-fixture.dll");
+                const string original = "original", newBytes = "complete replacement";
+                file(path, original);
+                PinnedFile old;
+                require(old.Open(path, true), "pin original binary for reopening failure");
+                wgstate::OperationGuard guard(dir, {});
+                guard.HoldVerified(path, old.Release());
+                wgstate::OperationGuard::Publication published;
+                require(guard.PutHeld(path, newBytes.data(), newBytes.size(), nullptr, &published, true) == ERROR_SHARING_VIOLATION &&
+                        published.published && !guard.Holds(path) && Sha256File(path) == Sha256Bytes(newBytes.data(), newBytes.size()),
+                        "complete publication is reported even if the binary cannot be re-locked");
+            }
+            auto createJournaled = [&](RunJournal& journal, const wstring& path, const string& contents) {
+                JournalDirectory(journal, Parent(path));
+                PinnedFile created;
+                require(created.Create(path) && created.OverwriteBytes(contents.data(), contents.size()), "create the fixture file");
+                JournalCreated(journal, path, created);
+            };
+            {
                 RunJournal j;
-                JournalCreate(j, Join(StateDir(fs), L"backup\\x.dll"), false);  // (the state folder and backup\ first: not there yet)
-                file(Join(StateDir(fs), L"backup\\x.dll"), "x");
-                JournalCreate(j, Join(StateDir(fs), L"uninstall.exe"), false);
-                file(Join(StateDir(fs), L"uninstall.exe"), "MZ");
+                createJournaled(j, Join(StateDir(fs), L"backup\\x.dll"), "x");
+                createJournaled(j, Join(StateDir(fs), L"uninstall.exe"), "MZ");
                 const auto left = RollbackCreated(mc, StateDir(fs), j);
                 require(j.created.size() == 0 && left.empty() && !IsDir(StateDir(fs)), "rollback: a state folder this run made, with only what it made: all of it goes");
             }
@@ -1768,12 +1809,8 @@ int main() {
                     {Join(StateDir(fs), L"notes\\mine.txt"), "the player's"}, {Join(StateDir(fs), L"uninstall.exe"), "MZ earlier"}};
                 for (auto& f : before) file(f.first, f.second);
                 RunJournal j;
-                JournalCreate(j, StateDir(fs), true);                            // (there: not written down)
-                JournalCreate(j, Join(StateDir(fs), L"backup\\y.dll"), false);  // backup\ and the file: this run's
-                file(Join(StateDir(fs), L"backup\\y.dll"), "y");
-                JournalCreate(j, Join(StateDir(fs), L"owned-files.json"), false);
-                file(Join(StateDir(fs), L"owned-files.json"), "{}");
-                JournalCreate(j, Join(StateDir(fs), L"uninstall.exe"), false);   // (there: an overwrite later is not a create)
+                createJournaled(j, Join(StateDir(fs), L"backup\\y.dll"), "y");
+                createJournaled(j, Join(StateDir(fs), L"owned-files.json"), "{}");
                 const auto left = RollbackCreated(mc, StateDir(fs), j);
                 bool same = true;
                 for (auto& f : before) { string b; same = same && ReadAll(f.first, b) && b == f.second; }
@@ -1795,7 +1832,7 @@ int main() {
                 string k, nb;
                 require(ReadAll(BackupPath(bg, L"wronggpu.ini"), k) && k == kept && ReadAll(b, nb) && nb == game && e.backup == L"wronggpu.ini.1" &&
                             IEq(b, EntryBackupPath(bg, e)) && w.size() == 1 && w[0].find(L"backup\\wronggpu.ini") != wstring::npos &&
-                            j.created.size() == 1 && IEq(j.created[0].first, b),
+                            j.created.size() == 1 && IEq(j.created[0].path, b),
                         "backup collision: the kept backup\\wronggpu.ini stays byte for byte; the new backup is wronggpu.ini.1 (created only where nothing "
                         "was, written down in the run journal alone), listed");
                 Record br;
@@ -2265,6 +2302,16 @@ int main() {
                     CloseHandle(held);
                     require(w >= 0 && ReadRrSettings(sg).mode == "accurate",
                             "the menu saves accurate while the launcher's write waits for the state lock: the launcher decides under the lock and accurate stays");
+                }
+                {
+                    require(DataOverride().empty() && !PathWithin(sg, AppDataPath()), "RR fixture is outside the default data root");
+                    sctx.fMap.map = std::make_unique<wgc::Map>();
+                    DeleteFileW(wgstate::SettingsPathOf(sg).c_str());
+                    require(RefreshRrSettings(sctx, sg, true) == 1 && ReadRrSettings(sg).enabled,
+                            "RR refresh enables a recorded game outside the default data root");
+                    require(wgstate::SetSettings(sg, {{"rr_mode_pending", "exact"}}).ok() &&
+                            RefreshRrSettings(sctx, sg, true) == 1 && ReadRrSettings(sg).mode == "exact",
+                            "RR refresh applies the queued mode once the data is ready");
                 }
                 // the state files go with the state folder only while their stamp is valid for their own name and this install
                 // (wg_state.h): a file the player edited or made, an unknown one, a copy under another name (temporary files among

@@ -214,11 +214,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         if (hv && hc >= 2 && IEq(hv[1], L"--rr-prepare")) {
 #ifdef WRONGGPU_TESTING
             if (hc < 5 || !StartsWithI(hv[4], L"--data=")) { LocalFree(hv); return EXIT_USAGE; }
+#endif
             wstring why;
-            if (!SetDataOverride(wstring(hv[4]).substr(7), why) || !GamePathAllowed(hv[2]) || !GamePathAllowed(SelfPath())) {
+            if (hc >= 5 && StartsWithI(hv[4], L"--data=") &&
+                (!SetDataOverride(wstring(hv[4]).substr(7), why, true) || !GamePathAllowed(hv[2]) || !GamePathAllowed(SelfPath()))) {
                 LocalFree(hv); return EXIT_REFUSED;
             }
-#endif
             TestAccessStart(L"WrongGPU");
             const int code = RunRrPrepareHelper(hc, hv);
             LocalFree(hv);
@@ -233,9 +234,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     g.kit.hinst = hInst;
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     int argc = 0; LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    auto setData = [](const wstring& root, bool silent) {
+    auto setData = [](const wstring& root, bool silent, bool specified = false) {
         wstring why;
-        if (SetDataOverride(root, why)) {
+        if (SetDataOverride(root, why, specified)) {
             TestAccessStart(L"WrongGPU");
             return true;
         }
@@ -252,11 +253,11 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     if (argv[1][0] == L'-') {
         bool guiOpts = true;
         wstring dataArg, logArg;
-        bool noScanArg = false;
+        bool noScanArg = false, dataSpecified = false;
         for (int i = 1; i < argc && guiOpts; ++i) {
             const wstring s = argv[i], ls = Lower(s);
-            if (ls.rfind(L"--data=", 0) == 0) dataArg = s.substr(7);
-            else if (ls == L"--data" && i + 1 < argc) dataArg = argv[++i];
+            if (ls.rfind(L"--data=", 0) == 0) { dataArg = s.substr(7); dataSpecified = true; }
+            else if (ls == L"--data") { dataArg = i + 1 < argc ? argv[++i] : L""; dataSpecified = true; }
             else if (ls.rfind(L"--log=", 0) == 0) logArg = s.substr(6);
             else if (ls == L"--log" && i + 1 < argc) logArg = argv[++i];
             else if (ls == L"--noscan") noScanArg = true;
@@ -264,7 +265,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         }
         if (guiOpts) {
             LocalFree(argv);
-            if (!setData(dataArg, false)) return EXIT_USAGE;
+            if (dataSpecified && dataArg.empty()) return EXIT_USAGE;
+            if (!setData(dataArg, false, dataSpecified)) return EXIT_USAGE;
             if (!logArg.empty() && !GamePathAllowed(logArg)) return EXIT_REFUSED;
             gl.dataOverride = DataOverride();
             if (noScanArg) { g.noScan = g.ctx.noScanAlways = true; g.ctx.noLibraryScan = true; }
@@ -278,7 +280,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         if (const void* d = ResourceData(960, sz)) { g.ctx.restorer = d; g.ctx.restorerSize = sz; }
     }
     wstring dirArg, exeArg, hipProbe, optiArg, dataArg;
-    bool bad = false;
+    bool bad = false, dataSpecified = false;
     for (int i = 1; i < argc; ++i) {
         wstring a = argv[i], la = Lower(a);
         if (la == L"/s" || la == L"/silent") g.silent = true;
@@ -309,14 +311,14 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         else if (la.rfind(L"/model=", 0) == 0) g.userDll = a.substr(7);
         else if (la.rfind(L"/dlssdll=", 0) == 0) g.userDll = a.substr(9);
         else if (la.rfind(L"/out=", 0) == 0) g.outZip = a.substr(5);
-        else if (la.rfind(L"/data=", 0) == 0 || la.rfind(L"--data=", 0) == 0) dataArg = a.substr(a[0] == L'/' ? 6 : 7);
+        else if (la.rfind(L"/data=", 0) == 0 || la.rfind(L"--data=", 0) == 0) { dataArg = a.substr(a[0] == L'/' ? 6 : 7); dataSpecified = true; }
         else if (la.rfind(L"/log=", 0) == 0) g.ctx.logFile = a.substr(5);
         else if (la.rfind(L"/shot=", 0) == 0) g.shotDir = a.substr(6);
         else if (la.rfind(L"/hipprobe=", 0) == 0) hipProbe = a.substr(10);
         else bad = true;
     }
     if (argv) LocalFree(argv);
-    if (!setData(dataArg, g.silent)) return EXIT_USAGE;
+    if (!setData(dataArg, g.silent, dataSpecified)) return EXIT_USAGE;
     for (const wstring* path : {&dirArg, &exeArg, &g.ctx.logFile, &g.userDll, &g.outZip, &g.shotDir, &hipProbe, &optiArg})
         if (!path->empty() && !GamePathAllowed(*path)) return EXIT_REFUSED;
     if (g.ctx.logFile.empty()) g.ctx.logFile = DefaultLogPath();

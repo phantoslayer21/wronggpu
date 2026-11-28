@@ -838,17 +838,21 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
                 res.message = L"This WrongGPU launcher can only access files inside its --data folder.";
             }
             else {
-                if (DataOverride().empty()) SetEnvironmentVariableW(L"LOCALAPPDATA", lad.c_str());  // the player's model and shared data, not this account's
+#ifndef WRONGGPU_TESTING
+                if (!lad.empty()) SetEnvironmentVariableW(L"LOCALAPPDATA", lad.c_str());
+#endif
                 g.ctx.playerDocuments = docs;  // and the player's Documents (rrconfig.h), not this account's
                 if (!logFile.empty()) g.ctx.logFile = logFile;
                 // run by another account (an administrator's name typed at the prompt): the Apps & features entries go to the
                 // player's hive, where the player's launcher and Settings > Apps look
+#ifndef WRONGGPU_TESTING
                 HKEY hive = nullptr;
-                if (DataOverride().empty() && !hiveSet && !sid.empty() && !IEq(sid, CurrentUserSid())) {
+                if (!hiveSet && !sid.empty() && !IEq(sid, CurrentUserSid())) {
                     hiveSet = true;
                     if (RegOpenKeyExW(HKEY_USERS, sid.c_str(), 0, KEY_READ | KEY_WRITE, &hive) == ERROR_SUCCESS) SetUninstallHive(hive);
                     else LogLine(g.ctx, L"elevated worker: the player's registry hive cannot be opened; Apps & features entries go to this account");
                 }
+#endif
                 g.ctx.perGameEntry = perEntry >= 0 ? perEntry == 1 : !LauncherInstalled();
                 Ui ui; ui.step = [](int, int, const wstring&) {}; ui.log = [](const wstring& s) { LogLine(g.ctx, s); };
                 LogLine(g.ctx, wstring(L"elevated worker: ") + OpName(r.op) + L" " + (r.dir.empty() ? r.exe : r.dir) + (IsElevated() ? L" (elevated)" : L" (not elevated)"));
@@ -1292,7 +1296,7 @@ int RunCli(int argc, wchar_t** argv) {
     }
     gl.dataOverride = a.get(L"data");
     wstring dataError;
-    if (((a.has(L"data") || a.opt.count(L"data")) && gl.dataOverride.empty()) || !SetDataOverride(gl.dataOverride, dataError)) {
+    if (!SetDataOverride(gl.dataOverride, dataError, a.has(L"data") || a.opt.count(L"data"))) {
         if (dataError.empty()) dataError = L"--data needs a folder.";
         Print(dataError);
         Output refused;
@@ -1304,11 +1308,14 @@ int RunCli(int argc, wchar_t** argv) {
     TestAccessStart(L"WrongGPU");
     logFile = a.get(L"log");
     for (const auto& name : {L"log", L"out", L"dir", L"model", L"library", L"startmenu", L"zip", L"out-zip",
-                             L"job", L"result", L"batch", L"dll", L"repair-after", L"dump", L"shots", L"out-dir", L"fixture"})
+                             L"job", L"result", L"batch", L"dll", L"repair-after", L"dump", L"shots", L"out-dir", L"fixture", L"opti"}) {
+        if (IEq(name, L"startmenu") && a.get(name) == L"-") continue;
+        if (IEq(name, L"opti") && (StartsWithI(a.get(name), L"http://") || StartsWithI(a.get(name), L"https://"))) continue;
         if (!a.get(name).empty() && !GamePathAllowed(a.get(name))) {
             Print(L"This WrongGPU launcher can only access files inside its --data folder.");
             return EXIT_REFUSED;
         }
+    }
     for (const auto* paths : {&a.libraries, &a.ignoreLists})
         for (const auto& path : *paths)
             if (!GamePathAllowed(path)) {

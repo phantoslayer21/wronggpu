@@ -57,7 +57,7 @@ bool EditionCached(const wstring& dataDir, wstring* path) {
     const EditionInfo e = PinnedEdition();
     if (dataDir.empty() || e.sha256.empty()) return false;
     const wstring p = Join(EditionCacheDir(dataDir), e.file);
-    if (!Matches(p, e)) return false;
+    if (!PathWithin(p, dataDir, true) || !Matches(p, e)) return false;
     if (path) *path = p;
     return true;
 }
@@ -84,8 +84,8 @@ bool IsPriorEditionDll(const wstring& optiDll) {
     return IsFile(optiDll) && IsPriorEditionHash(Sha256File(optiDll));
 }
 
-// One GET into `dest` (truncated first). status: the HTTP status (0: no answer). False: no complete body (err says why).
-static bool Download(const EditionInfo& e, const wstring& dest, const std::function<bool(unsigned long long, unsigned long long)>& progress,
+// One GET into an exclusively created staging file. Status is zero if no answer was received.
+static bool Download(const EditionInfo& e, PinnedFile& file, const wstring& dest, const wstring& dataDir, const std::function<bool(unsigned long long, unsigned long long)>& progress,
                      DWORD& status, bool& cancelled, wstring& err) {
     status = 0;
     URL_COMPONENTS uc{}; uc.dwStructSize = sizeof(uc);
@@ -108,16 +108,15 @@ static bool Download(const EditionInfo& e, const wstring& dest, const std::funct
         WinHttpSetOption(s, WINHTTP_OPTION_SECURE_PROTOCOLS, &proto, sizeof proto);
     }
     bool ok = false;
-    HANDLE f = INVALID_HANDLE_VALUE;
     if (HINTERNET c = WinHttpConnect(s, host, uc.nPort, 0)) {
-        // GitHub answers a release asset with a redirect to its download host (https to https: WinHTTP follows it)
         if (HINTERNET rq = WinHttpOpenRequest(c, L"GET", path, nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, secure ? WINHTTP_FLAG_SECURE : 0)) {
             if (WinHttpSendRequest(rq, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) && WinHttpReceiveResponse(rq, nullptr)) {
                 DWORD len = sizeof(status);
                 WinHttpQueryHeaders(rq, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status, &len, WINHTTP_NO_HEADER_INDEX);
                 if (status == 200) {
-                    f = CreateFileW(dest.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-                    if (f == INVALID_HANDLE_VALUE) err = L"cannot write " + dest + L": " + ErrText(GetLastError());
+                    DWORD error = 0;
+                    if (!PathWithin(dest, dataDir, true)) err = L"unsafe staging path " + dest;
+                    else if (!file.Create(dest, &error)) err = L"cannot create " + dest + L": " + ErrText(error);
                     else {
                         std::vector<char> buf(1 << 20);
                         unsigned long long done = 0;
@@ -129,11 +128,10 @@ static bool Download(const EditionInfo& e, const wstring& dest, const std::funct
                             if (!got) break;
                             done += got;
                             if (done > e.size) { err = L"more data than the pinned size"; failed = true; break; }
-                            DWORD w = 0;
-                            if (!WriteFile(f, buf.data(), got, &w, nullptr) || w != got) { err = L"cannot write " + dest + L": " + ErrText(GetLastError()); failed = true; break; }
-                            if (progress && !progress(done, e.size)) { cancelled = true; failed = true; break; }
+                            if (!file.WriteChunk(buf.data(), got, &error)) { err = L"cannot write " + dest + L": " + ErrText(error); failed = true; break; }
+                            if (progress && !progress(done, e.size)) { cancelled = true; failed = true; }
                         }
-                        CloseHandle(f); f = INVALID_HANDLE_VALUE;
+                        if (!failed && !file.Flush(&error)) { err = ErrText(error); failed = true; }
                         if (!failed && done != e.size) err = L"incomplete download (" + std::to_wstring(done) + L" of " + std::to_wstring(e.size) + L" bytes)";
                         ok = !failed && done == e.size;
                     }
@@ -162,6 +160,8 @@ EditionResult GetEdition(Context& ctx, const wstring& dataDir, const std::functi
         }
         const wstring dir = EditionCacheDir(dataDir);
         const wstring final_ = Join(dir, e.file);
+        if (!PathWithin(final_, dataDir, true) || !IEq(e.file, BaseName(e.file)))
+            Fail(L"The OptiScaler cache path is unsafe: " + final_);
         if (Matches(final_, e)) {
             r.path = final_; r.cached = true;
             LogLine(ctx, L"OptiScaler: WrongGPU edition " + e.version + L" from the launcher's cache (" + final_ + L", sha256 checked)");
@@ -169,16 +169,27 @@ EditionResult GetEdition(Context& ctx, const wstring& dataDir, const std::functi
         }
         if (IsFile(final_)) {  // a copy that doesn't match (changed, cut short): never used
             LogLine(ctx, L"OptiScaler: the cached edition " + final_ + L" doesn't match the pinned file; downloading it again");
-            ForceDelete(final_);
         }
         EnsureDir(dir);
-        const wstring part = final_ + L".part";
+        struct CacheDirectory {
+            HANDLE handle;
+            ~CacheDirectory() { if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle); }
+        } cache{CreateFileW(dir.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr)};
+        if (cache.handle == INVALID_HANDLE_VALUE || !IEq(ResolvedHandlePath(cache.handle), ResolvedPath(dir)) ||
+            !PathWithin(dir, dataDir, true))
+            Fail(L"The OptiScaler cache directory cannot be secured: " + dir);
+        const wstring part = final_ + L"." + std::to_wstring(GetCurrentProcessId()) + L"-" +
+                             std::to_wstring(GetTickCount64()) + L".part";
+        if (!PathWithin(part, dataDir, true)) Fail(L"The OptiScaler download path is unsafe: " + part);
         LogLine(ctx, L"OptiScaler: downloading WrongGPU's edition " + e.version + L" from " + e.url);
+        struct StagingFile {
+            PinnedFile file;
+            ~StagingFile() { if (file.IsOpen()) file.Delete(); }
+        } staging;
         DWORD status = 0;
         wstring err;
-        const bool got = Download(e, part, progress, status, r.cancelled, err);
-        if (!got) {
-            if (IsFile(part)) ForceDelete(part);
+        if (!Download(e, staging.file, part, dataDir, progress, status, r.cancelled, err)) {
             r.detail = err;
             r.error = r.cancelled ? L"The OptiScaler download was cancelled."
                       : status == 0 ? L"WrongGPU couldn't download its OptiScaler edition. Check your internet connection."
@@ -186,22 +197,26 @@ EditionResult GetEdition(Context& ctx, const wstring& dataDir, const std::functi
             LogLine(ctx, L"OptiScaler: download failed: " + err);
             return r;
         }
-        const wstring sha = Sha256File(part);
+        if (!PathWithin(final_, dataDir, true)) Fail(L"The OptiScaler cache path changed during download.");
+        const wstring sha = staging.file.Sha256();
         if (!IEq(sha, e.sha256)) {
-            ForceDelete(part);
             r.mismatch = true;
             r.error = L"The OptiScaler download wasn't the file WrongGPU expects, so it wasn't used.";
             r.detail = L"sha256 " + sha + L", expected " + e.sha256;
             LogLine(ctx, L"OptiScaler: download refused: " + r.detail);
             return r;
         }
-        if (!MoveFileExW(part.c_str(), final_.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-            r.detail = L"cannot rename " + part + L": " + ErrText(GetLastError());
-            ForceDelete(part);
+        DWORD error = 0;
+        PinnedFile previous;
+        const bool exists = previous.Open(final_, true, &error);
+        const bool missing = error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+        if (!(exists ? previous.ReplaceWith(staging.file, final_, &error) : missing && staging.file.RenameNew(final_, &error))) {
+            r.detail = L"cannot rename " + part + L": " + ErrText(error);
             r.error = L"WrongGPU couldn't save its OptiScaler edition in its data folder.";
             LogLine(ctx, L"OptiScaler: " + r.detail);
             return r;
         }
+        staging.file.Close();
         r.path = final_;
         LogLine(ctx, L"OptiScaler: WrongGPU edition " + e.version + L" downloaded and checked (sha256 " + e.sha256.substr(0, 8) + L"): " + final_);
     } catch (const SetupError& x) {

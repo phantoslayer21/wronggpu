@@ -39,7 +39,8 @@ class T:
     def __init__(self, exe, work, model, hip):
         self.exe, self.work, self.model = exe, work, model
         self.passed, self.failures = 0, []
-        self.data = work
+        self.data = os.path.join(work, "data")
+        os.makedirs(self.data, exist_ok=True)
         self.log = os.path.join(work, "launcher-test.log")
         self.out = os.path.join(work, "out.json")
         self.hip = hip
@@ -47,10 +48,11 @@ class T:
         if os.path.lexists(os.path.join(work, "no-hip")):
             raise SystemExit("%s already holds no-hip: not a fresh run folder" % work)
         self.env = self.child_env(os.environ)
+        self.registry = self.env["LOCALAPPDATA"]
         # the store libraries: <work>\libraries only; every store access logged and checked after each call (launcher_isolation)
         iso.test_env(self.env, work)
         self.expect_scan = False  # set by a test whose next call must search the test libraries (the guard's sensitivity)
-        self.uninstall = suite.uninstall_root(self.env["LOCALAPPDATA"])  # this run's Apps & features root (the build's own)
+        self.uninstall = suite.uninstall_root(self.data)  # this run's Apps & features root (the build's own)
         self.j = {}
 
     def child_env(self, inherited):
@@ -70,6 +72,7 @@ class T:
         env["WRONGGPU_TEST_HIP_CANDIDATES"] = self.hip or os.path.join(self.work, "no-hip", "amdhip64_7.dll")
         os.makedirs(env["APPDATA"], exist_ok=True)
         os.makedirs(env["LOCALAPPDATA"], exist_ok=True)  # (in the run's own fresh folder)
+        env["WRONGGPU_TEST_FIXTURE_ROOT"] = self.work
         return env
 
     def check(self, name, cond, detail=""):
@@ -115,7 +118,7 @@ class T:
             return ""
 
     def reg_keys(self, root=None):
-        return safety_registry.entries(self.data, root or self.uninstall)
+        return safety_registry.entries(self.registry, root or self.uninstall)
 
     def entries_for(self, folder):
         return {k: v for k, v in self.reg_keys().items() if v.get("InstallLocation", "").lower() == folder.lower()}
@@ -674,9 +677,9 @@ def test_experimental_and_shared_model(t, opti):
     t.check("first uninstalled: the model stays (the other game is on the managed list)", rc == 0 and os.path.isfile(model) and snapshot(r1) == s1, diff(s1, snapshot(r1)))
     # a stale Apps & features entry (its game folder deleted by hand, so no record) is no game that still uses the data
     stale = t.uninstall + "\\WrongGPU-00000000"
-    safety_registry.set_location(t.data, stale, os.path.join(t.work, "games", "Deleted Game", "bin", "x64"))
+    safety_registry.set_location(t.registry, stale, os.path.join(t.work, "games", "Deleted Game", "bin", "x64"))
     rc = t.run("uninstall", e2)
-    safety_registry.delete(t.data, stale)
+    safety_registry.delete(t.registry, stale)
     t.check("last uninstalled (a stale entry of a deleted game left): byte for byte; the scoped cache stays", rc == 0 and snapshot(r2) == s2 and os.path.isfile(model),
             (rc, diff(s2, snapshot(r2))))
     shutil.rmtree(r1, ignore_errors=True)
@@ -952,7 +955,7 @@ def test_launcher_uninstall(t, opti):
             "WrongGPU" not in t.reg_keys() and not t.entries_for(b), (rc, t.j, diff(before, after)))
     t.check("...and the game with its own entry too: byte for byte, its entry gone", snapshot(root2) == before2 and not t.entries_for(b2),
             (diff(before2, snapshot(root2)), t.entries_for(b2)))
-    t.check("nothing left in the user folder: %LOCALAPPDATA%\\WrongGPU (model data, list, logs) and the moved exe gone", wait_removed(t) and not os.path.exists(os.path.join(shared, "model")),
+    t.check("nothing left in the user folder: %LOCALAPPDATA%\\WrongGPU (model data, list, logs) and the moved exe gone", wait_removed(t) and wait_gone(shared),
             (removed_folders(t), os.listdir(shared) if os.path.isdir(shared) else None))
     t.check("...and %LOCALAPPDATA%\\Programs, which the install made on this fresh profile, is gone too",
             not programs_made or wait_gone(os.path.dirname(programs)),
@@ -2073,7 +2076,8 @@ def test_rr_config_fix(t, opti):
         t.check("...Fix it for me: the elevated worker saves the choice at once (one permission prompt, its apply job), on in the profile, nothing in "
                 "Engine.ini or the record, the card waits for the first start (r6 #7)",
                 ff.get("busy_started") is True and ff.get("done") is True and ff.get("saved") == "on" and ff.get("state") == -1 and
-                ff.get("notice") == "" and len(asks()) == 1 and "apply" in asks()[0] and "--job=" in asks()[0] and get_fix(exe)[1].get("profile") == "on" and
+                ff.get("notice") == "" and len(asks()) == 1 and "apply" in asks()[0] and "--job=" in asks()[0] and
+                ('"--data=' + t.data + '"') in asks()[0] and get_fix(exe)[1].get("profile") == "on" and
                 not os.listdir(docs) and "rrconfig\t" not in record_text(b), (ff, asks(), os.listdir(docs)))
         write(bl4_gus, b"[ScalabilityGroups]\r\n")  # the game's first start
         rx, pg, rcf = rr_page("protected-fixforme-then", prot_env, extra=("--apply=rrdue",))
@@ -3045,7 +3049,7 @@ def main():
     # registry entries of an earlier run (test root only)
     for k, v in t.reg_keys().items():
         if (k.startswith("WrongGPU-") and v.get("InstallLocation", "").lower().startswith(work.lower())) or (k == "WrongGPU" and work.lower() in v.get("InstallLocation", "").lower()):
-            safety_registry.delete(t.data, t.uninstall + "\\" + k)
+            safety_registry.delete(t.registry, t.uninstall + "\\" + k)
     if a.startup_only:  # the start of a run and the HIP check only
         rc = t.run("hipcheck")
         print("startup-only: run folder %s; hipcheck exit %d" % (work, rc))

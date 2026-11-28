@@ -531,9 +531,16 @@ int WriteStateKeys(Context& ctx, const wstring& dir, const std::vector<std::pair
 }
 
 int WriteRrState(Context& ctx, const wstring& dir, const Profile& p, bool dataReady, wstring* why, const string* prevMode) {
-    if (!GamePathAllowed(dir) || !GamePathAllowed(Join(StateDir(dir), L"settings.ini")) ||
-        (!dataReady && IsFile(RrDataFile()))) return 0;
+    if (!GamePathAllowed(dir) || !GamePathAllowed(Join(StateDir(dir), L"settings.ini"))) return 0;
     const string want = p.get("rr_mode").empty() ? string("fast") : p.get("rr_mode");
+    const bool explicitMode = prevMode && want != *prevMode;
+    if (!dataReady && IsFile(RrDataFile())) {
+        if (!explicitMode) return 0;
+        const int r = WriteStateKeys(ctx, dir, {{"rr_mode_pending", want}}, why);
+        if (r >= 0 && why) *why = L"Ray Reconstruction mode " + FromUtf8(want) +
+                                  L" is pending until compatible Ray Reconstruction data is ready.";
+        return r < 0 ? r : 1;
+    }
     const string enabled = p.get("rr_enabled") != "off" && dataReady ? "1" : "0";
     // decided under the state lock from the file as it is now (wg_state.h UpdateSettings), so a mode the game's menu saved
     // after the launcher read the settings is never replaced by the launcher's older view: the mode is written only when the
@@ -542,8 +549,11 @@ int WriteRrState(Context& ctx, const wstring& dir, const Profile& p, bool dataRe
     const wgstate::SetOutcome o = wgstate::UpdateSettings(dir, [&](const wgstate::Settings& now, std::vector<std::pair<string, string>>* out) {
         const string* cur = wgstate::Get(now, "rr_mode");
         const bool curValid = cur && (*cur == "exact" || *cur == "accurate" || *cur == "fast");
-        const bool writeMode = !curValid || (prevMode && want != *prevMode);
-        const string mode = writeMode ? want : *cur;
+        const string* pending = wgstate::Get(now, "rr_mode_pending");
+        const bool usePending = dataReady && pending && (*pending == "exact" || *pending == "accurate" || *pending == "fast");
+        const bool writeMode = !curValid || explicitMode || usePending;
+        const string mode = explicitMode ? want : usePending ? *pending : writeMode ? want : *cur;
+        if (pending && (usePending || explicitMode)) out->push_back({"rr_mode_pending", "off"});
         out->push_back({"rr_enabled", enabled});
         if (writeMode) out->push_back({"rr_mode", mode});
         out->push_back({"rr_exact_allowed", mode == "exact" ? "1" : "0"});
@@ -596,9 +606,9 @@ string RenderRrSettings(const Profile& p, bool dataReady, const string& in) {
     string text = in;
     if (text.empty())
         text = "# WrongGPU Ray Reconstruction settings (written by the WrongGPU launcher; OptiScaler's menu changes rr_mode too)\r\n[wronggpu]\r\n";
-    text = IniSet(text, "wronggpu", "rr_enabled", on ? "1" : "0");
-    text = IniSet(text, "wronggpu", "rr_mode", mode.empty() ? "fast" : mode);  // always written (rc5: Fast by default)
-    text = IniSet(text, "wronggpu", "rr_exact_allowed", mode == "exact" ? "1" : "0");
+    text = SetFrontEndKey(text, "wronggpu", "rr_enabled", on ? "1" : "0");
+    text = SetFrontEndKey(text, "wronggpu", "rr_mode", mode.empty() ? "fast" : mode);  // always written (rc5: Fast by default)
+    text = SetFrontEndKey(text, "wronggpu", "rr_exact_allowed", mode == "exact" ? "1" : "0");
     return text;
 }
 
@@ -614,7 +624,7 @@ bool FoldRrFromGame(const wstring& dir, Profile& p) {
 }
 
 int RefreshRrSettings(Context& ctx, const wstring& dir, bool dataReady, wstring* why) {
-    if (!PathWithin(dir, AppDataPath(), true) || !PathWithin(Join(StateDir(dir), L"settings.ini"), AppDataPath(), true) ||
+    if (!GamePathAllowed(dir) || !GamePathAllowed(Join(StateDir(dir), L"settings.ini")) ||
         !LoadFMap(ctx) || (!dataReady && IsFile(RrDataFile()))) return 0;
     Record m;
     if (!LoadRecord(RecordPath(dir), m) || m.legacy || !RecordHasRr(m)) return 0;
@@ -630,8 +640,8 @@ std::vector<RrSettingsFailure> RefreshAllRrSettings(Context& ctx, const wstring&
     std::vector<RrSettingsFailure> failed;
     std::vector<wstring> dirs;
     for (auto& d : ManagedGames()) {
-        if (!PathWithin(d, AppDataPath(), true)) continue;
-        if (!PathWithin(Join(StateDir(d), L"settings.ini"), AppDataPath(), true)) continue;
+        if (!GamePathAllowed(d)) continue;
+        if (!GamePathAllowed(Join(StateDir(d), L"settings.ini"))) continue;
         Record m;
         if (!except.empty() && IEq(FullPath(d), FullPath(except))) continue;
         if (LoadRecord(RecordPath(d), m) && !m.legacy && RecordHasRr(m)) dirs.push_back(d);

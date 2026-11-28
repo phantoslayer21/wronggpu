@@ -25,28 +25,63 @@ void LogLine(Context& ctx, const wstring& s) {
         if (temp.empty() || IEq(temp, fullShared) || StartsWithI(temp, fullShared + L"\\")) { ctx.logFile.clear(); return; }
         ctx.logFile = Join(temp, L"WrongGPU-junction-" + std::to_wstring(GetCurrentProcessId()) + L".log");
     }
-    HANDLE h = CreateFileW(ctx.logFile.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    const bool sharedLog = PathWithin(ctx.logFile, shared);
+    if (!GamePathAllowed(ctx.logFile) || (sharedLog && !PathWithin(ctx.logFile, shared, true))) return;
+    HANDLE h = CreateFileW(ctx.logFile.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
     if (h == INVALID_HANDLE_VALUE) return;
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (!GetFileInformationByHandle(h, &info) || info.nNumberOfLinks != 1 ||
+        (info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY))) { CloseHandle(h); return; }
+    if (!DataOverride().empty()) {
+        const wstring actual = ResolvedHandlePath(h);
+        if (actual.empty() || !GamePathAllowed(actual) || (sharedLog && !PathWithin(actual, shared))) {
+            CloseHandle(h);
+            return;
+        }
+    }
     DWORD w; WriteFile(h, line.data(), (DWORD)line.size(), &w, nullptr); CloseHandle(h);
 }
 static wstring g_dataOverride;
+#ifdef WRONGGPU_TESTING
+static wstring g_fixtureRoot;
+#endif
 const wstring& DataOverride() { return g_dataOverride; }
 
-bool SetDataOverride(const wstring& path, wstring& why) {
-    const wstring full = path.empty() ? wstring() : FullPath(path);
+bool SetDataOverride(const wstring& path, wstring& why, bool specified) {
+    if (specified && path.empty()) { why = L"--data needs a folder."; return false; }
+    const wstring full = path.empty() ? wstring() : ResolvedPath(path);
+    if (!path.empty() && (full.empty() || !PathWithin(path, path, true) || (Exists(path) && !IsDir(path)))) {
+        why = L"The launcher data folder cannot be resolved or goes through a link.";
+        return false;
+    }
 #ifdef WRONGGPU_TESTING
     PWSTR local = nullptr;
     const HRESULT got = SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DONT_VERIFY, nullptr, &local);
     const wstring real = SUCCEEDED(got) && local ? Join(local, L"WrongGPU") : wstring();
     CoTaskMemFree(local);
-    if (full.empty() || real.empty() || PathWithin(full, real) || PathWithin(real, full) || !PathWithin(full, full, true)) {
+    const wstring live = real.empty() ? wstring() : ResolvedPath(real);
+    if (full.empty() || live.empty() || PathWithin(full, live) || PathWithin(live, full)) {
         why = L"This WrongGPU test build requires --data pointing to an isolated fixture folder.";
         return false;
+    }
+    // The process suite can name its fixture workspace explicitly. Only its data child can activate that scope.
+    const wstring fixture = EnvVar(L"WRONGGPU_TEST_FIXTURE_ROOT");
+    const wstring fixtureRoot = fixture.empty() ? wstring() : ResolvedPath(fixture);
+    wstring allowedFixture;
+    if (!fixtureRoot.empty() && IEq(full, Join(fixtureRoot, L"data"))) {
+        if (!PathWithin(fixture, fixture, true) || PathWithin(fixtureRoot, live) || PathWithin(live, fixtureRoot) ||
+            !PathWithin(EnvVar(L"LOCALAPPDATA"), fixtureRoot, true) || !PathWithin(EnvVar(L"APPDATA"), fixtureRoot, true)) {
+            why = L"The launcher fixture workspace requires isolated LOCALAPPDATA and APPDATA.";
+            return false;
+        }
+        allowedFixture = fixtureRoot;
     }
 #endif
     if (!full.empty()) {
         for (const auto* name : {L"model", L"logs", L"jobs", L"rr-prepare", L"temp", L"launcher.ini", L"launcher.log",
-                                 L"managed-games.txt", L"ignore-files.txt", L"launcher-registry.hiv"}) {
+                                 L"managed-games.txt", L"ignore-files.txt", L"launcher-registry.hiv", L"setup.log",
+                                 L"optiscaler", L"Programs", L"StartMenu", L"localappdata", L"Documents", L"portable-launchers.txt",
+                                 L"library-list.txt", L"hip-runtime.txt", L"compare.txt"}) {
             if (!PathWithin(Join(full, name), full, true)) {
                 why = L"A launcher path in --data resolves through a link.";
                 return false;
@@ -54,12 +89,33 @@ bool SetDataOverride(const wstring& path, wstring& why) {
         }
     }
     g_dataOverride = full;
+#ifdef WRONGGPU_TESTING
+    g_fixtureRoot = allowedFixture;
+#endif
     return true;
 }
 
 bool GamePathAllowed(const wstring& path) {
-    return g_dataOverride.empty() || PathWithin(path, g_dataOverride, true);
+#ifdef WRONGGPU_TESTING
+    return g_dataOverride.empty() || PathWithin(path, g_dataOverride, true) ||
+           (!g_fixtureRoot.empty() && PathWithin(path, g_fixtureRoot, true));
+#else
+    (void)path;
+    return true;
+#endif
 }
+
+#ifdef WRONGGPU_TESTING
+wstring TestRegistryDir() {
+    // The process suite's private hive lives beside its data directory so that Windows can
+    // release its registry files independently of launcher data removal.
+    if (!g_fixtureRoot.empty()) {
+        const wstring profile = EnvVar(L"LOCALAPPDATA");
+        if (PathWithin(profile, g_fixtureRoot, true)) return profile;
+    }
+    return DataOverride();
+}
+#endif
 
 // The active shared data path, without creating it.
 wstring AppDataPath() {

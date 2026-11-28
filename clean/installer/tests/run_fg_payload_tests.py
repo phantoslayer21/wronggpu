@@ -48,12 +48,14 @@ def plugin(product="WrongGPU"):
                            extra=b"synthetic, never loaded", dll_name="WrongGPU-FG.asi")
 
 
-def run(work, name, fg=None):
+def run(work, name, fg=None, rr_map=None):
     """make_payload.py on a minimal payload (the FSR front end stand-in) with --fg <fg>: (exit code, output, payload_table.h)."""
     out = os.path.join(work, "out-" + name)
     shutil.rmtree(out, ignore_errors=True)
     cmd = [sys.executable, MAKE_PAYLOAD, "--payload", os.path.join(work, "payload"), "--map", os.path.join(work, "map.json"),
            "--version", "0.7.0-test", "--out", out] + (["--fg", fg] if fg else [])
+    if rr_map:
+        cmd += ["--map-f", rr_map]
     p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
     table = ""
     if os.path.isfile(os.path.join(out, "payload_table.h")):
@@ -95,6 +97,11 @@ def main():
     rc, out, table, rc_text = run(work, "none")
     rows, count = fg_rows(table)
     check("without --fg: kFgPayload holds only its end mark, kFgPayloadCount 0", rc == 0 and count == 0 and rows == [] and "kFgPayload[]" in table, out)
+
+    rr_synth = os.path.abspath(os.path.join(HERE, "..", "..", "..", "data", "rr-f-synth"))
+    for name in sorted(n for n in os.listdir(rr_synth) if n.endswith(".map.json")):
+        rc, out, _, _ = run(work, name, rr_map=os.path.join(rr_synth, name))
+        check(name + " is rejected by release payload generation", rc != 0 and "synthetic converter map" in out, out)
 
     stage = folder(work, "stage", {"plugins/WrongGPU-FG.asi": plugin(), "fg-dxil/fg_exec_pack.dxil": kernel, "fg-dxil/fg_exec_capture.dxil": kernel + b"b",
                                    "fg-dxil/manifest.json": b'{"format": 1, "kernels": []}\n'})

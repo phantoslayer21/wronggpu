@@ -37,7 +37,9 @@ inline wstring UninstallRootFor(wstring lad) {
     swprintf(b, 80, L"Software\\WrongGPU-CandidateTests\\%08X\\Uninstall\\", h);
     return b;
 }
+const wstring& DataOverride();
 inline wstring UninstallRoot() {
+    if (!DataOverride().empty()) return UninstallRootFor(DataOverride());
     wstring v(GetEnvironmentVariableW(L"LOCALAPPDATA", nullptr, 0), L'\0');
     v.resize(v.empty() ? 0 : GetEnvironmentVariableW(L"LOCALAPPDATA", &v[0], (DWORD)v.size()));
     return UninstallRootFor(v);

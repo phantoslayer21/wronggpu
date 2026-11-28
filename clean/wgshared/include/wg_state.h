@@ -291,19 +291,24 @@ public:
     bool Holds(const std::wstring& path) const { return Find(path) >= 0; }
     void ReleaseBinaries() { CloseAll(); }
     void HoldVerified(const std::wstring& path, HANDLE h) { held_.push_back({ExtendedPath(path), h}); }
-    static DWORD PutNew(const std::wstring& path, const void* data, size_t size) {
-        return PutComplete(ExtendedPath(path), data, size);
+    struct Publication {
+        bool published = false;
+        BY_HANDLE_FILE_INFORMATION identity{};
+    };
+    static DWORD PutNew(const std::wstring& path, const void* data, size_t size, Publication* publication = nullptr) {
+        return PutComplete(ExtendedPath(path), data, size, publication);
     }
     // Puts the complete new bytes at `path` with no window in which a process can load a partial file or the guard holds
-    // nothing: (1) the held old binary, if any, is renamed away through its own handle to <name>.wronggpu-old (the next free
+    // a partially written file: (1) the held old binary, if any, is renamed away through its own handle to <name>.wronggpu-old (the next free
     // <name>.wronggpu-old-<n> when that name is taken; nothing is deleted by name); (2) the new bytes are written to a temporary
-    // file in the same folder, flushed, closed and renamed into place (only where nothing is); (3) the new file is opened and
+    // file in the same folder, flushed and renamed by handle (only where nothing is); (3) the new file is opened and
     // held like the others at once; (4) the old file is deleted through its held handle. A process can at most load the complete
     // new file in the moment between (2) and (3): then the result is ERROR_SHARING_VIOLATION, the new file stays, and the guard's
     // result turns to GameRunning (the operation stops). Files the operation creates (no old binary) take steps 2 and 3.
-    // ERROR_SUCCESS, or the error of the step that failed: before (2) completes nothing changed (the old file is renamed back);
-    // *oldLeft names an old file that could not be deleted after a successful replace (it stays, under its .wronggpu-old name).
-    DWORD PutHeld(const std::wstring& path, const void* data, size_t size, std::wstring* oldLeft = nullptr) {
+    // On a failed publication, the old name is restored if still free. oldLeft holds the saved name when renaming back
+    // or deleting it fails. publication describes what reached the target independently of the re-open result.
+    DWORD PutHeld(const std::wstring& path, const void* data, size_t size, std::wstring* oldLeft = nullptr,
+                  Publication* publication = nullptr, bool failReopen = false) {
         if (oldLeft) oldLeft->clear();
         const std::wstring target = ExtendedPath(path);
         const int i = Find(path);
@@ -319,13 +324,33 @@ public:
             if (e) return e;  // nothing changed
             held_.erase(held_.begin() + i);
         }
-        auto renameBack = [&]() { if (old != INVALID_HANDLE_VALUE) { RenameHandle(old, target, false); held_.push_back({target, old}); } };
-        DWORD e = PutComplete(target, data, size);
-        if (e) { renameBack(); return e; }  // the old file back under its name, still held
-        HANDLE h = CreateFileW(target.c_str(), DELETE | GENERIC_READ | FILE_WRITE_DATA, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        DWORD heldErr = 0;
+        Publication installed;
+        DWORD e = PutComplete(target, data, size, &installed);
+        if (e) {
+            if (old == INVALID_HANDLE_VALUE) return e;
+            const DWORD renameError = RenameHandle(old, target, false);
+            if (!renameError) { held_.push_back({target, old}); return e; }
+            if (oldLeft) *oldLeft = target.substr(0, target.find_last_of(L'\\') + 1) + oldName;
+            CloseHandle(old);
+            return renameError;
+        }
+        if (publication) *publication = installed;
+        HANDLE h = failReopen ? INVALID_HANDLE_VALUE :
+            CreateFileW(target.c_str(), DELETE | GENERIC_READ | FILE_WRITE_DATA, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                        FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+        DWORD heldErr = failReopen ? ERROR_SHARING_VIOLATION : h == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+        if (h != INVALID_HANDLE_VALUE) {
+            BY_HANDLE_FILE_INFORMATION actual{};
+            const auto& expected = installed.identity;
+            if (!GetFileInformationByHandle(h, &actual) || actual.dwVolumeSerialNumber != expected.dwVolumeSerialNumber ||
+                actual.nFileIndexHigh != expected.nFileIndexHigh || actual.nFileIndexLow != expected.nFileIndexLow ||
+                actual.nNumberOfLinks != 1) {
+                CloseHandle(h);
+                h = INVALID_HANDLE_VALUE;
+                heldErr = ERROR_FILE_INVALID;
+            }
+        }
         if (h == INVALID_HANDLE_VALUE) {
-            heldErr = GetLastError();
             which_ = path;
             err_ = heldErr;
             result_ = heldErr == ERROR_SHARING_VIOLATION ? GuardResult::GameRunning : GuardResult::Unknown;
@@ -391,12 +416,12 @@ private:
         memcpy(info->FileName, newName.c_str(), newName.size() * sizeof(wchar_t));
         return SetFileInformationByHandle(h, FileRenameInfo, info, static_cast<DWORD>(bytes)) ? 0 : GetLastError();
     }
-    // The complete bytes at `target` (a new temporary file in its folder, written in checked chunks, flushed, closed, then
-    // renamed into place only where nothing is). 0 or the error; the temporary file is deleted on a failure.
-    static DWORD PutComplete(const std::wstring& target, const void* data, size_t size) {
+    // Publish complete bytes at target through the flushed staging handle, only where nothing is. On failure, remove the
+    // staging file through that same handle.
+    static DWORD PutComplete(const std::wstring& target, const void* data, size_t size, Publication* publication) {
         static volatile LONG counter = 0;
         const std::wstring tmp = target + kTempMark + std::to_wstring(GetCurrentProcessId()) + L"-g" + std::to_wstring(InterlockedIncrement(&counter));
-        HANDLE t = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        HANDLE t = CreateFileW(tmp.c_str(), GENERIC_WRITE | DELETE, FILE_SHARE_READ, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (t == INVALID_HANDLE_VALUE) return GetLastError();
         DWORD e = 0;
         const char* p = static_cast<const char*>(data);
@@ -408,9 +433,12 @@ private:
             else done += put;
         }
         if (!e && !FlushFileBuffers(t)) e = GetLastError();
-        if (!CloseHandle(t) && !e) e = GetLastError();
-        if (!e) MoveIntoPlace(tmp, target, MOVEFILE_WRITE_THROUGH, &e);
-        if (e) DeleteFileW(tmp.c_str());
+        Publication result;
+        if (!e && !GetFileInformationByHandle(t, &result.identity)) e = GetLastError();
+        if (!e) e = RenameHandle(t, target, false);
+        if (e) DeleteThrough(t);
+        CloseHandle(t);
+        if (!e && publication) { result.published = true; *publication = result; }
         return e;
     }
     struct Held { std::wstring path; HANDLE h; };
