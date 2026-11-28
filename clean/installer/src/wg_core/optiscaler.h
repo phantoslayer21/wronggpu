@@ -22,6 +22,9 @@ const wchar_t* const kOptiFrontEnd = L"wronggpu_ffx_dx12.dll";
 // The proxy names OptiScaler can load as, in the order the proxy picker tries them (coexist.h kProxyOrder, design
 // section 5).
 inline const wchar_t* const kOptiProxies[] = {L"dxgi.dll", L"winmm.dll", L"version.dll", L"wininet.dll", L"winhttp.dll", L"dbghelp.dll"};
+inline bool OptiPackageMemberAllowed(const wstring& member, const wstring& root) {
+    return GamePathAllowed(member) && (DataOverride().empty() || PathWithin(member, root, true));
+}
 const wchar_t* const kOptiTested = L"0.9.4";
 inline const wchar_t* const kOptiFactoryWrappingGames[] = {L"007FirstLight.exe"};  // see DoInstall
 struct OptiKey { const char* section; const char* key; const char* value; };

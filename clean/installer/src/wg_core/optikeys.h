@@ -22,6 +22,7 @@ IniSpan IniFind(const string& text, const string& section, const string& key);
 string IniValueAt(const string& text, const IniSpan& s);
 string IniReplaceValue(const string& text, const IniSpan& s, const string& value);  // only the value's bytes change
 struct IniEntry { string section, key, value; };
+wstring OptiReadWarning(const string& text);
 std::vector<IniEntry> IniEntries(const string& text);  // every unambiguous key line, in order
 
 // ---- the keys of the OptiScaler tab ------------------------------------------------------------------------------------

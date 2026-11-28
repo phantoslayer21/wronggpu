@@ -106,10 +106,12 @@ public:
     // older FileDispositionInfo where that is not supported) and closes it. The name is free when this returns true.
     bool Delete(DWORD* err = nullptr);
     bool RenameNew(const wstring& path, DWORD* err = nullptr);
-    bool ReplaceWith(PinnedFile& stage, const wstring& path, DWORD* err = nullptr);
+    bool ReplaceWith(PinnedFile& stage, const wstring& path, DWORD* err = nullptr, wstring* originalLeft = nullptr);
     bool WriteChunk(const void* data, DWORD size, DWORD* err = nullptr);
     // Publish complete replacement bytes while this handle still pins the old file.
-    bool ReplaceBytes(const wstring& path, const void* data, size_t size, DWORD* err = nullptr, bool failWrite = false);
+    bool ReplaceBytes(const wstring& path, const void* data, size_t size, DWORD* err = nullptr, bool failWrite = false,
+                      PinnedFile* metadata = nullptr, BY_HANDLE_FILE_INFORMATION* published = nullptr);
+    void Adopt(HANDLE handle) { Close(); h_ = handle; }
     HANDLE Release();  // transfers the pin to the operation's binary guard
     // Replaces the bytes through the handle (forWrite) with src's, which are hashed first and must be `srcSha` (nothing is
     // touched otherwise); the attributes and times of src are put on the file. false: err holds why (ERROR_FILE_CORRUPT when
@@ -128,11 +130,15 @@ public:
     bool ReadOnlyLost() const { return readOnlyLost_; }
 
 private:
-    bool RenameReplace(const wstring& path, DWORD* err);    bool CopyFrom(HANDLE src, const wstring& srcSha, DWORD* err);
+    bool RenameReplace(const wstring& path, DWORD* err);
+    bool CopyFrom(HANDLE src, const wstring& srcSha, DWORD* err);
+    DWORD CopyMetadataTo(PinnedFile& target, const wstring& targetPath, bool restoreTimes);
     HANDLE h_ = INVALID_HANDLE_VALUE;
     DWORD restoreAttrs_ = 0;
     bool readOnlyLost_ = false;  // the attributes to put back on Close (a read-only file that Open made writable); 0: none
 };
+// Remove abandoned staging siblings for this target before an operation changes it.
+void CleanStaleStages(const wstring& path);
 enum class DeleteIf { Deleted, Gone, Changed, Failed };
 // Deletes path when its bytes are one of `shas` (pinned: hashed and deleted through one handle). Gone: nothing was there.
 // Changed: other bytes (or a link or folder): nothing was done. Failed: held by another program or not deletable (err).

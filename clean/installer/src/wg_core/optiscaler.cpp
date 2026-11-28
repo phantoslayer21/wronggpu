@@ -74,7 +74,7 @@ OptiPackage PrepareOptiScaler(Context& ctx, const wstring& chosen) {
     if (!IsFile(Join(root, L"OptiScaler.dll")))
         for (auto& d : ListDirs(root)) if (IsFile(Join(d, L"OptiScaler.dll"))) { root = d; break; }
     const wstring dll = Join(root, L"OptiScaler.dll"), config = Join(root, L"OptiScaler.ini");
-    if (!GamePathAllowed(dll) || !GamePathAllowed(config)) {
+    if (!OptiPackageMemberAllowed(dll, root) || !OptiPackageMemberAllowed(config, root)) {
         p.error = L"OptiScaler's package files resolve outside the launcher fixture.";
         return p;
     }
@@ -100,9 +100,17 @@ OptiPackage PrepareOptiScaler(Context& ctx, const wstring& chosen) {
     while (!stack.empty()) {
         const wstring rel = stack.back(); stack.pop_back();
         const wstring abs = rel.empty() ? root : Join(root, rel);
+        if (!OptiPackageMemberAllowed(abs, root)) {
+            p.error = L"OptiScaler package directory is outside the launcher fixture: " + abs;
+            return p;
+        }
         for (auto& f : ListFiles(abs, L"*")) {
             const wstring n = BaseName(f);
             if (rel.empty() && (IEq(n, L"setup_windows.bat") || IEq(n, L"setup_linux.sh") || n.rfind(L"!!", 0) == 0)) continue;
+            if (!OptiPackageMemberAllowed(f, root)) {
+                p.error = L"OptiScaler package file is outside the launcher fixture: " + f;
+                return p;
+            }
             p.files.push_back(rel.empty() ? n : Join(rel, n));
         }
         for (auto& d : ListDirs(abs)) stack.push_back(rel.empty() ? BaseName(d) : Join(rel, BaseName(d)));

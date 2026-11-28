@@ -107,32 +107,13 @@ string MockDll(const std::vector<std::pair<wstring, wstring>>& strings, const st
 }
 }  // namespace
 
+#include "launcher_safety_core_cases.h"
+
 int main() {
-    auto verifyIniEncoding = [] {
-        const string from = "[FrameGen]\r\n\tFGOutput \t= auto \t; player's note\r\nKeep=1\n";
-        const string to = "[FrameGen]\r\n\tFGOutput \t= dlssg \t; player's note\r\nKeep=1\n";
-        auto wide = [](const string& text, bool bigEndian) {
-            string bytes = bigEndian ? "\xfe\xff" : "\xff\xfe";
-            for (char c : text) {
-                bytes.push_back(bigEndian ? '\0' : c);
-                bytes.push_back(bigEndian ? c : '\0');
-            }
-            return bytes;
-        };
-        for (const auto& pair : {std::make_pair(from, to), std::make_pair("\xef\xbb\xbf" + from, "\xef\xbb\xbf" + to),
-                                 std::make_pair(wide(from, false), wide(to, false)), std::make_pair(wide(from, true), wide(to, true))}) {
-            string value;
-            require(IniHasKey(pair.first, "framegen", "fgoutput", &value) && value == "auto" &&
-                    IniSet(pair.first, "FrameGen", "FGOutput", "dlssg") == pair.second,
-                    "OptiScaler INI editing preserves BOM, line endings, indentation and inline comments");
-        }
-        bool refused = false;
-        try { IniSet(from + "[FrameGen]\r\nFGOutput=other\r\n", "FrameGen", "FGOutput", "dlssg"); }
-        catch (const SetupError& error) { refused = error.msg.find(L"duplicate") != wstring::npos; }
-        require(refused, "duplicate OptiScaler keys are refused with a clear error");
-    };
-    verifyIniEncoding();
     try {
+        VerifyIniEncoding();
+        VerifyLauncherScope();
+
         // ---- 0.6.1: Collect logs in uninstall.exe (no converter data) never claims the map is invalid ----------------
         {
             const wstring cl = TempFolder() + L"-collect";
@@ -2269,21 +2250,20 @@ int main() {
                 {
                     Profile stale = DefaultProfile();
                     stale.v["rr_mode"] = "fast";
-                    const string fastPrev = "fast";
                     DeleteFileW(wgstate::SettingsPathOf(sg).c_str());
                     require(wgstate::SetSettings(sg, {{"rr_mode", "accurate"}}).ok(), "(interleaving: the menu saved accurate)");
-                    require(WriteRrState(sctx, sg, stale, true, nullptr, nullptr) >= 0 && ReadRrSettings(sg).mode == "accurate" &&
+                    require(WriteRrState(sctx, sg, stale, true) >= 0 && ReadRrSettings(sg).mode == "accurate" &&
                                 *wgstate::Get(wgstate::ReadSettings(sg), "rr_exact_allowed") == "0",
                             "an RR refresh with the launcher's older view (fast): the menu's newer accurate stays (a refresh never changes a saved mode)");
-                    require(WriteRrState(sctx, sg, stale, true, nullptr, &fastPrev) >= 0 && ReadRrSettings(sg).mode == "accurate",
+                    require(WriteRrState(sctx, sg, stale, true) >= 0 && ReadRrSettings(sg).mode == "accurate",
                             "an apply whose own mode did not change (fast before, fast now): the menu's newer accurate stays (an unchanged field is not written)");
                     Profile chosen = DefaultProfile();
                     chosen.v["rr_mode"] = "exact";
-                    require(WriteRrState(sctx, sg, chosen, true, nullptr, &fastPrev) == 1 && ReadRrSettings(sg).mode == "exact" &&
+                    require(WriteRrState(sctx, sg, chosen, true, nullptr, true) == 1 && ReadRrSettings(sg).mode == "exact" &&
                                 *wgstate::Get(wgstate::ReadSettings(sg), "rr_exact_allowed") == "1",
                             "an apply where the player changed the mode in the launcher (fast -> exact): written, rr_exact_allowed follows");
                     DeleteFileW(wgstate::SettingsPathOf(sg).c_str());
-                    require(WriteRrState(sctx, sg, stale, true, nullptr, nullptr) == 1 && ReadRrSettings(sg).mode == "fast",
+                    require(WriteRrState(sctx, sg, stale, true) == 1 && ReadRrSettings(sg).mode == "fast",
                             "no mode saved yet: the launcher's mode is written");
                     // the menu saves while the launcher's write waits for the lock: the decision is made from the menu's save
                     require(wgstate::SetSettings(sg, {{"rr_mode", "fast"}}).ok(), "(interleaving 2: fast saved)");
@@ -2297,7 +2277,7 @@ int main() {
                         wgstate::WriteAtomic(wgstate::SettingsPathOf(sg), wgstate::Stamped(wgstate::RenderSettings(now), "settings.ini", sid));
                     });
                     WaitForSingleObject(held, 5000);
-                    const int w = WriteRrState(sctx, sg, stale, true, nullptr, &fastPrev);  // the launcher read fast before the menu's save
+                    const int w = WriteRrState(sctx, sg, stale, true);  // the launcher read fast before the menu's save
                     menu.join();
                     CloseHandle(held);
                     require(w >= 0 && ReadRrSettings(sg).mode == "accurate",
@@ -2306,12 +2286,25 @@ int main() {
                 {
                     require(DataOverride().empty() && !PathWithin(sg, AppDataPath()), "RR fixture is outside the default data root");
                     sctx.fMap.map = std::make_unique<wgc::Map>();
+                    DeleteFileW(ProfilePath(sg).c_str());
+                    put(Join(sg, L"OptiScaler.ini"), "[Menu]\r\nShowFps=true\r\nShowFps=false\r\n");
                     DeleteFileW(wgstate::SettingsPathOf(sg).c_str());
                     require(RefreshRrSettings(sctx, sg, true) == 1 && ReadRrSettings(sg).enabled,
-                            "RR refresh enables a recorded game outside the default data root");
+                            "RR refresh enables a recorded game outside the default data root with duplicate INI keys and no profile");
+                    DeleteFileW(Join(sg, L"OptiScaler.ini").c_str());
                     require(wgstate::SetSettings(sg, {{"rr_mode_pending", "exact"}}).ok() &&
                             RefreshRrSettings(sctx, sg, true) == 1 && ReadRrSettings(sg).mode == "exact",
                             "RR refresh applies the queued mode once the data is ready");
+                    EnsureDir(Parent(RrDataFile()));
+                    put(RrDataFile(), "incompatible cache fixture");
+                    Profile chosen = DefaultProfile();
+                    chosen.v["rr_mode"] = "exact";
+                    require(WriteRrState(sctx, sg, chosen, false, nullptr, true) == 1 &&
+                                wgstate::SetSettings(sg, {{"rr_mode", "accurate"}}).ok() &&
+                                RefreshRrSettings(sctx, sg, true) == 1 && ReadRrSettings(sg).mode == "accurate" &&
+                                *wgstate::Get(wgstate::ReadSettings(sg), "rr_mode_pending") == "off",
+                            "a later in-game RR choice supersedes the queued launcher mode");
+                    DeleteFileW(RrDataFile().c_str());
                 }
                 // the state files go with the state folder only while their stamp is valid for their own name and this install
                 // (wg_state.h): a file the player edited or made, an unknown one, a copy under another name (temporary files among

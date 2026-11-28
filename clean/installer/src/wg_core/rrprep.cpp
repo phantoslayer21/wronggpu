@@ -74,7 +74,9 @@ std::vector<wchar_t> RrHelperEnvironment(const wstring& log) {
     real = EnvVar(L"WRONGGPU_TEST_REAL_DRIVER_CACHE") == L"1";
 #endif
     PWSTR p = nullptr;
+#ifdef WRONGGPU_TESTING
     if (!DataOverride().empty()) local = Join(DataOverride(), L"localappdata");
+#endif
     else if (real && SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DONT_VERIFY, nullptr, &p)) && p) local = p;
     if (p) CoTaskMemFree(p);
     std::vector<wchar_t> env;

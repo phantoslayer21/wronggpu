@@ -210,8 +210,10 @@ EditionResult GetEdition(Context& ctx, const wstring& dataDir, const std::functi
         PinnedFile previous;
         const bool exists = previous.Open(final_, true, &error);
         const bool missing = error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
-        if (!(exists ? previous.ReplaceWith(staging.file, final_, &error) : missing && staging.file.RenameNew(final_, &error))) {
+        wstring originalLeft;
+        if (!(exists ? previous.ReplaceWith(staging.file, final_, &error, &originalLeft) : missing && staging.file.RenameNew(final_, &error))) {
             r.detail = L"cannot rename " + part + L": " + ErrText(error);
+            if (!originalLeft.empty()) r.detail += L". The original is kept at " + originalLeft;
             r.error = L"WrongGPU couldn't save its OptiScaler edition in its data folder.";
             LogLine(ctx, L"OptiScaler: " + r.detail);
             return r;

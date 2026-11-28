@@ -443,6 +443,7 @@ void EntryJson(Json& j, const GameEntry& e) {
     if (e.fgUses) j.B("fg_installed", e.fgInstalled);
 #endif
     // Ray Reconstruction (rr.h): only a game that uses it says anything of it
+    if (!e.optiIniWarning.empty()) j.S("ini_warning", e.optiIniWarning);
     j.B("rr_uses", e.rrUses);
     if (e.rrUses) j.S("rr_why", e.rrWhy).B("rr_installed", e.rrInstalled).B("rr_enabled", e.rrEnabled).S("rr_mode", e.rrMode).B("rr_path_tracing_only", e.rrPathTracingOnly);
     // a game that creates RR itself (rr.h RrUse::direct): RR is available only where the install's OptiScaler is WrongGPU's
@@ -745,6 +746,10 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
         wstring ver;
         if (!m.proxy.empty() && IsFile(Join(dir, m.proxy))) ver = FileVersion(Join(dir, m.proxy));
         o.j.S("optiscaler_version", ver);
+        if (const wstring warning = OptiReadWarning(ini); !warning.empty()) {
+            o.j.S("ini_warning", warning);
+            Print(L"Warning: " + warning);
+        }
         o.j.Key("locked").Arr();
         const auto rows = OptiTabRows(ini);
         for (auto& r : rows) if (r.locked) o.j.Obj().S("section", r.section).S("key", r.key).S("value", r.value).S("why", r.why ? r.why : L"").End();
@@ -914,12 +919,14 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
         Profile p = GameProfile(dir);
         std::vector<std::pair<string, string>> optiEdits;
         bool modelGiven = false;  // a model=<m> item: the player's explicit model choice
+        bool rrModeGiven = false;
         bool fgGiven = false;     // an fg=<on|off> item (frame generation, fg.h)
         if (verb == L"set") {
             for (size_t i = 1; i < a.pos.size(); ++i) {
                 const wstring& kv = a.pos[i];
                 const size_t eq = kv.find(L'=');
                 if (eq != wstring::npos && IEq(kv.substr(0, eq), L"model")) modelGiven = true;
+                if (eq != wstring::npos && IEq(kv.substr(0, eq), L"rr_mode")) rrModeGiven = true;
                 if (eq != wstring::npos && IEq(kv.substr(0, eq), FromUtf8(kFgKeyEnable))) fgGiven = true;
                 wstring why;
                 if (eq == wstring::npos) why = L"use key=value: " + kv;
@@ -954,6 +961,7 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
                 r.optiEdits = optiEdits;
             }
 #endif
+            r.rrModeChosen = rrModeGiven;
             Ui ui; ui.step = [](int, int, const wstring&) {}; ui.log = [](const wstring& s) { LogLine(g.ctx, s); };
             const OpResult res = RunOp(g.ctx, r, ui);
             OpLogEnd();
@@ -963,6 +971,10 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
         string wini, oini;
         wini = EffectiveWronggpuIni(dir);  // (#219: the state folder over the file)
         ReadAll(Join(dir, L"OptiScaler.ini"), oini);
+        if (const wstring warning = OptiReadWarning(oini); !warning.empty()) {
+            o.j.S("ini_warning", warning);
+            Print(L"Warning: " + warning);
+        }
         auto eff = EffectiveSettings(wini, oini);
         if (const RrFileState rs = ReadRrSettings(dir); rs.present) {  // Ray Reconstruction: the RR plugin's settings file
             eff["rr_enabled"] = rs.enabled ? "on" : "off";
@@ -1165,9 +1177,7 @@ int Verb(const wstring& verb, const Args& a, Output& o) {
         return EXIT_OK;
     }
     if (verb == L"self-uninstall") {  // no window: the games are done in this process (Apps & features opens the window: uninstall-launcher)
-        // nothing installed for this user: nothing to uninstall (never the games, nor this copy's own settings and logs), as the
-        // window's Uninstall launcher is not offered then
-        if (!LauncherInstalled()) {
+        if (DataOverride().empty() && !LauncherInstalled()) {
             const wstring why = L"WrongGPU (the launcher) is not installed for this user: nothing was changed.";
             o.j.S("error", why); Print(why); return EXIT_NOT_INSTALLED;
         }

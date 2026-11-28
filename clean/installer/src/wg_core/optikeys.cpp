@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // WrongGPU launcher core: the OptiScaler tab and the inikey journal (optikeys.h). Written for this project.
 #include "optikeys.h"
+#include "optiscaler.h"
 
 #include <cstdio>
 
@@ -19,6 +20,9 @@ string Decode(const string& bytes, unsigned encoding) {
         const size_t low = i + (encoding == kUtf16BE ? 1 : 0), high = i + (encoding == kUtf16LE ? 1 : 0);
         units.push_back(static_cast<unsigned char>(bytes[low]) | (static_cast<unsigned char>(bytes[high]) << 8));
     }
+    if (!units.empty() && !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, units.data(),
+                                              static_cast<int>(units.size()), nullptr, 0, nullptr, nullptr))
+        Fail(L"OptiScaler.ini contains invalid UTF-16 data.");
     return ToUtf8(units);
 }
 string Encode(const string& text, unsigned encoding) {
@@ -61,6 +65,16 @@ std::vector<Line> Lines(const string& t) {
     }
     return v;
 }
+bool HasInlineComment(const string& section, const string& key) {
+    const string lower = LowerA(key);
+    if (lower.size() >= 4 && lower.compare(lower.size() - 4, 4, "path") == 0) return false;
+    if (FindOptiKey(section, key) || IsOptiLocked(section, key)) return true;
+    if (IEqA(section, "FrameGen"))
+        return lower == "fginput" || lower == "fgoutput" || lower == "fgtype" || lower == "enabled";
+    for (const auto& g : kOptiGameKeys)
+        if (IEqA(key, g.key) && (!g.section || IEqA(section, g.section))) return true;
+    return false;
+}
 // Visits every key line: (section, key, span).
 template <typename F> void ForEachKey(const string& t, F f) {
     string section;
@@ -81,23 +95,28 @@ template <typename F> void ForEachKey(const string& t, F f) {
         s.found = true; s.lineBegin = l.begin; s.lineEnd = l.end;
         size_t vb = eq + 1, ve = e;
         while (vb < ve && Space(t[vb])) ++vb;
-        for (size_t i = vb; i < ve; ++i)
-            if ((t[i] == ';' || t[i] == '#') && i > eq + 1 && Space(t[i - 1])) { ve = i; break; }
+        const string key = t.substr(a, ke - a);
+        if (HasInlineComment(section, key)) {
+            for (size_t i = vb; i < ve; ++i) {
+                if ((t[i] != ';' && t[i] != '#') || i == eq + 1 || !Space(t[i - 1])) continue;
+                ve = i;
+                if (i == vb) vb = eq + 1;  // an empty value: all of the existing whitespace belongs to the comment
+                break;
+            }
+        }
         while (ve > vb && Space(t[ve - 1])) --ve;
         s.valueBegin = vb; s.valueEnd = ve;
-        if (!f(section, t.substr(a, ke - a), s)) return;
+        if (!f(section, key, s)) return;
     }
 }
 }  // namespace
 
-IniSpan IniFind(const string& text, const string& section, const string& key) {
-    const IniText decoded(text);
+static IniSpan FindKey(const IniText& decoded, const string& section, const string& key) {
     IniSpan r;
     ForEachKey(decoded.text, [&](const string& sec, const string& k, const IniSpan& s) {
         if (!IEqA(sec, section) || !IEqA(k, key)) return true;
-        if (r.found) Duplicate(section, key);
         r = s;
-        return true;
+        return false;
     });
     if (r.found) {
         r.encoding = decoded.encoding;
@@ -107,6 +126,10 @@ IniSpan IniFind(const string& text, const string& section, const string& key) {
         r.valueEnd = decoded.Raw(r.valueEnd);
     }
     return r;
+}
+IniSpan IniFind(const string& text, const string& section, const string& key) {
+    try { return FindKey(IniText(text), section, key); }
+    catch (const SetupError&) { return {}; }
 }
 string IniValueAt(const string& text, const IniSpan& s) {
     return s.found ? Decode(text.substr(s.valueBegin, s.valueEnd - s.valueBegin), s.encoding) : string();
@@ -127,6 +150,12 @@ std::vector<IniEntry> IniEntries(const string& text) {
     return v;
 }
 
+wstring OptiReadWarning(const string& text) {
+    try { IniEntries(text); }
+    catch (const SetupError& error) { return error.msg; }
+    return {};
+}
+
 bool IniHasKey(const string& text, const string& section, const string& key, string* value) {
     const IniSpan span = IniFind(text, section, key);
     if (value && span.found) *value = IniValueAt(text, span);
@@ -134,9 +163,10 @@ bool IniHasKey(const string& text, const string& section, const string& key, str
 }
 
 string IniSet(const string& text, const string& section, const string& key, const string& value) {
-    const IniSpan span = IniFind(text, section, key);
-    if (span.found) return IniReplaceValue(text, span, value);
+    IniEntries(text);
     const IniText decoded(text);
+    const IniSpan span = FindKey(decoded, section, key);
+    if (span.found) return IniReplaceValue(text, span, value);
     const string& body = decoded.text;
     const string eol = body.empty() || body.find("\r\n") != string::npos ? "\r\n" : "\n";
     const string line = key + "=" + value;
@@ -283,6 +313,10 @@ std::vector<OptiRow> OptiTabRows(const string& ini) {
 }
 
 bool ApplyOptiEdits(const string& in, const std::vector<std::pair<string, string>>& edits, string& out, wstring* why) {
+    if (const wstring warning = OptiReadWarning(in); !warning.empty()) {
+        if (why) *why = warning;
+        return false;
+    }
     string t = in;
     for (auto& e : edits) {
         string section, key;
@@ -320,6 +354,7 @@ void JournalChanges(std::vector<IniKeyChange>& journal, const wstring& file, con
                   journal.end());
 }
 string RevertJournal(const string& text, const std::vector<IniKeyChange>& journal, const wstring& file, std::vector<wstring>* notes) {
+    IniEntries(text);
     string t = text;
     for (auto it = journal.rbegin(); it != journal.rend(); ++it) {
         const IniKeyChange& c = *it;

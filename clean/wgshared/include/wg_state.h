@@ -289,6 +289,13 @@ public:
     const char* words() const { return GuardWords(result_); }
     // Whether the guard holds `path` (a binary it was given).
     bool Holds(const std::wstring& path) const { return Find(path) >= 0; }
+    HANDLE TakeHeld(const std::wstring& path) {
+        const int i = Find(path);
+        if (i < 0) return INVALID_HANDLE_VALUE;
+        const HANDLE handle = held_[i].h;
+        held_.erase(held_.begin() + i);
+        return handle;
+    }
     void ReleaseBinaries() { CloseAll(); }
     void HoldVerified(const std::wstring& path, HANDLE h) { held_.push_back({ExtendedPath(path), h}); }
     struct Publication {

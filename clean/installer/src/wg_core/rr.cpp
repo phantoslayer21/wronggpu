@@ -530,13 +530,17 @@ int WriteStateKeys(Context& ctx, const wstring& dir, const std::vector<std::pair
     return StateWriteResult(ctx, dir, wgstate::SetSettings(dir, keys, wgstate::kDefaultWaitMs), why);
 }
 
-int WriteRrState(Context& ctx, const wstring& dir, const Profile& p, bool dataReady, wstring* why, const string* prevMode) {
+int WriteRrState(Context& ctx, const wstring& dir, const Profile& p, bool dataReady, wstring* why, bool explicitMode) {
     if (!GamePathAllowed(dir) || !GamePathAllowed(Join(StateDir(dir), L"settings.ini"))) return 0;
     const string want = p.get("rr_mode").empty() ? string("fast") : p.get("rr_mode");
-    const bool explicitMode = prevMode && want != *prevMode;
     if (!dataReady && IsFile(RrDataFile())) {
         if (!explicitMode) return 0;
-        const int r = WriteStateKeys(ctx, dir, {{"rr_mode_pending", want}}, why);
+        const auto queued = wgstate::UpdateSettings(dir, [&](const wgstate::Settings& now, std::vector<std::pair<string, string>>* out) {
+            const string* current = wgstate::Get(now, "rr_mode");
+            out->push_back({"rr_mode_pending", want});
+            out->push_back({"rr_mode_pending_from", current ? *current : "unset"});
+        }, wgstate::kDefaultWaitMs);
+        const int r = StateWriteResult(ctx, dir, queued, why);
         if (r >= 0 && why) *why = L"Ray Reconstruction mode " + FromUtf8(want) +
                                   L" is pending until compatible Ray Reconstruction data is ready.";
         return r < 0 ? r : 1;
@@ -544,16 +548,21 @@ int WriteRrState(Context& ctx, const wstring& dir, const Profile& p, bool dataRe
     const string enabled = p.get("rr_enabled") != "off" && dataReady ? "1" : "0";
     // decided under the state lock from the file as it is now (wg_state.h UpdateSettings), so a mode the game's menu saved
     // after the launcher read the settings is never replaced by the launcher's older view: the mode is written only when the
-    // file has none, or when the launcher's own choice changed (prevMode: the profile's mode before this apply; none: a
-    // refresh, which never changes a saved mode). rr_exact_allowed follows the mode that stays.
+    // file has none, the player applied it explicitly, or the pending mode still matches its saved baseline.
+    // rr_exact_allowed follows the mode that stays.
     const wgstate::SetOutcome o = wgstate::UpdateSettings(dir, [&](const wgstate::Settings& now, std::vector<std::pair<string, string>>* out) {
         const string* cur = wgstate::Get(now, "rr_mode");
         const bool curValid = cur && (*cur == "exact" || *cur == "accurate" || *cur == "fast");
         const string* pending = wgstate::Get(now, "rr_mode_pending");
-        const bool usePending = dataReady && pending && (*pending == "exact" || *pending == "accurate" || *pending == "fast");
+        const string* queuedFrom = wgstate::Get(now, "rr_mode_pending_from");
+        const bool pendingReady = dataReady && pending && (*pending == "exact" || *pending == "accurate" || *pending == "fast");
+        const bool usePending = pendingReady && (!queuedFrom || *queuedFrom == (cur ? *cur : "unset"));
         const bool writeMode = !curValid || explicitMode || usePending;
         const string mode = explicitMode ? want : usePending ? *pending : writeMode ? want : *cur;
-        if (pending && (usePending || explicitMode)) out->push_back({"rr_mode_pending", "off"});
+        if (pending && (pendingReady || explicitMode)) {
+            out->push_back({"rr_mode_pending", "off"});
+            out->push_back({"rr_mode_pending_from", "unset"});
+        }
         out->push_back({"rr_enabled", enabled});
         if (writeMode) out->push_back({"rr_mode", mode});
         out->push_back({"rr_exact_allowed", mode == "exact" ? "1" : "0"});
@@ -640,18 +649,25 @@ std::vector<RrSettingsFailure> RefreshAllRrSettings(Context& ctx, const wstring&
     std::vector<RrSettingsFailure> failed;
     std::vector<wstring> dirs;
     for (auto& d : ManagedGames()) {
-        if (!GamePathAllowed(d)) continue;
-        if (!GamePathAllowed(Join(StateDir(d), L"settings.ini"))) continue;
-        Record m;
+        if (!GamePathAllowed(d) || !GamePathAllowed(Join(StateDir(d), L"settings.ini"))) continue;
         if (!except.empty() && IEq(FullPath(d), FullPath(except))) continue;
-        if (LoadRecord(RecordPath(d), m) && !m.legacy && RecordHasRr(m)) dirs.push_back(d);
+        try {
+            Record m;
+            if (LoadRecord(RecordPath(d), m) && !m.legacy && RecordHasRr(m)) dirs.push_back(d);
+        } catch (const SetupError& error) {
+            failed.push_back({d, error.msg});
+        }
     }
     if (dirs.empty()) return failed;
     // An absent or unrecognized cache is no authority to turn another game's RR off.
     if (!RrDataValid(ctx)) return failed;
     for (auto& d : dirs) {
         wstring why;
-        if (RefreshRrSettings(ctx, d, true, &why) < 0) failed.push_back({d, why});
+        try {
+            if (RefreshRrSettings(ctx, d, true, &why) < 0) failed.push_back({d, why});
+        } catch (const SetupError& error) {
+            failed.push_back({d, error.msg});
+        }
     }
     return failed;
 }

@@ -862,7 +862,7 @@ def test_adopt_and_self_install(t, opti, baseline):
     t.check("the restorer: the game as before the 0.5.1 install, byte for byte", rc == 0 and after == before, (rc, diff(before, after)))
     t.check("the last game uninstalled while the launcher is installed: the shared model data stays (the launcher shows it as its own)",
             had_model and os.path.isdir(model_dir), (had_model, t.logtail()))
-    rc = t.run("self-uninstall", "--keep-games", "--startmenu=" + menu)
+    rc = t.run("self-uninstall", "--keep-games", "--startmenu=" + menu, exe=os.path.join(programs, "WrongGPU.exe"))
     t.check("self-uninstall: entry, shortcut and exe removed", rc == 0 and "WrongGPU" not in t.reg_keys() and not os.path.isfile(os.path.join(menu, "WrongGPU.lnk")) and
             not os.path.isfile(os.path.join(programs, "WrongGPU.exe")), (rc, t.j))
     t.check("...and with no game left, the launcher's uninstall takes the shared model data with it", wait_removed(t) and not os.path.isdir(model_dir),
@@ -943,11 +943,10 @@ def test_launcher_uninstall(t, opti):
     rc2 = t.run("self-install", "--startmenu=" + menu, exe=pexe, data=False)
     t.check("installed again: the game's entry folded in again", rc2 == 0 and not t.entries_for(b), (rc2, t.entries_for(b)))
     t.check("...a game left off the launcher's list keeps its own entry", rc == 0 and len(t.entries_for(b2)) == 1, (rc, t.entries_for(b2)))
-    # uninstalled from a portable copy that stays open (its window after Installed apps' Uninstall), which then repairs a game in
-    # the same process: the game keeps its own entry (the process started while the launcher was installed)
+    # The installed copy repairs a game in the same process after uninstalling itself. The repair must see the updated registration.
     rc = t.run("self-uninstall", "--keep-games", "--startmenu=" + menu, "--repair-after=" + exe, "--opti=" + opti, "--noscan", "--force", "--experimental",
-               exe=pexe, data=False)
-    t.check("uninstalled by a portable copy that then repairs a game in the same process: the launcher gone, the game keeps its own entry",
+               exe=installed, data=False)
+    t.check("repair in the same process after self-uninstall keeps the game's own entry",
             rc == 0 and t.j.get("repair_code") == 0 and "WrongGPU" not in t.reg_keys() and len(t.entries_for(b)) == 1 and "\nregkey\tWrongGPU-" in record_text(b),
             (rc, t.j, t.entries_for(b)))
     t.check("...the moved exe is deleted once it no longer runs", wait_removed(t), removed_folders(t))
@@ -957,13 +956,16 @@ def test_launcher_uninstall(t, opti):
     after = snapshot(root)
     t.check("self-uninstall with the games: the game byte for byte as before, the launcher gone", rc == 0 and after == before and wait_gone(programs) and
             "WrongGPU" not in t.reg_keys() and not t.entries_for(b), (rc, t.j, diff(before, after)))
-    t.check("...and the game with its own entry too: byte for byte, its entry gone", snapshot(root2) == before2 and not t.entries_for(b2),
-            (diff(before2, snapshot(root2)), t.entries_for(b2)))
+    t.check("...the off-list game and its own entry stay installed under an explicit data root",
+            os.path.isfile(os.path.join(b2, "wronggpu-setup", "install.record")) and len(t.entries_for(b2)) == 1, t.entries_for(b2))
     t.check("nothing left in the user folder: %LOCALAPPDATA%\\WrongGPU (model data, list, logs) and the moved exe gone", wait_removed(t) and wait_gone(shared),
             (removed_folders(t), os.listdir(shared) if os.path.isdir(shared) else None))
     t.check("...and %LOCALAPPDATA%\\Programs, which the install made on this fresh profile, is gone too",
             not programs_made or wait_gone(os.path.dirname(programs)),
             os.listdir(os.path.dirname(programs)) if os.path.isdir(os.path.dirname(programs)) else None)
+    rc = t.run("uninstall", exe2, "--noscan")
+    t.check("the off-list game can still be uninstalled separately", rc == 0 and snapshot(root2) == before2 and not t.entries_for(b2),
+            (rc, diff(before2, snapshot(root2)), t.entries_for(b2)))
     # the Start-menu shortcut: a replace (no folder named) keeps it where the entry has it; test builds never use the
     # player's Start menu (their default is a folder in LOCALAPPDATA)
     tmenu = os.path.join(shared, "StartMenu")
@@ -3016,6 +3018,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--launcher", required=True)
     ap.add_argument("--work", required=True)
+    ap.add_argument("--legacy-restorer", help="earlier shipped restorer to copy as data without running it")
     ap.add_argument("--baseline", help="the 0.5.1 installer (WRONGGPU_TESTING build, same test map) for the adoption cases")
     ap.add_argument("--hip", help="mock amdhip64_7.dll (WRONGGPU_HIP_RUNTIME)")
     ap.add_argument("--run-old-baseline", action="store_true", help="also run --baseline: OUTSIDE the suite's isolation guarantee (the "
@@ -3050,6 +3053,7 @@ def main():
     iso.self_test(work)  # (#243) first: no launcher call with a broken guard
     model = suite.cases.f_mini_case(present=0)  # the synthetic source of the test map the launcher was built with
     t = T(os.path.abspath(a.launcher), work, model, a.hip)
+    t.legacy_restorer = a.legacy_restorer
     # registry entries of an earlier run (test root only)
     for k, v in t.reg_keys().items():
         if (k.startswith("WrongGPU-") and v.get("InstallLocation", "").lower().startswith(work.lower())) or (k == "WrongGPU" and work.lower() in v.get("InstallLocation", "").lower()):

@@ -219,6 +219,7 @@ wstring FgInstallRel(const wstring& pluginRel, const wstring& payloadRel) {
 }
 
 wstring OptiFgConflictText(const string& optiIni) {
+    if (const wstring warning = OptiReadWarning(optiIni); !warning.empty()) return warning;
     wstring set;
     for (const char* key : {"FGInput", "FGOutput", "FGType", "Enabled"}) {
         string value;

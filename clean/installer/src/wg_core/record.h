@@ -47,7 +47,18 @@ namespace wg {
 // ------------------------------------------------------------------------------------------------
 // backup: the entry's backup below wronggpu-setup\backup when it is not `rel` (a file that an earlier uninstall kept was at
 // that name: the new backup went to <rel>.<n>; the record's "backup" line). Empty: backup\<rel>.
-struct Entry { wstring action, rel; bool existed = false; wstring orig, inst, owner, backup; };
+struct FileIdentity {
+    DWORD volume = 0;
+    ULONGLONG index = 0;
+    bool Matches(const PinnedFile& file) const;
+    bool Matches(const wstring& path) const;
+};
+struct Entry {
+    wstring action, rel;
+    bool existed = false;
+    wstring orig, inst, owner, backup;
+    FileIdentity published;  // a recovery record owns only the file this run published
+};
 // The rrconfig line (rrconfig.h): what "Fix it for me" did to the game's Engine.ini, so that =off and the uninstall undo it.
 struct RrConfigFix {
     bool present = false;
@@ -64,6 +75,7 @@ struct RrConfigFix {
 inline const wchar_t* const kRuntimeGameRoot = L"<game-root>";
 struct Record {
     wstring version, game, exe, status, regkey, model, modelM;
+    wstring restorerSha;  // empty for older records, "-" until this install publishes its restorer
     wstring installId;  // this install's id (32 hex digits; kept by repair and update): WrongGPU's stamp on its state files names it
     std::vector<Entry> e;
     bool legacy = false;
@@ -158,7 +170,7 @@ extern const wchar_t* const kPartlyRestored;
 bool AnyPartly(const std::vector<wstring>& warnings);
 // The player's original of `rel` (from `source`, its SHA-256 `sha`) kept in the folder that survives: an earlier kept copy
 // with these bytes is used again, else a new <time> generation. Checked byte for byte; throws on failure. Returns its path.
-wstring KeptOriginal(const wstring& dir, const wstring& rel, const wstring& source, const wstring& sha, PinnedFile* held = nullptr);
+wstring KeptOriginal(const wstring& dir, const wstring& rel, const wstring& source, const wstring& sha, PinnedFile* held = nullptr, bool move = false);
 // The OptiScaler.ini in `dir` is the one WrongGPU last wrote (its hash is the record's). The restore goes by this alone.
 bool OptiIniWrittenByUs(const wstring& dir, const Record& m);
 // The OptiScaler setup next to the game is still WrongGPU's: the OptiScaler DLL the record installed is there under its name
