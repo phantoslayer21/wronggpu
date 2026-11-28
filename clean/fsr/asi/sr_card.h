@@ -15,6 +15,7 @@
 #include <string>
 
 #include "../../wgshared/include/wg_host_menu_abi.h"
+#include "asi_abi.h"
 
 namespace wgasi {
 namespace card {
@@ -23,6 +24,13 @@ struct Hooks {
     std::function<std::wstring()> gameDir;  // the game folder whose wronggpu-setup holds settings.ini
     std::function<char()> activeModel;      // 'M', 'K', 'L': the model that runs (or the saved choice); 0: AMD's FSR runs
     std::function<void(const std::string&)> log;
+    // rc3: what the front end reports it actually runs (asi_abi.h WrongGpuAsiReportSrV1); false until a front end reported
+    // (an older one never does: the card then names activeModel as before). The status lines come from it: running
+    // (the model and mode of the last frame), switching, idle, and the last model that could not start.
+    std::function<bool(WrongGpuAsiSrV1*)> srStatus;
+    // What a front end reported through WrongGpuAsiShowModelV1: 'M', 'K', 'L', 0 (AMD's FSR), or -1 when no front end
+    // reported anything yet (the SR front end has not run: the card then says "Not in use", never "Running").
+    std::function<int()> frontEndShown;
 };
 
 // OptiPluginInit's work: registers the card. False (nothing registered) when the host's table lacks what it needs.

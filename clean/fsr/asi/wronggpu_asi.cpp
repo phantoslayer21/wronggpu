@@ -422,6 +422,22 @@ extern "C" __declspec(dllexport) void WrongGpuAsiShowModelV1(char model) {
     if (model == wgasi::kShowSaved || model == wgasi::kModelAmd || wgasi::LabelOf(model)) g_state.shown.store(model);
 }
 
+// The front end reports what it actually runs (asi_abi.h WrongGpuAsiReportSrV1): the card's status lines use it.
+namespace {
+std::mutex g_srMutex;
+WrongGpuAsiSrV1 g_sr{};
+bool g_srReported = false;
+}  // namespace
+
+extern "C" __declspec(dllexport) void WrongGpuAsiReportSrV1(const WrongGpuAsiSrV1* status) {
+    if (!status || status->size < sizeof(WrongGpuAsiSrV1)) return;
+    std::lock_guard lock(g_srMutex);
+    g_sr = *status;
+    g_sr.size = sizeof(WrongGpuAsiSrV1);
+    g_sr.error_reason[sizeof(g_sr.error_reason) - 1] = 0;
+    g_srReported = true;
+}
+
 extern "C" __declspec(dllexport) int WrongGpuAsiQueryStatusV1(WrongGpuAsiStatusV1* status, uint32_t caller_size) {
     return g_diagnostics.Query(status, caller_size, g_state.hooked.load(), g_state.model.load());
 }
@@ -456,6 +472,16 @@ extern "C" __declspec(dllexport) bool OptiPluginInit(const WgHostMenuApi* api, W
     wgasi::card::Hooks hooks;
     hooks.gameDir = [] { return wgchoice::GameDirOf(RecordPath()).wstring(); };
     hooks.activeModel = [] { return ActiveModel(); };
+    hooks.frontEndShown = [] {
+        const char shown = g_state.shown.load();
+        return wgchoice::IsModel(shown) || shown == wgasi::kModelAmd ? int(shown) : -1;  // (kShowSaved: nothing reported)
+    };
+    hooks.srStatus = [](WrongGpuAsiSrV1* out) {  // (an older front end never reports: the card then uses activeModel)
+        std::lock_guard lock(g_srMutex);
+        if (!g_srReported || !out) return false;
+        *out = g_sr;
+        return true;
+    };
     hooks.log = [](const std::string& line) { AsiLog::Get().Write(line); };
     return wgasi::card::Init(api, plugin, std::move(hooks));
 }

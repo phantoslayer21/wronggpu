@@ -339,6 +339,10 @@ Config ParseConfig(const std::string& text, std::string* warnings) {
             float f = 0;
             ok = ParseFloat(value, f) && f >= 1.0f && f <= 600000.0f;
             if (ok) c.createGiveUpMs = static_cast<uint32_t>(f);
+        } else if (key == "switch_wait_ms") {
+            float f = 0;
+            ok = ParseFloat(value, f) && f >= 0.0f && f <= 600000.0f;
+            if (ok) c.switchWaitMs = static_cast<uint32_t>(f);
         } else if (key == "context_park_ms") {
             float f = 0;
             ok = ParseFloat(value, f) && f >= 0.0f && f <= 60000.0f;

@@ -82,6 +82,19 @@ struct FrontEnd::UpscaleContext {
     bool modeSwitchFailed = false; // such a create failed: no more attempts for this context
     // The options of upscalers a mode switch replaced (they stay alive with their upscalers in `replaced`).
     std::vector<std::string> retiredOptions;
+    // Model switch hand-over (FrontEnd::FindLender): `bridge` is the borrowed upscaler this context upscales with while its
+    // own is created, or for its life when its own model cannot run (then `upscaler` stays null and `backend` is the
+    // lender's). `lent` is set on the context whose upscaler is borrowed. `retiredBridges`: a borrowed upscaler after this
+    // context took its own over, released kBridgeKeepFrames frames later (command lists recorded before may still use it).
+    std::shared_ptr<SharedUpscaler> bridge;
+    std::weak_ptr<SharedUpscaler> lent;
+    std::vector<std::shared_ptr<SharedUpscaler>> retiredBridges;
+    uint64_t retireBridgesAt = 0;
+    // rc3 round 2: the chosen model is not converted on this PC, so this context runs another one (the stored choice is
+    // unchanged): the model it stands in for, shown on the card until a model that was chosen starts.
+    char substitutedFor = 0;
+    char substKind = 1;       // why (asi_abi.h WG_ASI_SR_ERROR_*): 1 not converted, 2 its data does not match, 0 it failed
+    std::string substReason;  // short, for the card
     void DestroyReplaced() {
         for (const Replaced& r : replaced) r.backend->destroy(r.upscaler);
         replaced.clear();
@@ -102,6 +115,9 @@ struct FrontEnd::UpscaleContext {
         modelOption = fresh.modelOption;
         srModel = fresh.srModel;
         srMode = fresh.srMode;
+        substitutedFor = fresh.substitutedFor;
+        substKind = fresh.substKind;
+        substReason = fresh.substReason;
         fpMessage = fresh.fpMessage;
         amd = nullptr;
         amdApi = nullptr;
@@ -130,18 +146,51 @@ struct FrontEnd::UpscaleContext {
     }
 };
 
+// A WrongGPU upscaler lent for a model switch (frontend.h, FindLender). The lender context object stays where it is while
+// its host still has it; once the host destroyed it (or it was parked) this object owns it, and the last holder (a
+// borrower's bridge, or the lender's destroy) retires it: the upscaler is destroyed and the object deleted.
+struct FrontEnd::SharedUpscaler {
+    FrontEnd* owner = nullptr;
+    std::mutex mutex;                 // one dispatch at a time on the lent upscaler (the lender's and the borrowers')
+    UpscaleContext* donor = nullptr;  // the lender (owns the upscaler: its log callback and options point into it)
+    uint32_t donorId = 0;             // U<id> of the lender, for the log
+    char model = 0;                   // the model the lent upscaler runs ('M', 'K', 'L'; 0 when the options named it)
+    bool orphaned = false;            // the host destroyed the lender, or it was parked: retired with this object (mutex)
+    uint32_t lastBorrower = 0;        // U<id> of the last borrower, for the log
+    uint32_t viaId = 0;               // U<id> of the context the last borrower found it through (the lender, or another borrower)
+    bool parked = false;              // it was parked when it was first lent, for the log (and the borrower's history reset)
+    SharedUpscaler() = default;
+    SharedUpscaler(const SharedUpscaler&) = delete;
+    SharedUpscaler& operator=(const SharedUpscaler&) = delete;
+    ~SharedUpscaler() {
+        if (orphaned && donor) owner->RetireLender(donor, lastBorrower);
+    }
+};
+
 namespace {
+
+// A runtime before rc3 ends its create refusal with what it guessed keeps the game ("the front end's own upscaler (AMD FSR)
+// keeps the game"); the front end decides that (another WrongGPU model, AMD FSR, the host's own upscaler) and logs it on the
+// next lines, so the guess is replaced by what the runtime knows.
+std::string WithoutHandoverGuess(const char* message) {
+    std::string m = message ? message : "";
+    static const char kGuess[] = ": the front end's own upscaler (AMD FSR) keeps the game";
+    const size_t at = m.find(kGuess);
+    if (at != std::string::npos) m.replace(at, sizeof kGuess - 1, ": the context is not created");
+    return m;
+}
 
 void UpscalerLog(void* user, int level, const char* message) {
     auto* u = static_cast<FrontEnd::UpscaleContext*>(user);
     const char* tag = level == WG_LOG_ERROR ? "ERROR" : level == WG_LOG_WARN ? "warning" : "info";
     char prefix[64];
     std::snprintf(prefix, sizeof prefix, "  U%u upscaler %s: ", u->id, tag);
+    const std::string text = WithoutHandoverGuess(message);
     if (level == WG_LOG_ERROR && message) {
         std::string& reason = u->creating ? u->createError : u->failReason;
-        if (reason.empty()) reason = message;
+        if (reason.empty()) reason = text;
     }
-    u->owner->LogLine(std::string(prefix) + (message ? message : ""));
+    u->owner->LogLine(std::string(prefix) + text);
     // clean/fe-wrapped-list: "about to ..." comes right before a step that may take the process down (HIP start-up, the
     // shared-memory import): on disk now, so the log says where it stopped
     if (message && std::strncmp(message, "about to ", 9) == 0) u->owner->FlushLog();
@@ -293,6 +342,7 @@ FrontEnd::FrontEnd(Platform platform, Config config) : platform_(std::move(platf
 
 FrontEnd::~FrontEnd() {
     // Contexts the game never destroyed: the process is ending; GPU objects are left to the runtime.
+    exiting_.store(true);  // (a lent upscaler retired from here: its context object is deleted, its GPU objects left)
     std::lock_guard lock(mutex_);
     for (auto& entry : own_)
         if (!entry.first->pending) delete entry.first;  // one whose create still runs is left to the process exit
@@ -399,14 +449,191 @@ FrontEnd::UpscaleContext* FrontEnd::TakeParked(const WgUpscalerBackend* backend,
              a.output_width != b.output_width || a.output_height != b.output_height)
         why = "the new context has other sizes";
     else if (a.flags != b.flags || p->create.flags != fresh.create.flags) why = "the new context has other flags";
-    else if (p->options != fresh.options) why = "the new context has other options or another model";
     else if (platform_.deviceLost && platform_.deviceLost(b.d3d12_device)) why = "the D3D12 device was removed";
+    else if (p->options != fresh.options) {
+        why = "the new context has other options or another model";
+        if (config_.customSlot) {  // a model switch: it may lend its upscaler to the new context meanwhile (FindLender)
+            parked_ = p;
+            return nullptr;
+        }
+    }
     if (!why) {
         *parkedMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - parkedAt_).count();
         return p;
     }
     Retire(p, tag, why);
     return nullptr;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Model switch hand-over (frontend.h)
+
+std::shared_ptr<FrontEnd::SharedUpscaler> FrontEnd::FindLender(const WgUpscalerBackend* backend, const UpscaleContext& u,
+                                                               const std::string& tag) {
+    const WgCreateInfo& b = u.createInfo;
+    auto fits = [&](const UpscaleContext& d) {
+        const WgCreateInfo& a = d.createInfo;
+        return d.backend == backend && a.d3d12_device == b.d3d12_device && a.max_render_width == b.max_render_width &&
+               a.max_render_height == b.max_render_height && a.output_width == b.output_width && a.output_height == b.output_height &&
+               a.flags == b.flags && d.create.flags == u.create.flags && !d.broken && !d.splitBlocked &&
+               d.mode == UpscaleContext::Mode::Own;
+    };
+    if (platform_.deviceLost && platform_.deviceLost(b.d3d12_device)) return nullptr;
+    std::shared_ptr<SharedUpscaler> sp;
+    uint32_t via = 0;
+    {
+        std::lock_guard lock(mutex_);
+        std::vector<UpscaleContext*> live;
+        for (const auto& e : own_) live.push_back(e.first);
+        std::sort(live.begin(), live.end(), [](const UpscaleContext* x, const UpscaleContext* y) { return x->id > y->id; });
+        for (UpscaleContext* d : live) {  // the most recent first
+            if (d == &u) continue;
+            std::unique_lock<std::mutex> dl(d->mutex, std::try_to_lock);  // (busy on another thread right now: not this one)
+            if (!dl.owns_lock() || !fits(*d)) continue;
+            if (d->bridge) {  // it upscales with a borrowed upscaler itself: the same one
+                sp = d->bridge;
+                via = d->id;
+            } else if (d->upscaler && !d->pending) {
+                sp = d->lent.lock();
+                if (!sp) {
+                    sp = std::make_shared<SharedUpscaler>();
+                    sp->owner = this;
+                    sp->donor = d;
+                    sp->donorId = d->id;
+                    sp->model = RunModelOf(*d);
+                    d->lent = sp;
+                }
+                via = d->id;
+            }
+            if (sp) break;
+        }
+    }
+    if (!sp) {
+        std::lock_guard park(parkMutex_);
+        UpscaleContext* p = parked_;
+        if (p && p->upscaler && !p->pending && fits(*p)) {
+            parked_ = nullptr;  // (the park timer then finds nothing)
+            sp = std::make_shared<SharedUpscaler>();
+            sp->owner = this;
+            sp->donor = p;
+            sp->donorId = p->id;
+            sp->model = RunModelOf(*p);
+            sp->orphaned = true;  // its host context is gone already
+            sp->parked = true;
+            p->lent = sp;
+            via = p->id;
+        }
+    }
+    if (sp) {
+        std::lock_guard l(sp->mutex);
+        sp->lastBorrower = u.id;
+        sp->viaId = via;
+    }
+    (void)tag;
+    return sp;
+}
+
+void FrontEnd::RetireLender(UpscaleContext* donor, uint32_t borrowerHint) {
+    if (exiting_.load()) {  // the process is ending: as for contexts the game never destroyed
+        delete donor;
+        return;
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    donor->DestroyReplaced();
+    if (donor->upscaler) donor->backend->destroy(donor->upscaler);
+    donor->upscaler = nullptr;
+    if (donor->fallback) donor->fallbackBackend->destroy(donor->fallback);
+    donor->fallback = nullptr;
+    char ms[32];
+    std::snprintf(ms, sizeof ms, "%.1f", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    Log("model switch: the upscaler of U" + std::to_string(donor->id) + " (lent to U" + std::to_string(borrowerHint) +
+        ") destroyed in " + ms + " ms: no context uses it any more");
+    delete donor;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The card's status (rc3, frontend.h SrReport)
+
+void FrontEnd::UpdateSr(const std::function<void(SrReport&)>& change) {
+    std::lock_guard lock(srMutex_);
+    SrReport next = sr_;
+    change(next);
+    if (srSent_ && next == sr_) return;
+    sr_ = next;
+    srSent_ = true;
+    if (platform_.asiReportSr) platform_.asiReportSr(sr_);
+}
+
+SrReport FrontEnd::LastSrReport() {
+    std::lock_guard lock(srMutex_);
+    return sr_;
+}
+
+char FrontEnd::RunModelOf(const UpscaleContext& u) {
+    if (wgchoice::IsModel(u.srModel)) return u.srModel;
+    return wgchoice::IsModel(u.selectedModel) ? u.selectedModel : 'M';
+}
+
+void FrontEnd::ReportStartFailure(const UpscaleContext& u, const std::string& reason, bool idle, char failedModel, char kind) {
+    std::string r = reason;
+    if (r.size() > 150) r = r.substr(0, 147) + "...";
+    const char model = failedModel ? failedModel : RunModelOf(u);
+    const uint32_t w = u.create.maxUpscaleSize.width, h = u.create.maxUpscaleSize.height;
+    UpdateSr([&](SrReport& s) {
+        s.errorModel = model;
+        s.errorKind = kind;
+        s.errorWidth = w;
+        s.errorHeight = h;
+        s.errorReason = r;
+        if (idle) {
+            s.state = 0;
+            s.running = s.pending = 0;
+            s.runningMode = -1;
+        } else if (s.state == 2 && s.pending == model) {  // (the switch to it is over: the running model stays)
+            s.state = 1;
+            s.pending = 0;
+        }
+    });
+}
+
+// What a create failure says, for the log and the card (asi_abi.h WG_ASI_SR_ERROR_*): 2 the model's data was converted with
+// another map (convert it again), 1 no converted model, 0 anything else.
+char FrontEnd::FailureKindOf(const std::string& text) {
+    if (text.find("converted with a different map") != std::string::npos || text.find("does not match this installation") != std::string::npos)
+        return 2;
+    if (text.find("no converted model") != std::string::npos || text.find("isn't converted") != std::string::npos) return 1;
+    return 0;
+}
+
+int FrontEnd::ModelFileState(char model, const std::string& options, std::string* searched) {
+    if (!platform_.modelPlaces || !platform_.fileExists) return -1;
+    bool inOptions = false, inEnv = false, kDir = false;
+    OptionValue(options, "model_dir", &inOptions);
+    const char* env = std::getenv("WG_RUNTIME_OPTIONS");
+    if (env) OptionValue(env, "model_dir", &inEnv);
+    if (model == 'K') {
+        bool a = false, b = false;
+        OptionValue(options, "model_k_dir", &a);
+        if (env) OptionValue(env, "model_k_dir", &b);
+        kDir = a || b;
+    }
+    if (inOptions || inEnv || kDir) return -1;  // (the player's own folder decides; the front end does not look)
+    const char* leaf = model == 'K' ? "\\K\\model.wgcm" : model == 'L' ? "\\L\\model.wgcm" : "\\model.wgcm";
+    std::string where;
+    for (const ModelPlace& place : platform_.modelPlaces()) {
+        if (place.dir.empty()) continue;
+        std::string dir = place.dir;
+        while (dir.size() > 3 && (dir.back() == '\\' || dir.back() == '/')) dir.pop_back();
+        const std::string file = dir + leaf;
+        const bool there = platform_.fileExists(file);
+        where += (where.empty() ? "" : "; ") + file + (there ? " (found)" : " (not there)");
+        if (there) {
+            if (searched) *searched = where;
+            return 1;
+        }
+    }
+    if (searched) *searched = where;
+    return 0;
 }
 
 void FrontEnd::Log(const std::string& line) {
@@ -668,6 +895,11 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
                     forwarded_[*context] = Forwarded{name, 0, api, status, true};
                     runningModel_.store(0);  // AMD's upscaler runs
                     if (config_.customSlot && !asiHooked && platform_.asiShowModel) platform_.asiShowModel(0);
+                    UpdateSr([](SrReport& s) {
+                        s.state = 0;
+                        s.running = s.pending = 0;
+                        s.runningMode = -1;
+                    });
                 }
                 Log(tag + " -> " + RcName(rc) + " (the host chose AMD's upscaler version " + Hex(chosen) + "; forwarded) context=" +
                     Name(context));
@@ -747,13 +979,56 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
             }
         }
         ApplySrMode(*u, tag);
-        const std::string refusal = ApplyModelDir(*u, tag);
+        std::string refusal = ApplyModelDir(*u, tag);
         info.options = u->options.c_str();
         info.log = &UpscalerLog;
         info.log_user = u;
         // The split service only (the hooks it needs are installed after the create succeeded: ActivateSplit).
         AdaptCreateInfo(backend, platform_.services ? platform_.services(backend, u->device) : nullptr, info);
         u->createInfo = info;
+        // rc3 round 2, custom slot: the chosen model is not converted on this PC (its file is in none of the places). With
+        // a WrongGPU upscaler running (a model switch) that one is kept (the hand-over below); at a start with nothing to
+        // keep, a converted model runs instead (Model M, else Model K): never the host's own upscaler. The stored choice
+        // (the model choice record, sr_model) is not changed, so the chosen model runs once it is converted.
+        const char chosenModel = u->selectedModel;  // the player's choice (the stored one), for the start fallback below
+        char notConverted = 0;
+        std::shared_ptr<SharedUpscaler> earlyLender;
+        if (config_.customSlot && wgchoice::IsModel(u->selectedModel)) {
+            std::string searched;
+            if (ModelFileState(u->selectedModel, u->options, &searched) == 0) {
+                notConverted = u->selectedModel;
+                earlyLender = FindLender(backend, *u, tag);
+                if (earlyLender) {
+                    refusal = std::string("Model ") + notConverted + " isn't converted on this PC (looked at: " + searched +
+                              "); convert it in the WrongGPU app";
+                } else {
+                    for (const char alt : {'M', 'K'}) {
+                        const int32_t m = alt == notConverted ? -1 : ModelOfName(std::string(1, alt));
+                        const WgEntryDef* sr = m >= 0 ? SrEntryOfModel(m) : nullptr;
+                        if (!sr || ModelFileState(alt, config_.BackendOptions(), nullptr) != 1) continue;
+                        u->selectedModel = alt;
+                        u->modelOption = kWgModelRows[m].runtime_option;
+                        u->modelProviderId = sr->id;
+                        u->modelProviderName = EntryProviderName(*sr);
+                        u->options = config_.BackendOptions() + ";" + u->modelOption;
+                        u->substitutedFor = notConverted;
+                        u->substKind = 1;
+                        u->substReason = "not converted on this PC";
+                        Log(tag + " model choice: Model " + notConverted + " isn't converted on this PC, so Model " + alt +
+                            " runs instead. The stored choice stays Model " + notConverted + " and runs once it is converted "
+                            "(convert it in the WrongGPU app). Looked at: " + searched);
+                        ApplySrMode(*u, tag);
+                        refusal = ApplyModelDir(*u, tag);
+                        info.options = u->options.c_str();
+                        u->createInfo = info;
+                        break;
+                    }
+                    if (!u->substitutedFor)
+                        Log(tag + " model choice: Model " + notConverted + " isn't converted on this PC, and neither Model M nor Model K "
+                            "was found to run instead (looked at: " + searched + ")");
+                }
+            }
+        }
         // Custom slot: the same upscaler with the same options failed earlier in this session: no new attempt.
         std::string remembered;
         uint64_t repeats = 0;
@@ -801,6 +1076,11 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
         double parkedMs = 0;
         UpscaleContext* warm = attempt ? TakeParked(backend, *u, tag, &parkedMs) : nullptr;
         if (attempt) parkGuard.settled = true;
+        // Model switch hand-over (frontend.h): the upscaler that already runs, lent to this context while its own is
+        // created, or for its life when its own model cannot run.
+        std::shared_ptr<SharedUpscaler> lender;
+        if (config_.customSlot && !warm) lender = earlyLender ? earlyLender : FindLender(backend, *u, tag);
+        const auto createStart = std::chrono::steady_clock::now();
         if (!attempt) {
             // (nothing created: `why` says so; the fallback below decides)
         } else if (warm) {
@@ -819,11 +1099,16 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
             // AMD there is nothing else to upscale with, so it waits for the create, but not for ever: create_giveup_ms.
             // Custom slot without an AMD DLL of its own there is nothing to upscale with meanwhile: it waits as with
             // fallback_to_amd = 0.
+            // Model switch hand-over: with a lender the game's thread waits switch_wait_ms at most; the lender upscales meanwhile.
             const bool amdMeanwhile = config_.fallbackToAmd && (!config_.customSlot || UpscaleFallbackApi());
             u->creating = true;
             auto pending = PendingCreate::Start(backend, u->createInfo, HoldDevice(u->createInfo.d3d12_device));
-            if (pending->Wait(amdMeanwhile ? config_.createWaitMs : config_.createGiveUpMs)) {
+            if (pending->Wait(lender ? config_.switchWaitMs : amdMeanwhile ? config_.createWaitMs : config_.createGiveUpMs)) {
                 u->creating = false;
+                char took[48];
+                std::snprintf(took, sizeof took, "%.2f s", pending->Seconds());
+                Log(tag + " U" + std::to_string(u->id) + ": the upscaler's create finished in " + took + " (" +
+                    (pending->Result() == WG_OK ? "created" : WgResultText(pending->Result())) + "; on the create thread, the game's thread waited for it)");
                 if (u->failReason.empty()) u->failReason = u->createError;
                 const WgResult r = pending->Result();
                 u->upscaler = pending->Take();
@@ -883,7 +1168,10 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
             } else {
                 u->pending = pending;
                 u->pendingBackend = backend;
-                if (amdMeanwhile) {
+                if (lender) {
+                    why = std::string("upscaler \"") + backend->name + "\" is still starting after " + std::to_string(config_.switchWaitMs) +
+                          " ms (switch_wait_ms); it takes over when it has started";
+                } else if (amdMeanwhile) {
                     why = std::string("upscaler \"") + backend->name + "\" is still starting after " + std::to_string(config_.createWaitMs) +
                           " ms (create_wait_ms); it takes over when it has started";
                 } else {
@@ -893,6 +1181,115 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
                     why = std::string("upscaler \"") + backend->name + "\" did not finish its create in " +
                           std::to_string(config_.createGiveUpMs) + " ms (create_giveup_ms): refused";
                 }
+            }
+        }
+        if (lender && !u->backend) {
+            // Model switch hand-over: the lent upscaler upscales this context, until its own has started (u->pending) or,
+            // when its own model cannot run, for its life. The host never sees a failed create for a model switch.
+            u->bridge = lender;
+            u->backend = backend;
+            if (!u->pending && u->failReason.empty()) u->failReason = why;
+            if (lender->parked) u->resetNext = true;  // the parked upscaler's history is old
+            const std::string running = (lender->model ? std::string("Model ") + lender->model : std::string("the running model")) +
+                                        " (the upscaler of U" + std::to_string(lender->donorId) +
+                                        (lender->parked ? std::string(", parked") : std::string()) +
+                                        (lender->viaId != lender->donorId ? ", which U" + std::to_string(lender->viaId) + " borrows" : std::string()) + ")";
+            const std::string chosen = u->selectedModel ? std::string("Model ") + u->selectedModel : std::string("the chosen model");
+            char ms[32];
+            std::snprintf(ms, sizeof ms, "%.0f", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - createStart).count());
+            if (u->pending) {
+                const char runModel = lender->model, startModel = RunModelOf(*u);
+                UpdateSr([&](SrReport& s) {
+                    s.state = 2;
+                    s.running = runModel;
+                    s.pending = startModel;
+                });
+            } else {
+                if (notConverted)
+                    ReportStartFailure(*u, "not converted on this PC", false, notConverted, 1);
+                else if (FailureKindOf(u->createError.empty() ? why : u->createError) == 2)
+                    ReportStartFailure(*u, "its data doesn't match this version", false, 0, 2);
+                else
+                    ReportStartFailure(*u, !refusal.empty() && u->selectedModel == 'L'
+                                               ? std::string("no converted Model L file was found (WrongGPU.exe model convert --preset=L writes it)")
+                                               : u->createError.empty() ? why : u->createError,
+                                       false);
+            }
+            if (u->pending)
+                Log(tag + " model switch: " + chosen + " is starting in the background (" + why + "); " + running +
+                    " keeps upscaling U" + std::to_string(u->id) + " until then (the game's thread waited " + ms + " ms)");
+            else
+                Log(tag + " model switch: " + chosen + " cannot run (" + why + (u->createError.empty() || why.find(u->createError) != std::string::npos ? "" : ": " + u->createError) +
+                    "); " + running + " keeps upscaling U" + std::to_string(u->id) +
+                    " for its life (no fallback to the host's own upscaler; select another model, or restart the game after fixing the cause)");
+        }
+        // rc3 round 3, custom slot: the create failed for ANY reason (a file that is missing, data converted with another map,
+        // a runtime refusal) and no WrongGPU model runs that could be kept (a start): the other converted models are tried, M,
+        // then K, then L, before the create fails; the stored choice stays. Never the host's own upscaler while one works.
+        if (config_.customSlot && !u->backend && !u->pending && !lender && wgchoice::IsModel(chosenModel)) {
+            const std::string firstWhy = u->createError.empty() ? why : u->createError;
+            const char firstModel = u->selectedModel;  // the model that just failed (the chosen one, or the one standing in)
+            char kind = notConverted && !u->substitutedFor ? 1 : FailureKindOf(firstWhy);
+            const std::string firstShort = kind == 2 ? "its data doesn't match this version" : kind == 1 ? "not converted on this PC" : firstWhy;
+            for (const char alt : {'M', 'K', 'L'}) {
+                const int32_t m = alt == chosenModel || alt == firstModel ? -1 : ModelOfName(std::string(1, alt));
+                const WgEntryDef* sr = m >= 0 ? SrEntryOfModel(m) : nullptr;
+                if (!sr || ModelFileState(alt, config_.BackendOptions(), nullptr) != 1) continue;
+                u->selectedModel = alt;
+                u->modelOption = kWgModelRows[m].runtime_option;
+                u->modelProviderId = sr->id;
+                u->modelProviderName = EntryProviderName(*sr);
+                u->options = config_.BackendOptions() + ";" + u->modelOption;
+                ApplySrMode(*u, tag);
+                ApplyModelDir(*u, tag);
+                {
+                    std::lock_guard lock(mutex_);
+                    if (failedCreates_.count(FailureKey(backend, *u))) continue;  // (it failed earlier in this session too)
+                }
+                info.options = u->options.c_str();
+                u->createInfo = info;
+                u->createError.clear();
+                Log(tag + " model choice: " + std::string("Model ") + firstModel +
+                    (kind == 2   ? std::string("'s data doesn't match this version (converted with another map); convert it again in the WrongGPU app")
+                     : kind == 1 ? std::string(" isn't converted on this PC; convert it in the WrongGPU app")
+                                 : " couldn't start (" + firstWhy + ")") +
+                    ". Trying Model " + alt + " instead; the stored choice stays Model " + chosenModel + ".");
+                u->creating = true;
+                auto again = PendingCreate::Start(backend, u->createInfo, HoldDevice(u->createInfo.d3d12_device));
+                if (!again->Wait(config_.createGiveUpMs)) {  // (it takes over if it finishes: as any bounded create)
+                    u->pending = again;
+                    u->pendingBackend = backend;
+                    u->substitutedFor = chosenModel;
+                    u->substKind = char(kind);
+                    u->substReason = firstShort;
+                    why = std::string("Model ") + alt + " did not finish its create in " + std::to_string(config_.createGiveUpMs) +
+                          " ms (create_giveup_ms)";
+                    break;
+                }
+                u->creating = false;
+                const WgResult r = again->Result();
+                WgUpscaler* up = again->Take();
+                if (r == WG_OK && up && ActivateSplit(*u, backend, tag)) {
+                    u->upscaler = up;
+                    u->backend = backend;
+                    u->failReason.clear();
+                    u->substitutedFor = chosenModel;
+                    u->substKind = char(kind);
+                    u->substReason = firstShort;
+                    Log(tag + " model choice: Model " + alt + " runs (Model " + chosenModel + " stays the stored choice)");
+                    break;
+                }
+                if (up) backend->destroy(up);
+                const std::string altWhy = u->createError.empty() ? std::string("create failed: ") + WgResultText(r) : u->createError;
+                {
+                    std::lock_guard lock(mutex_);
+                    failedCreates_[FailureKey(backend, *u)] = RememberedFailure{altWhy, 0, r == WG_ERROR_UNSUPPORTED};
+                }
+                Log(tag + " model choice: Model " + alt + " couldn't start either (" + altWhy + ")");
+            }
+            if (!u->backend && !u->pending) {
+                Log(tag + " model choice: no converted WrongGPU model could start (Model " + firstModel + ": " + firstWhy + ")");
+                u->createError = firstWhy;
             }
         }
     } else if (why.empty()) {
@@ -918,6 +1315,14 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
                 Log(tag + " -> ERROR_RUNTIME_ERROR: " + why + "; hosted in OptiScaler's custom slot without an AMD DLL of WrongGPU's own "
                     "(amd_fidelityfx_dx12.wronggpu-original.dll next to this DLL): no context, the host's own upscaler takes over");
             clearRunningOnFail();
+            {
+                bool anyOwn = false;
+                {
+                    std::lock_guard lock(mutex_);
+                    anyOwn = !own_.empty();
+                }
+                ReportStartFailure(*u, u->createError.empty() ? why : u->createError, !anyOwn);
+            }
             delete u;
             return FFX_API_RETURN_ERROR_RUNTIME_ERROR;
         }
@@ -965,13 +1370,24 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
         }
         u->amdApi = original;
         u->mode = UpscaleContext::Mode::Amd;
+        if (!u->pending && config_.upscaler != UpscalerChoice::Amd && !forceAmd)
+            ReportStartFailure(*u, u->createError.empty() ? why : u->createError, true);  // (AMD's FSR upscales this context)
     }
     {
         std::lock_guard lock(mutex_);
         own_[u] = true;
     }
     // the model the active context runs (HostSelected compares a selection with it): none while it runs AMD's upscaler
-    const char activeModel = u->mode == UpscaleContext::Mode::Amd && !u->pending ? char(0) : u->selectedModel;
+    if (u->mode == UpscaleContext::Mode::Own && u->substitutedFor && (u->upscaler || u->pending))  // (the card: why another model)
+        ReportStartFailure(*u, u->substReason, false, u->substitutedFor, u->substKind);
+    else if (u->mode == UpscaleContext::Mode::Own && u->upscaler && !u->bridge)  // a model started: no start failure to show
+        UpdateSr([](SrReport& s) {
+            s.errorModel = 0;
+            s.errorWidth = s.errorHeight = 0;
+            s.errorReason.clear();
+        });
+    // (a borrowed upscaler: the lender's model runs until this context's own has started, CheckPending)
+    const char activeModel = u->bridge ? u->bridge->model : u->mode == UpscaleContext::Mode::Amd && !u->pending ? char(0) : u->selectedModel;
     runningModel_.store(activeModel);
     if (config_.customSlot && !asiHooked && platform_.asiShowModel) platform_.asiShowModel(activeModel);
     *context = u;
@@ -1013,10 +1429,13 @@ ffxReturnCode_t FrontEnd::CreateAmdFromSaved(UpscaleContext& u, uint64_t call, b
 
 void FrontEnd::CheckPending(UpscaleContext& u, uint64_t call) {
     const std::string tag = "#" + std::to_string(call) + " U" + std::to_string(u.id);
+    const std::string lenderModel = !u.bridge ? std::string()
+                                    : u.bridge->model ? std::string("Model ") + u.bridge->model : std::string("the running model");
     if (!u.pending->Done()) {
         for (const double seconds : {10.0, 30.0, 60.0, 300.0})
             if (u.pending->PassedThreshold(seconds))
-                Log(tag + " note: WrongGPU's upscaler is still starting after " + std::to_string(int(seconds)) + " s; AMD FSR upscales meanwhile");
+                Log(tag + " note: WrongGPU's upscaler is still starting after " + std::to_string(int(seconds)) + " s; " +
+                    (u.bridge ? lenderModel + " upscales meanwhile (model switch)" : std::string("AMD FSR upscales meanwhile")));
         return;
     }
     u.creating = false;
@@ -1028,13 +1447,15 @@ void FrontEnd::CheckPending(UpscaleContext& u, uint64_t call) {
         u.upscaler = upscaler;
         if (!ActivateSplit(u, u.pendingBackend, tag)) {
             // AMD's FSR keeps upscaling this context (as after a failed create); nothing of the hooks is left patched.
+            // (A borrowed upscaler keeps upscaling it instead: the model switch did not happen.)
             u.pendingBackend->destroy(upscaler);
             u.upscaler = nullptr;
             u.failReason = "WrongGPU's D3D12 hooks could not be installed for the command-list split";
             Log(tag + " ERROR: upscaler \"" + u.pendingBackend->name + "\" started after " + seconds + ", but " + u.failReason +
-                "; AMD FSR keeps upscaling");
-            runningModel_.store(0);
-            if (config_.customSlot && platform_.asiShowModel) platform_.asiShowModel(0);
+                (u.bridge ? "; " + lenderModel + " keeps upscaling (model switch)" : std::string("; AMD FSR keeps upscaling")));
+            runningModel_.store(u.bridge ? u.bridge->model : char(0));
+            if (config_.customSlot && platform_.asiShowModel) platform_.asiShowModel(u.bridge ? u.bridge->model : char(0));
+            ReportStartFailure(u, u.failReason, !u.bridge);
             u.pending.reset();
             return;
         }
@@ -1047,12 +1468,45 @@ void FrontEnd::CheckPending(UpscaleContext& u, uint64_t call) {
             failedCreates_.erase(FailureKey(u.pendingBackend, u));
         }
         Log(tag + ": WrongGPU's upscaler \"" + u.backend->name + "\" started after " + seconds + "; it upscales from this frame on");
+        if (!u.substitutedFor) UpdateSr([](SrReport& s) {  // a model started: no start failure to show (its first frame reports it)
+            s.errorModel = 0;
+            s.errorWidth = s.errorHeight = 0;
+            s.errorReason.clear();
+        });
+        if (u.bridge) {
+            // Model switch done: the borrowed upscaler is released a few frames later (lists recorded before may use it).
+            Log(tag + " model switch: " + (u.selectedModel ? std::string("Model ") + u.selectedModel : std::string("the chosen model")) +
+                " runs from this frame on; " + lenderModel + " upscaled meanwhile (its upscaler is released after " +
+                std::to_string(kBridgeKeepFrames) + " frames)");
+            u.retiredBridges.push_back(std::move(u.bridge));
+            u.bridge.reset();
+            u.retireBridgesAt = u.dispatches + kBridgeKeepFrames;
+            runningModel_.store(u.selectedModel);
+            if (config_.customSlot && platform_.asiShowModel) platform_.asiShowModel(u.selectedModel);
+        }
+    } else if (u.bridge) {
+        // Model switch: the new model cannot run; the borrowed model keeps this context for its life (never the host's own
+        // upscaler, never a failed frame).
+        u.failReason = u.createError.empty() ? std::string("upscaler \"") + u.pendingBackend->name + "\" create failed: " + WgResultText(r)
+                                             : u.createError;
+        Log(tag + " ERROR: upscaler \"" + u.pendingBackend->name + "\" create failed after " + seconds + ": " + WgResultText(r) + " (" +
+            u.failReason + "); model switch: " + (u.selectedModel ? std::string("Model ") + u.selectedModel : std::string("the chosen model")) +
+            " cannot run, " + lenderModel + " keeps upscaling this context");
+        runningModel_.store(u.bridge->model);
+        ReportStartFailure(u, FailureKindOf(u.failReason) == 2 ? std::string("its data doesn't match this version") : u.failReason, false, 0,
+                           FailureKindOf(u.failReason));
+        if (config_.customSlot) {
+            if (platform_.asiShowModel) platform_.asiShowModel(u.bridge->model);
+            std::lock_guard lock(mutex_);
+            failedCreates_[FailureKey(u.pendingBackend, u)] = RememberedFailure{u.failReason, 0, r == WG_ERROR_UNSUPPORTED};
+        }
     } else {
         u.failReason = u.createError.empty() ? std::string("upscaler \"") + u.pendingBackend->name + "\" create failed: " + WgResultText(r)
                                              : u.createError;
         Log(tag + " ERROR: upscaler \"" + u.pendingBackend->name + "\" create failed after " + seconds + ": " + WgResultText(r) +
             "; AMD FSR keeps upscaling");
         runningModel_.store(0);
+        ReportStartFailure(u, u.failReason, true);
         if (config_.customSlot) {
             if (platform_.asiShowModel) platform_.asiShowModel(0);
             std::lock_guard lock(mutex_);
@@ -1350,6 +1804,12 @@ std::string FrontEnd::ApplyModelDir(UpscaleContext& u, const std::string& tag) {
         if (l && c.index < 0)
             refusal = "Model L is chosen but no converted Model L was found (" + c.searched +
                       "); WrongGPU.exe model convert --preset=L writes it";
+        // The runtime's own default place is not probed for M and K (the runtime looks there itself), but Model L has
+        // no fallback there either: its file is checked too, so a missing one is refused here with the same reason
+        // (2026-11-27: it failed inside the runtime, "no converted model at ...\L\model.wgcm").
+        else if (l && c.option.empty() && platform_.fileExists && !platform_.fileExists(c.file))
+            refusal = "Model L is chosen but no converted Model L was found (" + c.searched + ": not there either); "
+                      "WrongGPU.exe model convert --preset=L writes it";
     }
     {
         std::lock_guard lock(mutex_);
@@ -1381,8 +1841,8 @@ void FrontEnd::Report(const UpscaleContext& u, UpscaleState state, const WgFrame
     s.state = state;
     s.upscaler = state == UpscaleState::Compare || state == UpscaleState::Amd ? (u.amdName.empty() ? std::string("AMD FSR") : u.amdName)
                                                 : u.backend ? u.backend->name : "";
-    if (state == UpscaleState::Network && config_.upscaler == UpscalerChoice::Network)
-        s.upscaler = std::string("WrongGPU network ") + u.modelProviderName;
+    if (state == UpscaleState::Network && config_.upscaler == UpscalerChoice::Network)  // (a borrowed upscaler: the lender's model)
+        s.upscaler = std::string("WrongGPU network ") + (u.bridge && u.bridge->donor ? u.bridge->donor->modelProviderName : u.modelProviderName);
     if (state == UpscaleState::Failed) {
         s.upscaler = "Upscaling unavailable";
         s.reason = !failureReason.empty() ? failureReason : !u.failReason.empty() ? u.failReason : "No upscaler produced this frame";
@@ -1439,21 +1899,43 @@ ffxReturnCode_t FrontEnd::DestroyContext(ffxContext* context, const ffxAllocatio
         if (!anyOwn) {
             if (others) runningModel_.store(0);
             if (config_.customSlot && platform_.asiShowModel) platform_.asiShowModel(others ? char(0) : char(1));
+            // the card's status: no context of WrongGPU's, so it upscales nothing (never the saved choice as running)
+            UpdateSr([](SrReport& s) {
+                s.state = 0;
+                s.running = s.pending = 0;
+                s.runningMode = -1;
+            });
         }
         ffxReturnCode_t rc = FFX_API_RETURN_OK;
         std::shared_ptr<PendingCreate> pending;
         bool park = false;
         bool switched = false;  // it could have been parked, but another upscaler context is in use
+        // Model switch hand-over: `lent` (its upscaler is borrowed: it stays, with this object, until the last borrower
+        // is done; SharedUpscaler), and this context's own borrowed or retired ones, released here on the game's thread
+        // after its lock (a worker that still runs its create must not be the one that destroys them).
+        std::shared_ptr<SharedUpscaler> lent, bridge;
+        std::vector<std::shared_ptr<SharedUpscaler>> retiredBridges;
+        uint32_t lentTo = 0;
         {
             std::lock_guard lock(u->mutex);
             u->DestroyReplaced();  // issue #58: the destroy is their completion boundary, parked or not
             pending = std::move(u->pending);
+            bridge = std::move(u->bridge);
+            u->bridge.reset();
+            retiredBridges = std::move(u->retiredBridges);
+            u->retiredBridges.clear();
+            lent = u->lent.lock();
+            if (lent) {
+                std::lock_guard l(lent->mutex);  // (its borrower's dispatch is done; from now on this object is the lent one's)
+                lent->orphaned = true;
+                lentTo = lent->lastBorrower;
+            }
             // A working upscaler is parked for the next context with the same parameters (frontend.h), with its
             // stand-in; AMD's contexts always go now.
-            park = !pending && CanPark(*u);
+            park = !lent && !pending && CanPark(*u);
             switched = park && others;
             park = park && !others;
-            if (!park) {
+            if (!park && !lent) {
                 if (u->upscaler) u->backend->destroy(u->upscaler);
                 u->upscaler = nullptr;
                 if (u->fallback) u->fallbackBackend->destroy(u->fallback);
@@ -1463,19 +1945,25 @@ ffxReturnCode_t FrontEnd::DestroyContext(ffxContext* context, const ffxAllocatio
             if (u->amd) {
                 const OriginalApi* original = u->amdApi;
                 rc = original ? original->destroyContext(&u->amd, u->amdFromSaved ? nullptr : memCb) : ffxReturnCode_t(FFX_API_RETURN_NO_PROVIDER);
-                if (park) u->amd = nullptr;
+                if (park || lent) u->amd = nullptr;
             }
         }
         Log(tag + " -> " + RcName(rc) + " (U" + std::to_string(u->id) + " destroyed after " + std::to_string(u->dispatches) +
             " dispatches" + (pending && !pending->Done() ? "; its upscaler is still starting and is destroyed when it has" : "") +
-            (park ? "; its upscaler is parked for " + std::to_string(config_.contextParkMs) +
-                        " ms (context_park_ms) for a context with the same parameters"
-                  : switched ? "; its upscaler is destroyed now, not parked: another upscaler context is in use (the host switched "
-                               "upscalers)"
-                             : std::string()) +
+            (lent ? "; model switch: its upscaler keeps upscaling U" + std::to_string(lentTo) +
+                        " until that context's own model has started (or for its life when that model cannot run), then it is destroyed"
+             : park ? "; its upscaler is parked for " + std::to_string(config_.contextParkMs) +
+                          " ms (context_park_ms) for a context with the same parameters"
+                    : switched ? "; its upscaler is destroyed now, not parked: another upscaler context is in use (the host switched "
+                                 "upscalers)"
+                               : std::string()) +
             ")");
         *context = nullptr;
-        if (park) {
+        bridge.reset();  // (may retire a lender that was waiting for this borrower: RetireLender)
+        retiredBridges.clear();
+        if (lent) {
+            lent.reset();  // `u` belongs to the lent upscaler now: deleted with it, here when its borrowers are gone already
+        } else if (park) {
             Park(u, tag);
         } else if (pending) {  // the create's thread may still use the context (create info, log callback)
             const WgUpscalerBackend* backend = u->pendingBackend;
@@ -1762,6 +2250,13 @@ int32_t FrontEnd::HostSelected(uint64_t versionId) {
             ", source=ffx)" + (err.empty() ? "" : "; " + err) +
             (running == model ? "; it already runs" : std::string("; it runs after the upscaler is recreated (now running: ") +
                                                           (wgchoice::IsModel(running) ? std::string("Model ") + running : std::string("no WrongGPU model")) + ")"));
+        if (running == model)  // (the model that stands in for an unconverted one is now the choice: no note any more)
+            UpdateSr([](SrReport& s) {
+                if (s.errorKind != 1) return;
+                s.errorModel = s.errorKind = 0;
+                s.errorWidth = s.errorHeight = 0;
+                s.errorReason.clear();
+            });
         return running == model ? WG_HOST_SELECTED_NOTHING_CHANGED : WG_HOST_SELECTED_RECORDED;
     }
     if (o == wgchoice::Outcome::SeqExhausted) {
@@ -1996,6 +2491,12 @@ ffxReturnCode_t FrontEnd::DispatchUpscale(UpscaleContext& u, const ffxDispatchDe
     const std::string tag = "#" + std::to_string(call);
     const uint64_t frameIndex = u.dispatches++;
     const bool log = ShouldLogDispatch(frameIndex);
+    if (!u.retiredBridges.empty() && u.dispatches > u.retireBridgesAt) {
+        // Model switch: the upscaler borrowed until this context's own started, released kBridgeKeepFrames frames later
+        // (its lender's host context still has it, or it is destroyed now: RetireLender)
+        std::vector<std::shared_ptr<SharedUpscaler>> old = std::move(u.retiredBridges);
+        u.retiredBridges.clear();
+    }
     WgFrame frame;
     std::string problem, notes;
     if (d.flags & (FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB | FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_PQ)) {
@@ -2034,16 +2535,35 @@ ffxReturnCode_t FrontEnd::DispatchUpscale(UpscaleContext& u, const ffxDispatchDe
             }
         }
         if (u.broken) return BrokenFrame(u, frame, tag, frameIndex);  // bug hunt F1: the failed upscaler is not called again
+        // Model switch hand-over: a lent upscaler (this context's borrowed one, or its own while lent) takes one dispatch at a
+        // time; the lender's mode switch or resize below replaces its upscaler under the same lock.
+        const std::shared_ptr<SharedUpscaler> lease = u.bridge ? u.bridge : u.lent.lock();
+        std::unique_lock<std::mutex> leaseLock;
+        if (lease) leaseLock = std::unique_lock<std::mutex>(lease->mutex);
         SwitchModeForFrame(u, frame, tag);
         ResizeForFrame(u, frame, tag);
         if (platform_.diagnosticFrame) platform_.diagnosticFrame(u.id, frame);
         if (!u.fallbackBackend && platform_.standIn) u.fallbackBackend = platform_.standIn(config_);
         std::string note;
-        r = DispatchWithFallback(u.backend, u.upscaler, frame, u.fallbackBackend, u.createInfo, &u.fallback, note);
+        const WgUpscalerBackend* runBackend = u.bridge ? u.bridge->donor->backend : u.backend;
+        WgUpscaler* runUpscaler = u.bridge ? u.bridge->donor->upscaler : u.upscaler;
+        r = runUpscaler ? DispatchWithFallback(runBackend, runUpscaler, frame, u.fallbackBackend, u.createInfo, &u.fallback, note)
+                        : WG_ERROR_NOT_READY;  // (never expected: a lent upscaler is not destroyed while it is lent)
         if (platform_.diagnosticResult) platform_.diagnosticResult(u.id, frameIndex, r);
         if (!note.empty()) Log(tag + " note U" + std::to_string(u.id) + ": " + note);
         if (r == WG_OK) {
             if (note.empty()) u.resetNext = u.restartNext = false;  // the upscaler took the frame (with the reset, if one was due)
+            if (note.empty()) {  // the card's status: the model (and mode) that upscaled this frame, and a switch in progress
+                const char runModel = u.bridge ? u.bridge->model : RunModelOf(u);
+                const int32_t runMode = u.bridge ? (u.bridge->donor ? u.bridge->donor->srMode : -1) : u.srMode;
+                const char pendingModel = u.bridge && u.pending ? RunModelOf(u) : char(0);
+                UpdateSr([&](SrReport& s) {
+                    s.state = pendingModel ? 2u : 1u;
+                    s.running = runModel;
+                    s.pending = pendingModel;
+                    s.runningMode = runMode;
+                });
+            }
             if (u.badRun) {
                 Log(tag + " note U" + std::to_string(u.id) + ": frame " + std::to_string(frameIndex) + ": WrongGPU upscales again after " +
                     std::to_string(u.badRun) + " frame(s) it could not take (history reset)");
@@ -2363,6 +2883,12 @@ ffxReturnCode_t FrontEnd::Dispatch(ffxContext* context, const ffxDispatchDescHea
         ++u->dispatches;
         const ffxReturnCode_t rc = original->dispatch(&u->amd, desc);
         if (log || rc != FFX_API_RETURN_OK) Log(tag + " -> " + RcName(rc) + " (forwarded to AMD)");
+        if (rc == FFX_API_RETURN_OK && desc->type == FFX_API_DISPATCH_DESC_TYPE_UPSCALE)  // the card's status: AMD's FSR upscales
+            UpdateSr([](SrReport& s) {
+                s.state = 0;
+                s.running = s.pending = 0;
+                s.runningMode = -1;
+            });
         if (desc->type == FFX_API_DISPATCH_DESC_TYPE_UPSCALE)
             Report(*u, rc == FFX_API_RETURN_OK ? UpscaleState::Amd : UpscaleState::Failed, nullptr,
                    "AMD FSR dispatch failed: " + std::string(RcName(rc)));

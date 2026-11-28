@@ -21,6 +21,7 @@
 #include "../../wgshared/include/wg_host_menu_abi.h"
 #include "../../wgshared/include/wg_state.h"
 #include "wg_sr_modes.h"
+#include "../asi/asi_abi.h"
 
 static int failures = 0, checks = 0;
 #define CHECK(x) do { ++checks; if (!(x)) { ++failures; std::printf("FAIL line %d: %s\n", __LINE__, #x); } } while (0)
@@ -149,6 +150,12 @@ int main(int argc, char** argv) {
     CHECK(init(&api, nullptr));
     CHECK(!g_tab && g_title == "WrongGPU Upscaler" && g_draw);
 
+    // rc3 round 2: no front end has reported anything (Ray Reconstruction handles the frames, the SR front end never ran):
+    // nothing is "Running", whatever the saved choice says
+    DrawFrame();
+    CHECK(HasText("Not in use: the WrongGPU upscaler hasn't run in this session.") && !HasText("Running:"));
+    CHECK(g_combos.size() == 3);
+
     // no shared block yet (no SR front end in this process): settings.ini only, the default shows Fast
     showModel('M');
     DrawFrame();
@@ -199,6 +206,77 @@ int main(int argc, char** argv) {
     showModel(0);
     DrawFrame();
     CHECK(HasText("AMD FSR is selected") && g_combos.size() == 3);
+
+    // rc3: once the front end reports what it actually runs (WrongGpuAsiReportSrV1), the status lines come from that report,
+    // never from the saved choice: switching, running with its mode, a model that could not start, idle.
+    auto report = reinterpret_cast<void (*)(const WrongGpuAsiSrV1*)>(GetProcAddress(asi, WRONGGPU_ASI_REPORT_SR));
+    CHECK(report != nullptr);
+    if (report) {
+        WrongGpuAsiSrV1 s{};
+        s.size = sizeof(s);
+        s.state = WG_ASI_SR_SWITCHING;
+        s.running_model = 'M';
+        s.pending_model = 'L';
+        s.running_mode = WG_SR_MODE_FAST;
+        report(&s);
+        DrawFrame();
+        CHECK(HasText("Switching to Model L... Model M (Fast) keeps running until it is ready.") && !HasText("Running:"));
+        s.state = WG_ASI_SR_RUNNING;
+        s.pending_model = 0;
+        s.error_model = 'L';
+        s.error_width = 1920;
+        s.error_height = 1080;
+        std::snprintf(s.error_reason, sizeof s.error_reason, "%s", "no converted Model L file was found");
+        report(&s);
+        DrawFrame();
+        CHECK(HasText("Running: Model M (Fast)"));
+        CHECK(HasText("Model L couldn't start at 1920x1080: no converted Model L file was found. Model M kept."));
+        // the case of 2026-11-27: OptiScaler runs its stock FSR 2.1.2; the saved choice (or a shown model) is no "Running"
+        s.state = WG_ASI_SR_IDLE;
+        s.running_model = 0;
+        report(&s);
+        showModel('M');
+        DrawFrame();
+        CHECK(HasText("Idle: WrongGPU is not upscaling (OptiScaler is running another upscaler).") && !HasText("Running:"));
+        CHECK(HasText("Model L couldn't start at 1920x1080: no converted Model L file was found.") && !HasText("kept"));
+        CHECK(g_combos.size() == 3);
+        WrongGpuAsiSrV1 small = s;  // a report smaller than the structure (an older or broken writer) is ignored
+        small.size = 8;
+        small.state = WG_ASI_SR_RUNNING;
+        small.running_model = 'M';
+        report(&small);
+        DrawFrame();
+        CHECK(HasText("Idle:"));
+        s.state = WG_ASI_SR_RUNNING;  // the mode of the last frame, as reported
+        s.running_model = 'M';
+        s.running_mode = WG_SR_MODE_EXACT;
+        s.error_model = 0;
+        report(&s);
+        DrawFrame();
+        CHECK(HasText("Running: Model M (Exact)") && !HasText("couldn't start"));
+        // the stored choice is not converted (rc3 round 2): another model runs, and the card says why in plain words
+        s.error_model = 'L';
+        s.error_kind = WG_ASI_SR_ERROR_NOT_CONVERTED;
+        s.error_reason[0] = 0;
+        report(&s);
+        DrawFrame();
+        CHECK(HasText("Running: Model M (Exact)"));
+        CHECK(HasText("Model L isn't converted on this PC, so Model M is running. Convert Model L in the WrongGPU app."));
+        s.state = WG_ASI_SR_IDLE;
+        s.running_model = 0;
+        report(&s);
+        DrawFrame();
+        CHECK(HasText("Model L isn't converted on this PC, so WrongGPU can't run it. Convert Model L in the WrongGPU app."));
+        // the stored choice's data was converted with another map (rc3 round 3): Model M runs, convert it again
+        s.state = WG_ASI_SR_RUNNING;
+        s.running_model = 'M';
+        s.error_model = 'K';
+        s.error_kind = WG_ASI_SR_ERROR_STALE_DATA;
+        report(&s);
+        DrawFrame();
+        CHECK(HasText("Model K's data doesn't match this version; convert it again in the WrongGPU app. Model M is running."));
+        CHECK(!HasText("couldn't start") && !HasText("isn't converted"));
+    }
 
     block.close();
     std::filesystem::remove_all(game, ec);

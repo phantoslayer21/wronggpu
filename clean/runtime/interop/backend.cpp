@@ -676,7 +676,7 @@ class Context {
       if (!exec_->prepare(&err) || !exec_->prepare_device(device_, &err) ||
           !make_shared_objects(false, "arena", &err) || !exec_->init(device_, set_, &err)) {
         // R1, every model: no HIP route in a game. The context is not created; the one error line is the whole report
-        // and the front end's own upscaler (AMD FSR, else its stand-in) keeps the game
+        // and the front end decides what upscales instead (another WrongGPU model, AMD FSR, its stand-in)
         return fail(WG_ERROR_UNSUPPORTED, dx12_refused_line(dx12_default_, err));
       } else {
         say(WG_LOG_INFO, std::string("executor dx12: the network runs on the game's D3D12 device, recorded into the "

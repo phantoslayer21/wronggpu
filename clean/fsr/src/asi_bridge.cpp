@@ -38,4 +38,25 @@ void SetAsiChoiceRecord(const std::wstring& path) {
         set(path.c_str());
 }
 
+void ReportAsiSr(uint32_t state, char running, char pending, int32_t runningMode, char errorModel, char errorKind, uint32_t errorWidth,
+                 uint32_t errorHeight, const std::string& errorReason) {
+    HMODULE m = GetModuleHandleW(WRONGGPU_ASI_MODULE);
+    if (!m) return;
+    auto report = reinterpret_cast<PfnWrongGpuAsiReportSrV1>(reinterpret_cast<void*>(GetProcAddress(m, WRONGGPU_ASI_REPORT_SR)));
+    if (!report) return;
+    WrongGpuAsiSrV1 s{};
+    s.size = sizeof(s);
+    s.state = state;
+    s.running_model = running;
+    s.pending_model = pending;
+    s.error_model = errorModel;
+    s.error_kind = errorKind;
+    s.running_mode = runningMode;
+    s.error_width = errorWidth;
+    s.error_height = errorHeight;
+    const size_t n = errorReason.size() < sizeof(s.error_reason) - 1 ? errorReason.size() : sizeof(s.error_reason) - 1;
+    for (size_t i = 0; i < n; ++i) s.error_reason[i] = errorReason[i];
+    report(&s);
+}
+
 }  // namespace wgwin
