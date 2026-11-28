@@ -395,6 +395,7 @@ bool Browse(int mode, wstring& out) {  // 0 exe, 1 folder, 2 model dll, 3 OptiSc
             const wstring p = Parent(e.dir);
             if (start.empty() && e.source != L"Added" && p.size() >= 3 && p[1] == L':' && GetDriveTypeW(p.substr(0, 3).c_str()) == DRIVE_FIXED) start = p;
         }
+        if (start.empty() && !DataOverride().empty()) start = DataOverride();
         if (start.empty()) { PWSTR pf = nullptr; if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_ProgramFilesX86, 0, nullptr, &pf)) && pf) start = pf; if (pf) CoTaskMemFree(pf); }
         IShellItem* place = nullptr;
         if (!start.empty() && SUCCEEDED(SHCreateItemFromParsingName(start.c_str(), nullptr, IID_PPV_ARGS(&place)))) { d->SetDefaultFolder(place); place->Release(); }

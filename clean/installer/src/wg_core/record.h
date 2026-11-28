@@ -47,7 +47,18 @@ namespace wg {
 // ------------------------------------------------------------------------------------------------
 // backup: the entry's backup below wronggpu-setup\backup when it is not `rel` (a file that an earlier uninstall kept was at
 // that name: the new backup went to <rel>.<n>; the record's "backup" line). Empty: backup\<rel>.
-struct Entry { wstring action, rel; bool existed = false; wstring orig, inst, owner, backup; };
+struct FileIdentity {
+    DWORD volume = 0;
+    ULONGLONG index = 0;
+    bool Matches(const PinnedFile& file) const;
+    bool Matches(const wstring& path) const;
+};
+struct Entry {
+    wstring action, rel;
+    bool existed = false;
+    wstring orig, inst, owner, backup;
+    FileIdentity published;  // a recovery record owns only the file this run published
+};
 // The rrconfig line (rrconfig.h): what "Fix it for me" did to the game's Engine.ini, so that =off and the uninstall undo it.
 struct RrConfigFix {
     bool present = false;
@@ -64,13 +75,16 @@ struct RrConfigFix {
 inline const wchar_t* const kRuntimeGameRoot = L"<game-root>";
 struct Record {
     wstring version, game, exe, status, regkey, model, modelM;
+    wstring restorerSha;  // empty for older records, "-" until this install publishes its restorer
     wstring installId;  // this install's id (32 hex digits; kept by repair and update): WrongGPU's stamp on its state files names it
     std::vector<Entry> e;
     bool legacy = false;
+    bool installPending = false;  // the install plan or a recovery record, before successful publication
     int format = 1;                                   // 1: 0.5.x setup, 2: the launcher
     wstring payloadVersion, runtimeSha, frontEndSha, pluginSha, proxy, proxyReason;
     wstring rrPluginSha;                              // the payload line's sixth field (empty: no RR files, or a record before rc6)
     std::vector<wstring> extra;                       // lines this version does not know (written back unchanged)
+    std::vector<IniEntry> optiDefaults;
     std::vector<IniKeyChange> inikeys;                // the OptiScaler.ini journal
     struct CoexistLine { wstring tool, fingerprint, decision; };
     std::vector<CoexistLine> coexist;
@@ -117,14 +131,14 @@ struct RunJournal;
 // is there already (one an earlier uninstall kept: never overwritten), the first free backup\<rel>.<n>, which goes into
 // e.backup (and so into the record). The kept file stays; it is logged and (warnings) listed. Checked against e.orig.
 // j: the run journal (each create written down before it). Returns the backup's path.
-wstring CopyBackup(Context& ctx, const wstring& dir, Entry& e, const wstring& source, RunJournal* j, std::vector<wstring>* warnings);
+wstring CopyBackup(Context& ctx, const wstring& dir, Entry& e, const wstring& source, RunJournal* j, std::vector<wstring>* warnings, PinnedFile* held = nullptr);
 wstring LegacyStateDir(const wstring& dir);
 wstring LegacyRecordPath(const wstring& dir);
 wstring LegacyBackupPath(const wstring& dir, const wstring& rel);
 // Reads a record. One read from <dir>\wronggpu-setup\install.record that names another folder is the record of dir all the
 // same (a moved game folder): rebased to dir in memory (Record::movedFrom), never refused for it.
 bool LoadRecord(const wstring& path, Record& m);
-void SaveRecord(const wstring& path, const Record& m);
+void SaveRecord(const wstring& path, const Record& m, bool create = false, RunJournal* journal = nullptr);
 // rc6 L1: a rebased record (movedFrom) written in its folder: OptiScaler.ini's paths into the old folder (its front end, its
 // plugins folder) pointed at the new one, the record and owned-files.json saved, the game's own Apps & features entry (a
 // record with a regkey) pointed at the new folder, and on the managed list the new folder in the old one's place (the old
@@ -151,13 +165,13 @@ bool HostedRecord(const Record& m);
 // version-resource check reads the held file by its path (the held file cannot change meanwhile).
 enum class Holds { Missing, Ours, Original, Other };
 // What the path of entry `e` holds now (h: its current SHA-256; empty when missing).
-Holds WhatIsThere(Context& ctx, const wstring& dir, const Entry& e, const wstring& h);
+Holds WhatIsThere(Context& ctx, const wstring& dir, const Entry& e, const wstring& h, bool requirePublication);
 // The warnings of files a restore could not put back or had to leave begin with this ("partly" in the result).
 extern const wchar_t* const kPartlyRestored;
 bool AnyPartly(const std::vector<wstring>& warnings);
 // The player's original of `rel` (from `source`, its SHA-256 `sha`) kept in the folder that survives: an earlier kept copy
 // with these bytes is used again, else a new <time> generation. Checked byte for byte; throws on failure. Returns its path.
-wstring KeptOriginal(const wstring& dir, const wstring& rel, const wstring& source, const wstring& sha);
+wstring KeptOriginal(const wstring& dir, const wstring& rel, const wstring& source, const wstring& sha, PinnedFile* held = nullptr, bool move = false);
 // The OptiScaler.ini in `dir` is the one WrongGPU last wrote (its hash is the record's). The restore goes by this alone.
 bool OptiIniWrittenByUs(const wstring& dir, const Record& m);
 // The OptiScaler setup next to the game is still WrongGPU's: the OptiScaler DLL the record installed is there under its name
@@ -182,6 +196,9 @@ bool TestFault(const char* name);
 // the player's hive, HKEY_USERS\<sid>).
 HKEY UninstallHive();
 void SetUninstallHive(HKEY hive);
+#ifdef WRONGGPU_TESTING
+void RemoveTestUninstallHive();
+#endif
 wstring RegKeyFor(const wstring& dir, const wchar_t* prefix = kRegPrefix);
 void RegisterUninstall(Context& ctx, const Record& m, const wstring& state, const wstring& displayName);
 std::vector<wstring> RegisteredInstalls();
@@ -256,8 +273,8 @@ wstring LeftText(const wstring& where, const std::vector<wstring>& rels);
 // operation runs. Keep the returned gate for the whole operation, on the thread that took it; a nested GuardOperation for the
 // same folder on the same thread returns nullptr (the outer gate covers it). Refuses (EXIT_REFUSED, "Nothing was changed:
 // ...", naming the file) while a binary is in use by the game or another program, while that cannot be told, and while
-// another WrongGPU program holds the lock or it may not be opened. Inside it, the operation writes binaries with PutBinary /
-// PutBinaryFrom (renamed in complete and held at once; a load in that moment stops the operation) and deletes held ones with
+// another WrongGPU program holds the lock or it may not be opened. Inside it, the operation writes binaries with PutBinary
+// (renamed in complete and held at once; a load in that moment stops the operation) and deletes held ones with
 // DeleteHeldBinary; GateHolds tells which files the gate holds (their reads still work; their writes go through the gate).
 // The state files (settings.ini, model-choice.ini) are written inside the same hold (the state lock is recursive per thread).
 struct OperationGate {
@@ -275,11 +292,11 @@ struct OperationGate {
 std::unique_ptr<OperationGate> GuardOperation(const wstring& dir, const Record* m, bool holdBinaries = true);
 bool IsBinaryName(const wstring& rel);  // .dll / .asi: what a game loads
 bool GateHolds(const wstring& path);
-void PutBinary(const wstring& path, const void* data, size_t size);
-void PutBinaryFrom(const wstring& path, const wstring& source);
+void ReleaseRestoreBinaries();
+void PutBinary(const wstring& path, const void* data, size_t size, PinnedFile* held = nullptr, RunJournal* journal = nullptr);
 DWORD DeleteHeldBinary(const wstring& path);  // ERROR_SUCCESS, ERROR_NOT_FOUND (not held), or the delete's error
 std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool failedInstall, bool keepState,
-                               std::map<wstring, wstring>* keptWarnings = nullptr);
+                               std::map<wstring, wstring>* keptWarnings = nullptr, const wstring* expectedOpti = nullptr);
 // rc6 L4: the player's things in the state folder that a failed install or update never removes when they were there before
 // it: profile.ini (the game's settings), previous\ (the version Roll back goes to) and rr-config\ (the Engine.ini fix's backup);
 // since 0.6.5 also the state files settings.ini and model-choice.ini (wg_state.h).
@@ -289,8 +306,17 @@ wstring NewInstallId();
 // What an install run creates, written down BEFORE each create (a file or a folder that was not there), so a failed run takes
 // back only what it made: RollbackCreated deletes those files (newest first) and removes those folders when empty. Everything
 // else stays: it is logged and returned (paths relative to `state`). Never throws (a destructor calls it).
-struct RunJournal { std::vector<std::pair<wstring, bool>> created; bool done = false; };  // (path, is a folder); done: rolled back
-void JournalCreate(RunJournal& j, const wstring& path, bool folder);    // only when nothing is at path; parents first
+struct CreatedPath {
+    wstring path;
+    bool folder;
+    DWORD volume = 0;
+    ULONGLONG id = 0;
+};
+struct RunJournal { std::vector<CreatedPath> created; bool done = false; };
+void JournalDirectory(RunJournal& j, const wstring& path);
+void RollbackNewGameFiles(const wstring& state, RunJournal& journal);
+void JournalCreated(RunJournal& j, const wstring& path, const BY_HANDLE_FILE_INFORMATION& file);
+void JournalCreated(RunJournal& j, const wstring& path, const PinnedFile& file);
 std::vector<wstring> RollbackCreated(Context& ctx, const wstring& state, RunJournal& j);
 std::vector<wstring> LegacyRestore(Context& ctx, const wstring& dir, Ui& ui);
 }  // namespace wg

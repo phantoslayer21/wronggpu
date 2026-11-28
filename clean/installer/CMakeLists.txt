@@ -242,7 +242,25 @@ add_custom_command(
 
 # WrongGPU-Restore.exe: the per-game restorer (uninstall.exe in each game's wronggpu-setup folder): wg_core without the
 # payload, the converter data or the UI. WrongGPU.exe embeds it (resource 960) and writes it into every game it installs.
-file(GENERATE OUTPUT ${GEN}/restore_app.rc CONTENT "1 ICON \"${GEN}/app.ico\"\n")
+file(GENERATE OUTPUT ${GEN}/restore_app.rc CONTENT "1 ICON \"${GEN}/app.ico\"\n
+1 VERSIONINFO
+FILEVERSION 0,0,0,0
+PRODUCTVERSION 0,0,0,0
+BEGIN
+  BLOCK \"StringFileInfo\"
+  BEGIN
+    BLOCK \"040904B0\"
+    BEGIN
+      VALUE \"OriginalFilename\", \"WrongGPU-Restore.exe\\0\"
+      VALUE \"ProductName\", \"WrongGPU\\0\"
+    END
+  END
+  BLOCK \"VarFileInfo\"
+  BEGIN
+    VALUE \"Translation\", 0x0409, 1200
+  END
+END
+")
 add_executable(WrongGPU-Restore WIN32 src/app/restore_main.cpp ${GEN}/restore_app.rc ${GEN}/app.ico ${MANIFEST_SOURCE})
 target_compile_definitions(WrongGPU-Restore PRIVATE "WRONGGPU_VERSION_STR=L\"${WRONGGPU_VERSION}\"")
 target_link_libraries(WrongGPU-Restore PRIVATE wg_core shell32 user32 advapi32)
@@ -340,6 +358,8 @@ add_executable(model-choice-k-only-tests tests/model_choice_k_tests.cpp src/wg_c
 target_compile_definitions(model-choice-k-only-tests PRIVATE WRONGGPU_MODEL_K=1 WRONGGPU_MODEL_L=0)
 target_link_libraries(model-choice-k-only-tests PRIVATE wg_core)
 add_test(NAME launcher-core COMMAND launcher-core-tests)
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/launcher-core-localappdata")
+set_tests_properties(launcher-core PROPERTIES ENVIRONMENT "LOCALAPPDATA=${CMAKE_CURRENT_BINARY_DIR}/launcher-core-localappdata")
 add_test(NAME model-choice COMMAND model-choice-tests)
 add_test(NAME model-choice-k COMMAND model-choice-k-tests)
 add_test(NAME model-choice-k-only COMMAND model-choice-k-only-tests)

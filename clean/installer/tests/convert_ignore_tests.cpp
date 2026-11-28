@@ -510,11 +510,37 @@ int main() {
                     require(ok2, "RemoveSharedData, the list can't be put back: done");
                     cleanAfterBlocked(checkBlocked(kept, L".removed-", "RemoveSharedData: the list stays in the moved folder (the rest went), said where"));
                     LauncherPaths lp;
-                    lp.dataDir = Join(root, L"own-data");
-                    lp.custom = true;
+                    lp.dataDir = appData;  // exercise the default shared-data uninstall path
                     std::vector<wstring> uiLines;
                     Ui ui{[](int, int, const wstring&) {}, [&uiLines](const wstring& s) { uiLines.push_back(s); }};
                     auto uiSaid = [&uiLines] { wstring all; for (auto& s : uiLines) all += s + L"\n"; return all; };
+                    const wstring blockedKey = UninstallRoot() + kLauncherEntry;
+                    const wstring childKey = blockedKey + L"\\fixture-child";
+                    auto blockRegistration = [&] {
+                        HKEY child = nullptr;
+                        const LONG opened = RegCreateKeyExW(hive, childKey.c_str(), 0, nullptr, 0, KEY_WRITE, nullptr, &child, nullptr);
+                        if (opened == ERROR_SUCCESS) RegCloseKey(child);
+                        return opened == ERROR_SUCCESS;
+                    };
+                    require(blockRegistration(), "private registry has a launcher entry that cannot be deleted");
+                    fill();
+                    bool began = false;
+                    const bool blockedEntry = SelfUninstall(ctx, lp, false, L"-", ui, &why,
+                        [&](const std::vector<OpRequest>&) { began = true; return std::vector<OpResult>{}; });
+                    require(!blockedEntry && !began && Has(why, L"Apps & features") && Bytes(list) == listBytes,
+                            "default uninstall reports blocked registration at preflight and leaves files alone");
+                    RegDeleteKeyW(hive, childKey.c_str());
+                    bool blockedLate = false;
+                    const bool removedEntry = SelfUninstall(ctx, lp, false, L"-", ui, &why,
+                        [&](const std::vector<OpRequest>&) {
+                            blockedLate = blockRegistration();
+                            return std::vector<OpResult>{};
+                        });
+                    require(blockedLate && !removedEntry && Has(why, L"Apps & features") && Bytes(list) == listBytes,
+                            "default uninstall checks a registration deletion that fails after preflight");
+                    RegDeleteKeyW(hive, childKey.c_str());
+                    RegDeleteKeyW(hive, blockedKey.c_str());
+                    RemoveTree(appData);
                     fill();
                     SetPutBackHookForTest(&OtherProgramMakesList);
                     const bool ok3 = SelfUninstall(ctx, lp, false, L"-", ui, &why);

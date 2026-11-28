@@ -61,7 +61,7 @@ static bool Truthy(const string& v) { const string l = LowerA(v); return l == "1
 
 // ---- data locations ----------------------------------------------------------------------------------------------
 wstring DefaultInstallDir() {
-    const wstring base = EnvVar(L"LOCALAPPDATA");
+    const wstring base = DataOverride().empty() ? EnvVar(L"LOCALAPPDATA") : DataOverride();
     return Join(Join(base, L"Programs"), L"WrongGPU");
 }
 LauncherPaths ResolvePaths(const wstring& selfExe, const wstring& dataOverride) {
@@ -72,7 +72,7 @@ LauncherPaths ResolvePaths(const wstring& selfExe, const wstring& dataOverride) 
     p.portable = !p.installedCopy && IsFile(Join(dir, kPortableMarker));
     if (!dataOverride.empty()) { p.custom = true; p.dataDir = FullPath(dataOverride); }
     else if (p.portable) p.dataDir = Join(dir, L"WrongGPU-data");
-    else p.dataDir = Join(EnvVar(L"LOCALAPPDATA"), L"WrongGPU");
+    else p.dataDir = AppDataPath();
     return p;
 }
 bool RunningPackaged() {
@@ -85,6 +85,7 @@ bool RunningPackaged() {
 bool LauncherInstalled(wstring* exe) {
     const wstring key = UninstallRoot() + kLauncherEntry;
     const wstring loc = RegString(UninstallHive(), key.c_str(), L"InstallLocation");
+    if (!GamePathAllowed(loc)) return false;
     // an entry whose program is gone (its folder deleted by hand) is no install: Install for this user writes it again
     if (loc.empty() || !IsFile(Join(loc, L"WrongGPU.exe"))) return false;
     if (exe) *exe = Join(loc, L"WrongGPU.exe");
@@ -391,6 +392,9 @@ GameEntry EntryFor(Context& ctx, const wstring& exeIn, const wstring& name, cons
         string wini, oini;
         wini = EffectiveWronggpuIni(g.dir);  // (#219: the state folder over the file)
         ReadAll(Join(g.dir, L"OptiScaler.ini"), oini);
+        g.optiIniWarning = OptiReadWarning(oini);
+        if (!g.optiIniWarning.empty())
+            LogLine(ctx, L"warning: " + Join(g.dir, L"OptiScaler.ini") + L": " + g.optiIniWarning);
         const bool off = EffectiveSettings(wini, oini)["wronggpu"] == "off";
         g.wgOff = off;  // kept with a Running status too (the window's Model M data rule)
         if (GameRunning(exe)) { g.status = GameStatus::Running; g.statusText = L"Running (actions locked)"; }
@@ -402,6 +406,7 @@ GameEntry EntryFor(Context& ctx, const wstring& exeIn, const wstring& name, cons
         else if (!g.needs.empty() && !g.needsFound) { g.status = GameStatus::NeedsPrereq; g.statusText = L"Installed " + rec.version + L", needs " + g.needs + L": " + g.needsGame + L" blocks OptiScaler without it"; }
         else if (off) { g.status = GameStatus::TurnedOff; g.statusText = L"Installed " + rec.version + L", turned off (AMD FSR)"; }
         else { g.status = GameStatus::Installed; g.statusText = L"Installed " + rec.version; }
+        if (!g.optiIniWarning.empty()) g.statusText += L" (check OptiScaler.ini)";
         return g;
     }
     if (!exists) {  // a managed install whose game is gone (moved or uninstalled): Uninstall removes our files
@@ -471,7 +476,7 @@ std::vector<GameEntry> ScanGames(Context& ctx, const GlobalSettings& gs, bool no
     // before the store libraries are read
     const bool quick = (bool)managedFirst;
     auto add = [&](const wstring& exe, const wstring& name, const wstring& source, bool fast) {
-        if (exe.empty() || seen.count(Lower(FullPath(exe)))) return;
+        if (exe.empty() || !GamePathAllowed(exe) || seen.count(Lower(FullPath(exe)))) return;
         seen.insert(Lower(FullPath(exe)));
         // one game that can't be read (a broken or huge file, a parser's throw) is left out and logged, never the whole list
         try {
@@ -490,7 +495,7 @@ std::vector<GameEntry> ScanGames(Context& ctx, const GlobalSettings& gs, bool no
         if (!IsFile(RecordPath(dir)) && !DriveUnreachable(dir)) { gone.push_back(dir); continue; }
         if (!LoadRecord(RecordPath(dir), m) || m.legacy) continue;
         // a game that is gone: its entry points into the install folder, where the record is
-        add(IsFile(m.exe) ? m.exe : Join(dir, m.exe.empty() ? wstring(L"game.exe") : BaseName(m.exe)), L"", L"Managed", quick);
+        add(GamePathAllowed(m.exe) && IsFile(m.exe) ? m.exe : Join(dir, m.exe.empty() ? wstring(L"game.exe") : BaseName(m.exe)), L"", L"Managed", quick);
     }
     for (auto& dir : gone) {  // off the list (a moved game comes back by its new folder: the store scan, its rebased record)
         try { RemoveManagedGame(dir); LogLine(ctx, L"scan: " + dir + L" left the managed list: its install record is gone"); }
@@ -505,14 +510,17 @@ std::vector<GameEntry> ScanGames(Context& ctx, const GlobalSettings& gs, bool no
         }
     // then the store libraries and the extra folders (read after the managed games: the same list, sooner for them)
     std::vector<StoreGame> roots = noScan ? std::vector<StoreGame>{} : ScanLibraries();
-    for (auto& folder : gs.extraFolders)
-        for (auto& sub : ListDirs(folder)) roots.push_back({BaseName(sub), sub, L"", L"Folder"});
+    for (auto& folder : gs.extraFolders) {
+        if (!GamePathAllowed(folder)) continue;
+        for (auto& sub : ListDirs(folder))
+            if (GamePathAllowed(sub)) roots.push_back({BaseName(sub), sub, L"", L"Folder"});
+    }
     for (auto& f : DetectGames(roots)) add(f.exe, f.name, f.source, false);
     // a game added by hand whose exe is gone (deleted, its drive offline) is not listed; it stays on the list for when it
     // is back (a managed one came in above, by its record)
     // (rc6: as the game it leads to, ResolveGameExe: a launcher stub or a root starter added before Add game resolved it)
     for (auto& exe : gs.addedGames)
-        if (IsFile(exe)) { const wstring game = ResolveGameExe(exe); add(game.empty() ? exe : game, L"", L"Added", false); }
+        if (GamePathAllowed(exe) && IsFile(exe)) { const wstring game = ResolveGameExe(exe); add(game.empty() ? exe : game, L"", L"Added", false); }
     SortGames(r);
     return r;
 }
@@ -523,10 +531,11 @@ bool ResolveGameArg(Context& ctx, const wstring& arg, wstring& exe, wstring& dir
     wstring in = arg;
     while (!in.empty() && (in.back() == L'\\' || in.back() == L'/')) in.pop_back();
     const wstring full = FullPath(in);
+    if (!GamePathAllowed(full)) Fail(L"This WrongGPU launcher can only access games inside its --data folder.", EXIT_REFUSED);
     Record m;
     if (IsDir(full) && LoadRecord(RecordPath(full), m) && !m.legacy) {
         dir = full;
-        exe = IsFile(m.exe) ? m.exe : Join(full, m.exe.empty() ? wstring(L"game.exe") : BaseName(m.exe));  // gone: points into the folder
+        exe = GamePathAllowed(m.exe) && IsFile(m.exe) ? m.exe : Join(full, m.exe.empty() ? wstring(L"game.exe") : BaseName(m.exe));  // gone: points into the folder
         return true;
     }
     exe = ResolveGameExe(full);
@@ -1057,7 +1066,7 @@ string WithFrontEndState(const string& wronggpuIni, const std::vector<std::pair<
     for (auto& kv : state) {
         if (kv.first == "upscaler") {
             string cur, sec;
-            t = IniGetFrontEnd(t, "upscaler", &cur, &sec) ? IniSet(t, sec, "upscaler", kv.second) : IniSet(t, "fsr", "upscaler", kv.second);
+            t = IniGetFrontEnd(t, "upscaler", &cur, &sec) ? SetFrontEndKey(t, sec, "upscaler", kv.second) : SetFrontEndKey(t, "fsr", "upscaler", kv.second);
         } else if (kv.first.rfind("rr_", 0) != 0 && kv.first != "model" && !IsFgKey(kv.first) &&  // (frame generation's keys: fg.h)
                    kv.first != "m_mode" && kv.first != "k_mode" && kv.first != "l_mode") {      // (the SR modes: never runtime_options)
             items.push_back(kv);
@@ -1075,7 +1084,7 @@ string WithFrontEndState(const string& wronggpuIni, const std::vector<std::pair<
         if (!overridden) kept.push_back(kv);
     }
     for (auto& s : items) { t = IniRemoveFrontEnd(t, s.first); kept.push_back(s); }
-    return IniSet(t, had ? section : "fsr", "runtime_options", JoinOptions(kept));
+    return SetFrontEndKey(t, had ? section : "fsr", "runtime_options", JoinOptions(kept));
 }
 
 string EffectiveWronggpuIni(const wstring& dir) {
@@ -1152,14 +1161,11 @@ bool FoldSrFromGame(const wstring& dir, Profile& p) {
 }
 
 void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vector<wstring>& notes, std::vector<wstring>* warnings,
-                  bool modelChosen) {
+                  bool modelChosen, bool installing, bool rrModeChosen) {
     Record m;
     if (!LoadRecord(RecordPath(dir), m) || m.legacy) Fail(L"WrongGPU is not installed in " + dir + L".", EXIT_NOT_INSTALLED);
     InferOwners(ctx, m);
     bool recordChanged = m.format < 2;
-    Profile before;  // the launcher's choice as saved before this apply: RR's mode is written only when it changes (rr.h WriteRrState)
-    const bool hadBefore = LoadProfile(ProfilePath(dir), before);
-    const string prevMode = before.get("rr_mode").empty() ? string("fast") : before.get("rr_mode");
     MigrateRrState(ctx, dir);  // #219: an older plugin's or the player's edit of WrongGPU\wronggpu.ini: its mode into the state folder
     // Model L (or Model K, a build with its choice) saved while its data on this PC is not ready (removed since, or an install
     // of a game set to it before the data was converted): the game's files say Model M until it is; the profile keeps the
@@ -1195,15 +1201,24 @@ void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vecto
         const wchar_t* name = L"OptiScaler.ini";
         const wstring path = Join(dir, name);
         string in;
-        if (!ReadAll(path, in)) {  // missing or unreadable: never created here; a model choice saved without it is said
-            if (forcedEntry) {
-                const wstring w = L"OptiScaler's list couldn't be updated; the model choice is saved (" + wstring(name) +
-                                  (IsFile(path) ? L" could not be read)." : L" is missing).");
-                LogLine(ctx, w);
-                notes.push_back(w);
-                if (warnings) warnings->push_back(w);
-            }
+        PinnedFile file;
+        if (!file.Open(path, true) || !file.ReadBytes(in)) {
+            const wstring w = L"OptiScaler.ini couldn't be updated; the other settings are saved (" + wstring(name) +
+                              (IsFile(path) ? L" could not be read)." : L" is missing).");
+            LogLine(ctx, w);
+            notes.push_back(w);
+            if (warnings) warnings->push_back(w);
             return;
+        }
+        if (installing) {
+            const wstring current = Sha256Bytes(in.data(), in.size());
+            for (const auto& e : m.e)
+                if (e.action == L"copy" && IEq(e.rel, name) && !IEq(e.inst, current)) {
+                    const wstring w = L"OptiScaler.ini changed after installation. Its current contents were kept.";
+                    notes.push_back(w);
+                    if (warnings) warnings->push_back(w);
+                    return;
+                }
         }
         string out;
         RenderOptiIni(q, in, out, &notes);
@@ -1215,7 +1230,8 @@ void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vecto
         JournalChanges(m.inikeys, name, in, out);
         recordChanged = recordChanged || out != in;
         if (out == in) return;
-        WriteFileAtomic(path, out.data(), out.size());
+        DWORD err = 0;
+        if (!file.ReplaceBytes(path, out.data(), out.size(), &err)) Fail(L"Cannot write " + path + L": " + ErrText(err));
         const wstring h = Sha256Bytes(out.data(), out.size());
         for (auto& e : m.e) if (e.action == L"copy" && IEq(e.rel, name) && e.inst != h) { e.inst = h; recordChanged = true; }
         notes.push_back(wstring(name) + L" written");
@@ -1316,7 +1332,11 @@ void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vecto
         // tests: the RR write fails after the upscaler settings (and the model choice) were written (a partial apply)
         if (EnvVar(L"WRONGGPU_TEST_FAIL_RR_STATE") == L"1") { w = -1; why = L"the settings file could not be written (test)"; } else
 #endif
-        w = WriteRrState(ctx, dir, p, RrDataValid(ctx), &why, hadBefore ? &prevMode : nullptr);
+        w = WriteRrState(ctx, dir, p, RrDataValid(ctx), &why, rrModeChosen);
+        if (w > 0 && !why.empty()) {
+            notes.push_back(why);
+            if (warnings) warnings->push_back(why);
+        }
         if (w < 0) {
             notApplied.push_back(L"the Ray Reconstruction settings (" + why + L")");
             if (applied.empty()) Fail(L"Settings not applied: " + why, EXIT_REFUSED);
@@ -1390,7 +1410,11 @@ void ApplyOptiTab(Context& ctx, const wstring& dir, const OpRequest& r, std::vec
     const wchar_t* const file = L"OptiScaler.ini";
     const wstring path = Join(dir, file);
     string in;
-    if (!ReadAll(path, in)) Fail(L"OptiScaler.ini is missing in " + dir + L": Repair puts it back.", EXIT_FAILED);
+    PinnedFile pinned;
+    DWORD error = 0;
+    if (!pinned.Open(path, true, &error) || !pinned.ReadBytes(in))
+        Fail(L"Cannot secure " + path + L": " + ErrText(error), EXIT_REFUSED);
+    IniEntries(in);
     string text = in;
     if (r.optiReset) {  // the editable keys back to what the install wrote, byte for byte (locked keys stay as they are)
         std::vector<IniKeyChange> mine, rest;
@@ -1418,7 +1442,7 @@ void ApplyOptiTab(Context& ctx, const wstring& dir, const OpRequest& r, std::vec
         text = out;
     }
     if (text != in) {
-        WriteFileAtomic(path, text.data(), text.size());
+        if (!pinned.ReplaceBytes(path, text.data(), text.size(), &error)) Fail(L"Cannot write " + path + L": " + ErrText(error));
         notes.push_back(L"OptiScaler.ini written");
     }
     const wstring h = Sha256Bytes(text.data(), text.size());
@@ -1429,6 +1453,7 @@ void ApplyOptiTab(Context& ctx, const wstring& dir, const OpRequest& r, std::vec
 }
 
 std::vector<wstring> AdoptInstall(Context& ctx, const wstring& dir, bool* repair) {
+    const auto operation = GuardOperation(dir, nullptr, false);
     std::vector<wstring> notes;
     Record m;
     if (!LoadRecord(RecordPath(dir), m) || m.legacy) Fail(L"No WrongGPU installation record was found in " + dir + L".", EXIT_NOT_INSTALLED);
@@ -1460,9 +1485,14 @@ std::vector<wstring> AdoptInstall(Context& ctx, const wstring& dir, bool* repair
     }
     if (ctx.restorer && ctx.restorerSize) {
         const wstring un = Join(StateDir(dir), L"uninstall.exe");
-        if (Sha256File(un) != Sha256Bytes(ctx.restorer, ctx.restorerSize)) {
+        const wstring sha = Sha256Bytes(ctx.restorer, ctx.restorerSize);
+        if (!IEq(Sha256File(un), sha)) {
             WriteFileAtomic(un, ctx.restorer, ctx.restorerSize);
             notes.push_back(L"uninstall.exe is now the launcher's restorer (reads the v1 and v2 records)");
+        }
+        if (!IEq(m.restorerSha, sha)) {
+            m.restorerSha = sha;
+            SaveRecord(RecordPath(dir), m);
         }
     }
     WriteOwnedFiles(dir, m);
@@ -1498,7 +1528,7 @@ static void InstallOp(Context& ctx, const OpRequest& r, Ui& ui, OpResult& res) {
     const wstring dir = target.dir;
     LogLine(ctx, wstring(L"launcher ") + OpName(r.op) + L": " + target.exe + L" (" + (target.validated ? L"validated" : L"experimental") + L"), install folder " + dir);
     // #219: a repair or update (an install over a recorded one) holds the game's state lock from here to its end (record.h)
-    const auto gate = IsFile(RecordPath(dir)) ? GuardOperation(dir, target.installed ? &target.record : nullptr) : nullptr;
+    const auto gate = GuardOperation(dir, target.installed ? &target.record : nullptr);
     // the rules table (design section 5): DLSS-NR on AMD, DXVK / vkd3d-proton, two OptiScaler copies, not D3D12, anti-cheat
     if (const Finding* no = target.coexist.refusal())
         Fail(no->tool == Tool::AntiCheat ? AntiCheatMessage(no->evidence) : no->what + L": " + no->message, no->code ? no->code : EXIT_REFUSED);
@@ -1573,21 +1603,8 @@ static void InstallOp(Context& ctx, const OpRequest& r, Ui& ui, OpResult& res) {
     FoldSrFromGame(dir, profile);  // so do the model and the SR modes chosen in the game (OptiScaler's list, WrongGPU.asi's card)
     FoldFgFromGame(dir, profile);  // and frame generation's settings as the state folder has them
     if (target.installed && !target.record.version.empty() && ctx.data && !IEq(target.record.version, ctx.data->version)) SavePrevious(ctx, dir, target.record, ui);
-    std::vector<IniKeyChange> oldJournal = target.installed ? target.record.inikeys : !wrongDir.empty() ? wrong.inikeys : std::vector<IniKeyChange>{};
-    // a game's opt-in keys follow its setting (ApplyProfile), not the old file
+    std::vector<IniKeyChange> oldJournal = !target.installed && !wrongDir.empty() ? wrong.inikeys : std::vector<IniKeyChange>{};
     oldJournal.erase(std::remove_if(oldJournal.begin(), oldJournal.end(), [&](const IniKeyChange& c) { return OptInKey(target.exe, c); }), oldJournal.end());
-    // rc6 L5: values OptiScaler's own menu saved over the launcher's (the journal's keys, JournalOutside) carry over to the new
-    // OptiScaler.ini as the player's choices, as the OptiScaler tab's Keep would make them (locked keys stay WrongGPU's)
-    if (target.installed && HostedRecord(target.record) && OptiSetupIsOurs(dir, target.record)) {  // (0.6.1: never another setup's values)
-        string current;
-        if (ReadAll(Join(dir, L"OptiScaler.ini"), current))
-            for (auto& o : JournalOutside(current, oldJournal, L"OptiScaler.ini")) {
-                if (o.fileValue == "(missing)" || IsOptiLocked(o.section, o.key)) continue;
-                for (auto& j : oldJournal)
-                    if (IEq(j.file, L"OptiScaler.ini") && j.section == o.section && j.key == o.key) j.ours = o.fileValue;
-                LogLine(ctx, L"OptiScaler.ini: [" + FromUtf8(o.section) + L"] " + FromUtf8(o.key) + L" = " + FromUtf8(o.fileValue) + L" (saved by OptiScaler's menu) carried over");
-            }
-    }
     // the game's Engine.ini fix (rrconfig.h) is not in the game folder: its record line and backup go over to the new record
     const RrConfigFix keepFix = target.installed ? target.record.rrconfig : !wrongDir.empty() ? wrong.rrconfig : RrConfigFix();
     string keepBackup = wrongDir.empty() ? string() : wrongFixBackup;
@@ -1618,21 +1635,28 @@ static void InstallOp(Context& ctx, const OpRequest& r, Ui& ui, OpResult& res) {
             SaveRecord(RecordPath(dir), m);
         }
     }
-    ApplyProfile(ctx, dir, profile, res.notes, &res.warnings);
+    ApplyProfile(ctx, dir, profile, res.notes, &res.warnings, false, true);
     if (!oldJournal.empty()) {  // the player's OptiScaler tab choices carried over to the new OptiScaler.ini
         Record m;
         string fresh;
-        if (LoadRecord(RecordPath(dir), m) && HostedRecord(m) && ReadAll(Join(dir, L"OptiScaler.ini"), fresh)) {
+        const wstring path = Join(dir, L"OptiScaler.ini");
+        PinnedFile file;
+        if (LoadRecord(RecordPath(dir), m) && HostedRecord(m) && file.Open(path, true) && file.ReadBytes(fresh) &&
+            std::any_of(m.e.begin(), m.e.end(), [&](const Entry& e) {
+                return e.action == L"copy" && IEq(e.rel, L"OptiScaler.ini") &&
+                       IEq(e.inst, Sha256Bytes(fresh.data(), fresh.size()));
+            })) {
             const string out = ReplayJournal(fresh, oldJournal, L"OptiScaler.ini", m.inikeys, &res.notes);
             if (out != fresh) {
-                WriteFileAtomic(Join(dir, L"OptiScaler.ini"), out.data(), out.size());
+                DWORD err = 0;
+                if (!file.ReplaceBytes(path, out.data(), out.size(), &err)) Fail(L"Cannot write " + path + L": " + ErrText(err));
                 const wstring h = Sha256Bytes(out.data(), out.size());
                 for (auto& e : m.e) if (e.action == L"copy" && IEq(e.rel, L"OptiScaler.ini")) e.inst = h;
                 res.notes.push_back(L"your OptiScaler settings were carried over");
             }
             SaveRecord(RecordPath(dir), m);
             WriteOwnedFiles(dir, m);
-        }
+        } else res.warnings.push_back(L"OptiScaler.ini could not be secured for carrying over the previous folder's settings. Its current contents were kept.");
     }
     AddManagedGame(dir);
     const wstring ver = ctx.data ? ctx.data->version : L"", was = target.installed ? target.record.version : L"";
@@ -1662,6 +1686,9 @@ OpResult RunOp(Context& ctx, const OpRequest& r, Ui& ui) {
         ~NoScan() { c.noLibraryScan = c.noScanAlways; }
     } noScan(ctx, r.noScan);
     try {
+        if ((!r.dir.empty() && (!GamePathAllowed(r.dir) || !GamePathAllowed(StateDir(r.dir)))) ||
+            (!r.exe.empty() && !GamePathAllowed(r.exe)))
+            Fail(L"This WrongGPU launcher can only access games inside its --data folder.", EXIT_REFUSED);
         switch (r.op) {
             case Op::Install: case Op::Repair: case Op::Update: InstallOp(ctx, r, ui, res); break;
             case Op::Uninstall: {
@@ -1700,7 +1727,7 @@ OpResult RunOp(Context& ctx, const OpRequest& r, Ui& ui) {
                     }
                 }
                 if (!r.optiOnly)
-                    ApplyProfile(ctx, r.dir, r.hasProfile ? r.profile : GameProfile(r.dir), res.notes, &res.warnings, r.hasProfile && r.modelChosen);
+                    ApplyProfile(ctx, r.dir, r.hasProfile ? r.profile : GameProfile(r.dir), res.notes, &res.warnings, r.hasProfile && r.modelChosen, false, r.rrModeChosen);
                 ApplyOptiTab(ctx, r.dir, r, res.notes);
                 res.message = L"Settings applied; they take effect the next time the game starts";
                 break;
@@ -1750,6 +1777,7 @@ string JobText(const OpRequest& r, const wstring& localAppData, const wstring& l
     if (r.hasProfile)
         for (size_t i = 0; i < kSettingCount; ++i) t += string("profile.") + kSettings[i].key + "=" + r.profile.get(kSettings[i].key) + "\r\n";
     if (r.modelChosen) t += "modelchosen=1\r\n";
+    if (r.rrModeChosen) t += "rrmodechosen=1\r\n";
     for (auto& e : r.optiEdits) t += "optikey." + e.first + "=" + e.second + "\r\n";
     if (r.movePlugins) t += "moveplugins=1\r\n";
     // the files the player agreed to move, each with the SHA-256 it had then: "<path>|<sha256>"
@@ -1800,6 +1828,7 @@ bool ParseJob(const string& text, OpRequest& r, wstring& localAppData, wstring& 
         else if (k == "rrconfigonly") r.rrConfigOnly = Truthy(kv.second);
         else if (k == "rrconfigset") r.rrConfigSet = kv.second;
         else if (k == "modelchosen") r.modelChosen = Truthy(kv.second);
+        else if (k == "rrmodechosen") r.rrModeChosen = Truthy(kv.second);
         else if (k.rfind("optikey.", 0) == 0) r.optiEdits.push_back({k.substr(8), kv.second});
         else if (k.rfind("profile.", 0) == 0) {
             if (!r.hasProfile) { r.profile = DefaultProfile(); r.hasProfile = true; }
@@ -1855,7 +1884,11 @@ bool ParseResult(const string& text, OpResult& res) {
 // ---- the launcher's own install ------------------------------------------------------------------------------------
 static wstring StartMenuDir(const wstring& startMenu) {
     if (startMenu == L"-") return L"";
-    if (!startMenu.empty()) return startMenu;
+    if (!startMenu.empty()) {
+        if (!GamePathAllowed(startMenu)) Fail(L"The Start menu path resolves outside the launcher fixture.");
+        return startMenu;
+    }
+    if (!DataOverride().empty()) return Join(DataOverride(), L"StartMenu");
 #ifdef WRONGGPU_TESTING
     // test builds (their Apps & features entries go to the test registry root) never touch the player's Start menu: a
     // sandbox's "Install for this user" would otherwise point the real WrongGPU shortcut at the sandbox's copy
@@ -1881,6 +1914,7 @@ static bool MakeShortcut(const wstring& lnk, const wstring& target, wstring* why
         return false;
     }
     sl->SetPath(target.c_str());
+    if (!DataOverride().empty()) sl->SetArguments((L"\"--data=" + DataOverride() + L"\"").c_str());
     sl->SetWorkingDirectory(Parent(target).c_str());
     sl->SetDescription(L"WrongGPU: Model M upscaling for your games");
     sl->SetIconLocation(target.c_str(), 0);
@@ -1933,7 +1967,7 @@ static void DeleteWhenFree(Context& ctx, const wstring& path, bool tree, const w
     }
     const wstring noteName = L"WrongGPU cleanup " + BaseName(path), noteKey = RunOnceKey();
     wstring unnote;
-    if (atSignIn && !noteKey.empty()) {
+    if (atSignIn && !noteKey.empty() && DataOverride().empty()) {
         const wstring note = L"\"" + cmdExe + L"\" /D /C \"" + (tree ? L"rmdir /s /q " : L"del /f /q ") + q + L" 2>nul & " + rmdirs + L"exit\"";
         HKEY k;
         // RunOnce runs a command line of at most 260 characters: a longer one is left out (the cleanup below still runs)
@@ -1979,7 +2013,8 @@ static bool WriteLauncherEntry(Context& ctx, const wstring& exe, const wstring& 
     setS(L"DisplayVersion", ctx.data ? ctx.data->version : L"");
     setS(L"Publisher", L"WrongGPU");
     setS(L"InstallLocation", Parent(exe));
-    setS(L"UninstallString", L"\"" + exe + L"\" uninstall-launcher");
+    setS(L"UninstallString", L"\"" + exe + L"\" uninstall-launcher" +
+                             (DataOverride().empty() ? L"" : L" \"--data=" + DataOverride() + L"\""));
     setS(L"DisplayIcon", exe);
     setS(L"StartMenuShortcut", shortcut);
     if (RegString(UninstallHive(), LauncherEntryKey().c_str(), L"InstallDate").empty()) {  // the first install's date (a replace keeps it)
@@ -2111,20 +2146,53 @@ bool SelfInstall(Context& ctx, const wstring& selfExe, const wstring& dirIn, con
 
 // The launcher's own files in its data folder, by their names only (a --data folder may hold other things).
 static void RemoveLauncherFiles(const wstring& dir) {
-    for (auto n : {L"launcher.ini", L"launcher.log", L"library-list.txt"}) DeleteFileW(Join(dir, n).c_str());  // library-list.txt: the window's last list
+    for (auto n : {L"launcher.ini", L"launcher.log", L"library-list.txt"}) {
+        const wstring path = Join(dir, n);
+        if (PathWithin(path, dir, true)) DeleteFileW(path.c_str());
+    }
     const std::pair<const wchar_t*, std::vector<const wchar_t*>> sub[] = {{L"logs", {L"last-operation.log", L"elevated-*.log"}}, {L"jobs", {L"job-*.txt", L"result-*.txt", L"batch-*.txt"}}};
     for (auto& s : sub) {
         const wstring d = Join(dir, s.first);
-        for (auto pat : s.second) for (auto& f : ListFiles(d, pat)) DeleteFileW(f.c_str());
+        if (!PathWithin(d, dir, true)) continue;
+        for (auto pat : s.second)
+            for (auto& f : ListFiles(d, pat))
+                if (PathWithin(f, dir, true)) DeleteFileW(f.c_str());
         RemoveDirectoryW(d.c_str());
     }
+}
+
+static void RemoveScopedDataFiles(const wstring& root) {
+    RemoveLauncherFiles(root);
+    for (auto name : {L"managed-games.txt", L"portable-launchers.txt", L"hip-runtime.txt", L"compare.txt", L"setup.log"}) {
+        const wstring path = Join(root, name);
+        if (PathWithin(path, root, true)) DeleteFileW(path.c_str());
+    }
+    const wstring model = Join(root, L"model");
+    for (const wstring& folder : {Join(model, L"F"), Join(model, L"F.old"), Join(model, L"F.new"),
+                                 Join(model, L"K"), Join(model, L"L"), Join(model, L"FG"), model}) {
+        for (auto name : {L"model.wgcm", L"model-source.txt"}) {
+            const wstring path = Join(folder, name);
+            if (PathWithin(path, root, true)) DeleteFileW(path.c_str());
+        }
+        if (PathWithin(folder, root, true)) RemoveDirectoryW(folder.c_str());
+    }
+    for (const auto* name : {L"Programs", L"StartMenu", L"temp", L"optiscaler", L"localappdata", L"Documents",
+                            L"rr-prepare\\run", L"rr-prepare"}) {
+        const wstring path = Join(root, name);
+        if (PathWithin(path, root, true)) RemoveDirectoryW(path.c_str());
+    }
+#ifdef WRONGGPU_TESTING
+    if (IEq(root, DataOverride())) RemoveTestUninstallHive();
+#endif
+    RemoveDirectoryW(root.c_str());
 }
 
 bool AnyGameHasWrongGPU() { return !OtherGameWithWrongGPU(L"").empty(); }
 LauncherUninstallLook LookBeforeLauncherUninstall(Context& ctx) {
     LauncherUninstallLook l;
-    std::vector<wstring> locs = RegisteredInstalls();
-    for (auto& d : ManagedGames()) locs.push_back(d);
+    std::vector<wstring> locs = ManagedGames();
+    if (DataOverride().empty())
+        for (auto& d : RegisteredInstalls()) locs.push_back(d);
     for (auto& loc : locs) {  // as OtherGameWithWrongGPU counts them (a game on a drive that is not connected counts)
         if (loc.empty()) continue;
         if (IsFile(RecordPath(loc))) l.anyGame = true;
@@ -2142,7 +2210,7 @@ SharedDataLook LookAtSharedData(Context& ctx) {
     if (!s.there) return s;
     const LauncherUninstallLook l = LookBeforeLauncherUninstall(ctx);
     s.anyGame = l.anyGame; s.modelData = l.modelData; s.rrData = l.rrData;
-    s.installed = LauncherInstalled() || IsFile(Join(shared, L"launcher.ini"));
+    s.installed = LauncherInstalled() || (DataOverride().empty() && IsFile(Join(shared, L"launcher.ini")));
     return s;
 }
 // Log a linked root before RemoveTree unlinks it; never queue recursive cleanup for a remaining link.
@@ -2177,6 +2245,10 @@ bool RemoveSharedData(Context& ctx, wstring* why, wstring* kept) {
         if (s.installed) { if (why) *why = L"WrongGPU is installed for this user: its own uninstall removes this data. Nothing was removed."; return false; }
         if (s.anyGame) { if (why) *why = L"a game still has WrongGPU and uses this data. Uninstall WrongGPU from it first. Nothing was removed."; return false; }
         const wstring shared = AppDataPath();
+        if (!DataOverride().empty()) {
+            RemoveScopedDataFiles(shared);
+            return true;
+        }
         const DWORD sharedAttrs = GetFileAttributesW(shared.c_str());
         if (sharedAttrs != INVALID_FILE_ATTRIBUTES && (sharedAttrs & FILE_ATTRIBUTE_REPARSE_POINT)) {
             if (!RemoveDirectoryW(shared.c_str())) {
@@ -2239,21 +2311,58 @@ static void RegisterUnreachableGame(Context& ctx, const wstring& dir) {
         LogLine(ctx, L"launcher uninstall: " + dir + L" keeps WrongGPU with its own Apps & features entry (its drive is not connected)");
     } catch (const SetupError& e) { LogLine(ctx, L"launcher uninstall: no entry of its own for " + dir + L": " + e.msg); }
 }
+bool OwnsLauncherRegistration(bool custom, const wstring& self, const wstring& registered) {
+    return !custom || (!self.empty() && !registered.empty() && IEq(self, registered));
+}
+
+static void LeaveProgramDirectory(const wstring& dir) {
+    wchar_t cur[MAX_PATH] = {};
+    const DWORD n = GetCurrentDirectoryW(MAX_PATH, cur);
+    if (n && n < MAX_PATH && PathWithin(cur, dir)) {
+        wchar_t system[MAX_PATH] = {};
+        if (GetSystemDirectoryW(system, MAX_PATH)) SetCurrentDirectoryW(system);
+    }
+}
+
+static LONG CheckLauncherRegistrationRemoval(HKEY hive, const wstring& key) {
+    if (!hive) return ERROR_FILE_NOT_FOUND;
+    HKEY entry = nullptr;
+    const LONG opened = RegOpenKeyExW(hive, key.c_str(), 0, DELETE | KEY_QUERY_VALUE, &entry);
+    if (opened != ERROR_SUCCESS) return opened;
+    DWORD subkeys = 0;
+    const LONG queried = RegQueryInfoKeyW(entry, nullptr, nullptr, nullptr, &subkeys, nullptr, nullptr,
+                                         nullptr, nullptr, nullptr, nullptr, nullptr);
+    RegCloseKey(entry);
+    if (queried != ERROR_SUCCESS) return queried;
+    return subkeys ? ERROR_ACCESS_DENIED : ERROR_SUCCESS;
+}
+
 bool SelfUninstall(Context& ctx, const LauncherPaths& p, bool removeGames, const wstring& startMenu, Ui& ui, wstring* why, const GameOps& gameOps,
                    std::vector<wstring>* unreachable) {
     try {
         wstring installedExe;
         const bool installed = LauncherInstalled(&installedExe);
+        const bool ownsRegistration = OwnsLauncherRegistration(p.custom, ResolvedPath(p.exe), installed ? ResolvedPath(installedExe) : wstring());
         const wstring key = LauncherEntryKey();
-        const wstring lnk = RegString(UninstallHive(), key.c_str(), L"StartMenuShortcut");
+        const HKEY hive = UninstallHive();
+        if (ownsRegistration) {
+            const LONG check = CheckLauncherRegistrationRemoval(hive, key);
+            if (check != ERROR_SUCCESS && check != ERROR_FILE_NOT_FOUND)
+                Fail(L"Could not remove the launcher from Apps & features: " + ErrText(check), EXIT_REFUSED);
+        }
+        const wstring lnk = ownsRegistration ? RegString(hive, key.c_str(), L"StartMenuShortcut") : wstring();
+        const wstring madeAbove = ownsRegistration ? RegString(hive, key.c_str(), kMadeFolder) : wstring();
+        const wstring registeredLocation = p.custom && ownsRegistration ? RegString(hive, key.c_str(), L"InstallLocation") : wstring();
         auto nameOf = [](const wstring& dir, const Record& m) { return m.exe.empty() ? dir : GameDisplayName(m.exe); };
         // 1. The games, before anything of the launcher changes. A game that cannot be done stops it there: the launcher
         //    stays installed with all its settings, the games done so far stay done, and trying again carries on.
         std::vector<std::pair<wstring, Record>> games;
         std::vector<wstring> offline;  // on a drive that is not connected now: left as it is (neither restored nor detached)
+        if (p.custom) RestoreStep("self-uninstall-list");
         const DWORD sharedStartAttrs = GetFileAttributesW(AppDataPath().c_str());
         const bool sharedStartsAsLink = sharedStartAttrs != INVALID_FILE_ATTRIBUTES && (sharedStartAttrs & FILE_ATTRIBUTE_REPARSE_POINT);
         // Do not rewrite a managed-games list reached through a linked shared-data root.
+        if (p.custom && sharedStartsAsLink) Fail(L"The launcher data folder resolves through a link.", EXIT_REFUSED);
         for (auto& dir : sharedStartsAsLink ? std::vector<wstring>{} : ManagedGames()) {
             Record m;
             if (!LoadRecord(RecordPath(dir), m) || m.legacy) {
@@ -2265,7 +2374,7 @@ bool SelfUninstall(Context& ctx, const LauncherPaths& p, bool removeGames, const
         }
         // a game that kept its own Apps & features entry (a 0.5 install not adopted, an adoption declined at the permission
         // prompt) has WrongGPU too: "from games too" removes it from those as well, in the same batch
-        if (removeGames)
+        if (removeGames && !p.custom)
             for (auto& dir : RegisteredInstalls()) {
                 if (dir.empty() || !IsFile(RecordPath(dir))) continue;
                 bool listed = false;
@@ -2327,12 +2436,46 @@ bool SelfUninstall(Context& ctx, const LauncherPaths& p, bool removeGames, const
         for (auto& dir : offline) RegisterUnreachableGame(ctx, dir);
         // 2. The launcher: its entry, its shortcut and its own files. The games' shared files (the model data, the list the
         //    games' uninstallers read, compare.txt) stay while a game uses them.
-        const wstring madeAbove = RegString(UninstallHive(), key.c_str(), kMadeFolder);  // read before the entry goes
-        RegDeleteKeyW(UninstallHive(), key.c_str());
-        const wstring menuLnk = !startMenu.empty() && startMenu != L"-" ? Join(startMenu, L"WrongGPU.lnk") : lnk;
-        if (!menuLnk.empty()) DeleteFileW(menuLnk.c_str());
-        const wstring base = EnvVar(L"LOCALAPPDATA");
-        const wstring shared = base.empty() ? wstring() : Join(base, L"WrongGPU");
+        wstring retired, scopedExeDir;
+        const wstring program = ownsRegistration && installed ? installedExe : p.exe;
+        if (p.custom) {
+            if (program.empty() || !GamePathAllowed(program))
+                Fail(L"Could not secure the launcher program for removal: " + program, EXIT_REFUSED);
+            const wstring exeDir = Parent(program);
+            LeaveProgramDirectory(exeDir);
+            if (ownsRegistration || PathWithin(exeDir, p.dataDir, true)) scopedExeDir = exeDir;
+            const wstring suffix = L".removed-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+                                   std::to_wstring(GetTickCount64());
+            auto retireTo = [&](const wstring& path) {
+                if (!GamePathAllowed(path) || !MoveFileExW(program.c_str(), path.c_str(), MOVEFILE_WRITE_THROUGH)) return false;
+                retired = path;
+                return true;
+            };
+            // A running program may survive until this process exits. Move it clear of the data root so
+            // delayed deletion cannot keep that directory in place or contend with a quick reinstall.
+            const wstring outside = p.dataDir + L".launcher" + suffix;
+            const bool movedOutside = PathWithin(exeDir, p.dataDir, true) &&
+                !PathWithin(outside, p.dataDir) && PathWithin(outside, Parent(p.dataDir), true) && retireTo(outside);
+            if (!movedOutside && !retireTo(program + suffix) && !DeleteFileW(program.c_str())) {
+                const DWORD error = GetLastError();
+                if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND)
+                    Fail(L"Could not retire the launcher program " + program + L": " + ErrText(error) +
+                         L". Close the program that has it open and try again.", EXIT_REFUSED);
+            }
+            if (!retired.empty()) LogLine(ctx, L"retired launcher program at " + retired);
+        }
+        if (ownsRegistration && hive && (!p.custom || IEq(registeredLocation, RegString(hive, key.c_str(), L"InstallLocation")))) {
+            const LONG removed = RegDeleteKeyW(hive, key.c_str());
+            if (removed != ERROR_SUCCESS && removed != ERROR_FILE_NOT_FOUND) {
+                wstring message = L"Could not remove the launcher from Apps & features: " + ErrText(removed);
+                if (!retired.empty() && !MoveFileExW(retired.c_str(), program.c_str(), MOVEFILE_WRITE_THROUGH))
+                    message += L". The retired program is at " + retired;
+                Fail(message + L". Try again after the entry is available.", EXIT_REFUSED);
+            }
+            const wstring menuLnk = !startMenu.empty() && startMenu != L"-" ? Join(startMenu, L"WrongGPU.lnk") : lnk;
+            if (!menuLnk.empty()) DeleteFileW(menuLnk.c_str());
+        }
+        const wstring shared = DataOverride().empty() ? AppDataPath() : wstring();
         const wstring data = p.custom || !installed || shared.empty() ? p.dataDir : shared;  // the data folder of the launcher that goes
         LogLine(ctx, wstring(L"launcher uninstalled") + (removeGames ? L" with its games" : L"; games kept"));
         {   // from here on nothing is written into the folders that go (a log line would bring them back)
@@ -2353,7 +2496,8 @@ bool SelfUninstall(Context& ctx, const LauncherPaths& p, bool removeGames, const
         // under it (it is noted in the shared folder while it is there with its marker)
         const bool portableUses = PortableLauncherUsesSharedData();
         if (portableUses) LogLine(ctx, L"launcher uninstall: the shared model data stays (a portable launcher uses it)");
-        const bool gamesLeft = AnyGameHasWrongGPU() || !offline.empty() || portableUses;
+        // Every game operation succeeded. Scoped cleanup uses the preflight list and the action just taken.
+        const bool gamesLeft = (p.custom ? !removeGames && !games.empty() : AnyGameHasWrongGPU()) || !offline.empty() || portableUses;
         const wstring trash = shared.empty() ? wstring() : shared + L".removed-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
         bool trashMade = false;
         wstring listLeftIn;  // the player's ignore list when it could not leave the trash (PutIgnoreListBack): kept there
@@ -2394,21 +2538,15 @@ bool SelfUninstall(Context& ctx, const LauncherPaths& p, bool removeGames, const
         //    its own window uninstalls it), the folder removed; the hidden cleanup deletes it once it no longer runs.
         wstring exeDirLeft;  // the install folder when it could not go at once (the hidden cleanup removes it, once empty)
         // the topmost folder above the install folder that the first install made, when the install folder is under it
-        const wstring upTo = installed && !madeAbove.empty() && StartsWithI(FullPath(Parent(installedExe)), FullPath(madeAbove) + L"\\") ? madeAbove : wstring();
-        if (installed) {
+        wstring upTo = installed && !madeAbove.empty() && StartsWithI(FullPath(Parent(installedExe)), FullPath(madeAbove) + L"\\") ? madeAbove : wstring();
+        if (p.custom && !gamesLeft && PathWithin(scopedExeDir, p.dataDir, true)) upTo = p.dataDir;
+        if (p.custom) {
+            if (!scopedExeDir.empty() && !RemoveDirectoryW(scopedExeDir.c_str()) && IsDir(scopedExeDir)) exeDirLeft = scopedExeDir;
+            else if (!scopedExeDir.empty() && !upTo.empty() && !IEq(FullPath(scopedExeDir), FullPath(upTo)))
+                RemoveEmptyUpTo(Parent(scopedExeDir), upTo);
+        } else if (installed) {
             const wstring exeDir = Parent(installedExe);
-            // a launcher started from its Start-menu shortcut runs with its install folder as the current directory, and
-            // Windows does not remove a folder a process stands in: this process moves out of it first
-            wchar_t cur[MAX_PATH] = {};
-            const DWORD cn = GetCurrentDirectoryW(MAX_PATH, cur);
-            if (cn > 0 && cn < MAX_PATH) {
-                wstring c = cur;
-                while (c.size() > 3 && c.back() == L'\\') c.pop_back();
-                if (IEq(FullPath(c), FullPath(exeDir)) || StartsWithI(FullPath(c), FullPath(exeDir) + L"\\")) {
-                    wchar_t sys[MAX_PATH]; GetSystemDirectoryW(sys, MAX_PATH);
-                    SetCurrentDirectoryW(sys);
-                }
-            }
+            LeaveProgramDirectory(exeDir);
             bool moved = false;
             if (!trash.empty() && (trashMade || CreateDirectoryW(trash.c_str(), nullptr))) {
                 trashMade = true;
@@ -2421,9 +2559,8 @@ bool SelfUninstall(Context& ctx, const LauncherPaths& p, bool removeGames, const
             }
             if (moved || DeleteFileW(installedExe.c_str())) {
                 if (!RemoveDirectoryW(exeDir.c_str()) && IsDir(exeDir)) exeDirLeft = exeDir;
-                else if (!upTo.empty()) RemoveEmptyUpTo(Parent(exeDir), upTo);  // %LOCALAPPDATA%\Programs it made
-            }
-            else DeleteWhenFree(ctx, installedExe, false, exeDir, upTo);  // another volume (a --dir install): deleted in place once it closes
+                else if (!upTo.empty()) RemoveEmptyUpTo(Parent(exeDir), upTo);
+            } else DeleteWhenFree(ctx, installedExe, false, exeDir, upTo);
         }
         // the install folder that could not go yet goes after the moved exe (rmdir without /s: only while it is empty), and the
         // folders above it that the first install made with it (madeAbove), so no empty %LOCALAPPDATA%\Programs stays
@@ -2436,6 +2573,11 @@ bool SelfUninstall(Context& ctx, const LauncherPaths& p, bool removeGames, const
             }
         }
         if (!exeDirLeft.empty() && !IsDir(trash)) RemoveEmptyUpTo(exeDirLeft, upTo);
+        if (p.custom && !gamesLeft) RemoveScopedDataFiles(p.dataDir);
+        if (!retired.empty() && !DeleteFileW(retired.c_str())) {
+            const bool inProgramDir = !scopedExeDir.empty() && IEq(Parent(retired), scopedExeDir);
+            DeleteWhenFree(ctx, retired, false, inProgramDir ? scopedExeDir : wstring(), inProgramDir ? upTo : wstring());
+        }
         return true;
     } catch (const SetupError& e) { if (why) *why = e.msg; return false; }
 }

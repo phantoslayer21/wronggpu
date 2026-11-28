@@ -54,7 +54,8 @@ wstring PlainWarning(const wstring& w) {
     if (w.rfind(kLeftUnrecorded, 0) == 0)  // named like WrongGPU's own files, but not in the install's record: never deleted by their names
         return L"Some files were left where they are: WrongGPU deletes only files it can prove are its own (logs and reports with its name, copies it didn't record, other files in its folders). Delete them yourself if you don't need them.";
     if (Has(w, L"another name, a hard link")) return L"A file that has another name (a hard link) was left as it is, because writing to it would change that other name too.";
-    if (Has(w, L"The game replaced ")) return L"The game had replaced one of its files since WrongGPU was installed (probably a game update). Its newer file was kept.";
+    if (w.rfind(L"Another file is at ", 0) == 0 && Has(w, L". It was left in place."))
+        return L"Another file was already there, so WrongGPU left it in place.";
     if (Has(w, L"exists again with different content") || Has(w, L"The backup folder was kept"))
         return L"A game file the game changed was kept as it is. Its original stays in a backup folder in the game's folder.";
     if (Has(w, L"Left in place (changed since install)")) return L"A WrongGPU file was changed after it was installed, so it was left in place.";
@@ -76,13 +77,12 @@ wstring PlainError(const SetupError& e) {
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
-    TestAccessStart(L"restorer");  // (#243: a test build run by the tests leaves a line for every run)
     SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
     static const EmbeddedData data{nullptr, 0, 0, L"", 0, L"", 0, WRONGGPU_VERSION_STR};
     Context ctx;
     ctx.data = &data;
-    bool silent = false, collect = false, uninstall = false, bad = false;
-    wstring dirArg, exeArg, outZip;
+    bool silent = false, collect = false, uninstall = false, bad = false, dataSpecified = false;
+    wstring dirArg, exeArg, outZip, dataArg;
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     for (int i = 1; i < argc; ++i) {
@@ -95,10 +95,19 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         else if (la.rfind(L"/d=", 0) == 0) dirArg = a.substr(3);
         else if (la.rfind(L"/exe=", 0) == 0) exeArg = a.substr(5);
         else if (la.rfind(L"/out=", 0) == 0) outZip = a.substr(5);
+        else if (la.rfind(L"/data=", 0) == 0 || la.rfind(L"--data=", 0) == 0) { dataArg = a.substr(a[0] == L'/' ? 6 : 7); dataSpecified = true; }
         else if (la.rfind(L"/log=", 0) == 0) ctx.logFile = a.substr(5);
         else bad = true;
     }
     if (argv) LocalFree(argv);
+    wstring dataError;
+    if (!SetDataOverride(dataArg, dataError, dataSpecified)) {
+        if (!silent) MessageBoxW(nullptr, dataError.c_str(), L"WrongGPU", MB_ICONERROR);
+        return EXIT_USAGE;
+    }
+    TestAccessStart(L"restorer");
+    for (const auto* path : {&dirArg, &exeArg, &outZip, &ctx.logFile})
+        if (!path->empty() && !GamePathAllowed(*path)) return EXIT_REFUSED;
     if (ctx.logFile.empty()) ctx.logFile = DefaultLogPath();
     if (bad && silent) { LogLine(ctx, L"unknown command-line option"); return EXIT_USAGE; }
     const wstring self = SelfPath();
@@ -112,6 +121,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         dir = FullPath(dirArg);
         while (dir.size() > 3 && (dir.back() == L'\\' || dir.back() == L'/')) dir.pop_back();
     } else if (fromState) dir = Parent(Parent(self));
+    if (!dir.empty() && !GamePathAllowed(dir)) return EXIT_REFUSED;
     SystemInfo sys;
     Ui ui;
     ui.step = [](int, int, const wstring&) {};

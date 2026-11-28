@@ -266,3 +266,4 @@ def _section(t, opti, game, edition_package, OPTI_INI, tag, refuses):
         httpd.shutdown()
         t.env.pop("WRONGGPU_TEST_EDITION", None)
         t.env.pop("WRONGGPU_TEST_PRIOR_EDITION_DLL", None)
+        shutil.rmtree(os.path.join(t.data, "optiscaler"), ignore_errors=True)

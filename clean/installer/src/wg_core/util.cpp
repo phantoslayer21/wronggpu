@@ -2,6 +2,9 @@
 // WrongGPU launcher core: small helpers (strings, paths, files, SHA-256), moved unchanged from setup.cpp. Written for
 // this project.
 #include "util.h"
+#include <aclapi.h>
+#include "context.h"
+#include "../../../wgshared/include/wg_state.h"
 
 #include <atomic>
 
@@ -179,7 +182,8 @@ wstring HashHandle(HANDLE h) {
 
 namespace {
 // The attributes a person sets on a file; what is put back when a read-only bit that was cleared for a write is given up.
-constexpr DWORD kUserAttrs = FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_ARCHIVE;
+constexpr DWORD kUserAttrs = FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM |
+                             FILE_ATTRIBUTE_ARCHIVE | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED;
 bool SetAttrsByHandle(HANDLE h, DWORD attrs) {
     FILE_BASIC_INFO b{};  // (times 0: unchanged)
     b.FileAttributes = (attrs & kUserAttrs) ? (attrs & kUserAttrs) : FILE_ATTRIBUTE_NORMAL;
@@ -232,6 +236,123 @@ bool PinnedFile::Close() {
     restoreAttrs_ = 0;
     return ok;
 }
+HANDLE PinnedFile::Release() {
+    const HANDLE h = h_;
+    h_ = INVALID_HANDLE_VALUE;
+    restoreAttrs_ = 0;
+    return h;
+}
+
+static wstring NtRenamePath(const wstring& path) {
+    const wstring extended = wgstate::ExtendedPath(FullPath(path));
+    return extended.rfind(L"\\\\?\\", 0) == 0 ? L"\\??\\" + extended.substr(4) : extended;
+}
+bool PinnedFile::RenameNew(const wstring& path, DWORD* err) {
+    if (h_ == INVALID_HANDLE_VALUE) { if (err) *err = ERROR_INVALID_HANDLE; return false; }
+    const wstring name = NtRenamePath(path);
+    const size_t size = sizeof(FILE_RENAME_INFO) + name.size() * sizeof(wchar_t);
+    std::vector<unsigned char> storage(size, 0);
+    auto* info = reinterpret_cast<FILE_RENAME_INFO*>(storage.data());
+    info->FileNameLength = static_cast<DWORD>(name.size() * sizeof(wchar_t));
+    memcpy(info->FileName, name.data(), info->FileNameLength);
+    if (SetFileInformationByHandle(h_, FileRenameInfo, info, static_cast<DWORD>(size))) return true;
+    if (err) *err = GetLastError();
+    return false;
+}
+
+bool PinnedFile::ReplaceBytes(const wstring& path, const void* data, size_t size, DWORD* err, bool failWrite,
+                              PinnedFile* metadata, BY_HANDLE_FILE_INFORMATION* published, ReplacementMetadata kind) {
+    if (!metadata && h_ == INVALID_HANDLE_VALUE) { if (err) *err = ERROR_INVALID_HANDLE; return false; }
+    static volatile LONG serial = 0;
+    PinnedFile stage;
+    const wstring temp = path + L".wronggpu-tmp-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+                         std::to_wstring(InterlockedIncrement(&serial));
+    if (!stage.Create(temp, err)) return false;
+    auto fail = [&](DWORD e) { stage.Delete(); if (err) *err = e; return false; };
+    DWORD error = 0;
+    if (!stage.OverwriteBytes(data, failWrite ? size / 2 : size, &error) || !stage.Flush(&error)) return fail(error);
+    if (failWrite) return fail(ERROR_DISK_FULL);
+    PinnedFile& source = metadata ? *metadata : *this;
+    if ((error = source.CopyMetadataTo(stage, temp, kind)) != ERROR_SUCCESS) return fail(error);
+    BY_HANDLE_FILE_INFORMATION identity{};
+    if (published && !GetFileInformationByHandle(stage.h_, &identity)) return fail(GetLastError());
+    wstring originalLeft;
+    if (!(IsOpen() ? ReplaceWith(stage, path, &error, &originalLeft) : stage.RenameNew(path, &error))) {
+        fail(error);
+        if (!originalLeft.empty())
+            Fail(L"Cannot replace " + path + L": " + ErrText(error) + L". The original is kept at " + originalLeft);
+        return false;
+    }
+    if (published) *published = identity;
+    return true;
+}
+bool PinnedFile::WriteChunk(const void* data, DWORD size, DWORD* err) {
+    DWORD written = 0, error = ERROR_SUCCESS;
+    if (h_ == INVALID_HANDLE_VALUE) error = ERROR_INVALID_HANDLE;
+    else if (!WriteFile(h_, data, size, &written, nullptr)) error = GetLastError();
+    else if (written != size) error = ERROR_WRITE_FAULT;
+    if (err) *err = error;
+    return error == ERROR_SUCCESS;
+}
+bool PinnedFile::ReplaceWith(PinnedFile& stage, const wstring& path, DWORD* err, wstring* originalLeft) {
+    if (h_ == INVALID_HANDLE_VALUE || !stage.IsOpen()) { if (err) *err = ERROR_INVALID_HANDLE; return false; }
+    DWORD error = ERROR_SUCCESS;
+#ifdef WRONGGPU_TESTING
+    const bool simulateRace = IEq(EnvVar(L"WRONGGPU_TEST_REPLACE_RACE"), path) && GamePathAllowed(path);
+    if (simulateRace) error = ERROR_SHARING_VIOLATION;
+#endif
+    if (!error && stage.RenameReplace(path, &error)) return true;
+    if (error != ERROR_SHARING_VIOLATION && error != ERROR_NOT_SUPPORTED &&
+        error != ERROR_INVALID_PARAMETER && error != ERROR_ACCESS_DENIED) {
+        if (err) *err = error;
+        return false;
+    }
+    // Some filesystems reject a POSIX replace over a delete-denying pin. Move the verified
+    // file by handle, publish the complete sibling with no replace, and retain the old name
+    // if a competing creator prevents recovery.
+    static volatile LONG serial = 0;
+    const wstring saved = path + L".wronggpu-old-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+                          std::to_wstring(InterlockedIncrement(&serial));
+    if (!RenameNew(saved, &error)) { if (err) *err = error; return false; }
+#ifdef WRONGGPU_TESTING
+    if (simulateRace) {
+        PinnedFile competing;
+        if (competing.Create(path)) {
+            const string bytes = "; competing fixture file\r\n";
+            if (!competing.OverwriteBytes(bytes.data(), bytes.size())) competing.Delete();
+        }
+    }
+#endif
+    if (!stage.RenameNew(path, &error)) {
+        DWORD restoreError = 0;
+        if (!RenameNew(path, &restoreError)) {
+            error = restoreError;
+            if (originalLeft) *originalLeft = saved;
+        }
+        if (err) *err = error;
+        return false;
+    }
+    Delete();
+    return true;
+}
+bool PinnedFile::RenameReplace(const wstring& path, DWORD* err) {
+    if (h_ == INVALID_HANDLE_VALUE) { if (err) *err = ERROR_INVALID_HANDLE; return false; }
+    const wstring name = NtRenamePath(path);
+    const size_t bytes = sizeof(FILE_RENAME_INFO) + name.size() * sizeof(wchar_t);
+    std::vector<unsigned char> storage(bytes, 0);
+    auto* info = reinterpret_cast<FILE_RENAME_INFO*>(storage.data());
+    // FileRenameInfoEx, REPLACE_IF_EXISTS | POSIX_SEMANTICS. The old handle remains valid through the swap.
+    const DWORD flags = 0x1 | 0x2;
+    memcpy(storage.data(), &flags, sizeof flags);
+    info->FileNameLength = static_cast<DWORD>(name.size() * sizeof(wchar_t));
+    memcpy(info->FileName, name.data(), info->FileNameLength);
+    if (!SetFileInformationByHandle(h_, static_cast<FILE_INFO_BY_HANDLE_CLASS>(22), info, static_cast<DWORD>(bytes))) {
+        if (err) *err = GetLastError();
+        return false;
+    }
+    return true;
+}
+
 wstring PinnedFile::Sha256() { return h_ == INVALID_HANDLE_VALUE ? wstring() : HashHandle(h_); }
 bool PinnedFile::Delete(DWORD* err) {
     if (h_ == INVALID_HANDLE_VALUE) { if (err) *err = ERROR_INVALID_HANDLE; return false; }
@@ -283,7 +404,7 @@ bool PinnedFile::CopyFrom(HANDLE s, const wstring& srcSha, DWORD* err) {
     FILE_BASIC_INFO b{};  // the original's attributes and times (a restored file is the file it was)
     b.CreationTime.u.LowPart = si.ftCreationTime.dwLowDateTime; b.CreationTime.u.HighPart = (LONG)si.ftCreationTime.dwHighDateTime;
     b.LastWriteTime.u.LowPart = si.ftLastWriteTime.dwLowDateTime; b.LastWriteTime.u.HighPart = (LONG)si.ftLastWriteTime.dwHighDateTime;
-    b.FileAttributes = si.dwFileAttributes & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_ARCHIVE);
+    b.FileAttributes = si.dwFileAttributes & kUserAttrs;
     if (!b.FileAttributes) b.FileAttributes = FILE_ATTRIBUTE_NORMAL;
     SetFileInformationByHandle(h_, FileBasicInfo, &b, sizeof(b));  // (best effort: the content is what matters)
     restoreAttrs_ = 0;  // written: the source's attributes are on the file now
@@ -304,11 +425,13 @@ bool PinnedFile::OverwriteBytes(const void* data, size_t size, DWORD* err) {
     restoreAttrs_ = 0;
     return true;
 }
-bool PinnedFile::Create(const wstring& path, DWORD* err) {
+bool PinnedFile::Create(const wstring& path, DWORD* err, bool deleteOnClose) {
     Close();
     // CREATE_NEW fails on anything at the name (a file, a folder, a link: FILE_FLAG_OPEN_REPARSE_POINT, never its target)
-    h_ = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE | DELETE | FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ, nullptr, CREATE_NEW,
-                     FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    DWORD flags = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT;
+    if (deleteOnClose) flags |= FILE_FLAG_DELETE_ON_CLOSE;
+    h_ = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE | DELETE | FILE_WRITE_ATTRIBUTES | WRITE_DAC, FILE_SHARE_READ, nullptr, CREATE_NEW,
+                     flags, nullptr);
     if (h_ == INVALID_HANDLE_VALUE) { if (err) *err = GetLastError(); return false; }
     restoreAttrs_ = 0;
     return true;
@@ -326,11 +449,80 @@ bool PinnedFile::ReadBytes(string& out) {
         out.append(buf.data(), n);
     }
 }
-bool PinnedFile::CopyOut(const wstring& dst, wstring* sha, DWORD* err) {
+static DWORD CopyNamedStream(const wstring& from, const wstring& to) {
+    struct File {
+        HANDLE h;
+        ~File() { if (h != INVALID_HANDLE_VALUE) CloseHandle(h); }
+    };
+    const DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+    File input{CreateFileW(from.c_str(), GENERIC_READ, share, nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr)};
+    if (input.h == INVALID_HANDLE_VALUE) return GetLastError();
+    File output{CreateFileW(to.c_str(), GENERIC_WRITE, share, nullptr, CREATE_NEW, FILE_FLAG_OPEN_REPARSE_POINT, nullptr)};
+    if (output.h == INVALID_HANDLE_VALUE) return GetLastError();
+    std::vector<char> buffer(1u << 16);
+    for (;;) {
+        DWORD read = 0, written = 0;
+        if (!ReadFile(input.h, buffer.data(), static_cast<DWORD>(buffer.size()), &read, nullptr)) return GetLastError();
+        if (!read) break;
+        if (!WriteFile(output.h, buffer.data(), read, &written, nullptr)) return GetLastError();
+        if (written != read) return ERROR_WRITE_FAULT;
+    }
+    return FlushFileBuffers(output.h) ? ERROR_SUCCESS : GetLastError();
+}
+
+DWORD PinnedFile::CopyMetadataTo(PinnedFile& target, const wstring& targetPath, ReplacementMetadata kind) {
+    FILE_BASIC_INFO basic{};
+    if (!GetFileInformationByHandleEx(h_, FileBasicInfo, &basic, sizeof(basic))) return GetLastError();
+    DWORD volumeFlags = 0;
+    if (!GetVolumeInformationByHandleW(h_, nullptr, 0, nullptr, nullptr, &volumeFlags, nullptr, 0)) return GetLastError();
+    if (volumeFlags & FILE_NAMED_STREAMS) {
+        const wstring path = ResolvedHandlePath(h_);
+        if (path.empty()) return ERROR_INVALID_NAME;
+        WIN32_FIND_STREAM_DATA stream{};
+        HANDLE found = FindFirstStreamW(path.c_str(), FindStreamInfoStandard, &stream, 0);
+        if (found == INVALID_HANDLE_VALUE && GetLastError() != ERROR_HANDLE_EOF) return GetLastError();
+        if (found != INVALID_HANDLE_VALUE) {
+            struct FindCloser { HANDLE h; ~FindCloser() { FindClose(h); } } closer{found};
+            do {
+                if (wcscmp(stream.cStreamName, L"::$DATA") == 0) continue;
+                const DWORD error = CopyNamedStream(path + stream.cStreamName, targetPath + stream.cStreamName);
+                if (error != ERROR_SUCCESS) return error;
+            } while (FindNextStreamW(found, &stream));
+            if (GetLastError() != ERROR_HANDLE_EOF) return GetLastError();
+        }
+    }
+    if (volumeFlags & FILE_PERSISTENT_ACLS) {
+        PACL dacl = nullptr;
+        PSECURITY_DESCRIPTOR descriptor = nullptr;
+        const DWORD got = GetSecurityInfo(h_, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr, &dacl, nullptr, &descriptor);
+        if (got != ERROR_SUCCESS) return got;
+        SECURITY_DESCRIPTOR_CONTROL control{};
+        DWORD revision = 0;
+        DWORD error = ERROR_SUCCESS;
+        if (!GetSecurityDescriptorControl(descriptor, &control, &revision)) error = GetLastError();
+        else {
+            const SECURITY_INFORMATION protection = control & SE_DACL_PROTECTED
+                ? PROTECTED_DACL_SECURITY_INFORMATION : UNPROTECTED_DACL_SECURITY_INFORMATION;
+            error = SetSecurityInfo(target.h_, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | protection, nullptr, nullptr, dacl, nullptr);
+        }
+        LocalFree(descriptor);
+        if (error != ERROR_SUCCESS) return error;
+    }
+    basic.ChangeTime.QuadPart = 0;
+    if (kind != ReplacementMetadata::Restore) basic.LastWriteTime.QuadPart = 0;
+    basic.FileAttributes = (restoreAttrs_ ? restoreAttrs_ : basic.FileAttributes) & kUserAttrs;
+    if (kind == ReplacementMetadata::InstalledBinary)
+        basic.FileAttributes &= ~(FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED);
+    if (!basic.FileAttributes) basic.FileAttributes = FILE_ATTRIBUTE_NORMAL;
+    return SetFileInformationByHandle(target.h_, FileBasicInfo, &basic, sizeof(basic)) ? ERROR_SUCCESS : GetLastError();
+}
+
+bool PinnedFile::CopyOut(const wstring& dst, wstring* sha, DWORD* err, PinnedFile* created, bool deleteOnClose) {
     auto fail = [&](DWORD e) { if (err) *err = e; return false; };
     if (h_ == INVALID_HANDLE_VALUE) return fail(ERROR_INVALID_HANDLE);
-    PinnedFile out;
-    if (!out.Create(dst, err)) return false;
+    PinnedFile local;
+    PinnedFile& out = created ? *created : local;
+    if (!out.Create(dst, err, deleteOnClose)) return false;
     LARGE_INTEGER zero{};
     if (!SetFilePointerEx(h_, zero, nullptr, FILE_BEGIN)) { const DWORD e = GetLastError(); out.Delete(); return fail(e); }
     wgc::Sha256 hash;
@@ -342,7 +534,9 @@ bool PinnedFile::CopyOut(const wstring& dst, wstring* sha, DWORD* err) {
         if (!WriteFile(out.h_, buf.data(), n, &w, nullptr) || w != n) { const DWORD e = GetLastError(); out.Delete(); return fail(e ? e : ERROR_WRITE_FAULT); }
         hash.update(buf.data(), n);
     }
-    FlushFileBuffers(out.h_);
+    if (!FlushFileBuffers(out.h_)) { const DWORD e = GetLastError(); out.Delete(); return fail(e); }
+    const DWORD metadata = CopyMetadataTo(out, dst, ReplacementMetadata::Restore);
+    if (metadata != ERROR_SUCCESS) { out.Delete(); return fail(metadata); }
     if (sha) *sha = HexW(hash.finish());
     return true;
 }
@@ -497,20 +691,24 @@ bool TestLibraries(wstring* folder) {
 
 #ifdef WRONGGPU_TESTING
 // A path as one form for the scope test: \\?\C:\x and \??\C:\x as C:\x, \\?\UNC\srv\share as \\srv\share, then full.
+#endif
+
 static wstring ScopeForm(const wstring& p) {
     wstring s = p;
     if (StartsWithI(s, L"\\\\?\\UNC\\")) s = L"\\\\" + s.substr(8);
     else if (StartsWithI(s, L"\\\\?\\") || StartsWithI(s, L"\\??\\")) s = s.substr(4);
+    std::replace(s.begin(), s.end(), L'/', L'\\');
     s = FullPath(s);
     while (s.size() > 3 && s.back() == L'\\') s.pop_back();
     return s;
 }
 
+#ifdef WRONGGPU_TESTING
 // Test builds: the access log (WRONGGPU_TEST_ACCESS_LOG). A new log starts with "run <WRONGGPU_TEST_RUN_ID>" (the tests' guard
 // checks it is this run's); every line is appended before the read it records. false: not written (the read is refused).
 static bool TestAccessLine(const wstring& line) {
     const wstring log = EnvVar(L"WRONGGPU_TEST_ACCESS_LOG");
-    if (log.empty()) return false;
+    if (log.empty() || !GamePathAllowed(log)) return false;
     HANDLE h = CreateFileW(log.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, CREATE_NEW,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
     string text;
@@ -529,16 +727,40 @@ static bool TestAccessLine(const wstring& line) {
     return ok;
 }
 
+#endif
+
+wstring ResolvedHandlePath(HANDLE file) {
+    if (file == INVALID_HANDLE_VALUE) return L"";
+    wchar_t buf[MAX_PATH * 4] = {};
+    const DWORD n = GetFinalPathNameByHandleW(file, buf, (DWORD)(sizeof buf / sizeof buf[0]), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    return n > 0 && n < sizeof buf / sizeof buf[0] ? ScopeForm(buf) : L"";
+}
 // The final form of a path that exists: the name Windows resolves it to (every junction and link above it followed), as
 // C:\... or \\server\...; empty when it cannot be opened.
 static wstring FinalForm(const wstring& p) {
     const HANDLE h = CreateFileW(p.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
                                  FILE_FLAG_BACKUP_SEMANTICS, nullptr);
     if (h == INVALID_HANDLE_VALUE) return L"";
-    wchar_t buf[MAX_PATH * 4] = {};
-    const DWORD n = GetFinalPathNameByHandleW(h, buf, (DWORD)(sizeof buf / sizeof buf[0]), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    const wstring resolved = ResolvedHandlePath(h);
     CloseHandle(h);
-    return n > 0 && n < sizeof buf / sizeof buf[0] ? ScopeForm(buf) : L"";
+    return resolved;
+}
+// Resolve the existing ancestor of a new path before adding the still-missing names.
+wstring ResolvedPath(const wstring& path) {
+    wstring p = ScopeForm(path), suffix;
+    while (!p.empty()) {
+        if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            const wstring final = FinalForm(p);
+            return final.empty() || suffix.empty() ? final : ScopeForm(Join(final, suffix));
+        }
+        const DWORD error = GetLastError();
+        if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) return L"";
+        const wstring up = Parent(p);
+        if (up.empty() || up == p) break;
+        suffix = suffix.empty() ? BaseName(p) : Join(BaseName(p), suffix);
+        p = up;
+    }
+    return L"";
 }
 // The long lexical form of a path that exists (8.3 names expanded), for comparing with its final form.
 static wstring LongForm(const wstring& p) {
@@ -553,7 +775,7 @@ static bool RealPathOk(const wstring& lexical, const wchar_t** why) {
     wstring probe = lexical;
     while (!probe.empty() && GetFileAttributesW(probe.c_str()) == INVALID_FILE_ATTRIBUTES) {
         const wstring up = Parent(probe);
-        if (up == probe || up.empty()) return true;  // nothing of it exists: nothing to read
+        if (up == probe || up.empty()) { *why = L"cannot be resolved"; return false; }
         probe = up;
     }
     if (probe.empty()) return true;
@@ -572,15 +794,47 @@ static bool RealPathOk(const wstring& lexical, const wchar_t** why) {
     }
     return true;
 }
-#endif
+
+// Expand 8.3 names without resolving junctions. Keep the names of any still-missing descendants.
+static wstring LongAncestors(const wstring& lexical) {
+    wstring probe = lexical, suffix;
+    while (GetFileAttributesW(probe.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        const wstring up = Parent(probe);
+        if (up.empty() || up == probe) return lexical;
+        suffix = suffix.empty() ? BaseName(probe) : Join(BaseName(probe), suffix);
+        probe = up;
+    }
+    return suffix.empty() ? LongForm(probe) : Join(LongForm(probe), suffix);
+}
+
+bool PathWithin(const wstring& path, const wstring& root, bool requirePlain) {
+    if (path.empty() || root.empty()) return false;
+    const wstring lexical = ScopeForm(path), rootLexical = ScopeForm(root);
+    auto absolute = [](const wstring& s) {
+        if (s.size() >= 3 && s[1] == L':' && s[2] == L'\\') return s.find(L':', 2) == wstring::npos;
+        const auto serverEnd = s.find(L'\\', 2);
+        return StartsWithI(s, L"\\\\") && !StartsWithI(s, L"\\\\.\\") &&
+               serverEnd != wstring::npos && serverEnd > 2 && serverEnd + 1 < s.size() &&
+               s.find(L':') == wstring::npos;
+    };
+    if (!absolute(lexical) || !absolute(rootLexical)) return false;
+    auto under = [](const wstring& p, const wstring& r) {
+        return IEq(p, r) || (p.size() > r.size() && StartsWithI(p, r) && (p[r.size()] == L'\\' || r.back() == L'\\'));
+    };
+    const bool inside = under(lexical, rootLexical) || under(LongAncestors(lexical), LongAncestors(rootLexical));
+    const wchar_t* why = nullptr;
+    return inside && (!requirePlain || (RealPathOk(rootLexical, &why) && RealPathOk(lexical, &why)));
+}
 
 bool LibraryAccess(const wstring& path) {
     ++g_libraryAccesses;
 #ifdef WRONGGPU_TESTING
     wstring folder;
     if (!TestLibraries(&folder)) {
-        TestAccessLine(L"library access: " + path);  // (a test build without the tests' list: logged where asked, never held back)
-        return true;
+        // Tests linked directly against the core use only their own fixture arguments.
+        if (DataOverride().empty()) return true;
+        TestAccessLine(L"library access refused: " + path);
+        return false;
     }
     // the tests' scope: the folder that holds WRONGGPU_TEST_LIBRARIES (the test run's own folder), as it really is; nothing
     // else is read, and nothing is read whose access line could not be written (fail closed)
@@ -588,7 +842,7 @@ bool LibraryAccess(const wstring& path) {
     const wstring p = ScopeForm(path);
     const wchar_t* why = nullptr;
     bool inside = !root.empty() && (IEq(p, root) || (p.size() > root.size() && StartsWithI(p, root) && (p[root.size()] == L'\\' || root.back() == L'\\')));
-    if (inside && GetFileAttributesW(root.c_str()) != INVALID_FILE_ATTRIBUTES && !IEq(FinalForm(root), LongForm(root))) { inside = false; why = L"the test folder resolves elsewhere"; }
+    if (inside && !GamePathAllowed(path)) { inside = false; why = L"outside the test build's --data folder"; }
     if (inside && !RealPathOk(p, &why)) inside = false;
     if (!inside) {
         TestAccessLine(L"library access refused: " + path + (why ? wstring(L" (") + why + L")" : wstring()));
@@ -596,18 +850,13 @@ bool LibraryAccess(const wstring& path) {
     }
     return TestAccessLine(L"library access: " + path);
 #else
-    (void)path;
-    return true;
+    return GamePathAllowed(path);
 #endif
 }
 
 bool LibraryRegistryAccess(const wchar_t* what) {
     ++g_libraryAccesses;
 #ifdef WRONGGPU_TESTING
-    if (!TestLibraries()) {
-        TestAccessLine(wstring(L"library access: registry ") + what);
-        return true;
-    }
     TestAccessLine(wstring(L"library access refused: registry ") + what);
     return false;
 #else

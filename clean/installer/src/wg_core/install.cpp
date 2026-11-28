@@ -6,16 +6,28 @@
 #include "coexist.h"
 #include "fg.h"
 #include "gamerules.h"
+#include "leftovers.h"
+#include "known_restorers.h"
+#include "optikeys.h"
 #include "optiscaler.h"
 #include "payload.h"
 #include "pe.h"
 #include "record.h"
 #include "rr.h"
 #include "settings.h"
+#include "../../../wgshared/include/wg_state.h"
 
 #include <algorithm>
+#include <memory>
+#include <set>
 
 namespace wg {
+
+static bool KnownRestorerSha(const wstring& sha) {
+    for (const auto* known : kKnownRestorerShas)
+        if (IEq(sha, known)) return true;
+    return false;
+}
 
 // The install routes (setup_route.h of the installer). Two routes. Hosted: the player's OptiScaler next to the game
 // exe, WrongGPU's FFX DLL under its own name, the game's FSR files untouched (/OPTISCALER=, the wizard's default).
@@ -266,6 +278,7 @@ static wstring ModelPathForGame(Context& ctx, Ui& ui, std::vector<wstring>& warn
 std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const ModelState& model, const Consent& consent, Ui& ui, const HipInfo& hip) {
     std::vector<wstring> warnings;
     const wstring dir = target.dir;
+    const auto operation = GuardOperation(dir, target.installed ? &target.record : nullptr);
     // 0. The embedded package and converter data must be intact before anything is touched.
     ui.step(0, 1, L"Verifying the package");
     for (auto& f : *ctx.data) {
@@ -385,7 +398,10 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
     bool rrData = false;
     if (rr) {
         ui.step(0, 1, L"Preparing the Ray Reconstruction data");
-        const RrDataState rd = FindRrData(ctx, &target, L"", {});
+        RrDataState rd;
+        if (IsFile(RrDataFile()) && !RrDataValid(ctx))
+            rd.error = L"the existing Ray Reconstruction data belongs to a different or unreadable converter map";
+        else rd = FindRrData(ctx, &target, L"", {});
         for (auto& n : rd.notes) { ui.log(n); warnings.push_back(n); }  // the ignore lists' lines (an RR data kept unchecked)
         wstring why;
         rrData = rd.ok && WriteRrData(ctx, rd, &why);
@@ -419,6 +435,15 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
     // player's settings, profile.ini, previous\ for Roll back, rr-config\, a file the player keeps there, what an earlier
     // uninstall kept and listed) stays and is listed. Never a removal of the whole folder.
     const bool keepSettings = StateHasSettings(dir) || IsFile(RecordPath(dir));
+    const wstring uninstaller = Join(StateDir(dir), L"uninstall.exe");
+    FileIdentity oldRestorer;
+    wstring oldRestorerHash;
+    if (Exists(uninstaller)) {
+        PinnedFile file;
+        if (!GamePathAllowed(uninstaller) || !file.Open(uninstaller, false) || !file.Id(&oldRestorer.volume, &oldRestorer.index) ||
+            (oldRestorerHash = file.Sha256()).empty())
+            Fail(L"Cannot secure the existing uninstaller: " + uninstaller, EXIT_REFUSED);
+    }
     RunJournal journal;
     struct EarlierGone {
         Context& ctx; const wstring& dir; Ui& ui; RunJournal& journal; bool armed = false;
@@ -429,14 +454,45 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
         }
     } earlierGone{ctx, dir, ui, journal};
     std::map<wstring, wstring> keptByRestore;  // recorded files the restore left in place (changed since the install), with its warning
+    string carriedOpti;
+    PinnedFile optiMetadata;
+    bool haveCarriedOpti = false, optiUnmodified = false;
+    wstring carriedOptiSha, originalOptiSha, oldOptiDllSha, expectedOptiTarget;
+    std::vector<IniEntry> optiDefaults;
+    std::vector<IniKeyChange> optiJournal;
+    Record priorOpti;
     string carriedIni;         // the earlier install's wronggpu.ini when it was WrongGPU's: the new one starts from it
     bool haveCarried = false;
     if (IsFile(RecordPath(dir))) {
         ui.log(L"An earlier installation was found - restoring the original files first.");
+        const wstring optiPath = Join(dir, L"OptiScaler.ini");
+        if (LoadRecord(RecordPath(dir), priorOpti) && HostedRecord(priorOpti) && OptiSetupIsOurs(dir, priorOpti) && Exists(optiPath)) {
+            PinnedFile file;
+            if (!file.Open(optiPath, false) || !file.ReadBytes(carriedOpti)) Fail(L"Cannot read " + optiPath);
+            carriedOptiSha = Sha256Bytes(carriedOpti.data(), carriedOpti.size());
+            IniEntries(carriedOpti);
+            if (ctx.opti.ok()) {
+                const wstring saved = Target(dir, Join(kStateDirName, L"opti-metadata-" + NewInstallId() + L".ini"));
+                wstring copied;
+                DWORD error = 0;
+                if (!file.CopyOut(saved, &copied, &error, &optiMetadata, true) || !IEq(copied, carriedOptiSha))
+                    Fail(L"Cannot keep OptiScaler.ini metadata: " + ErrText(error));
+                RestoreStep("opti-metadata-saved");
+            }
+            for (const auto& e : priorOpti.e) {
+                if (IEq(e.rel, L"OptiScaler.ini")) {
+                    optiUnmodified = IEq(e.inst, carriedOptiSha);
+                    if (e.existed) originalOptiSha = e.orig;
+                }
+                if (IEq(e.rel, priorOpti.proxy)) oldOptiDllSha = e.inst;
+            }
+            haveCarriedOpti = true;
+        }
         haveCarried = MigrateOurSettings(ctx, dir, ui, carriedIni);
         earlierGone.armed = true;
         try {
-            for (auto& w : DoRestore(ctx, dir, ui, false, true, &keptByRestore)) warnings.push_back(w);
+            for (auto& w : DoRestore(ctx, dir, ui, false, true, &keptByRestore, haveCarriedOpti ? &carriedOptiSha : nullptr)) warnings.push_back(w);
+            ReleaseRestoreBinaries();  // the game state lock still spans the new plan and installation
         } catch (const SetupError&) {  // nothing is lost: the restore can be run again from the record and the backup
             ui.log(L"The earlier installation could not be removed; its record and backup were left as they are. Close anything that uses the game's files, then run setup again or uninstall it.");
             throw;
@@ -485,8 +541,8 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
     else ReadAll(Join(dir, L"wronggpu.ini"), selectedIni);
     string existingUpscaler, existingSection;
     if (!IniGetFrontEnd(selectedIni, "upscaler", &existingUpscaler, &existingSection))
-        selectedIni = IniSet(selectedIni, "fsr", "upscaler", "network");
-    selectedIni = IniSet(selectedIni, "fsr", "runtime_dll", "wronggpu_runtime.dll");
+        selectedIni = SetFrontEndKey(selectedIni, "fsr", "upscaler", "network");
+    selectedIni = SetFrontEndKey(selectedIni, "fsr", "runtime_dll", "wronggpu_runtime.dll");
     // Preserve user options, then append the explicit installer choice (last model item wins).
     string selectedOptions, selectedSection;
     IniGetFrontEnd(selectedIni, "runtime_options", &selectedOptions, &selectedSection);
@@ -520,13 +576,14 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
         }
     }
 #endif
-    selectedIni = IniSet(selectedIni, "fsr", "runtime_options", selectedOptions);
+    selectedIni = SetFrontEndKey(selectedIni, "fsr", "runtime_options", selectedOptions);
     // Under Wine the game runs in a prefix of its own (Proton), where this launcher's %LOCALAPPDATA% does not exist: the
     // model folder is named by its Z: path, which that prefix reaches too. A model_dir the player set stays.
     string playerModelDir, playerModelDirSection;
     IniGetFrontEnd(selectedIni, "model_dir", &playerModelDir, &playerModelDirSection);
-    if (UnderWine() && playerModelDir.empty())
-        selectedIni = IniSet(selectedIni, "fsr", "model_dir", ToUtf8(ModelPathForGame(ctx, ui, warnings, ModelBaseDir())));
+    if (!DataOverride().empty() || (UnderWine() && playerModelDir.empty()))
+        selectedIni = SetFrontEndKey(selectedIni, playerModelDirSection.empty() ? "fsr" : playerModelDirSection, "model_dir",
+                             ToUtf8(ModelPathForGame(ctx, ui, warnings, ModelBaseDir())));
     const wstring selectedIniSrc = Join(OptiTempDir(ctx), L"WrongGPU.selected.ini");
     WriteFileAtomic(selectedIniSrc, selectedIni.data(), selectedIni.size());
     optiFiles.push_back({L"wronggpu.ini", selectedIniSrc});
@@ -585,10 +642,77 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
         proxy = co.proxy.name;
         proxyReason = co.proxy.reason;
         if (proxy.empty()) Fail(L"OptiScaler needs a free name next to the game exe (dxgi.dll, winmm.dll, version.dll, wininet.dll, winhttp.dll or dbghelp.dll): " + co.proxy.reason, EXIT_OTHER_MODS);
+        for (const auto& rel : ctx.opti.files)
+            if (!OptiPackageMemberAllowed(Join(ctx.opti.dir, rel), ctx.opti.dir))
+                Fail(L"OptiScaler package file is outside the launcher fixture: " + rel, EXIT_REFUSED);
         string ini;
         if (!ReadAll(Join(ctx.opti.dir, L"OptiScaler.ini"), ini)) Fail(L"Cannot read OptiScaler.ini of " + ctx.opti.source);
         const bool pathKey = IniHasKey(ini, "Plugins", "Path");
+        const string packageIni = ini;
+        optiDefaults = IniEntries(IniSet(packageIni, "Log", "LogLevel", "2"));
+        const bool newEdition = haveCarriedOpti &&
+            !IEq(oldOptiDllSha, Sha256File(Join(ctx.opti.dir, L"OptiScaler.dll")));
+        bool playerLogLevel = false;
+        if (haveCarriedOpti) {
+            const wstring targetIni = Join(dir, L"OptiScaler.ini");
+            expectedOptiTarget = keptByRestore.count(L"optiscaler.ini") ? carriedOptiSha : originalOptiSha;
+            if ((Exists(targetIni) && expectedOptiTarget.empty()) || !IEq(Sha256File(targetIni), expectedOptiTarget))
+                Fail(L"OptiScaler.ini changed before the merge. Its current contents were kept.", EXIT_REFUSED);
+            const bool carryFile = !newEdition && !optiUnmodified;
+            if (carryFile) ini = carriedOpti;
+            auto oldDefault = [&](const string& section, const string& key) {
+                return std::find_if(priorOpti.optiDefaults.begin(), priorOpti.optiDefaults.end(), [&](const IniEntry& d) {
+                    return IEq(FromUtf8(d.section), FromUtf8(section)) && IEq(FromUtf8(d.key), FromUtf8(key));
+                });
+            };
+            if (!carryFile) {
+                for (const auto& value : IniEntries(carriedOpti)) {
+                    const auto was = oldDefault(value.section, value.key);
+                    const bool logging = IEq(FromUtf8(value.section), L"Log") && IEq(FromUtf8(value.key), L"LogLevel");
+                    if (!logging && !IniHasKey(packageIni, value.section, value.key)) continue;
+                    // Older records have setup defaults for logging and editable values normally shipped as "auto".
+                    const bool legacyChoice = priorOpti.optiDefaults.empty() && !optiUnmodified &&
+                        ((FindOptiKey(value.section, value.key) && value.value != "auto") ||
+                         (logging && value.value != "2"));
+                    if ((logging || !IsOptiLocked(value.section, value.key)) &&
+                        (legacyChoice || (was != priorOpti.optiDefaults.end() && was->value != value.value))) {
+                        ini = IniSet(ini, value.section, value.key, value.value);
+                        if (logging) playerLogLevel = true;
+                    }
+                }
+            }
+            for (const char* key : {"FGOutput", "FGType"}) {
+                string choice;
+                if (IniHasKey(carriedOpti, "FrameGen", key, &choice) && !choice.empty()) {
+                    const auto was = oldDefault("FrameGen", key);
+                    const bool changed = was == priorOpti.optiDefaults.end() ? choice != "auto" : was->value != choice;
+                    if (StartsWithI(FromUtf8(choice), L"wronggpu")) {
+                        string defaultValue = "auto";
+                        IniHasKey(packageIni, "FrameGen", key, &defaultValue);
+                        ini = IniSet(ini, "FrameGen", key, defaultValue);
+                    } else if (carryFile || changed) ini = IniSet(ini, "FrameGen", key, choice);
+                }
+            }
+            for (auto change : priorOpti.inikeys) {
+                if (!IEq(change.file, L"OptiScaler.ini") || IsOptiLocked(change.section, change.key)) continue;
+                string choice, fresh;
+                if (!IniHasKey(carriedOpti, change.section, change.key, &choice) ||
+                    !IniHasKey(ini, change.section, change.key, &fresh)) continue;
+                if (newEdition && IniHasKey(packageIni, change.section, change.key, &fresh)) {
+                    change.original = fresh;
+                    change.absent = false;
+                }
+                ini = IniSet(ini, change.section, change.key, choice);
+                change.ours = choice;
+                if (change.ours != change.original || change.absent) optiJournal.push_back(change);
+            }
+        }
+        // A repair or update owns the plugin loader and path, DX12 upscaler, FFX library and index, the
+        // WrongGPU slot index. Preserve the player's logging and image controls.
         for (auto& k : kOptiIni) {
+            if (playerLogLevel && !strcmp(k.section, "Log") && !strcmp(k.key, "LogLevel")) continue;
+            if (haveCarriedOpti && !newEdition && !optiUnmodified && strcmp(k.section, "Plugins") && strcmp(k.section, "Upscalers") &&
+                strcmp(k.section, "Libraries") && strcmp(k.section, "FSR")) continue;
             if (slot && (!strcmp(k.key, "FfxDx12SRPath") || (!strcmp(k.section, "FSR") && !strcmp(k.key, "UpscalerIndex")))) continue;
             ini = IniSet(ini, k.section, k.key, *k.value ? string(k.value) : ToUtf8(Join(dir, kOptiFrontEnd)));
         }
@@ -749,6 +873,8 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
     // the earlier install moved aside or replaced with the player's OK (its disable entries, its copies over a file that
     // was there): those go aside again below on that OK.)
     Record m; m.version = ctx.data->version; m.game = dir; m.exe = target.exe;
+    m.optiDefaults = std::move(optiDefaults);
+    m.inikeys = std::move(optiJournal);
     // this install's id: the earlier install's (a repair or update keeps it, so WrongGPU's stamped state files stay its own), a
     // new one otherwise
     m.installId = target.installed && !target.record.installId.empty() ? target.record.installId : NewInstallId();
@@ -768,7 +894,11 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
     for (auto* sl : replace) {  // the game's DLL keeps working under its new name; WrongGPU's forwards to it (spec 20)
         Entry e; e.action = L"rename"; e.rel = sl->original; e.inst = Sha256File(Join(dir, sl->name));
         const wstring tp = Target(dir, e.rel);
-        if (Exists(tp)) { e.existed = true; e.orig = Sha256File(tp); }
+        if (Exists(tp)) {
+            e.existed = true;
+            e.orig = Sha256File(tp);
+            if (e.orig.empty()) Fail(L"Cannot read the existing file " + tp);
+        }
         m.e.push_back(e);
     }
     for (auto& f : *ctx.data) {
@@ -780,6 +910,7 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
     }
     RestoreStep("seed-planned");  // (tests: a seed file appears here, after its check and before the record)
     for (auto& of : optiFiles) {
+        if (!GamePathAllowed(of.src)) Fail(L"OptiScaler source is outside the launcher fixture: " + of.src, EXIT_REFUSED);
         Entry e; e.action = L"copy"; e.rel = of.rel; e.inst = Sha256File(of.src);
         if (e.inst.empty()) Fail(L"Cannot read OptiScaler's " + of.rel);
         wstring tp = Target(dir, e.rel);
@@ -808,7 +939,7 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
                 e.orig = Sha256File(tp);
                 if (e.orig.empty()) Fail(L"Cannot read the existing file " + tp);
                 e.existed = e.orig != e.inst;
-                if (!e.existed) e.orig.clear();
+                // A same-byte mirror is already installed; verify its identity and leave its bytes alone.
             }
             m.e.push_back(e);
             mirrors.push_back({src.rel, e.rel});
@@ -881,29 +1012,65 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
     ui.step(done, total, L"Backing up existing files");
 
     const wstring state = StateDir(dir), rpath = RecordPath(dir);
-    JournalCreate(journal, state, true);
-    EnsureDir(state);
+    m.restorerSha = L"-";
+    m.installPending = true;
+    JournalDirectory(journal, state);
     bool recorded = false;
+    std::map<wstring, std::unique_ptr<PinnedFile>> pins;
+    std::set<wstring> applied;
+    auto hold = [&](const wstring& rel, const wstring& expected, bool write) -> PinnedFile& {
+        const wstring path = Target(dir, rel);
+        auto& pin = pins[Lower(rel)];
+        if (!pin) {
+            pin = std::make_unique<PinnedFile>();
+            DWORD error = 0;
+            if (!pin->Open(path, write, &error)) {
+                if (error == ERROR_TOO_MANY_LINKS)
+                    Fail(L"Cannot install over " + path + L": the existing file has another name (a hard link).");
+                Fail(L"Cannot secure " + path + L" for install: " + ErrText(error));
+            }
+        }
+        if (expected.empty() || !IEq(pin->Sha256(), expected))
+            Fail(L"The file changed during install and was kept: " + path);
+        return *pin;
+    };
+    auto take = [&](const wstring& rel) {
+        auto node = pins.extract(Lower(rel));
+        return node.empty() ? std::unique_ptr<PinnedFile>() : std::move(node.mapped());
+    };
     try {
+        for (const auto* sl : replace) {
+            const auto it = std::find_if(m.e.begin(), m.e.end(), [&](const Entry& e) { return IEq(e.rel, sl->original); });
+            hold(sl->name, it->inst, true);
+        }
         for (auto& e : m.e) {
+            if (haveCarriedOpti && IEq(e.rel, L"OptiScaler.ini") && !IEq(e.orig, expectedOptiTarget))
+                Fail(L"OptiScaler.ini changed before the merge. Its current contents were kept.", EXIT_REFUSED);
+            if (!e.orig.empty()) hold(e.rel, e.orig, e.action == L"copy" || e.action == L"rename");
             if (!e.existed) continue;
             // created only where nothing is: a file an earlier uninstall kept in backup\ stays, this backup takes a new name
-            CopyBackup(ctx, dir, e, Target(dir, e.rel), &journal, &warnings);
+            CopyBackup(ctx, dir, e, Target(dir, e.rel), &journal, &warnings, pins.at(Lower(e.rel)).get());
             ui.step(++done, total, L"Backed up " + e.rel);
             ui.log(L"backup " + e.rel);
         }
-        JournalCreate(journal, rpath, false);
-        SaveRecord(rpath, m);  // written before any change so an interrupted install can still be undone
+        SaveRecord(rpath, m, true, &journal);  // written before any change so an interrupted install can still be undone
         recorded = true;
         RestoreStep("seed-recorded");  // (tests: a seed file appears here, after the record and before it is written)
         for (auto& e : m.e) {
             const wstring tp = Target(dir, e.rel);
             if (e.action == L"dir") {
                 ui.step(++done, total, L"Creating " + e.rel);
-                EnsureDir(tp);
+                if (CreateDirectoryW(tp.c_str(), nullptr)) {
+                    journal.created.push_back({tp, true});
+                    applied.insert(Lower(e.rel));
+                }
+                else if (GetLastError() != ERROR_ALREADY_EXISTS || !IsDir(tp)) Fail(L"Cannot create " + tp);
             } else if (e.action == L"disable") {
                 ui.step(++done, total, L"Moving aside " + e.rel);
-                ForceDelete(tp);
+                auto file = take(e.rel);
+                DWORD err = 0;
+                if (!file->Delete(&err)) Fail(L"Cannot move aside " + tp + L": " + ErrText(err));
+                applied.insert(Lower(e.rel));
                 ui.log(L"moved aside " + e.rel + L" (original kept in the backup)");
             } else if (e.action == L"rename") {
                 const FfxSlot* sl = nullptr;
@@ -911,20 +1078,59 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
                 if (!sl) Fail(L"Internal error: no FSR DLL for " + e.rel);
                 const wstring src = Join(dir, sl->name);
                 ui.step(++done, total, L"Keeping the game's " + wstring(sl->name) + L" as " + e.rel);
-                if (Exists(tp)) ForceDelete(tp);
-                if (!MoveFileExW(src.c_str(), tp.c_str(), MOVEFILE_WRITE_THROUGH)) Fail(L"Cannot rename " + src + L": " + ErrText(GetLastError()) + L". Is the game running?");
-                if (Sha256File(tp) != e.inst) Fail(L"Verification failed after renaming " + wstring(sl->name));
+                auto destination = take(e.rel);
+                auto source = take(sl->name);
+                DWORD err = 0;
+                if (destination) {
+                    if (!destination->Delete(&err)) Fail(L"Cannot move aside " + tp + L": " + ErrText(err));
+                    applied.insert(Lower(e.rel));
+                }
+                if (TestFault("install-rename")) Fail(L"Test failure before moving " + src);
+                if (!source->RenameNew(tp, &err)) Fail(L"Cannot rename " + src + L": " + ErrText(err) + L". Any file at its new name was kept.");
+                applied.insert(Lower(e.rel));
                 ui.log(L"renamed " + wstring(sl->name) + L" to " + e.rel);
             }
         }
+        auto put = [&](const wstring& rel, const void* data, size_t size, const wstring& sha) {
+            const wstring path = Target(dir, rel);
+            if (!IEq(Sha256Bytes(data, size), sha)) Fail(L"The install source changed: " + rel);
+            auto file = take(rel);
+            if (file) applied.insert(Lower(rel));
+            PinnedFile* metadata = optiMetadata.IsOpen() && IEq(rel, L"OptiScaler.ini") ? &optiMetadata : nullptr;
+            if (IsBinaryName(rel)) {
+                PutBinary(path, data, size, file.get(), &journal);
+            } else if (file || metadata) {
+                DWORD error = 0;
+                PinnedFile absent;
+                BY_HANDLE_FILE_INFORMATION published{};
+                if (!(file ? *file : absent).ReplaceBytes(path, data, size, &error, TestFault("install-text-write"), metadata, &published))
+                    Fail(L"Cannot write " + path + L": " + ErrText(error));
+                JournalCreated(journal, path, published);
+            } else {
+                EnsureDir(Parent(path));
+                wgstate::OperationGuard::Publication published;
+                const DWORD error = wgstate::OperationGuard::PutNew(path, data, size, &published);
+                if (published.published) JournalCreated(journal, path, published.identity);
+                if (error) Fail(L"Cannot create " + path + L": " + ErrText(error));
+            }
+        };
+        auto entryFor = [&](const wstring& rel) -> Entry& {
+            return *std::find_if(m.e.begin(), m.e.end(), [&](const Entry& e) { return e.action == L"copy" && IEq(e.rel, rel); });
+        };
+        auto putFrom = [&](const wstring& rel, const wstring& source) {
+            string bytes;
+            if (!GamePathAllowed(source) ||
+                (opti && PathWithin(source, ctx.opti.dir) && !OptiPackageMemberAllowed(source, ctx.opti.dir)) ||
+                !ReadAll(source, bytes)) Fail(L"Cannot read " + source);
+            put(rel, bytes.data(), bytes.size(), entryFor(rel).inst);
+        };
         for (auto& f : *ctx.data) {
             if (!payloadUsed(f)) continue;
             const wstring rel = payloadRel(f);
             ui.step(++done, total, L"Installing " + rel);
             DWORD sz = 0; const void* d = PayloadData(f, sz);
             const wstring tp = Target(dir, rel);
-            if (IsBinaryName(rel)) PutBinary(tp, d, sz);  // #219: renamed in complete, held by the operation's gate (record.h)
-            else WriteFileAtomic(tp, d, sz);
+            put(rel, d, sz, f.sha256);
             if (Sha256File(tp) != f.sha256) Fail(L"Verification failed after writing " + rel);
             ui.log(L"installed " + rel);
         }
@@ -936,7 +1142,11 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
             if (of.seed) {  // created only where nothing is (CopyFileW fail-if-exists): a file that appeared is never replaced
                 EnsureDir(Parent(tp));
                 DWORD err = 0;
-                if (!CopyNew(of.src, tp, &err)) {
+                PinnedFile seed;
+                if (!seed.Open(of.src, false, &err)) Fail(L"Cannot secure " + of.src + L": " + ErrText(err));
+                PinnedFile created;
+                wstring sha;
+                if (!seed.CopyOut(tp, &sha, &err, &created)) {
                     if (err != ERROR_FILE_EXISTS && err != ERROR_ALREADY_EXISTS) Fail(L"Cannot create " + tp + L": " + ErrText(err));
                     // the player's file (it appeared after the record was written): kept as it is, out of the record
                     m.e.erase(std::remove_if(m.e.begin(), m.e.end(), [&](const Entry& x) { return x.action == L"copy" && IEq(x.rel, of.rel); }), m.e.end());
@@ -946,18 +1156,19 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
                     warnings.push_back(w);
                     continue;
                 }
-                if (Sha256File(tp) != Sha256File(of.src)) Fail(L"Verification failed after writing " + of.rel);
+                JournalCreated(journal, tp, created);
+                if (sha != seed.Sha256()) Fail(L"Verification failed after writing " + of.rel);
                 ui.log(L"installed " + of.rel);
                 continue;
             }
-            if (IsBinaryName(of.rel)) PutBinaryFrom(tp, of.src);  // #219 (record.h)
-            else CopyChecked(of.src, tp);
+            putFrom(of.rel, of.src);
             ui.log((ours ? L"installed " : L"installed OptiScaler's ") + of.rel);
         }
         for (auto& mr : mirrors) {
             ui.step(++done, total, L"Installing " + mr.second);
-            if (IsBinaryName(mr.second)) PutBinaryFrom(Target(dir, mr.second), Target(dir, mr.first));  // #219 (record.h)
-            else CopyChecked(Target(dir, mr.first), Target(dir, mr.second));
+            const Entry& mirror = entryFor(mr.second);
+            if (!mirror.existed && !mirror.orig.empty()) { take(mr.second); continue; }
+            putFrom(mr.second, Target(dir, mr.first));
             ui.log(L"installed " + mr.second + L" (REFramework's copy of " + mr.first + L")");
         }
         if (opti) ui.log(L"OptiScaler " + ctx.opti.version + L" is set up for WrongGPU (OptiScaler.dll as " + proxy +
@@ -965,33 +1176,121 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
                          L"In the game, choose NVIDIA DLSS (or Intel XeSS) as the upscaler; OptiScaler's menu (Insert) switches upscalers.");
         ui.step(++done, total, L"Creating the uninstaller");
         // The uninstaller: the small restorer (WrongGPU-Restore.exe) the launcher embeds, else a copy of this program.
-        if (ctx.restorer && ctx.restorerSize) {
-            const wstring un = Join(state, L"uninstall.exe");
-            JournalCreate(journal, un, false);
-            WriteFileAtomic(un, ctx.restorer, ctx.restorerSize);
-            if (Sha256File(un) != Sha256Bytes(ctx.restorer, ctx.restorerSize)) Fail(L"Verification failed after writing the uninstaller");
-        } else {
-            JournalCreate(journal, Join(state, L"uninstall.exe"), false);
-            CopyChecked(SelfPath(), Join(state, L"uninstall.exe"));
+        string selfBytes;
+        const void* restorer = ctx.restorer;
+        size_t restorerSize = ctx.restorerSize;
+        if (!restorer || !restorerSize) {
+            if (!ReadAll(SelfPath(), selfBytes)) Fail(L"Cannot read the uninstaller source.");
+            restorer = selfBytes.data();
+            restorerSize = selfBytes.size();
         }
+        const wstring wantedRestorer = Sha256Bytes(restorer, restorerSize);
+        bool createRestorer = true;
+        if (Exists(uninstaller)) {
+            PinnedFile file;
+            if (!oldRestorer.index || !file.Open(uninstaller, true) || !oldRestorer.Matches(file))
+                Fail(L"The uninstaller changed during install and was kept: " + uninstaller);
+            string bytes;
+            if (!file.ReadBytes(bytes)) Fail(L"Cannot read " + uninstaller);
+            const wstring have = Sha256Bytes(bytes.data(), bytes.size());
+            if (!IEq(have, oldRestorerHash)) Fail(L"The uninstaller changed during install and was kept: " + uninstaller);
+            if (IEq(have, wantedRestorer)) createRestorer = false;
+            else {
+                const PeVersion version = ReadPeVersion(reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size());
+                const wstring original = version.Get(L"OriginalFilename");
+                const bool named = IEq(version.Get(L"ProductName"), L"WrongGPU") &&
+                    (IEq(original, L"WrongGPU-Restore.exe") || IEq(original, L"WrongGPU-Setup.exe"));
+                if (named || KnownRestorerSha(have)) {
+                    DWORD error = 0;
+                    if (!file.ReplaceBytes(uninstaller, restorer, restorerSize, &error))
+                        Fail(L"Cannot write " + uninstaller + L": " + ErrText(error));
+                    createRestorer = false;
+                } else {
+                    const wstring kept = KeptOriginal(dir, Join(kStateDirName, L"uninstall.exe"), uninstaller, have, &file, true);
+                    const wstring warning = L"An unrecognized uninstaller was kept at " + kept;
+                    warnings.push_back(warning);
+                    ui.log(warning);
+                }
+            }
+        }
+        if (createRestorer) {
+            wgstate::OperationGuard::Publication published;
+            const DWORD error = wgstate::OperationGuard::PutNew(uninstaller, restorer, restorerSize, &published);
+            if (published.published) JournalCreated(journal, uninstaller, published.identity);
+            if (error != ERROR_SUCCESS) Fail(L"Cannot create " + uninstaller + L": " + ErrText(error));
+        }
+        m.restorerSha = wantedRestorer;
         if (ctx.perGameEntry) RegisterUninstall(ctx, m, state, target.name);
-        JournalCreate(journal, Join(state, L"owned-files.json"), false);
-        WriteOwnedFiles(dir, m);
+        const wstring owned = Join(state, L"owned-files.json");
+        if (IsFile(owned)) WriteOwnedFiles(dir, m);
+        else {
+            const string json = OwnedFilesJson(m);
+            wgstate::OperationGuard::Publication published;
+            const DWORD error = wgstate::OperationGuard::PutNew(owned, json.data(), json.size(), &published);
+            if (published.published) JournalCreated(journal, owned, published.identity);
+            if (error) Fail(L"Cannot create " + owned + L": " + ErrText(error));
+        }
+        m.installPending = false;
+        SaveRecord(rpath, m);
         RestoreStep("installed");  // (tests: a failure after everything was written: the rollback takes back what this run made)
         ui.log(L"WrongGPU installed in " + dir + L" (" + m.status + L"); model data: " + ModelFile(ctx));
         ui.step(total, total, L"Done");
     } catch (const SetupError& ex) {
         ui.log(L"FAILED: " + ex.msg + L" - rolling back");
+        pins.clear();
+        ReleaseRestoreBinaries();
         try {
+            // An entry planned but never applied is not owned by this run, even if a new file has the same bytes.
+            if (recorded) {
+                m.installPending = true;
+                std::map<wstring, FileIdentity> published;
+                for (const auto& file : journal.created)
+                    if (!file.folder) published[Lower(FullPath(file.path))] = {file.volume, file.id};
+                for (auto& e : m.e) {
+                    const auto it = published.find(Lower(FullPath(Join(dir, e.rel))));
+                    if (it != published.end()) {
+                        e.published = it->second;
+                        applied.insert(Lower(e.rel));
+                    }
+                }
+                m.e.erase(std::remove_if(m.e.begin(), m.e.end(), [&](const Entry& e) { return !applied.count(Lower(e.rel)); }), m.e.end());
+                SaveRecord(rpath, m);
+#ifdef WRONGGPU_TESTING
+                PinnedFile rollbackLock;
+                if (EnvVar(L"WRONGGPU_TEST_LOCK_ROLLBACK") == L"1") {
+                    for (const auto& item : journal.created) {
+                        if (item.folder || !IsBinaryName(item.path) || PathWithin(item.path, state)) continue;
+                        const HANDLE h = CreateFileW(item.path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+                        if (h == INVALID_HANDLE_VALUE) Fail(L"Cannot acquire the fixture rollback lock");
+                        rollbackLock.Adopt(h);
+                        break;
+                    }
+                }
+#endif
+                RollbackNewGameFiles(state, journal);
+            }
             // (rc6 L4: the settings that were there before this install stay: the failed install's record and backup go only)
             if (recorded) DoRestore(ctx, dir, ui, true, keepSettings);
             // then what this run made and DoRestore left (the journal); anything else in the state folder stays and is listed
-            if (!IsFile(rpath)) RollbackCreated(ctx, state, journal);  // (a backup DoRestore had to keep stays with its record)
+            if (!recorded || !IsFile(rpath)) RollbackCreated(ctx, state, journal);  // (a backup DoRestore had to keep stays with its record)
             ui.log(L"Rollback complete; the game folder is back to its previous state.");
         } catch (const SetupError& r) { ui.log(L"Rollback problem: " + r.msg); }
         throw;
     }
-    if (!ctx.logFile.empty() && IsFile(ctx.logFile)) CopyFileW(ctx.logFile.c_str(), Join(state, L"setup.log").c_str(), FALSE);
+    const wstring gameLog = Join(state, L"setup.log");
+    string log;
+    if (!IEq(ctx.logFile, gameLog) && GamePathAllowed(ctx.logFile) && GamePathAllowed(gameLog) && ReadAll(ctx.logFile, log)) {
+        PinnedFile previous;
+        DWORD error = 0;
+        try {
+            if (previous.Open(gameLog, true, &error)) previous.ReplaceBytes(gameLog, log.data(), log.size(), &error);
+            else if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
+                error = wgstate::OperationGuard::PutNew(gameLog, log.data(), log.size());
+            if (error) warnings.push_back(L"Cannot refresh the game's setup.log: " + ErrText(error));
+        } catch (const SetupError& e) {
+            warnings.push_back(L"Cannot refresh the game's setup.log: " + e.msg);
+        }
+    }
     return warnings;
 }
 

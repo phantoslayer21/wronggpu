@@ -514,16 +514,15 @@ void ActivateWidget(int id) {
         }
         case ID_S_SELFUNINSTALL: {
             if (!v.live || v.busy) return;  // it can remove WrongGPU from the games: not while an operation works in one
-            if (!LauncherInstalled()) { v.launcherInstalled = false; Invalidate(); return; }  // nothing installed to uninstall (removed meanwhile)
+            if (!gl.paths.custom && !LauncherInstalled()) { v.launcherInstalled = false; Invalidate(); return; }
             // destructive: a question with the mark, as a game's Uninstall (POLISH-AUDIT 19), and no default (Return does not
             // remove WrongGPU from every game unread). The games'
-            // question only when a game has WrongGPU. Asked in a portable copy's window (Apps & features found it open): the
-            // installed launcher goes, and this copy stays open
+            // question only when a game has WrongGPU. An explicit data folder always belongs to this window's own program.
             // what it finds is read on a worker ("Preparing..."): every game's record and the drives they are on, the shared data
             // (a game on a network share that is offline holds each look for the share's timeout, never the window)
             auto look = std::make_shared<LauncherUninstallLook>();
             if (!WaitForRead(L"", kLookVerb, T_NONE, [look] { *look = LookBeforeLauncherUninstall(g.ctx); })) return;
-            const bool anyGame = look->anyGame, here = !gl.paths.portable;
+            const bool anyGame = look->anyGame, here = gl.paths.custom || !gl.paths.portable;
             // Collect logs from the question (uninstalling deletes the logs; opened from Installed apps, Cancel closes the window):
             // offered when the Library lists a game with WrongGPU; the question comes back after it
             const bool logs = anyGame && std::any_of(v.games.begin(), v.games.end(), [](const GameEntry& e) { return e.hasRecord; });

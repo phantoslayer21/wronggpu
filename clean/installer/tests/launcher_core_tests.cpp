@@ -107,8 +107,15 @@ string MockDll(const std::vector<std::pair<wstring, wstring>>& strings, const st
 }
 }  // namespace
 
+#include "launcher_safety_core_cases.h"
+
 int main() {
     try {
+        VerifyIniEncoding();
+        VerifyLauncherScope();
+        VerifyPublishedBinaryPin();
+        VerifyAdoptionRecordLock();
+
         // ---- 0.6.1: Collect logs in uninstall.exe (no converter data) never claims the map is invalid ----------------
         {
             const wstring cl = TempFolder() + L"-collect";
@@ -570,8 +577,7 @@ int main() {
             require(!refused && !IsFile(Join(newDir, L"wronggpu_runtime.dll")) && !IsDir(StateDir(newDir)) && IsFile(Join(newDir, L"Game.exe")),
                     "moved game: the uninstall works in the new folder");
 
-            // ---- a hand-placed WrongGPU DLL under the game's FSR name (a direct install) goes only when the game's
-            // original is there to put back (the backup, or the kept *.wronggpu-original.dll); else the uninstall refuses ----
+            // ---- a hand-placed DLL under the game's FSR name stays even if its product is WrongGPU. ----
             {
                 const FfxSlot& sl = kSlots[0];
                 const string orig = "the game's own FidelityFX DLL (synthetic)", installed = "WrongGPU's FSR DLL as installed (synthetic)";
@@ -598,10 +604,13 @@ int main() {
                     std::vector<wstring> w;
                     bool threw = false;
                     try { w = DoRestore(mc, d, quiet, false, false); } catch (const SetupError&) { threw = true; }
-                    string now;
-                    require(!threw && ReadAll(Join(d, sl.name), now) && now == orig && !IsFile(Join(d, sl.original)) && !IsDir(StateDir(d)),
-                            how ? "hand-placed FSR DLL: no backup, the kept copy there: the hand-placed DLL is replaced by the game's original"
-                                : "hand-placed FSR DLL: the backup there: the hand-placed DLL is replaced by the game's original");
+                    string now, keptBytes;
+                    bool kept = false;
+                    for (const auto& folder : ListDirs(Join(d, kKeptDirName)))
+                        kept = kept || (ReadAll(Join(folder, sl.name), keptBytes) && keptBytes == orig);
+                    require(!threw && ReadAll(Join(d, sl.name), now) && now == hand && kept &&
+                                !IsFile(Join(d, sl.original)) && !IsDir(StateDir(d)) && AnyPartly(w),
+                            "a hand-placed WrongGPU DLL stays, and the original is kept from its backup or renamed copy");
                 }
                 {  // neither the backup nor the kept copy: the uninstall refuses, as before 0.6.1 ("Nothing was changed")
                     const wstring d = direct(L"No Original", false, false);
@@ -1746,16 +1755,33 @@ int main() {
             require(cpEntries == 1, "the scan lists the game once: the wrong-place install's entry, not the game a second time");
             RemoveTree(cp); RemoveManagedGame(cp);
 
-            // ---- a failed install or update takes back only what THIS run made (the run journal, written before each create);
+            // ---- a failed install or update takes back only what this run created by file identity;
             // everything else in the state folder stays and is listed: never a removal of the whole folder ----------------------
             const wstring fs = Join(dir, L"failed-state");
             require(!StateHasSettings(fs), "L4: no state folder, no settings");
             {
+                const wstring path = Join(dir, L"binary-reopen-fixture.dll");
+                const string original = "original", newBytes = "complete replacement";
+                file(path, original);
+                PinnedFile old;
+                require(old.Open(path, true), "pin original binary for reopening failure");
+                wgstate::OperationGuard guard(dir, {});
+                guard.HoldVerified(path, old.Release());
+                wgstate::OperationGuard::Publication published;
+                require(guard.PutHeld(path, newBytes.data(), newBytes.size(), nullptr, &published, true) == ERROR_SHARING_VIOLATION &&
+                        published.published && !guard.Holds(path) && Sha256File(path) == Sha256Bytes(newBytes.data(), newBytes.size()),
+                        "complete publication is reported even if the binary cannot be re-locked");
+            }
+            auto createJournaled = [&](RunJournal& journal, const wstring& path, const string& contents) {
+                JournalDirectory(journal, Parent(path));
+                PinnedFile created;
+                require(created.Create(path) && created.OverwriteBytes(contents.data(), contents.size()), "create the fixture file");
+                JournalCreated(journal, path, created);
+            };
+            {
                 RunJournal j;
-                JournalCreate(j, Join(StateDir(fs), L"backup\\x.dll"), false);  // (the state folder and backup\ first: not there yet)
-                file(Join(StateDir(fs), L"backup\\x.dll"), "x");
-                JournalCreate(j, Join(StateDir(fs), L"uninstall.exe"), false);
-                file(Join(StateDir(fs), L"uninstall.exe"), "MZ");
+                createJournaled(j, Join(StateDir(fs), L"backup\\x.dll"), "x");
+                createJournaled(j, Join(StateDir(fs), L"uninstall.exe"), "MZ");
                 const auto left = RollbackCreated(mc, StateDir(fs), j);
                 require(j.created.size() == 0 && left.empty() && !IsDir(StateDir(fs)), "rollback: a state folder this run made, with only what it made: all of it goes");
             }
@@ -1768,12 +1794,8 @@ int main() {
                     {Join(StateDir(fs), L"notes\\mine.txt"), "the player's"}, {Join(StateDir(fs), L"uninstall.exe"), "MZ earlier"}};
                 for (auto& f : before) file(f.first, f.second);
                 RunJournal j;
-                JournalCreate(j, StateDir(fs), true);                            // (there: not written down)
-                JournalCreate(j, Join(StateDir(fs), L"backup\\y.dll"), false);  // backup\ and the file: this run's
-                file(Join(StateDir(fs), L"backup\\y.dll"), "y");
-                JournalCreate(j, Join(StateDir(fs), L"owned-files.json"), false);
-                file(Join(StateDir(fs), L"owned-files.json"), "{}");
-                JournalCreate(j, Join(StateDir(fs), L"uninstall.exe"), false);   // (there: an overwrite later is not a create)
+                createJournaled(j, Join(StateDir(fs), L"backup\\y.dll"), "y");
+                createJournaled(j, Join(StateDir(fs), L"owned-files.json"), "{}");
                 const auto left = RollbackCreated(mc, StateDir(fs), j);
                 bool same = true;
                 for (auto& f : before) { string b; same = same && ReadAll(f.first, b) && b == f.second; }
@@ -1795,7 +1817,7 @@ int main() {
                 string k, nb;
                 require(ReadAll(BackupPath(bg, L"wronggpu.ini"), k) && k == kept && ReadAll(b, nb) && nb == game && e.backup == L"wronggpu.ini.1" &&
                             IEq(b, EntryBackupPath(bg, e)) && w.size() == 1 && w[0].find(L"backup\\wronggpu.ini") != wstring::npos &&
-                            j.created.size() == 1 && IEq(j.created[0].first, b),
+                            j.created.size() == 1 && IEq(j.created[0].path, b),
                         "backup collision: the kept backup\\wronggpu.ini stays byte for byte; the new backup is wronggpu.ini.1 (created only where nothing "
                         "was, written down in the run journal alone), listed");
                 Record br;
@@ -2232,21 +2254,20 @@ int main() {
                 {
                     Profile stale = DefaultProfile();
                     stale.v["rr_mode"] = "fast";
-                    const string fastPrev = "fast";
                     DeleteFileW(wgstate::SettingsPathOf(sg).c_str());
                     require(wgstate::SetSettings(sg, {{"rr_mode", "accurate"}}).ok(), "(interleaving: the menu saved accurate)");
-                    require(WriteRrState(sctx, sg, stale, true, nullptr, nullptr) >= 0 && ReadRrSettings(sg).mode == "accurate" &&
+                    require(WriteRrState(sctx, sg, stale, true) >= 0 && ReadRrSettings(sg).mode == "accurate" &&
                                 *wgstate::Get(wgstate::ReadSettings(sg), "rr_exact_allowed") == "0",
                             "an RR refresh with the launcher's older view (fast): the menu's newer accurate stays (a refresh never changes a saved mode)");
-                    require(WriteRrState(sctx, sg, stale, true, nullptr, &fastPrev) >= 0 && ReadRrSettings(sg).mode == "accurate",
+                    require(WriteRrState(sctx, sg, stale, true) >= 0 && ReadRrSettings(sg).mode == "accurate",
                             "an apply whose own mode did not change (fast before, fast now): the menu's newer accurate stays (an unchanged field is not written)");
                     Profile chosen = DefaultProfile();
                     chosen.v["rr_mode"] = "exact";
-                    require(WriteRrState(sctx, sg, chosen, true, nullptr, &fastPrev) == 1 && ReadRrSettings(sg).mode == "exact" &&
+                    require(WriteRrState(sctx, sg, chosen, true, nullptr, true) == 1 && ReadRrSettings(sg).mode == "exact" &&
                                 *wgstate::Get(wgstate::ReadSettings(sg), "rr_exact_allowed") == "1",
                             "an apply where the player changed the mode in the launcher (fast -> exact): written, rr_exact_allowed follows");
                     DeleteFileW(wgstate::SettingsPathOf(sg).c_str());
-                    require(WriteRrState(sctx, sg, stale, true, nullptr, nullptr) == 1 && ReadRrSettings(sg).mode == "fast",
+                    require(WriteRrState(sctx, sg, stale, true) == 1 && ReadRrSettings(sg).mode == "fast",
                             "no mode saved yet: the launcher's mode is written");
                     // the menu saves while the launcher's write waits for the lock: the decision is made from the menu's save
                     require(wgstate::SetSettings(sg, {{"rr_mode", "fast"}}).ok(), "(interleaving 2: fast saved)");
@@ -2260,11 +2281,38 @@ int main() {
                         wgstate::WriteAtomic(wgstate::SettingsPathOf(sg), wgstate::Stamped(wgstate::RenderSettings(now), "settings.ini", sid));
                     });
                     WaitForSingleObject(held, 5000);
-                    const int w = WriteRrState(sctx, sg, stale, true, nullptr, &fastPrev);  // the launcher read fast before the menu's save
+                    const int w = WriteRrState(sctx, sg, stale, true);  // the launcher read fast before the menu's save
                     menu.join();
                     CloseHandle(held);
                     require(w >= 0 && ReadRrSettings(sg).mode == "accurate",
                             "the menu saves accurate while the launcher's write waits for the state lock: the launcher decides under the lock and accurate stays");
+                }
+                {
+                    require(DataOverride().empty() && !PathWithin(sg, AppDataPath()), "RR fixture is outside the default data root");
+                    sctx.fMap.map = std::make_unique<wgc::Map>();
+                    DeleteFileW(ProfilePath(sg).c_str());
+                    put(Join(sg, L"OptiScaler.ini"), "[Menu]\r\nShowFps=true\r\nShowFps=false\r\n");
+                    DeleteFileW(wgstate::SettingsPathOf(sg).c_str());
+                    require(RefreshRrSettings(sctx, sg, true) == 1 && ReadRrSettings(sg).enabled,
+                            "RR refresh enables a recorded game outside the default data root with duplicate INI keys and no profile");
+                    DeleteFileW(Join(sg, L"OptiScaler.ini").c_str());
+                    require(wgstate::SetSettings(sg, {{"rr_mode", "accurate"}, {"rr_mode_pending", "exact"}}).ok() &&
+                            RefreshRrSettings(sctx, sg, true) == 1 && ReadRrSettings(sg).mode == "accurate" &&
+                            *wgstate::Get(wgstate::ReadSettings(sg), "rr_mode_pending") == "off",
+                            "RR refresh preserves the game mode when an older pending request has no baseline");
+                    EnsureDir(Parent(RrDataFile()));
+                    put(RrDataFile(), "incompatible cache fixture");
+                    Profile chosen = DefaultProfile();
+                    chosen.v["rr_mode"] = "exact";
+                    require(WriteRrState(sctx, sg, chosen, false, nullptr, true) == 1 &&
+                                RefreshRrSettings(sctx, sg, true) == 1 && ReadRrSettings(sg).mode == "exact",
+                            "RR refresh applies a pending request whose game mode still matches its baseline");
+                    require(WriteRrState(sctx, sg, chosen, false, nullptr, true) == 1 &&
+                                wgstate::SetSettings(sg, {{"rr_mode", "accurate"}}).ok() &&
+                                RefreshRrSettings(sctx, sg, true) == 1 && ReadRrSettings(sg).mode == "accurate" &&
+                                *wgstate::Get(wgstate::ReadSettings(sg), "rr_mode_pending") == "off",
+                            "a later in-game RR choice supersedes the queued launcher mode");
+                    DeleteFileW(RrDataFile().c_str());
                 }
                 // the state files go with the state folder only while their stamp is valid for their own name and this install
                 // (wg_state.h): a file the player edited or made, an unknown one, a copy under another name (temporary files among
@@ -2332,15 +2380,21 @@ int main() {
                     // unless another program has it open without sharing writes (then the operation stops, the file as it was)
                     const wstring mirror = Join(gg, L"_storage_\\dxgi.dll");
                     put(mirror, "MZ earlier copy");
-                    PutBinary(mirror, "MZ this copy", 12);
-                    require(ReadAll(mirror, r) && r == "MZ this copy" && GateHolds(mirror), "gate: an unheld file at the path is replaced and the new one held");
+                    bool refused = false;
+                    try { PutBinary(mirror, "MZ this copy", 12); } catch (const SetupError&) { refused = true; }
+                    require(refused && ReadAll(mirror, r) && r == "MZ earlier copy", "gate: an unheld file is kept");
+                    PinnedFile verified;
+                    require(verified.Open(mirror, true) && verified.Sha256() == Sha256Bytes("MZ earlier copy", 15),
+                            "gate: the existing mirror can be pinned and verified before replacing it");
+                    PutBinary(mirror, "MZ this copy", 12, &verified);
+                    require(ReadAll(mirror, r) && r == "MZ this copy" && GateHolds(mirror), "gate: a verified file is replaced and the new one held");
                     const wstring other = Join(gg, L"_storage_\\wronggpu-amd-compare.dll");
                     put(other, "MZ in use");
                     HANDLE busy = CreateFileW(other.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
                     string stopped;
                     try { PutBinary(other, "MZ new", 6); } catch (const SetupError& ex) { stopped = ToUtf8(ex.msg); }
                     if (busy != INVALID_HANDLE_VALUE) CloseHandle(busy);
-                    require(stopped.find("Stopped") != string::npos && ReadAll(other, r) && r == "MZ in use" && !GateHolds(other),
+                    require(!stopped.empty() && ReadAll(other, r) && r == "MZ in use" && !GateHolds(other),
                             "gate: an unheld file another program has open: the operation stops, the file as it was");
                 }
                 put(bin, "MZ old");
@@ -2914,6 +2968,9 @@ int main() {
             }
         }
 
+#ifdef WRONGGPU_TESTING
+        VerifyScopedUninstallSnapshot(dir);
+#endif
         RemoveTree(dir);
         std::printf("launcher-core: %d checks passed\n", checks);
         return 0;

@@ -157,7 +157,7 @@ void StartModelSearch() {
 void UpdateButtons();
 void RefreshChecks() {
     wchar_t buf[1024]; GetWindowTextW(g.edPath, buf, 1024);
-    wstring exe = ResolveGameExe(buf);
+    wstring exe = GamePathAllowed(buf) ? ResolveGameExe(buf) : wstring();
     wstring name;
     for (auto& f : g.found) if (IEq(f.exe, exe)) name = f.name;
     g.target = exe.empty() ? GameTarget{} : Inspect(exe, name);
@@ -358,6 +358,7 @@ bool RelaunchElevated() {
     if (!g.uninstall && NeedsConsent()) args += L" /EXPERIMENTAL";        // the player ticked the confirmation already
     if (!g.uninstall && NeedsConflictOk()) args += L" /MOVEMODS /REMOVEOLD";
     if (!g.uninstall && g.model.ok() && !g.model.reused) args += L" " + wg_wizard::QuoteCmdArg(L"/MODEL=" + g.model.dll);
+    if (!DataOverride().empty()) args += L" " + wg_wizard::QuoteCmdArg(L"/DATA=" + DataOverride());
     wstring self = SelfPath();
     SHELLEXECUTEINFOW sei{}; sei.cbSize = sizeof(sei); sei.lpVerb = L"runas"; sei.lpFile = self.c_str();
     sei.lpParameters = args.c_str(); sei.nShow = SW_SHOWNORMAL; sei.hwnd = g.hwnd;

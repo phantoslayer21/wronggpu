@@ -1,4 +1,5 @@
 {
+  "test_only": true,
  "format": "wronggpu-converter-map",
  "version": 5,
  "model": "SYNTHETIC test map run 0 (page 56.5 item 2); no model data",

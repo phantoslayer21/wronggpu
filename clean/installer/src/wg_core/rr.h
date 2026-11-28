@@ -150,10 +150,10 @@ int WriteStateKeys(Context& ctx, const wstring& dir, const std::vector<std::pair
 // The state keys a launcher write puts in settings.ini for the profile and the RR data's state.
 std::vector<std::pair<string, string>> RrStateKeys(const Profile& p, bool dataReady);
 // The launcher's RR settings into the state folder, decided under the game's state lock from the file as it is then. The
-// mode is written only when the file has none or when the launcher's own choice changed (prevMode: the profile's mode before
-// this apply; null: a refresh, which never changes a saved mode), so a mode the game's menu saved meanwhile stays.
+// mode is written when the file has none, when the player explicitly chose it, or when a pending choice is ready and
+// the game's mode still matches the value observed when the choice was queued.
 // 1: written; 0: nothing to write (the same values); -1: refused (*why: as WriteStateKeys).
-int WriteRrState(Context& ctx, const wstring& dir, const Profile& p, bool dataReady, wstring* why = nullptr, const string* prevMode = nullptr);
+int WriteRrState(Context& ctx, const wstring& dir, const Profile& p, bool dataReady, wstring* why = nullptr, bool explicitMode = false);
 // Upgrade of an install whose WrongGPU\wronggpu.ini an older RR plugin (or the player) changed: while settings.ini has no
 // rr_mode, a WrongGPU\wronggpu.ini whose bytes differ from the record's hash is the player's (it stays, as every changed
 // file), and its rr_mode (and rr_overlay) are copied into settings.ini, so the game keeps running as before. A file with the

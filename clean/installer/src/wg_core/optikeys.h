@@ -12,14 +12,18 @@
 namespace wg {
 
 // ---- single values, byte for byte ---------------------------------------------------------------------------------------
-// The first line of `key` in `section` (both compared ignoring case, as OptiScaler reads its ini). The value is the text
-// after '=' without the spaces around it (no inline comments: OptiScaler's ini has none).
-struct IniSpan { bool found = false; size_t lineBegin = 0, lineEnd = 0, valueBegin = 0, valueEnd = 0; };
+// Byte offsets of an unambiguous key and its value, excluding whitespace and inline comments.
+struct IniSpan {
+    bool found = false;
+    size_t lineBegin = 0, lineEnd = 0, valueBegin = 0, valueEnd = 0;
+    unsigned encoding = 0;
+};
 IniSpan IniFind(const string& text, const string& section, const string& key);
 string IniValueAt(const string& text, const IniSpan& s);
 string IniReplaceValue(const string& text, const IniSpan& s, const string& value);  // only the value's bytes change
 struct IniEntry { string section, key, value; };
-std::vector<IniEntry> IniEntries(const string& text);  // every key line (first occurrence of each section/key), in order
+wstring OptiReadWarning(const string& text);
+std::vector<IniEntry> IniEntries(const string& text);  // every unambiguous key line, in order
 
 // ---- the keys of the OptiScaler tab ------------------------------------------------------------------------------------
 enum class OptiKind { Bool, Int, Number, Key };

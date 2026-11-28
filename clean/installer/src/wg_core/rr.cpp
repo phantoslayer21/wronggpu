@@ -248,7 +248,7 @@ void RecoverRrData(Context& ctx) {
 
 bool RrDataValid(Context& ctx, wstring* why) {
     if (!LoadFMap(ctx)) { if (why) *why = ctx.fMapError; return false; }
-    if (!IsFile(RrDataFile())) { if (why) *why = L"no converted Ray Reconstruction data on this PC"; return false; }
+    if (!GamePathAllowed(RrDataFile()) || !IsFile(RrDataFile())) { if (why) *why = L"no converted Ray Reconstruction data on this PC"; return false; }
     string w;
     const bool ok = wgc::verify_model_file(*ctx.fMap.map, std::filesystem::path(RrDataFile()), w);
     if (why) *why = FromUtf8(w);
@@ -448,7 +448,7 @@ bool ConvertRrData(Context& ctx, const wstring& dll, const std::vector<StoreGame
     if (dll.empty()) {
         for (auto& d : ManagedGames()) {  // the launcher's games first (their own RR model files), then the libraries
             Record m;
-            if (LoadRecord(RecordPath(d), m) && !m.legacy) where.push_back({GameDisplayName(m.exe), GameRoot(m.exe.empty() ? d : Parent(m.exe)), L"", L"Managed"});
+            if (LoadRecord(RecordPath(d), m) && !m.legacy && (m.exe.empty() || GamePathAllowed(m.exe))) where.push_back({GameDisplayName(m.exe), GameRoot(m.exe.empty() ? d : Parent(m.exe)), L"", L"Managed"});
         }
         for (auto& g : libraries) where.push_back(g);
     }
@@ -530,18 +530,39 @@ int WriteStateKeys(Context& ctx, const wstring& dir, const std::vector<std::pair
     return StateWriteResult(ctx, dir, wgstate::SetSettings(dir, keys, wgstate::kDefaultWaitMs), why);
 }
 
-int WriteRrState(Context& ctx, const wstring& dir, const Profile& p, bool dataReady, wstring* why, const string* prevMode) {
+int WriteRrState(Context& ctx, const wstring& dir, const Profile& p, bool dataReady, wstring* why, bool explicitMode) {
+    if (!GamePathAllowed(dir) || !GamePathAllowed(Join(StateDir(dir), L"settings.ini"))) return 0;
     const string want = p.get("rr_mode").empty() ? string("fast") : p.get("rr_mode");
+    if (!dataReady && IsFile(RrDataFile())) {
+        if (!explicitMode) return 0;
+        const auto queued = wgstate::UpdateSettings(dir, [&](const wgstate::Settings& now, std::vector<std::pair<string, string>>* out) {
+            const string* current = wgstate::Get(now, "rr_mode");
+            out->push_back({"rr_mode_pending", want});
+            out->push_back({"rr_mode_pending_from", current ? *current : "unset"});
+        }, wgstate::kDefaultWaitMs);
+        const int r = StateWriteResult(ctx, dir, queued, why);
+        if (r >= 0 && why) *why = L"Ray Reconstruction mode " + FromUtf8(want) +
+                                  L" is pending until compatible Ray Reconstruction data is ready.";
+        return r < 0 ? r : 1;
+    }
     const string enabled = p.get("rr_enabled") != "off" && dataReady ? "1" : "0";
     // decided under the state lock from the file as it is now (wg_state.h UpdateSettings), so a mode the game's menu saved
     // after the launcher read the settings is never replaced by the launcher's older view: the mode is written only when the
-    // file has none, or when the launcher's own choice changed (prevMode: the profile's mode before this apply; none: a
-    // refresh, which never changes a saved mode). rr_exact_allowed follows the mode that stays.
+    // file has none, the player applied it explicitly, or the pending mode still matches its saved baseline.
+    // rr_exact_allowed follows the mode that stays.
     const wgstate::SetOutcome o = wgstate::UpdateSettings(dir, [&](const wgstate::Settings& now, std::vector<std::pair<string, string>>* out) {
         const string* cur = wgstate::Get(now, "rr_mode");
         const bool curValid = cur && (*cur == "exact" || *cur == "accurate" || *cur == "fast");
-        const bool writeMode = !curValid || (prevMode && want != *prevMode);
-        const string mode = writeMode ? want : *cur;
+        const string* pending = wgstate::Get(now, "rr_mode_pending");
+        const string* queuedFrom = wgstate::Get(now, "rr_mode_pending_from");
+        const bool pendingReady = dataReady && pending && (*pending == "exact" || *pending == "accurate" || *pending == "fast");
+        const bool usePending = pendingReady && queuedFrom && *queuedFrom == (cur ? *cur : "unset");
+        const bool writeMode = !curValid || explicitMode || usePending;
+        const string mode = explicitMode ? want : usePending ? *pending : writeMode ? want : *cur;
+        if (pending && (pendingReady || explicitMode)) {
+            out->push_back({"rr_mode_pending", "off"});
+            out->push_back({"rr_mode_pending_from", "unset"});
+        }
         out->push_back({"rr_enabled", enabled});
         if (writeMode) out->push_back({"rr_mode", mode});
         out->push_back({"rr_exact_allowed", mode == "exact" ? "1" : "0"});
@@ -558,6 +579,7 @@ bool MigrateRrState(Context& ctx, const wstring& dir) {
     string text;
     if (!e || e->inst.empty() || !ReadAll(Join(dir, kRrSettings), text)) return false;
     if (IEq(Sha256Bytes(text.data(), text.size()), e->inst)) return false;  // WrongGPU's own file, unchanged: nothing to carry
+    if (IsFile(RrDataFile()) && !RrDataValid(ctx)) return false;
     // changed since the launcher last wrote it (an older RR plugin's save, or the player's edit): the player's file from now on;
     // its mode carries over into the state folder so nothing changes in the game
     std::vector<std::pair<string, string>> keys;
@@ -593,9 +615,9 @@ string RenderRrSettings(const Profile& p, bool dataReady, const string& in) {
     string text = in;
     if (text.empty())
         text = "# WrongGPU Ray Reconstruction settings (written by the WrongGPU launcher; OptiScaler's menu changes rr_mode too)\r\n[wronggpu]\r\n";
-    text = IniSet(text, "wronggpu", "rr_enabled", on ? "1" : "0");
-    text = IniSet(text, "wronggpu", "rr_mode", mode.empty() ? "fast" : mode);  // always written (rc5: Fast by default)
-    text = IniSet(text, "wronggpu", "rr_exact_allowed", mode == "exact" ? "1" : "0");
+    text = SetFrontEndKey(text, "wronggpu", "rr_enabled", on ? "1" : "0");
+    text = SetFrontEndKey(text, "wronggpu", "rr_mode", mode.empty() ? "fast" : mode);  // always written (rc5: Fast by default)
+    text = SetFrontEndKey(text, "wronggpu", "rr_exact_allowed", mode == "exact" ? "1" : "0");
     return text;
 }
 
@@ -611,6 +633,8 @@ bool FoldRrFromGame(const wstring& dir, Profile& p) {
 }
 
 int RefreshRrSettings(Context& ctx, const wstring& dir, bool dataReady, wstring* why) {
+    if (!GamePathAllowed(dir) || !GamePathAllowed(Join(StateDir(dir), L"settings.ini")) ||
+        !LoadFMap(ctx) || (!dataReady && IsFile(RrDataFile()))) return 0;
     Record m;
     if (!LoadRecord(RecordPath(dir), m) || m.legacy || !RecordHasRr(m)) return 0;
     MigrateRrState(ctx, dir);
@@ -625,15 +649,25 @@ std::vector<RrSettingsFailure> RefreshAllRrSettings(Context& ctx, const wstring&
     std::vector<RrSettingsFailure> failed;
     std::vector<wstring> dirs;
     for (auto& d : ManagedGames()) {
-        Record m;
+        if (!GamePathAllowed(d) || !GamePathAllowed(Join(StateDir(d), L"settings.ini"))) continue;
         if (!except.empty() && IEq(FullPath(d), FullPath(except))) continue;
-        if (LoadRecord(RecordPath(d), m) && !m.legacy && RecordHasRr(m)) dirs.push_back(d);
+        try {
+            Record m;
+            if (LoadRecord(RecordPath(d), m) && !m.legacy && RecordHasRr(m)) dirs.push_back(d);
+        } catch (const SetupError& error) {
+            failed.push_back({d, error.msg});
+        }
     }
     if (dirs.empty()) return failed;
-    const bool ready = RrDataValid(ctx);  // once (it reads and hashes the whole file), not per game
+    // An absent or unrecognized cache is no authority to turn another game's RR off.
+    if (!RrDataValid(ctx)) return failed;
     for (auto& d : dirs) {
         wstring why;
-        if (RefreshRrSettings(ctx, d, ready, &why) < 0) failed.push_back({d, why});
+        try {
+            if (RefreshRrSettings(ctx, d, true, &why) < 0) failed.push_back({d, why});
+        } catch (const SetupError& error) {
+            failed.push_back({d, error.msg});
+        }
     }
     return failed;
 }

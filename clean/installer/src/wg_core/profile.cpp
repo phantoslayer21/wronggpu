@@ -341,8 +341,8 @@ bool RenderWronggpuIni(const Profile& p, const string& in, string& out, wstring*
         const string want = p.get("wronggpu") == "off" ? "amd" : "network";
         string cur, sec;
         const bool has = IniGetFrontEnd(text, "upscaler", &cur, &sec);
-        if (!has && want != "network") text = IniSet(text, "fsr", "upscaler", want);
-        else if (has && LowerA(cur) != want) text = IniSet(text, sec, "upscaler", want);
+        if (!has && want != "network") text = SetFrontEndKey(text, "fsr", "upscaler", want);
+        else if (has && LowerA(cur) != want) text = SetFrontEndKey(text, sec, "upscaler", want);
     }
     // runtime items: the managed keys out of runtime_options and off their own lines, then the non-default ones
     string options, section;
@@ -384,7 +384,7 @@ bool RenderWronggpuIni(const Profile& p, const string& in, string& out, wstring*
     }
     const string joined = JoinOptions(items);
     // the line is rewritten only when its items change (a player's spacing and comment stay otherwise)
-    if (hadOptions ? joined != JoinOptions(SplitOptions(options)) : !joined.empty()) text = IniSet(text, hadOptions ? section : "fsr", "runtime_options", joined);
+    if (hadOptions ? joined != JoinOptions(SplitOptions(options)) : !joined.empty()) text = SetFrontEndKey(text, hadOptions ? section : "fsr", "runtime_options", joined);
     out = text;
     return true;
 }

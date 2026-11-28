@@ -201,7 +201,8 @@ wstring PlainWarning(const wstring& w) {
     if (w.rfind(kLeftUnrecorded, 0) == 0)  // named like WrongGPU's own files, but not in the install's record: never deleted by their names
         return L"Some files were left where they are: WrongGPU deletes only files it can prove are its own (logs and reports with its name, copies it didn't record, other files in its folders). Delete them yourself if you don't need them.";
     if (Has(w, L"another name, a hard link")) return L"A file that has another name (a hard link) was left as it is, because writing to it would change that other name too.";
-    if (Has(w, L"The game replaced ")) return L"The game had replaced one of its files since WrongGPU was installed (probably a game update). Its newer file was kept.";
+    if (w.rfind(L"Another file is at ", 0) == 0 && Has(w, L". It was left in place."))
+        return L"Another file was already there, so WrongGPU left it in place.";
     if (Has(w, L"exists again with different content") || Has(w, L"The backup folder was kept"))
         return L"A game file the game changed was kept as it is. Its original stays in a backup folder in the game's folder.";
     if (Has(w, L"Older install: left in place")) return L"A file of the older WrongGPU install was changed since, so it was left in place.";
@@ -671,13 +672,44 @@ void HandOverToInstalled(HANDLE& one, const wstring& installedExe, const wchar_t
 }
 // Before and after a replace: the other launcher windows were asked to close; true while one is still open after `ms` (busy, or asking
 // about its unsaved changes). This window keeps painting meanwhile.
-static bool WaitOtherWindowsClosed(DWORD ms) {
-    using namespace lui;
-    auto other = [] {
-        for (HWND w = nullptr; (w = FindWindowExW(nullptr, w, L"WrongGPULauncher", nullptr)) != nullptr;)
-            if (w != v.hwnd) return true;
-        return false;
-    };
+bool LauncherWindowRuns(HWND hwnd, const wstring& program, bool includeRenamed) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return false;
+    wchar_t exe[MAX_PATH * 2] = {};
+    DWORD size = static_cast<DWORD>(std::size(exe));
+    const bool got = QueryFullProcessImageNameW(process, 0, exe, &size) != 0;
+    CloseHandle(process);
+    if (!got) return false;
+    const wstring image = ResolvedPath(wstring(exe, size));
+    return OwnsLauncherRegistration(true, ResolvedPath(program), image) ||
+        (includeRenamed && OwnsLauncherRegistration(true, ResolvedPath(program + L".old"), image));
+}
+
+static std::vector<HWND> OtherLauncherWindows(const wstring& installedExe, bool includeRenamed = false) {
+    struct Search {
+        const wstring& installedExe;
+        bool includeRenamed;
+        std::vector<HWND> windows;
+
+        static BOOL CALLBACK Visit(HWND window, LPARAM param) {
+            auto& search = *reinterpret_cast<Search*>(param);
+            if (window == lui::v.hwnd) return TRUE;
+            wchar_t name[256] = {};
+            if (!GetClassNameW(window, name, static_cast<int>(std::size(name)))) return TRUE;
+            if (IEq(name, L"WrongGPULauncher") ||
+                (StartsWithI(name, L"WrongGPULauncher.") && LauncherWindowRuns(window, search.installedExe, search.includeRenamed)))
+                search.windows.push_back(window);
+            return TRUE;
+        }
+    } search{installedExe, includeRenamed, {}};
+    EnumWindows(Search::Visit, reinterpret_cast<LPARAM>(&search));
+    return search.windows;
+}
+
+static bool WaitOtherWindowsClosed(const wstring& installedExe, DWORD ms, bool includeRenamed = false) {
+    auto other = [&] { return !OtherLauncherWindows(installedExe, includeRenamed).empty(); };
     const ULONGLONG until = GetTickCount64() + ms;
     while (other() && GetTickCount64() < until) {
         MsgWaitForMultipleObjects(0, nullptr, FALSE, 50, QS_ALLINPUT);
@@ -708,21 +740,18 @@ bool AnswerReplaceOffer(HANDLE& one, const wstring& installedExe, const wstring&
     // always does). One left running on its program renamed aside would start its elevated workers and HIP probes from the
     // new file (its own path still names WrongGPU.exe), putting newer files into games under its older version. Busy, or
     // with its question open, it stays: nothing is replaced, and this asks again once the player has closed it.
-    for (bool asked = false; update && WaitOtherWindowsClosed(asked ? 1000 : 0);) {
+    for (bool asked = false; update && WaitOtherWindowsClosed(installedExe, asked ? 1000 : 0);) {
         if (!asked) {
             asked = true;
-            for (HWND w = nullptr; (w = FindWindowExW(nullptr, w, L"WrongGPULauncher", nullptr)) != nullptr;)
-                if (w != v.hwnd) PostMessageW(w, WM_CLOSE, 0, 0);
-            if (!WaitOtherWindowsClosed(3000)) break;
+            for (HWND w : OtherLauncherWindows(installedExe)) PostMessageW(w, WM_CLOSE, 0, 0);
+            if (!WaitOtherWindowsClosed(installedExe, 3000)) break;
         }
         LogLine(g.ctx, L"replace: WrongGPU " + have + L"'s window is still open (busy, or asking about unsaved changes): nothing replaced yet");
         update = Confirm(L"WrongGPU " + have + L" is still open\n\nIt's busy, or asking about unsaved changes. Finish there and close it, then choose Update. "
                          L"Nothing is replaced while it's open.", 1, L"Update", L"Not now");
     }
     if (!update) {
-        bool otherOpen = false;  // a window of the installed copy: two windows would work on the same data
-        for (HWND w = nullptr; (w = FindWindowExW(nullptr, w, L"WrongGPULauncher", nullptr)) != nullptr;)
-            if (w != v.hwnd) otherOpen = true;
+        const bool otherOpen = !OtherLauncherWindows(installedExe).empty();
         if (otherOpen) {
             Inform(L"WrongGPU " + have + L" is open.\n\nTo use this download instead, close that window and open this download again.", 0);
             HandOverToInstalled(one, installedExe, L"not now, its window is open");  // brings that window forward
@@ -740,9 +769,8 @@ bool AnswerReplaceOffer(HANDLE& one, const wstring& installedExe, const wstring&
         // a window of the older copy opened since (from Start, while this asked) closes too, as above
         bool otherOpen = false;
         if (replaced) {
-            for (HWND w = nullptr; (w = FindWindowExW(nullptr, w, L"WrongGPULauncher", nullptr)) != nullptr;)
-                if (w != v.hwnd) PostMessageW(w, WM_CLOSE, 0, 0);
-            otherOpen = WaitOtherWindowsClosed(3000);
+            for (HWND w : OtherLauncherWindows(installedExe, true)) PostMessageW(w, WM_CLOSE, 0, 0);
+            otherOpen = WaitOtherWindowsClosed(installedExe, 3000, true);
         }
         const wstring then = otherOpen ? L"The WrongGPU window that was open is still busy or has unsaved changes. Close it, then open WrongGPU from Start."
                                        : L"WrongGPU opens now. Next time, open it from Start as before.";

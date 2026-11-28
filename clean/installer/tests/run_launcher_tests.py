@@ -28,7 +28,8 @@ import mockpe  # noqa: E402  (synthetic PE files with a version resource)
 import launcher_build_facts as facts  # noqa: E402  (what the launcher under test was built with)
 import run_installer_tests as suite  # noqa: E402  (mock content, snapshots, the synthetic model case)
 from run_installer_tests import read, sha, snapshot, diff, write, kept_runtime, unrecorded_wronggpu_files  # noqa: E402
-import launcher_isolation as iso  # noqa: E402  (#243: no search of the PC's own game folders)
+import launcher_isolation as iso  # noqa: E402
+import launcher_safety_registry as safety_registry  # noqa: E402
 
 OPTI_INI = ("[Upscalers]\nDx12Upscaler=auto\n[Libraries]\nFfxDx12SRPath=auto\n[FSR]\nFsr4Update=auto\nUpscalerIndex=auto\n"
             "[Menu]\nShortcutKey=auto\nShowFps=auto\n")
@@ -39,6 +40,7 @@ class T:
         self.exe, self.work, self.model = exe, work, model
         self.passed, self.failures = 0, []
         self.data = os.path.join(work, "data")
+        os.makedirs(self.data, exist_ok=True)
         self.log = os.path.join(work, "launcher-test.log")
         self.out = os.path.join(work, "out.json")
         self.hip = hip
@@ -46,10 +48,11 @@ class T:
         if os.path.lexists(os.path.join(work, "no-hip")):
             raise SystemExit("%s already holds no-hip: not a fresh run folder" % work)
         self.env = self.child_env(os.environ)
+        self.registry = self.env["LOCALAPPDATA"]
         # the store libraries: <work>\libraries only; every store access logged and checked after each call (launcher_isolation)
         iso.test_env(self.env, work)
         self.expect_scan = False  # set by a test whose next call must search the test libraries (the guard's sensitivity)
-        self.uninstall = suite.uninstall_root(self.env["LOCALAPPDATA"])  # this run's Apps & features root (the build's own)
+        self.uninstall = suite.uninstall_root(self.data)  # this run's Apps & features root (the build's own)
         self.j = {}
 
     def child_env(self, inherited):
@@ -57,7 +60,7 @@ class T:
         inherited test override (WRONGGPU_TEST_*, WG_*: a test sets its own for one call; WRONGGPU_HIP_RUNTIME only from --hip)
         or HIP path."""
         tmp = os.path.join(self.work, "tmp")
-        env = dict(inherited, LOCALAPPDATA=os.path.join(self.work, "localappdata"), ProgramData=os.path.join(self.work, "programdata"),
+        env = dict(inherited, LOCALAPPDATA=os.path.join(self.work, "localappdata"), APPDATA=os.path.join(self.work, "appdata"), ProgramData=os.path.join(self.work, "programdata"),
                    TEMP=tmp, TMP=tmp)
         for k in [k for k in env if k.upper().startswith(("WG_", "WRONGGPU_TEST_")) or
                   k.upper() in ("WRONGGPU_HIP_RUNTIME", "HIP_PATH", "ROCM_PATH", "LLVM_PATH", "HIP_DEVICE_LIB_PATH")]:
@@ -67,7 +70,9 @@ class T:
         # the HIP check tries these candidates only, never the system's, PATH's or ROCm's runtime (checks.cpp HipCandidates):
         # the --hip mock, else a file that is not there (a default run never loads a real HIP runtime)
         env["WRONGGPU_TEST_HIP_CANDIDATES"] = self.hip or os.path.join(self.work, "no-hip", "amdhip64_7.dll")
+        os.makedirs(env["APPDATA"], exist_ok=True)
         os.makedirs(env["LOCALAPPDATA"], exist_ok=True)  # (in the run's own fresh folder)
+        env["WRONGGPU_TEST_FIXTURE_ROOT"] = self.work
         return env
 
     def check(self, name, cond, detail=""):
@@ -82,7 +87,7 @@ class T:
         """WrongGPU.exe <args> --data --log --out; the JSON result in self.j; returns the exit code. cwd: its current directory."""
         if os.path.exists(self.out):
             os.remove(self.out)
-        cmd = [exe or self.exe] + list(args) + ["--log=" + self.log, "--out=" + self.out] + (["--data=" + self.data] if data else [])
+        cmd = [exe or self.exe] + list(args) + ["--log=" + self.log, "--out=" + self.out] + ["--data=" + self.data]
         facts.require_test_hooks(cmd[0])  # fails closed before it runs: a testing build with the isolation hooks only
         start, astart = os.path.getsize(self.log) if os.path.isfile(self.log) else 0, iso.access_size(self.work)
         p = subprocess.run(cmd, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, cwd=cwd)
@@ -99,6 +104,7 @@ class T:
         baseline installer, which predates the access log and the hooks: the opt-in --run-old-baseline)."""
         if guard:
             facts.require_test_hooks(cmd[0])
+            cmd = list(cmd) + [("/DATA=" if cmd[1].startswith("/") else "--data=") + self.data]
         start, astart = os.path.getsize(self.log) if os.path.isfile(self.log) else 0, iso.access_size(self.work)
         rc = subprocess.run(cmd, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout).returncode
         if guard:
@@ -112,18 +118,7 @@ class T:
             return ""
 
     def reg_keys(self, root=None):
-        root = root or self.uninstall
-        p = subprocess.run(["reg", "query", root, "/s"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        keys, cur = {}, None
-        for line in p.stdout.decode("utf-8", "replace").splitlines():
-            if line.upper().startswith("HKEY_"):
-                name = line.strip().split("\\")[-1]
-                cur = keys.setdefault(name, {}) if line.strip().lower() != root.lower().replace("hkcu", "hkey_current_user") else None
-            elif cur is not None and line.startswith("    "):
-                parts = [x for x in line.strip().split("    ") if x]
-                if len(parts) >= 3:
-                    cur[parts[0]] = parts[-1].strip()
-        return keys
+        return safety_registry.entries(self.registry, root or self.uninstall)
 
     def entries_for(self, folder):
         return {k: v for k, v in self.reg_keys().items() if v.get("InstallLocation", "").lower() == folder.lower()}
@@ -231,7 +226,7 @@ def options_line(text):
 
 
 def managed_list(t):
-    p = os.path.join(t.env["LOCALAPPDATA"], "WrongGPU", "managed-games.txt")
+    p = os.path.join(t.data, "managed-games.txt")
     return read(p).decode("utf-8", "replace").lower() if os.path.isfile(p) else ""
 
 
@@ -280,8 +275,8 @@ def test_basics(t):
     write(os.path.join(port, "WrongGPU.portable"), "portable\r\n")
     rc = t.run("get", "--global", exe=os.path.join(port, "WrongGPU.exe"), data=False)
     g = t.j.get("global", {})
-    t.check("portable: data next to the exe (WrongGPU-data)", rc == 0 and g.get("portable") is True and
-            g.get("data_dir", "").lower() == os.path.join(port, "WrongGPU-data").lower(), t.j)
+    t.check("portable: --data applies even beside a portable marker", rc == 0 and g.get("portable") is True and
+            g.get("data_dir", "").lower() == t.data.lower(), t.j)
     shutil.rmtree(port, ignore_errors=True)
 
 
@@ -676,17 +671,16 @@ def test_experimental_and_shared_model(t, opti):
     t.check("an untested game without --experimental: exit 3", rc == 3 and snapshot(r1) == s1, (rc, t.j.get("message")))
     rc1 = t.run("install", e1, "--opti=" + opti, "--noscan", "--force", "--experimental")
     rc2 = t.run("install", e2, "--opti=" + opti, "--noscan", "--force", "--experimental")
-    model = os.path.join(t.env["LOCALAPPDATA"], "WrongGPU", "model", "model.wgcm")
+    model = os.path.join(t.data, "model", "model.wgcm")
     t.check("two installs", rc1 == 0 and rc2 == 0 and os.path.isfile(model), (rc1, rc2))
     rc = t.run("uninstall", e1)
     t.check("first uninstalled: the model stays (the other game is on the managed list)", rc == 0 and os.path.isfile(model) and snapshot(r1) == s1, diff(s1, snapshot(r1)))
     # a stale Apps & features entry (its game folder deleted by hand, so no record) is no game that still uses the data
     stale = t.uninstall + "\\WrongGPU-00000000"
-    subprocess.run(["reg", "add", stale, "/v", "InstallLocation", "/t", "REG_SZ", "/d", os.path.join(t.work, "games", "Deleted Game", "bin", "x64"), "/f"],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    safety_registry.set_location(t.registry, stale, os.path.join(t.work, "games", "Deleted Game", "bin", "x64"))
     rc = t.run("uninstall", e2)
-    subprocess.run(["reg", "delete", stale, "/f"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    t.check("last uninstalled (a stale entry of a deleted game left): byte for byte; the shared model data goes", rc == 0 and snapshot(r2) == s2 and not os.path.isfile(model),
+    safety_registry.delete(t.registry, stale)
+    t.check("last uninstalled (a stale entry of a deleted game left): byte for byte; the scoped cache stays", rc == 0 and snapshot(r2) == s2 and os.path.isfile(model),
             (rc, diff(s2, snapshot(r2))))
     shutil.rmtree(r1, ignore_errors=True)
     shutil.rmtree(r2, ignore_errors=True)
@@ -860,7 +854,7 @@ def test_adopt_and_self_install(t, opti, baseline):
     t.check("self-install: the adopted game's own entry is gone (one entry for all)", not t.entries_for(b) and "\nregkey\t\r\n" in record_text(b), t.entries_for(b))
     rc = t.run("install", exe, "--opti=" + opti, "--noscan", "--force", "--experimental")
     t.check("an install with the launcher installed: no entry of its own", rc == 0 and not t.entries_for(b), t.entries_for(b))
-    model_dir = os.path.join(t.env["LOCALAPPDATA"], "WrongGPU", "model")
+    model_dir = os.path.join(t.data, "model")
     had_model = os.path.isdir(model_dir)
     rc = t.raw([os.path.join(b, "wronggpu-setup", "uninstall.exe"), "/S", "/LOG=" + t.log])
     wait_gone(os.path.join(b, "wronggpu-setup"))
@@ -868,7 +862,7 @@ def test_adopt_and_self_install(t, opti, baseline):
     t.check("the restorer: the game as before the 0.5.1 install, byte for byte", rc == 0 and after == before, (rc, diff(before, after)))
     t.check("the last game uninstalled while the launcher is installed: the shared model data stays (the launcher shows it as its own)",
             had_model and os.path.isdir(model_dir), (had_model, t.logtail()))
-    rc = t.run("self-uninstall", "--keep-games", "--startmenu=" + menu)
+    rc = t.run("self-uninstall", "--keep-games", "--startmenu=" + menu, exe=os.path.join(programs, "WrongGPU.exe"))
     t.check("self-uninstall: entry, shortcut and exe removed", rc == 0 and "WrongGPU" not in t.reg_keys() and not os.path.isfile(os.path.join(menu, "WrongGPU.lnk")) and
             not os.path.isfile(os.path.join(programs, "WrongGPU.exe")), (rc, t.j))
     t.check("...and with no game left, the launcher's uninstall takes the shared model data with it", wait_removed(t) and not os.path.isdir(model_dir),
@@ -878,8 +872,8 @@ def test_adopt_and_self_install(t, opti, baseline):
 
 def test_launcher_uninstall(t, opti):
     print("\n[launcher] installed at its default place from a portable copy; uninstalled by its own copy: games kept, then games too; nothing left")
-    lad = t.env["LOCALAPPDATA"]
-    programs, shared = os.path.join(lad, "Programs", "WrongGPU"), os.path.join(lad, "WrongGPU")
+    shared = t.data
+    programs = os.path.join(shared, "Programs", "WrongGPU")
     installed = os.path.join(programs, "WrongGPU.exe")
     menu = os.path.join(t.work, "startmenu-default")
     port = os.path.join(t.work, "portable-copy")
@@ -889,7 +883,7 @@ def test_launcher_uninstall(t, opti):
         os.rmdir(os.path.dirname(programs))
     except OSError:
         pass
-    programs_made = not os.path.exists(os.path.dirname(programs))  # the install makes it, so its uninstall removes it
+    programs_made = wait_gone(os.path.dirname(programs))  # the install makes it, so its uninstall removes it
     os.makedirs(port)
     pexe = os.path.join(port, "WrongGPU.exe")
     shutil.copy2(t.exe, pexe)
@@ -909,7 +903,7 @@ def test_launcher_uninstall(t, opti):
     entry = t.reg_keys().get("WrongGPU", {})
     t.check("self-install (default place): the exe, the shortcut, one entry whose Uninstall opens the launcher's uninstall, an install date",
             rc == 0 and rc2 == 0 and os.path.isfile(installed) and os.path.isfile(os.path.join(menu, "WrongGPU.lnk")) and
-            entry.get("UninstallString", "").lower() == ('"%s" uninstall-launcher' % installed).lower() and re.fullmatch(r"\d{8}", entry.get("InstallDate", "")) is not None,
+            entry.get("UninstallString", "").lower() == ('"%s" uninstall-launcher "--data=%s"' % (installed, shared)).lower() and re.fullmatch(r"\d{8}", entry.get("InstallDate", "")) is not None,
             (rc, rc2, t.j, entry))
     t.check("self-install: the game's own entry folded into the launcher's", not t.entries_for(b) and "\nregkey\t\r\n" in record_text(b), t.entries_for(b))
     if motw:
@@ -926,10 +920,17 @@ def test_launcher_uninstall(t, opti):
             read(li).decode() if os.path.isfile(li) else "(none)")
     # uninstalled by the installed copy itself (as its window and Apps & features do): its running exe is moved out at once.
     # Started as its Start-menu shortcut starts it: its install folder is its current directory
+    uninstall_log_start = os.path.getsize(t.log)
     rc = t.run("self-uninstall", "--keep-games", "--startmenu=" + menu, exe=installed, data=False, cwd=programs)
-    t.check("self-uninstall by the installed copy (current directory: its install folder, as from the Start menu): its folder gone at once, entry and shortcut gone",
-            rc == 0 and not os.path.exists(programs) and
+    t.check("self-uninstall by the installed copy (current directory: its install folder, as from the Start menu): its folder, entry and shortcut go",
+            rc == 0 and wait_gone(programs) and
             "WrongGPU" not in t.reg_keys() and not os.path.isfile(os.path.join(menu, "WrongGPU.lnk")), (rc, t.j, os.listdir(programs) if os.path.isdir(programs) else None))
+    cleanup_log = read(t.log)[uninstall_log_start:].decode("utf-8", "replace").splitlines()
+    t.check("deferred cleanup never targets the install path that a reinstall will reuse",
+            not any(line.endswith("removed once it is free: " + installed) for line in cleanup_log), cleanup_log)
+    t.check("a retired launcher in the data root is moved clear before deferred cleanup",
+            any("retired launcher program at " + shared + ".launcher.removed-" in line for line in cleanup_log),
+            cleanup_log)
     t.check("keep games: the game keeps WrongGPU with its own entry again; the launcher's settings gone; the shared data stays (the game uses it)",
             len(t.entries_for(b)) == 1 and "\nregkey\tWrongGPU-" in record_text(b) and not os.path.isfile(li) and os.path.isdir(os.path.join(shared, "model")),
             (t.entries_for(b), os.listdir(shared) if os.path.isdir(shared) else None))
@@ -945,11 +946,10 @@ def test_launcher_uninstall(t, opti):
     rc2 = t.run("self-install", "--startmenu=" + menu, exe=pexe, data=False)
     t.check("installed again: the game's entry folded in again", rc2 == 0 and not t.entries_for(b), (rc2, t.entries_for(b)))
     t.check("...a game left off the launcher's list keeps its own entry", rc == 0 and len(t.entries_for(b2)) == 1, (rc, t.entries_for(b2)))
-    # uninstalled from a portable copy that stays open (its window after Installed apps' Uninstall), which then repairs a game in
-    # the same process: the game keeps its own entry (the process started while the launcher was installed)
+    # The installed copy repairs a game in the same process after uninstalling itself. The repair must see the updated registration.
     rc = t.run("self-uninstall", "--keep-games", "--startmenu=" + menu, "--repair-after=" + exe, "--opti=" + opti, "--noscan", "--force", "--experimental",
-               exe=pexe, data=False)
-    t.check("uninstalled by a portable copy that then repairs a game in the same process: the launcher gone, the game keeps its own entry",
+               exe=installed, data=False)
+    t.check("repair in the same process after self-uninstall keeps the game's own entry",
             rc == 0 and t.j.get("repair_code") == 0 and "WrongGPU" not in t.reg_keys() and len(t.entries_for(b)) == 1 and "\nregkey\tWrongGPU-" in record_text(b),
             (rc, t.j, t.entries_for(b)))
     t.check("...the moved exe is deleted once it no longer runs", wait_removed(t), removed_folders(t))
@@ -957,18 +957,21 @@ def test_launcher_uninstall(t, opti):
     t.check("installed again from the portable copy: the game's entry folded in once more", rc2 == 0 and not t.entries_for(b), (rc2, t.entries_for(b)))
     rc = t.run("self-uninstall", "--startmenu=" + menu, exe=installed, data=False)
     after = snapshot(root)
-    t.check("self-uninstall with the games: the game byte for byte as before, the launcher gone", rc == 0 and after == before and not os.path.exists(programs) and
+    t.check("self-uninstall with the games: the game byte for byte as before, the launcher gone", rc == 0 and after == before and wait_gone(programs) and
             "WrongGPU" not in t.reg_keys() and not t.entries_for(b), (rc, t.j, diff(before, after)))
-    t.check("...and the game with its own entry too: byte for byte, its entry gone", snapshot(root2) == before2 and not t.entries_for(b2),
-            (diff(before2, snapshot(root2)), t.entries_for(b2)))
-    t.check("nothing left in the user folder: %LOCALAPPDATA%\\WrongGPU (model data, list, logs) and the moved exe gone", wait_removed(t) and not os.path.exists(shared),
+    t.check("...the off-list game and its own entry stay installed under an explicit data root",
+            os.path.isfile(os.path.join(b2, "wronggpu-setup", "install.record")) and len(t.entries_for(b2)) == 1, t.entries_for(b2))
+    t.check("nothing left in the user folder: %LOCALAPPDATA%\\WrongGPU (model data, list, logs) and the moved exe gone", wait_removed(t) and wait_gone(shared),
             (removed_folders(t), os.listdir(shared) if os.path.isdir(shared) else None))
     t.check("...and %LOCALAPPDATA%\\Programs, which the install made on this fresh profile, is gone too",
-            not programs_made or not os.path.exists(os.path.dirname(programs)),
+            not programs_made or wait_gone(os.path.dirname(programs)),
             os.listdir(os.path.dirname(programs)) if os.path.isdir(os.path.dirname(programs)) else None)
+    rc = t.run("uninstall", exe2, "--noscan")
+    t.check("the off-list game can still be uninstalled separately", rc == 0 and snapshot(root2) == before2 and not t.entries_for(b2),
+            (rc, diff(before2, snapshot(root2)), t.entries_for(b2)))
     # the Start-menu shortcut: a replace (no folder named) keeps it where the entry has it; test builds never use the
     # player's Start menu (their default is a folder in LOCALAPPDATA)
-    tmenu = os.path.join(lad, "WrongGPU-TestStartMenu")
+    tmenu = os.path.join(shared, "StartMenu")
     shutil.rmtree(tmenu, ignore_errors=True)
     rc = t.run("self-install", "--startmenu=" + menu, exe=pexe, data=False)
     rc2 = t.run("self-install", exe=pexe, data=False)
@@ -991,33 +994,14 @@ def test_launcher_uninstall(t, opti):
             (rc, rc2, t.reg_keys().get("WrongGPU", {})))
     rc = t.run("self-uninstall", exe=installed, data=False)
     t.check("and uninstalled again: that shortcut gone, nothing left in the user folder", rc == 0 and not os.path.isfile(os.path.join(tmenu, "WrongGPU.lnk")) and
-            wait_removed(t) and not os.path.exists(shared) and not os.path.exists(programs), (rc, removed_folders(t)))
-    # a managed game on a drive that is not connected (a letter no drive has): left as it is, on the list, with the shared data
-    free = next((c for c in "QPOZYXWVUTSRNMLKJIH" if not os.path.exists(c + ":" + os.sep)), None)
-    if free:
-        offline = os.path.join(free + ":" + os.sep, "Games", "Offline Game", "bin", "x64")
-        rc = t.run("self-install", exe=pexe, data=False)
-        write(os.path.join(shared, "managed-games.txt"), "; test\r\n" + offline + "\r\n")
-        rc2 = t.run("self-uninstall", exe=installed, data=False)
-        t.check("a managed game on a drive that is not connected: the launcher uninstalled, the game named, kept on the list, the shared data kept",
-                rc == 0 and rc2 == 0 and [x.lower() for x in t.j.get("unreachable", [])] == [offline.lower()] and offline.lower() in managed_list(t) and
-                not os.path.exists(programs) and not os.path.isfile(li) and "WrongGPU" not in t.reg_keys(), (rc, rc2, t.j, managed_list(t)))
-        own = t.entries_for(offline)
-        t.check("...it gets its own Installed apps entry (its uninstaller in its wronggpu-setup folder, named by its folder), so it can be removed with no launcher",
-                len(own) == 1 and list(own.values())[0].get("UninstallString", "").lower() == ('"%s"' % os.path.join(offline, "wronggpu-setup", "uninstall.exe")).lower() and
-                list(own.values())[0].get("DisplayName") == "WrongGPU - Offline Game", own)
-        # another game installed and uninstalled meanwhile: the game on the drive that isn't connected still uses the shared data
-        rc = t.run("install", exe, "--opti=" + opti, "--noscan", "--force", "--experimental")
-        had = rc == 0 and os.path.isdir(model_dir)
-        rc2 = t.run("uninstall", exe)
-        t.check("...while it is on the list, the last reachable game's own uninstall keeps the shared model data (the game byte for byte)",
-                had and rc2 == 0 and snapshot(root) == before and os.path.isdir(model_dir), (had, rc2, diff(before, snapshot(root)), t.logtail()))
-        for k in own:
-            subprocess.run(["reg", "delete", t.uninstall + "\\" + k, "/f"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        wait_removed(t)
-        shutil.rmtree(shared, ignore_errors=True)
-    else:
-        print("  skipped: the drive that is not connected (every drive letter is in use)")
+            wait_removed(t) and not os.path.exists(os.path.join(shared, "model")) and wait_gone(programs), (rc, removed_folders(t)))
+    # An out-of-scope entry never reaches the file or registry operations for a managed game.
+    rc = t.run("self-install", exe=pexe, data=False)
+    offline = r"Q:\Games\Offline Fixture\bin\x64"
+    write(os.path.join(shared, "managed-games.txt"), "; test\r\n" + offline + "\r\n")
+    rc2 = t.run("self-uninstall", exe=installed, data=False)
+    t.check("a test launcher ignores a managed entry outside its data root",
+            rc == 0 and rc2 == 0 and not t.j.get("unreachable") and not t.entries_for(offline), (rc, rc2, t.j))
     # a portable launcher that used the shared data (it notes itself there): the last game's own uninstall keeps that data while the
     # copy is there, and removes it once the copy is gone
     rc = t.run("install", exe, "--opti=" + opti, "--noscan", "--force", "--experimental")
@@ -1042,12 +1026,12 @@ def test_launcher_uninstall(t, opti):
             (rc, rc2, rc3, t.j))
     rc = t.run("remove-data", exe=pexe, data=False)
     t.check("...no game left: the shared folder removed (nothing moved aside left), the portable copy kept",
-            rc == 0 and t.j.get("removed") is True and not os.path.exists(shared) and wait_removed(t) and os.path.isfile(pexe),
+            rc == 0 and t.j.get("removed") is True and not os.path.exists(os.path.join(shared, "model")) and wait_removed(t) and os.path.isfile(pexe),
             (rc, t.j, os.listdir(shared) if os.path.isdir(shared) else None, removed_folders(t)))
     shutil.rmtree(port, ignore_errors=True)
     rc = t.run("install", exe, "--opti=" + opti, "--noscan", "--force", "--experimental")
     rc2 = t.run("uninstall", exe)
-    t.check("...that copy deleted: the last game's uninstall removes the shared data", rc == 0 and rc2 == 0 and snapshot(root) == before and wait_gone(shared),
+    t.check("...that copy deleted: the last game's uninstall preserves the explicit root", rc == 0 and rc2 == 0 and snapshot(root) == before and os.path.isdir(shared),
             (rc, rc2, os.listdir(shared) if os.path.isdir(shared) else None))
     shutil.rmtree(tmenu, ignore_errors=True)
     shutil.rmtree(root, ignore_errors=True)
@@ -1084,7 +1068,7 @@ def rr_ini(b):
 def test_rr(t, opti, synth_f):
     print("\n[rr] Ray Reconstruction: which games, the RR files with the install, the RR data, settings, the RR log, uninstall")
     lad = t.env["LOCALAPPDATA"]
-    fdata = os.path.join(lad, "WrongGPU", "model", "F", "model.wgcm")
+    fdata = os.path.join(t.data, "model", "F", "model.wgcm")
     # a game without Ray Reconstruction: nothing of it anywhere
     rootN, bN, exeN = game(t, "Rr None")
     beforeN = snapshot(rootN)
@@ -1157,7 +1141,7 @@ def test_rr(t, opti, synth_f):
         t.check("rr-data status: valid", rc == 0 and t.j.get("rr_data", {}).get("valid") is True, t.j)
         # the data gone again: a repair turns RR off in the game and says so; then another RR game's install converts the data
         # from its own file, and the game installed before it gets RR too (no Repair or Apply on it needed)
-        shutil.rmtree(os.path.join(lad, "WrongGPU", "model", "F"), ignore_errors=True)
+        shutil.rmtree(os.path.join(t.data, "model", "F"), ignore_errors=True)
         rc = t.run("repair", exe, "--opti=" + opti, "--noscan", "--force", "--experimental")
         t.check("RR data gone: a repair writes rr_enabled=0 and its result says RR stays off",
                 rc == 0 and rr_ini(b).get("rr_enabled") == "0" and any("Ray Reconstruction data isn't converted yet" in w for w in t.j.get("warnings", [])),
@@ -1287,7 +1271,12 @@ RE9_IFACE = "wg_test_interface.dll"  # the game interface file the test build's 
 
 def mock_rr(t, rel):
     """A file of the test build's RR stand-ins (tests/make_mock_rr.py writes them next to the launcher it builds)."""
-    return read(os.path.join(os.path.dirname(t.exe), "mock-rr", rel))
+    launcher = os.path.dirname(t.exe)
+    for build in (launcher, os.path.dirname(launcher)):
+        path = os.path.join(build, "mock-rr", rel)
+        if os.path.isfile(path):
+            return read(path)
+    raise FileNotFoundError(rel)
 
 
 def add_refw(root):
@@ -1536,7 +1525,7 @@ def test_direct_rr(t, opti, synth_f):
     ed_pkg, edition = edition_package(t, "edition-direct")
     t.env["WRONGGPU_TEST_EDITION_DLL"] = sha(edition)
     lad = t.env["LOCALAPPDATA"]
-    fdata = os.path.join(lad, "WrongGPU", "model", "F", "model.wgcm")
+    fdata = os.path.join(t.data, "model", "F", "model.wgcm")
     root, b, exe = direct_game(t, "Direct Brick")
     before = snapshot(root)
     rc = t.run("status", exe, "--noscan")
@@ -1789,7 +1778,7 @@ def test_sm2_settings(t, opti):
             "Convert the Ray Reconstruction data" not in pg and "Prepare Ray Reconstruction" not in pg and "Set up Ray Reconstruction" not in pg, (rc, list(pg)[:60]))
     rc = t.run("set", exe, "sm2_rr_experimental=on")
     rc2, pg = sm2_page()
-    data_ready = os.path.isfile(os.path.join(t.env["LOCALAPPDATA"], "WrongGPU", "model", "F", "model.wgcm"))
+    data_ready = os.path.isfile(os.path.join(t.data, "model", "F", "model.wgcm"))
     sw = pg.get("Use WrongGPU (Ray Reconstruction, experimental)", {})
     t.check("window, sm2_rr_experimental on (command line): the held-off line is gone; with the RR data the switch is on, labelled Experimental, with the freeze / crash warning",
             rc == 0 and rc2 == 0 and held not in pg and
@@ -2096,7 +2085,8 @@ def test_rr_config_fix(t, opti):
         t.check("...Fix it for me: the elevated worker saves the choice at once (one permission prompt, its apply job), on in the profile, nothing in "
                 "Engine.ini or the record, the card waits for the first start (r6 #7)",
                 ff.get("busy_started") is True and ff.get("done") is True and ff.get("saved") == "on" and ff.get("state") == -1 and
-                ff.get("notice") == "" and len(asks()) == 1 and "apply" in asks()[0] and "--job=" in asks()[0] and get_fix(exe)[1].get("profile") == "on" and
+                ff.get("notice") == "" and len(asks()) == 1 and "apply" in asks()[0] and "--job=" in asks()[0] and
+                ('"--data=' + t.data + '"') in asks()[0] and get_fix(exe)[1].get("profile") == "on" and
                 not os.listdir(docs) and "rrconfig\t" not in record_text(b), (ff, asks(), os.listdir(docs)))
         write(bl4_gus, b"[ScalabilityGroups]\r\n")  # the game's first start
         rx, pg, rcf = rr_page("protected-fixforme-then", prot_env, extra=("--apply=rrdue",))
@@ -2476,8 +2466,8 @@ def test_rr_config_fix(t, opti):
         os.chmod(bl4_ini, 0o666)
         shutil.rmtree(os.path.join(docs, "My Games"))
         # 7. Hogwarts Legacy: %LOCALAPPDATA%, the folder that holds GameUserSettings.ini (WindowsNoEditor), not read-only
-        hog = os.path.join(t.env["LOCALAPPDATA"], "Hogwarts Legacy", "Saved", "Config")
-        hog_root = os.path.join(t.env["LOCALAPPDATA"], "Hogwarts Legacy")
+        hog = os.path.join(t.data, "Hogwarts Legacy", "Saved", "Config")
+        hog_root = os.path.join(t.data, "Hogwarts Legacy")
         shutil.rmtree(hog_root, ignore_errors=True)
         root, b, exe = game(t, "Hogwarts Test", exe="HogwartsLegacy.exe")
         rc = t.run("install", exe, "--opti=" + opti, "--noscan", "--force", "--experimental")
@@ -2612,7 +2602,7 @@ def test_rr_config_fix(t, opti):
         t.env.pop("WRONGGPU_TEST_DOCUMENTS", None)
         # this test's fixture games and test roots go, even after a failure part way (a later test scans the games folder)
         games = [os.path.join(t.work, "games", n) for n in ("Borderlands Four", "Hogwarts Test", "Not Borderlands")]
-        for d in [docs, os.path.join(t.work, "documents-job"), os.path.join(t.env["LOCALAPPDATA"], "Hogwarts Legacy")] + games:
+        for d in [docs, os.path.join(t.work, "documents-job"), os.path.join(t.data, "Hogwarts Legacy")] + games:
             if os.path.isdir(d):
                 set_writable(d)
                 shutil.rmtree(d, ignore_errors=True)
@@ -3005,45 +2995,33 @@ def test_ui_dump(t, opti):
 
 
 
-def test_data_root_junctions(parent):
-    """A junction at the data root must be unlinked without modifying anything in its target."""
-    work = facts.new_run_folder(parent.work, "junction-regression")  # a new folder of its own, with its own fresh tmp (T)
-    t = T(parent.exe, work, parent.model, None)
-    shared = os.path.join(t.env["LOCALAPPDATA"], "WrongGPU")
-    target = os.path.join(work, "junction-target")
-    os.makedirs(target, exist_ok=True)
-    write(os.path.join(target, "canary.txt"), "canary")
-    write(os.path.join(target, "launcher.log"), "do not change")
-    write(os.path.join(target, "managed-games.txt"), os.path.join(work, "missing-game") + "\n")
+def test_data_root_junctions(t):
+    """An explicit data root that is a junction is refused before opening the target."""
+    target = os.path.join(t.work, "junction-target")
+    shared = os.path.join(t.work, "junction-data")
+    write(os.path.join(target, "managed-games.txt"), "junction target sentinel\r\n")
     before = snapshot(target)
-    program = os.path.join(work, "installed")
-    rc = t.run("self-install", "--dir=" + program, data=False)
-    if os.path.isdir(shared):
-        os.replace(shared, os.path.join(work, "parked-data"))
-    def link():
-        return subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", shared, target],
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode == 0
-    def invoke_without_log(exe, verb):  # (launcher_build_facts.junction_call: also the negative controls' path)
-        return facts.junction_call(t, exe, verb, work)
-    linked = link()
-    rc2, log = invoke_without_log(os.path.join(program, "WrongGPU.exe"), "self-uninstall") if linked else (-1, "")
-    parent.check("self-uninstall: data-root junction unlinked, target unchanged, and link removal logged",
-                 rc == 0 and linked and rc2 == 0 and not os.path.lexists(shared) and snapshot(target) == before and "target was kept" in log,
-                 (rc, linked, rc2, log[-500:], diff(before, snapshot(target))))
-    if os.path.lexists(shared): os.rmdir(shared)
-    linked = link()
-    rc3, log = invoke_without_log(t.exe, "remove-data") if linked else (-1, "")
-    parent.check("remove-data: data-root junction unlinked, target unchanged, and link removal logged",
-                 linked and rc3 == 0 and not os.path.lexists(shared) and snapshot(target) == before and "target was kept" in log,
-                 (linked, rc3, log[-500:], diff(before, snapshot(target))))
-    if os.path.lexists(shared): os.rmdir(shared)
-    shutil.rmtree(work, ignore_errors=True)
+    linked = subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", shared, target],
+                            env=t.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode == 0
+    for verb in ("self-uninstall", "remove-data"):
+        result = subprocess.run([t.exe, verb, "--data=" + shared], env=t.env, capture_output=True)
+        t.check(verb + ": explicit data junction refused, target untouched",
+                linked and result.returncode == 10 and os.path.lexists(shared) and snapshot(target) == before,
+                (linked, result.returncode, result.stdout))
+    if linked:
+        os.rmdir(shared)
+    shutil.rmtree(target)
+
+
+def test_launcher_safety(t, opti, synth_f=""):
+    __import__("launcher_safety_cases").run(t, opti, synth_f, sys.modules[__name__])
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--launcher", required=True)
     ap.add_argument("--work", required=True)
+    ap.add_argument("--legacy-restorer", help="earlier shipped restorer to copy as data without running it")
     ap.add_argument("--baseline", help="the 0.5.1 installer (WRONGGPU_TESTING build, same test map) for the adoption cases")
     ap.add_argument("--hip", help="mock amdhip64_7.dll (WRONGGPU_HIP_RUNTIME)")
     ap.add_argument("--run-old-baseline", action="store_true", help="also run --baseline: OUTSIDE the suite's isolation guarantee (the "
@@ -3078,10 +3056,11 @@ def main():
     iso.self_test(work)  # (#243) first: no launcher call with a broken guard
     model = suite.cases.f_mini_case(present=0)  # the synthetic source of the test map the launcher was built with
     t = T(os.path.abspath(a.launcher), work, model, a.hip)
+    t.legacy_restorer = a.legacy_restorer
     # registry entries of an earlier run (test root only)
     for k, v in t.reg_keys().items():
         if (k.startswith("WrongGPU-") and v.get("InstallLocation", "").lower().startswith(work.lower())) or (k == "WrongGPU" and work.lower() in v.get("InstallLocation", "").lower()):
-            subprocess.run(["reg", "delete", t.uninstall + "\\" + k, "/f"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            safety_registry.delete(t.registry, t.uninstall + "\\" + k)
     if a.startup_only:  # the start of a run and the HIP check only
         rc = t.run("hipcheck")
         print("startup-only: run folder %s; hipcheck exit %d" % (work, rc))
@@ -3090,6 +3069,7 @@ def main():
     t0 = time.time()
     facts.self_checks(t)  # the suite's own guards (launcher_build_facts.py), before any launcher call
     test_basics(t)
+    test_launcher_safety(t, opti, a.synth_f)
     if a.only:  # development: only the tests named (after the basics)
         for name in a.only:
             fn = globals()["test_" + name]

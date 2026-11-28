@@ -208,11 +208,23 @@ using namespace wg;
 using namespace wg::app;
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
-    TestAccessStart(L"WrongGPU");  // (#243: a test build run by the tests leaves a line for every run)
     {   // release 0.6.0: the Ray Reconstruction helper (rrprep.h): this program copied under a game's program name, started by
         // the launcher with --rr-prepare <runtime> <passes>; nothing else of the launcher runs in it
         int hc = 0; LPWSTR* hv = CommandLineToArgvW(GetCommandLineW(), &hc);
-        if (hv && hc >= 2 && IEq(hv[1], L"--rr-prepare")) { const int code = RunRrPrepareHelper(hc, hv); LocalFree(hv); return code; }
+        if (hv && hc >= 2 && IEq(hv[1], L"--rr-prepare")) {
+#ifdef WRONGGPU_TESTING
+            if (hc < 5 || !StartsWithI(hv[4], L"--data=")) { LocalFree(hv); return EXIT_USAGE; }
+#endif
+            wstring why;
+            if (hc >= 5 && StartsWithI(hv[4], L"--data=") &&
+                (!SetDataOverride(wstring(hv[4]).substr(7), why, true) || !GamePathAllowed(hv[2]) || !GamePathAllowed(SelfPath()))) {
+                LocalFree(hv); return EXIT_REFUSED;
+            }
+            TestAccessStart(L"WrongGPU");
+            const int code = RunRrPrepareHelper(hc, hv);
+            LocalFree(hv);
+            return code;
+        }
         if (hv) LocalFree(hv);
     }
     // DLLs this exe loads late come from System32 only, never from the download folder.
@@ -222,20 +234,30 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     g.kit.hinst = hInst;
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     int argc = 0; LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    auto setData = [](const wstring& root, bool silent, bool specified = false) {
+        wstring why;
+        if (SetDataOverride(root, why, specified)) {
+            TestAccessStart(L"WrongGPU");
+            return true;
+        }
+        if (!silent) MessageBoxW(nullptr, why.c_str(), L"WrongGPU", MB_ICONERROR);
+        else WriteConsoleW(GetStdHandle(STD_ERROR_HANDLE), why.c_str(), static_cast<DWORD>(why.size()), nullptr, nullptr);
+        return false;
+    };
     // The launcher (build/launcher-design.md): no arguments opens its window, a verb runs the command line; the
     // installer's /switches below stay as aliases (scripts, run_installer_tests.py), and /WIZARD opens the old wizard.
-    if (argc < 2) { if (argv) LocalFree(argv); LauncherInit(L"", false, true); return RunLauncherWindow(); }
+    if (argc < 2) { if (argv) LocalFree(argv); if (!setData(L"", false)) return EXIT_USAGE; LauncherInit(L"", false, true); return RunLauncherWindow(); }
     // Apps & features' Uninstall: the window's own uninstall (it asks whether the games keep WrongGPU and shows how it went)
-    if (argc == 2 && IEq(argv[1], L"uninstall-launcher")) { LocalFree(argv); LauncherInit(L"", false, true); return RunLauncherWindow(true); }
+    if (argc == 2 && IEq(argv[1], L"uninstall-launcher")) { LocalFree(argv); if (!setData(L"", false)) return EXIT_USAGE; LauncherInit(L"", false, true); return RunLauncherWindow(true); }
     // Window start with sandbox options (--data=, --log=, --noscan) and no CLI verb
     if (argv[1][0] == L'-') {
         bool guiOpts = true;
         wstring dataArg, logArg;
-        bool noScanArg = false;
+        bool noScanArg = false, dataSpecified = false;
         for (int i = 1; i < argc && guiOpts; ++i) {
             const wstring s = argv[i], ls = Lower(s);
-            if (ls.rfind(L"--data=", 0) == 0) dataArg = s.substr(7);
-            else if (ls == L"--data" && i + 1 < argc) dataArg = argv[++i];
+            if (ls.rfind(L"--data=", 0) == 0) { dataArg = s.substr(7); dataSpecified = true; }
+            else if (ls == L"--data") { dataArg = i + 1 < argc ? argv[++i] : L""; dataSpecified = true; }
             else if (ls.rfind(L"--log=", 0) == 0) logArg = s.substr(6);
             else if (ls == L"--log" && i + 1 < argc) logArg = argv[++i];
             else if (ls == L"--noscan") noScanArg = true;
@@ -243,7 +265,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         }
         if (guiOpts) {
             LocalFree(argv);
-            gl.dataOverride = dataArg;
+            if (dataSpecified && dataArg.empty()) return EXIT_USAGE;
+            if (!setData(dataArg, false, dataSpecified)) return EXIT_USAGE;
+            if (!logArg.empty() && !GamePathAllowed(logArg)) return EXIT_REFUSED;
+            gl.dataOverride = DataOverride();
             if (noScanArg) { g.noScan = g.ctx.noScanAlways = true; g.ctx.noLibraryScan = true; }
             LauncherInit(logArg, false, true);
             return RunLauncherWindow();
@@ -254,8 +279,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         DWORD sz = 0;
         if (const void* d = ResourceData(960, sz)) { g.ctx.restorer = d; g.ctx.restorerSize = sz; }
     }
-    wstring dirArg, exeArg, hipProbe, optiArg;
-    bool bad = false;
+    wstring dirArg, exeArg, hipProbe, optiArg, dataArg;
+    bool bad = false, dataSpecified = false;
     for (int i = 1; i < argc; ++i) {
         wstring a = argv[i], la = Lower(a);
         if (la == L"/s" || la == L"/silent") g.silent = true;
@@ -286,12 +311,16 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
         else if (la.rfind(L"/model=", 0) == 0) g.userDll = a.substr(7);
         else if (la.rfind(L"/dlssdll=", 0) == 0) g.userDll = a.substr(9);
         else if (la.rfind(L"/out=", 0) == 0) g.outZip = a.substr(5);
+        else if (la.rfind(L"/data=", 0) == 0 || la.rfind(L"--data=", 0) == 0) { dataArg = a.substr(a[0] == L'/' ? 6 : 7); dataSpecified = true; }
         else if (la.rfind(L"/log=", 0) == 0) g.ctx.logFile = a.substr(5);
         else if (la.rfind(L"/shot=", 0) == 0) g.shotDir = a.substr(6);
         else if (la.rfind(L"/hipprobe=", 0) == 0) hipProbe = a.substr(10);
         else bad = true;
     }
     if (argv) LocalFree(argv);
+    if (!setData(dataArg, g.silent, dataSpecified)) return EXIT_USAGE;
+    for (const wstring* path : {&dirArg, &exeArg, &g.ctx.logFile, &g.userDll, &g.outZip, &g.shotDir, &hipProbe, &optiArg})
+        if (!path->empty() && !GamePathAllowed(*path)) return EXIT_REFUSED;
     if (g.ctx.logFile.empty()) g.ctx.logFile = DefaultLogPath();
     if (!optiArg.empty()) { g.ctx.opti = PrepareOptiScaler(g.ctx, optiArg); if (!g.ctx.opti.ok()) LogLine(g.ctx, L"OptiScaler: " + g.ctx.opti.error); }
     g.optiChoice = g.ctx.opti;
@@ -303,6 +332,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     wstring self = SelfPath();
     bool fromState = IEq(BaseName(self), L"uninstall.exe") && IEq(BaseName(Parent(self)), kStateDirName);
     if (fromState) { if (!g.collect) g.uninstall = true; if (dirArg.empty() && exeArg.empty()) dirArg = Parent(Parent(self)); }
+    if (!dirArg.empty() && !GamePathAllowed(dirArg)) return EXIT_REFUSED;
     g.sys.win = WindowsInfo();
     g.sys.gpu = DetectGpu();
     g.input = !exeArg.empty() ? exeArg : dirArg;

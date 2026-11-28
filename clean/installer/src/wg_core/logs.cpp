@@ -306,7 +306,7 @@ Bundle CollectLogs(Context& ctx, const wstring& dirIn, const wstring& outZip, co
     if (!ctx.logFile.empty()) take(ctx.logFile, L"install\\setup-latest.log");
     wstring gameSettingsStatus = L"unsupported game-settings location; use frame/settings observations";
     if (IEq(BaseName(exe), L"Cyberpunk2077.exe")) {
-        const wstring settings = Join(Parent(AppDataDir()), L"CD Projekt Red\\Cyberpunk 2077\\UserSettings.json");
+        const wstring settings = Join(DataOverride().empty() ? Parent(AppDataPath()) : AppDataPath(), L"CD Projekt Red\\Cyberpunk 2077\\UserSettings.json");
         const size_t before = files.size();
         take(settings, L"game-settings\\Cyberpunk-UserSettings.json");
         gameSettingsStatus = files.size() > before ? L"included" : L"not found or collection limit reached";
@@ -481,7 +481,7 @@ Bundle CollectLogs(Context& ctx, const wstring& dirIn, const wstring& outZip, co
 wstring DefaultBundlePath(const wstring& dir) {
     PWSTR desk = nullptr;
     wstring out;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Desktop, 0, nullptr, &desk)) && desk) out = desk;
+    if (DataOverride().empty() && SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Desktop, 0, nullptr, &desk)) && desk) out = desk;
     if (desk) CoTaskMemFree(desk);
     if (out.empty()) out = AppDataDir();
     Record m;

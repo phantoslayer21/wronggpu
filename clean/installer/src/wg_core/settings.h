@@ -8,6 +8,7 @@ namespace wg {
 
 struct StaleDefault { const wchar_t* upTo; const char* key; const char* old; const char* now; const wchar_t* why; };
 
+string SetFrontEndKey(const string& text, const string& section, const string& key, const string& value);
 string IniSet(const string& text, const string& section, const string& key, const string& value);
 bool IniGetFrontEnd(const string& text, const string& key, string* value, string* section);
 bool IniHasKey(const string& text, const string& section, const string& key, string* value = nullptr);

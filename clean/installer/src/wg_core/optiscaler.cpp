@@ -5,14 +5,29 @@
 
 #include "coexist.h"
 #include "optiedition.h"
+#include "optikeys.h"
 #include "pe.h"
+#include "settings.h"
 
 namespace wg {
 
+static wstring OptiScratch() {
+    if (!DataOverride().empty()) {
+        const wstring requested = EnvVar(L"TEMP");
+#ifdef WRONGGPU_TESTING
+        if (GamePathAllowed(requested)) return requested;
+#else
+        if (PathWithin(requested, DataOverride(), true)) return requested;
+#endif
+        return Join(DataOverride(), L"temp");
+    }
+    wchar_t tmp[MAX_PATH] = {};
+    GetTempPathW(MAX_PATH, tmp);
+    return tmp;
+}
 wstring OptiTempDir(Context& ctx) {
     if (!ctx.opti.tempDir.empty()) return ctx.opti.tempDir;
-    wchar_t tmp[MAX_PATH] = {}; GetTempPathW(MAX_PATH, tmp);
-    ctx.opti.tempDir = Join(tmp, L"wronggpu-optiscaler-" + std::to_wstring(GetCurrentProcessId()));
+    ctx.opti.tempDir = Join(OptiScratch(), L"wronggpu-optiscaler-" + std::to_wstring(GetCurrentProcessId()));
     EnsureDir(ctx.opti.tempDir);
     return ctx.opti.tempDir;
 }
@@ -35,12 +50,15 @@ OptiPackage PrepareOptiScaler(Context& ctx, const wstring& chosen) {
     if (!ctx.opti.tempDir.empty()) { RemoveTree(ctx.opti.tempDir); }
     OptiPackage p;
     p.source = FullPath(chosen);
+    if (!GamePathAllowed(p.source)) {
+        p.error = L"This WrongGPU launcher can only open OptiScaler inside its --data folder.";
+        return p;
+    }
     wstring root;
     if (IsDir(p.source)) root = p.source;
     else if (IsFile(p.source) && IEq(BaseName(p.source), L"OptiScaler.dll")) root = Parent(p.source);
     else if (IsFile(p.source) && (EndsWithI(p.source, L".7z") || EndsWithI(p.source, L".zip"))) {
-        wchar_t tmp[MAX_PATH] = {}; GetTempPathW(MAX_PATH, tmp);
-        p.tempDir = Join(tmp, L"wronggpu-optiscaler-" + std::to_wstring(GetCurrentProcessId()));
+        p.tempDir = Join(OptiScratch(), L"wronggpu-optiscaler-" + std::to_wstring(GetCurrentProcessId()));
         RemoveTree(p.tempDir); EnsureDir(Join(p.tempDir, L"package"));
         wchar_t sys[MAX_PATH] = {}; GetSystemDirectoryW(sys, MAX_PATH);
         const wstring tar = Join(sys, L"tar.exe");
@@ -55,14 +73,24 @@ OptiPackage PrepareOptiScaler(Context& ctx, const wstring& chosen) {
     }
     if (!IsFile(Join(root, L"OptiScaler.dll")))
         for (auto& d : ListDirs(root)) if (IsFile(Join(d, L"OptiScaler.dll"))) { root = d; break; }
-    if (!IsFile(Join(root, L"OptiScaler.dll")) || !IsFile(Join(root, L"OptiScaler.ini"))) {
+    const wstring dll = Join(root, L"OptiScaler.dll"), config = Join(root, L"OptiScaler.ini");
+    if (!OptiPackageMemberAllowed(dll, root) || !OptiPackageMemberAllowed(config, root)) {
+        p.error = L"OptiScaler's package files resolve outside the launcher fixture.";
+        return p;
+    }
+    if (!IsFile(dll) || !IsFile(config)) {
         p.error = L"No OptiScaler.dll and OptiScaler.ini in " + BaseName(p.source) + L" - is this OptiScaler's release?";
         return p;
     }
     string ini;
-    ReadAll(Join(root, L"OptiScaler.ini"), ini);
-    if (ini.find("FfxDx12SRPath") == string::npos) {
-        p.error = L"This OptiScaler is too old for WrongGPU (no FfxDx12SRPath setting) - use " + wstring(kOptiTested) + L" or newer";
+    try {
+        if (!ReadAll(config, ini) || !IniHasKey(ini, "Libraries", "FfxDx12SRPath")) {
+            p.error = L"This OptiScaler is too old for WrongGPU (no FfxDx12SRPath setting) - use " + wstring(kOptiTested) + L" or newer";
+            return p;
+        }
+        IniEntries(ini);
+    } catch (const SetupError& error) {
+        p.error = error.msg;
         return p;
     }
     p.dir = root;
@@ -72,9 +100,17 @@ OptiPackage PrepareOptiScaler(Context& ctx, const wstring& chosen) {
     while (!stack.empty()) {
         const wstring rel = stack.back(); stack.pop_back();
         const wstring abs = rel.empty() ? root : Join(root, rel);
+        if (!OptiPackageMemberAllowed(abs, root)) {
+            p.error = L"OptiScaler package directory is outside the launcher fixture: " + abs;
+            return p;
+        }
         for (auto& f : ListFiles(abs, L"*")) {
             const wstring n = BaseName(f);
             if (rel.empty() && (IEq(n, L"setup_windows.bat") || IEq(n, L"setup_linux.sh") || n.rfind(L"!!", 0) == 0)) continue;
+            if (!OptiPackageMemberAllowed(f, root)) {
+                p.error = L"OptiScaler package file is outside the launcher fixture: " + f;
+                return p;
+            }
             p.files.push_back(rel.empty() ? n : Join(rel, n));
         }
         for (auto& d : ListDirs(abs)) stack.push_back(rel.empty() ? BaseName(d) : Join(rel, BaseName(d)));

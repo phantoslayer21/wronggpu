@@ -177,7 +177,8 @@ std::vector<wstring> HipCandidates() {
     // 0.6.1: the development override only in a WRONGGPU_TESTING build; a release build never reads it (a developer's
     // mock HIP library set at install time was recorded in hip-runtime.txt)
     const wstring env = EnvVar(L"WRONGGPU_HIP_RUNTIME");
-    if (!env.empty()) c.push_back(env);
+    if (!env.empty() && GamePathAllowed(env)) c.push_back(env);
+    if (!DataOverride().empty()) return c;
 #endif
     wchar_t sys[MAX_PATH];
     if (GetSystemDirectoryW(sys, MAX_PATH)) c.push_back(Join(sys, kHipDll));
@@ -307,11 +308,13 @@ HipInfo CheckHip(Context& ctx) {
     envBlock.push_back(0);
     if (envBlock.size() == 1) envBlock.push_back(0);
     for (auto& dll : cands) {
+        if (!GamePathAllowed(dll)) continue;
         SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
         HANDLE rd = nullptr, wr = nullptr;
         if (!CreatePipe(&rd, &wr, &sa, 0)) continue;
         SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
-        wstring cmd = L"\"" + SelfPath() + L"\" \"/HIPPROBE=" + dll + L"\" \"/LOG=" + ctx.logFile + L"\"";
+        wstring cmd = L"\"" + SelfPath() + L"\" /S \"/HIPPROBE=" + dll + L"\" \"/LOG=" + ctx.logFile + L"\"" +
+                      (DataOverride().empty() ? L"" : L" \"/DATA=" + DataOverride() + L"\"");
         STARTUPINFOW si{}; si.cb = sizeof(si); si.dwFlags = STARTF_USESTDHANDLES; si.hStdOutput = wr; si.hStdError = wr; si.hStdInput = nullptr;
         PROCESS_INFORMATION pi{};
         std::vector<wchar_t> buf(cmd.begin(), cmd.end()); buf.push_back(0);

@@ -97,6 +97,7 @@ struct GameEntry {
     wstring previous;             // its version
     bool wgOff = false;           // its profile turns WrongGPU off (wronggpu=off, AMD FSR); also while it runs (status Running)
     std::vector<wstring> problems;  // VerifyInstall, missing wronggpu.ini, ...
+    wstring optiIniWarning;
     // rc6 L2: installed next to a launcher stub or a root starter (an earlier build's choice, MisplacedFor): the game's own exe.
     // A problem then (Needs repair); Repair, Update or Install moves the install there (uninstalled here, installed at the game)
     wstring realExe;
@@ -188,6 +189,7 @@ struct OpRequest {
     std::vector<std::pair<wstring, wstring>> movePluginsList, moveModsList;
     bool otherSetupOk = false;     // 0.6.1: Clean up / Adopt of WrongGPU files another mod's setup uses, confirmed (--confirm-other-setup)
     bool hasProfile = false;       // apply: this profile (else the game's profile.ini); install: the profile a new install starts with
+    bool rrModeChosen = false;     // apply: the player supplied rr_mode explicitly
     bool modelChosen = false;      // apply: the player applied the profile's model (the launcher's Apply, set <game> model=...): recorded
     Profile profile;
     // apply, the OptiScaler tab: edits of editable keys ("Section.Key", value); reset: the editable keys back to what the
@@ -222,7 +224,7 @@ bool NeedsElevation(const wstring& dir);
 // modelChosen: the player explicitly applied the profile's model (`set <game> model=<m>`): the game's model choice record
 // gets the launcher's choice with the next seq even when the model is the same (clean/fsr/src/model_choice_record.h).
 void ApplyProfile(Context& ctx, const wstring& dir, const Profile& p, std::vector<wstring>& notes, std::vector<wstring>* warnings = nullptr,
-                  bool modelChosen = false);
+                  bool modelChosen = false, bool installing = false, bool rrModeChosen = false);
 // The launcher's model choice into the game's model choice record (wronggpu-setup\model-choice.ini), with the next seq,
 // source=launcher. Call it holding the record's lock (wgchoice::Lock). false: not written (said in the notes and warnings).
 bool WriteLauncherModelChoice(Context& ctx, const wstring& dir, char model, std::vector<wstring>& notes, std::vector<wstring>* warnings);
@@ -314,6 +316,7 @@ using GameOps = std::function<std::vector<OpResult>(const std::vector<OpRequest>
 // A managed game whose record cannot be read is stale (its folder deleted by hand) and leaves the list, unless its drive is
 // not reachable (a USB drive unplugged, a network share offline): then it is left as it is, stays on the list, and the
 // shared data it reads stays too; its folder is added to *unreachable.
+bool OwnsLauncherRegistration(bool custom, const wstring& self, const wstring& registered);
 bool SelfUninstall(Context& ctx, const LauncherPaths& p, bool removeGames, const wstring& startMenu, Ui& ui, wstring* why, const GameOps& gameOps = {},
                    std::vector<wstring>* unreachable = nullptr);
 // A game on this PC has WrongGPU (the launcher's list or its own Apps & features entry, with its record): the launcher's
@@ -330,7 +333,8 @@ LauncherUninstallLook LookBeforeLauncherUninstall(Context& ctx);
 // RR data, the notes and lists the games' uninstallers read) goes. Refused while a game has WrongGPU (it reads the model data
 // when it runs; its last uninstall removes the data once no launcher uses it), and while the launcher is installed for this
 // user (its own uninstall removes it). All or nothing: the folder is moved aside first, and a file in use there stops it with
-// nothing removed. Never throws. look: what it finds (there: the folder is there; anyGame: as LookBeforeLauncherUninstall;
+// nothing removed. The lookup can throw if an explicit data root has an unsafe managed-games list.
+// look: what it finds (there: the folder is there; anyGame: as LookBeforeLauncherUninstall;
 // installed: the installed launcher, or its settings, use the folder).
 struct SharedDataLook { bool there = false, anyGame = false, installed = false, modelData = false, rrData = false; };
 SharedDataLook LookAtSharedData(Context& ctx);

@@ -303,6 +303,7 @@ OptiView ReadOpti(const GameEntry& e) {
     o.version = ver == L"unknown" ? wstring() : ver;
     o.headline = L"OptiScaler " + (o.version.empty() ? wstring() : o.version + L" ") + L"as " + (m.proxy.empty() ? wstring(L"its proxy DLL") : m.proxy) +
                  (m.proxyReason.empty() ? wstring() : L" (" + m.proxyReason + L")");
+    if (const wstring warning = OptiReadWarning(ini); !warning.empty()) o.headline += L" " + warning;
     for (auto& r : OptiTabRows(ini)) (r.locked ? o.locked : o.editable).push_back(r);
     for (auto& x : JournalOutside(ini, m.inikeys, L"OptiScaler.ini")) if (!IsOptiLocked(x.section, x.key)) o.outside.push_back(x);
     return o;
@@ -1005,6 +1006,7 @@ void StartNextQueued() {
 void OnApply() {
     if (PageWritesWait()) return;  // one rule for every write of the page (its Apply says why)
     OpRequest r = GuiApplyRequest(v.cur.dir, v.edit);  // the model shown is the player's model choice, even unchanged
+    r.rrModeChosen = v.edit.get("rr_mode") != v.saved.get("rr_mode");
     for (size_t i = 0; i < v.opti.editable.size() && i < v.optiValues.size(); ++i)
         if (v.optiValues[i] != v.opti.editable[i].value) r.optiEdits.push_back({v.opti.editable[i].section + "." + v.opti.editable[i].key, v.optiValues[i]});
     for (auto& e : r.optiEdits) {  // the values typed are checked before anything is written
@@ -3365,6 +3367,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
+static wstring LauncherWindowClass() {
+    const wstring base = L"WrongGPULauncher";
+    if (DataOverride().empty()) return base;
+    const string scope = ToUtf8(Lower(DataOverride()));
+    return base + L"." + Sha256Bytes(scope.data(), scope.size());
+}
+
 HWND CreateLauncherWindow(bool live) {
     v.live = live;
     v.fgBuild = FgPayloadAvailable(g.ctx);  // this build has frame generation's files (fg.h)
@@ -3375,7 +3384,8 @@ HWND CreateLauncherWindow(bool live) {
     gfx.Init();
     WNDCLASSEXW wc{}; wc.cbSize = sizeof(wc);
     wc.style = CS_DBLCLKS;
-    wc.lpfnWndProc = WndProc; wc.hInstance = g.hinst; wc.lpszClassName = L"WrongGPULauncher";
+    const wstring className = LauncherWindowClass();
+    wc.lpfnWndProc = WndProc; wc.hInstance = g.hinst; wc.lpszClassName = className.c_str();
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW); wc.hIcon = LoadIconW(g.hinst, MAKEINTRESOURCEW(1)); wc.hIconSm = wc.hIcon;
     RegisterClassExW(&wc);
     if (!live) {  // ui-dump / ui-render: a message-only window (never visible) receives the workers' results
@@ -3448,7 +3458,7 @@ int RunLauncherWindow(bool uninstall) {
     wstring installedExe, have;
     bool offerReplace = false, otherInstalled = false;
     LauncherStartDecision start;
-    if (!uninstall && LauncherInstalled(&installedExe) && !gl.paths.installedCopy && !gl.paths.portable && !IEq(FullPath(installedExe), FullPath(SelfPath()))) {
+    if (!uninstall && !gl.paths.custom && LauncherInstalled(&installedExe) && !gl.paths.installedCopy && !gl.paths.portable && !IEq(FullPath(installedExe), FullPath(SelfPath()))) {
         have = RegString(UninstallHive(), (UninstallRoot() + kLauncherEntry).c_str(), L"DisplayVersion");
         // rc5: the build decides at the same version, never the version string alone (wg_core DecideLauncherStart)
         start = DecideLauncherStart(SelfPath(), g.ctx.data->version, installedExe, have);
@@ -3461,15 +3471,24 @@ int RunLauncherWindow(bool uninstall) {
     // brings the open window forward, and from Apps & features asks the uninstall question there. Only a newer download
     // that offers to replace the installed launcher opens beside it, for that question only: whatever the answer, it hands
     // over to the installed copy and closes (HandOverToInstalled; the open one is asked to close once it is replaced).
-    HANDLE one = CreateMutexW(nullptr, FALSE, L"Local\\WrongGPU.Launcher.Window");  // held until this program ends
+    const wstring className = LauncherWindowClass();
+    const wstring lockName = gl.paths.custom ? L"Local\\" + className : L"Local\\WrongGPU.Launcher.Window";
+    HANDLE one = CreateMutexW(nullptr, FALSE, lockName.c_str());  // held until this program ends
+    const bool alreadyOpen = one && GetLastError() == ERROR_ALREADY_EXISTS;
     windowLock = &one;
-    if (one && GetLastError() == ERROR_ALREADY_EXISTS && !offerReplace)
-        if (HWND other = FindWindowW(L"WrongGPULauncher", nullptr)) {
+    if (alreadyOpen && !offerReplace) {
+        if (HWND other = FindWindowW(className.c_str(), nullptr)) {
+            if (uninstall && gl.paths.custom && !LauncherWindowRuns(other, SelfPath())) {
+                LogLine(g.ctx, L"Close the other launcher using this data folder, then try uninstall again.");
+                return EXIT_REFUSED;
+            }
             if (IsIconic(other)) ShowWindow(other, SW_RESTORE);
             SetForegroundWindow(other);
             if (uninstall) PostMessageW(other, WM_APP_UNINSTALL, 0, 0);
             return EXIT_OK;
         }
+        if (gl.paths.custom) return EXIT_REFUSED;  // the window for this data folder is still starting
+    }
     // the same or an older release next to the installed launcher: the installed copy opens instead (a second copy that is
     // not installed would work on the same data, and an older one would put its older files into games)
     if (otherInstalled && !offerReplace) {
@@ -3482,7 +3501,7 @@ int RunLauncherWindow(bool uninstall) {
         LogLine(g.ctx, L"start: the installed copy " + installedExe + L" didn't start; this copy runs");
         one = CreateMutexW(nullptr, FALSE, L"Local\\WrongGPU.Launcher.Window");  // the one-window lock back
     }
-    if (gl.paths.installedCopy) RefreshLauncherEntry(g.ctx, SelfPath());  // its entry up to date (version, size, the uninstall command)
+    if (gl.paths.installedCopy && !gl.paths.custom) RefreshLauncherEntry(g.ctx, SelfPath());  // its entry up to date (version, size, the uninstall command)
     // a newer download that only asks "Update WrongGPU to X?" reads and writes nothing of the installed copy's data meanwhile
     // (no conversion's model put back under an open window's conversion, no scan, health check or saved list and place)
     replaceAsking = offerReplace;

@@ -689,7 +689,7 @@ void PaintSettings(Gfx& gx, const Rc& area) {
     const wstring dataDir = v.fixture ? wstring(L"M:\\Games\\WrongGPU\\WrongGPU-data") : gl.paths.dataDir;
     wstring dataAt;
     {
-        const wstring lad = EnvVar(L"LOCALAPPDATA");
+        const wstring lad = DataOverride().empty() ? EnvVar(L"LOCALAPPDATA") : DataOverride();
         if (portable && (v.fixture || IEq(Parent(dataDir), Parent(gl.paths.exe)))) dataAt = L"next to it, in " + BaseName(dataDir);
         else if (!v.fixture && !lad.empty() && (IEq(dataDir, lad) || StartsWithI(dataDir, lad + L"\\"))) dataAt = L"in your user folder";
         else {
