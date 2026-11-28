@@ -1414,9 +1414,17 @@ struct FgAsiSessionHost::Impl {
                            " status_queued=" + std::to_string(in.status_queued) +
                            " status_skipped=" + std::to_string(in.status_skipped) +
                            " status_canceled=" + std::to_string(in.status_canceled) +
+                           " status_cfid_nz=" + std::to_string(in.status_frame_nonzero) +
+                           " status_first_cfid=" + std::to_string(in.status_first_cfid) +
+                           " status_tgts_max=" + std::to_string(in.status_target_count_max) +
+                           " status_tct_nz=" + std::to_string(in.status_target_completed_nonzero) +
+                           " retire_fence=" + std::to_string(in.retiring_fence_value) +
                            " watchdog_retired=" + std::to_string(in.watchdog_retired) +
                            " visible_sub=" + std::to_string(in.visible_submitted) +
+                           " primed=" + (in.primed ? "yes" : "no") +
                            " window_visible=" + (in.window_visible ? "yes" : "no") +
+                           " window_cloaked=" + (in.window_cloaked ? "yes" : "no") +
+                           " hwnd_root=" + (in.hwnd_is_root ? "yes" : "no") +
                            " force_vsync=" + (in.force_vsync_interrupt ? "yes" : "no");
             }
             uint64_t ret = 0, cw = 0, timeouts = 0, qw = 0;
@@ -2017,6 +2025,25 @@ struct FgAsiSessionHost::Impl {
             startup_present_base = st_presents.load();
             startup_admission_until = wgfg::FgInterruptNow() + (hwfq ? 15000000 : 10000000);
         }
+        if (hwfq && inner) {
+            // The HWFQ presenter already primed and committed its topmost composition visual. Present the
+            // underlying DXGI swap chain once with Present(0, 0) so DWM re-evaluates the now-occluded chain's
+            // independent-flip plane ownership and hands scanout back to composition.
+            if (chain_flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT) {
+                HANDLE w = inner->GetFrameLatencyWaitableObject();
+                if (w) {
+                    WaitForSingleObject(w, 50);
+                    CloseHandle(w);
+                }
+            }
+            const bool copied = CopyFacadeToChain();
+            const HRESULT khr = inner->Present(0, 0);
+            char kbuf[160];
+            std::snprintf(kbuf, sizeof kbuf,
+                          "fg host: hwfq startup chain kick Present(0,0) (copied=%s, hr=0x%08lx)",
+                          copied ? "yes" : "no", static_cast<unsigned long>(khr));
+            Log(kbuf);
+        }
         tearing_schedule_interval = dxgi ? base.min_interval : 0;
         st_presenter.store(static_cast<uint32_t>(chosen));
         Log(std::string("fg host: session created, ") + std::to_string(sd.output_width) + " x " +
@@ -2350,36 +2377,55 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
             snap.displayed = ps.displayed_real + ps.displayed_generated;
             snap.visible_submitted = ci.visible_submitted;
             snap.resolved_unseen = ps.display_skipped_real + ps.display_skipped_generated;
+            snap.status_queued = ci.status_queued;
             snap.watchdog_retired = ci.watchdog_retired;
             snap.visible_elapsed_ticks =
                 ci.first_visible_submit > 0 && t_arrival > ci.first_visible_submit
                     ? (t_arrival - ci.first_visible_submit)
                     : 0;
+            const uint32_t hz = m.st_refresh_hz.load();
+            snap.refresh_period = hz > 0 ? static_cast<wgfg::FgTicks>(10000000ull / hz) : ci.grid.period;
             snap.admission_timed_out = timed_out;
             snap.startup_grace = startup_grace;
             const HwfqFallbackReason fr = CheckHwfqZeroDisplayFallback(snap);
             if (fr == HwfqFallbackReason::None) return false;
             const bool tear = m.tearing_supported && (m.chain_flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0;
-            char fbuf[384];
+            const char* reason_text = fr == HwfqFallbackReason::QueuedZeroDisplay
+                                          ? "queued zero-display"
+                                          : (fr == HwfqFallbackReason::AdmissionTimeoutZeroDisplay
+                                                 ? "admission timeout"
+                                                 : "sustained zero-display");
+            char fbuf[512];
             std::snprintf(fbuf, sizeof fbuf,
                           "fg host: hwfq composition displayed 0 presents (%s; real_sub=%llu visible_sub=%llu "
-                          "skipped=%llu indep_flip=%llu comp=%llu watchdog=%llu elapsed_ms=%lld); falling back to %s "
-                          "for this run without disabling frame generation",
-                          fr == HwfqFallbackReason::AdmissionTimeoutZeroDisplay ? "admission timeout"
-                                                                                : "sustained zero-display",
+                          "queued=%llu skipped=%llu cfid_nz=%llu first_cfid=%llu tgts_max=%u tct_nz=%llu "
+                          "retire_fence=%llu indep_flip=%llu comp=%llu watchdog=%llu primed=%s cloaked=%s "
+                          "hwnd_root=%s elapsed_ms=%lld); falling back to %s for this run without disabling "
+                          "frame generation",
+                          reason_text,
                           static_cast<unsigned long long>(ps.real_submitted),
                           static_cast<unsigned long long>(ci.visible_submitted),
+                          static_cast<unsigned long long>(ci.status_queued),
                           static_cast<unsigned long long>(snap.resolved_unseen),
+                          static_cast<unsigned long long>(ci.status_frame_nonzero),
+                          static_cast<unsigned long long>(ci.status_first_cfid),
+                          static_cast<unsigned>(ci.status_target_count_max),
+                          static_cast<unsigned long long>(ci.status_target_completed_nonzero),
+                          static_cast<unsigned long long>(ci.retiring_fence_value),
                           static_cast<unsigned long long>(ci.indep_flip_frames),
                           static_cast<unsigned long long>(ci.comp_frames),
                           static_cast<unsigned long long>(ci.watchdog_retired),
+                          ci.primed ? "yes" : "no", ci.window_cloaked ? "yes" : "no",
+                          ci.hwnd_is_root ? "yes" : "no",
                           static_cast<long long>(snap.visible_elapsed_ticks / 10000),
                           tear ? "dxgi_tearing" : "dxgi_vsync");
             m.Log(fbuf);
             m.hwfq_fallback_to_dxgi = true;
-            m.DestroySession(fr == HwfqFallbackReason::AdmissionTimeoutZeroDisplay
-                                 ? "hwfq admission-timeout fallback"
-                                 : "hwfq zero-display fallback");
+            m.DestroySession(fr == HwfqFallbackReason::QueuedZeroDisplay
+                                 ? "hwfq queued-zero-display fallback"
+                                 : (fr == HwfqFallbackReason::AdmissionTimeoutZeroDisplay
+                                        ? "hwfq admission-timeout fallback"
+                                        : "hwfq zero-display fallback"));
             return true;
         };
         check_hwfq_fallback(false);
@@ -2878,14 +2924,21 @@ void FgAsiSessionHost::Attached(IDXGISwapChain4* inner, IUnknown* queue) {
         m.core->set_device(dev.Get(), q.Get());
         m.core->set_color_space(m.color_space);
     }
-    char line[192];
+    char hwnd_class[64] = "none";
+    bool hwnd_root = false;
+    if (m.hwnd && ::IsWindow(m.hwnd)) {
+        hwnd_root = ::GetAncestor(m.hwnd, GA_ROOT) == m.hwnd;
+        if (::GetClassNameA(m.hwnd, hwnd_class, static_cast<int>(sizeof(hwnd_class))) == 0)
+            std::snprintf(hwnd_class, sizeof(hwnd_class), "unknown");
+    }
+    char line[320];
     std::snprintf(line, sizeof(line),
                   "fg host: chain attached, %u x %u, format %u, %u buffers (facade), presents on %s, "
-                  "game_waitable=%s, facade_latency_limit=%u, real_chain_latency=%u",
+                  "game_waitable=%s, facade_latency_limit=%u, real_chain_latency=%u, hwnd_root=%s, hwnd_class=%s",
                   m.width, m.height, static_cast<unsigned>(m.chain_format), static_cast<unsigned>(m.facade.size()),
                   m.chain_queue.Get() != m.queue.Get() ? "the present queue" : "the game's queue",
                   m.game_requested_waitable ? "yes" : "no", m.st_latency_limit.load(),
-                  m.facade.size() >= 2 ? 2u : 1u);
+                  m.facade.size() >= 2 ? 2u : 1u, hwnd_root ? "yes" : "no", hwnd_class);
     m.Log(line);
 }
 

@@ -184,14 +184,17 @@ enum class HwfqFallbackReason : uint8_t {
     None = 0,
     ZeroDisplaySustained = 1,
     AdmissionTimeoutZeroDisplay = 2,
+    QueuedZeroDisplay = 3,
 };
 
 struct HwfqHealthSnapshot {
     uint64_t displayed = 0;            // displayed_real + displayed_generated
     uint64_t visible_submitted = 0;    // presents submitted while the bound window was visible
     uint64_t resolved_unseen = 0;      // display_skipped_real + display_skipped_generated
-    uint64_t watchdog_retired = 0;     // queued presents retired by the 250 ms occlusion watchdog
+    uint64_t status_queued = 0;        // PresentStatus_Queued reports from DWM
+    uint64_t watchdog_retired = 0;     // queued presents retired by the occlusion / never-displayed watchdog
     wgfg::FgTicks visible_elapsed_ticks = 0;  // ticks since the first visible-window present submission
+    wgfg::FgTicks refresh_period = 0;  // display refresh period in 100 ns ticks (0 if unknown)
     bool admission_timed_out = false;
     bool startup_grace = false;
 };
@@ -200,11 +203,21 @@ constexpr uint64_t kHwfqFallbackMinVisibleSubmits = 30;
 constexpr uint64_t kHwfqFallbackMinUnseen = 15;
 constexpr uint64_t kHwfqFallbackMinWatchdog = 2;
 constexpr uint64_t kHwfqFallbackTimeoutMinVisibleSubmits = 4;
-constexpr wgfg::FgTicks kHwfqFallbackMinElapsedTicks = 7500000;  // 750 ms
+constexpr uint64_t kHwfqFallbackMinQueuedForFast = 4;
+constexpr wgfg::FgTicks kHwfqFallbackMinElapsedTicks = 7500000;       // 750 ms
+constexpr wgfg::FgTicks kHwfqFallbackFastMinElapsedTicks = 300000;    // 30 ms floor (~11 refreshes at 360 Hz)
 
 constexpr HwfqFallbackReason CheckHwfqZeroDisplayFallback(const HwfqHealthSnapshot& h) {
     if (h.displayed > 0) return HwfqFallbackReason::None;
-    if (h.admission_timed_out && !h.startup_grace && h.visible_submitted >= kHwfqFallbackTimeoutMinVisibleSubmits)
+    const wgfg::FgTicks three_refreshes = (h.refresh_period > 0 ? h.refresh_period : 166667) * 3;
+    const wgfg::FgTicks fast_elapsed =
+        three_refreshes > kHwfqFallbackFastMinElapsedTicks ? three_refreshes : kHwfqFallbackFastMinElapsedTicks;
+    if (h.status_queued >= kHwfqFallbackMinQueuedForFast &&
+        h.visible_submitted >= kHwfqFallbackTimeoutMinVisibleSubmits &&
+        h.visible_elapsed_ticks >= fast_elapsed)
+        return HwfqFallbackReason::QueuedZeroDisplay;
+    if (h.admission_timed_out && h.visible_submitted >= kHwfqFallbackTimeoutMinVisibleSubmits &&
+        (!h.startup_grace || h.status_queued >= kHwfqFallbackMinQueuedForFast))
         return HwfqFallbackReason::AdmissionTimeoutZeroDisplay;
     if (h.visible_submitted >= kHwfqFallbackMinVisibleSubmits &&
         h.visible_elapsed_ticks >= kHwfqFallbackMinElapsedTicks &&

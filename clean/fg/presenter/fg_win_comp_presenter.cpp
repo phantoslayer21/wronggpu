@@ -2,6 +2,8 @@
 // Windows composition presenter (presentation manager + hardware flip queue): see fg_win_comp_presenter.h.
 #include "fg_win_comp_presenter.h"
 
+#include <dwmapi.h>
+
 #include <algorithm>
 #include <cstddef>
 #include <utility>
@@ -39,6 +41,22 @@ public:
     ~Win32CompBackend() override {
         DetachVisual();
         DestroyBuffers();
+        // Release all DirectComposition, presentation and D3D COM objects in dependency order BEFORE closing
+        // underlying kernel handles (surface_handle_, event handles, and any retired buffer availability handles).
+        dcomp_surface_.Reset();
+        visual_.Reset();
+        target_.Reset();
+        dcomp_.Reset();
+        surface_.Reset();
+        prime_buffer_.Reset();
+        prime_texture_.Reset();
+        retiring_fence_.Reset();
+        manager_.Reset();
+        factory_.Reset();
+        fences11_.clear();
+        context11_.Reset();
+        device11_.Reset();
+        DrainRetiredHandles();
         if (stats_event_) CloseHandle(stats_event_);
         if (lost_event_) CloseHandle(lost_event_);
         if (fence_event_) CloseHandle(fence_event_);
@@ -91,6 +109,7 @@ public:
 
         hr = factory_->CreatePresentationManager(&manager_);
         if (FAILED(hr)) return FgWinFail(FgStatus::Unsupported, FgWinRefusal::NoPresentationManager, hr);
+        (void)manager_->GetPresentRetiringFence(IID_PPV_ARGS(&retiring_fence_));
 
         FgWinResult r = CreateBuffers(slot_count, desc_.width, desc_.height, &info_);
         if (!r.Ok()) return r;
@@ -105,7 +124,46 @@ public:
             FAILED(hr = SetSourceRect(desc_.width, desc_.height)))
             return FgWinFail(FgStatus::Refused, FgWinRefusal::CompositionTarget, hr);
 
+        info_.hwnd_is_root = !desc_.bind_window || (desc_.hwnd && ::GetAncestor(desc_.hwnd, GA_ROOT) == desc_.hwnd);
+        info_.window_cloaked = IsWindowCloaked();
+
         if (desc_.bind_window) {
+            // Prime the presentation surface with a dedicated opaque displayable buffer BEFORE committing the
+            // DirectComposition visual so DWM's first view of the topmost visual is opaque and full-window (not empty).
+            D3D11_TEXTURE2D_DESC ptd = {};
+            ptd.Width = desc_.width;
+            ptd.Height = desc_.height;
+            ptd.MipLevels = 1;
+            ptd.ArraySize = 1;
+            ptd.Format = desc_.format;
+            ptd.SampleDesc.Count = 1;
+            ptd.Usage = D3D11_USAGE_DEFAULT;
+            ptd.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+            ptd.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE |
+                            D3D11_RESOURCE_MISC_SHARED_DISPLAYABLE;
+            if (SUCCEEDED(device11_->CreateTexture2D(&ptd, nullptr, &prime_texture_)) && prime_texture_) {
+                ComPtr<ID3D11RenderTargetView> prtv;
+                if (SUCCEEDED(device11_->CreateRenderTargetView(prime_texture_.Get(), nullptr, &prtv)) && prtv) {
+                    const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+                    context11_->ClearRenderTargetView(prtv.Get(), black);
+                    context11_->Flush();
+                }
+                if (SUCCEEDED(manager_->AddBufferFromResource(prime_texture_.Get(), &prime_buffer_)) && prime_buffer_) {
+                    const UINT64 ppid = manager_->GetNextPresentId();
+                    if (SUCCEEDED(surface_->SetBuffer(prime_buffer_.Get())) &&
+                        SUCCEEDED(manager_->SetTargetTime(SystemInterruptTime{0})) &&
+                        SUCCEEDED(manager_->Present())) {
+                        prime_present_id_ = ppid;
+                        info_.primed = true;
+                    } else {
+                        prime_buffer_.Reset();
+                        prime_texture_.Reset();
+                    }
+                } else {
+                    prime_texture_.Reset();
+                }
+            }
+
             ComPtr<IDXGIDevice> dxgi_dev;
             device11_.As(&dxgi_dev);
             if (FAILED(hr = FgDCompCreateDevice3(dxgi_dev.Get(), IID_PPV_ARGS(&dcomp_))) ||
@@ -116,7 +174,7 @@ public:
                 FAILED(hr = target_->SetRoot(visual_.Get())) ||
                 FAILED(hr = dcomp_->Commit()))
                 return FgWinFail(FgStatus::Refused, FgWinRefusal::CompositionTarget, hr);
-            // Wait for DWM to apply the visual tree before the first Present is issued.
+            // Wait for DWM to apply the visual tree before the first session Present is issued.
             dcomp_->WaitForCommitCompletion();
         }
 
@@ -150,6 +208,44 @@ public:
             return false;
         RECT cr = {};
         return ::GetClientRect(desc_.hwnd, &cr) != FALSE && cr.right > cr.left && cr.bottom > cr.top;
+    }
+
+    bool IsWindowCloaked() const override {
+        if (!desc_.bind_window || !desc_.hwnd || !::IsWindow(desc_.hwnd)) return false;
+        using DwmGetAttrFn = HRESULT(WINAPI*)(HWND, DWORD, PVOID, DWORD);
+        static const DwmGetAttrFn dwm_get_attr = []() -> DwmGetAttrFn {
+            const HMODULE m = ::LoadLibraryExW(L"dwmapi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+            return m ? reinterpret_cast<DwmGetAttrFn>(
+                           reinterpret_cast<void*>(::GetProcAddress(m, "DwmGetWindowAttribute")))
+                     : nullptr;
+        }();
+        if (!dwm_get_attr) return false;
+        DWORD cloaked = 0;
+        return SUCCEEDED(dwm_get_attr(desc_.hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked != 0;
+    }
+
+    std::uint64_t RetiringFenceValue() const override {
+        return retiring_fence_ ? static_cast<std::uint64_t>(retiring_fence_->GetCompletedValue()) : 0u;
+    }
+
+    std::uint64_t PrimePresentId() const override { return prime_present_id_; }
+
+    bool ProbeCompFrame(std::uint64_t cfid, std::uint32_t* target_count,
+                        std::uint64_t* completed_time) const override {
+        if (cfid == 0) return false;
+        COMPOSITION_FRAME_STATS fst = {};
+        COMPOSITION_TARGET_ID targets[4] = {};
+        UINT count = 0;
+        if (FAILED(FgDCompGetStatistics(cfid, &fst, 4, targets, &count))) return false;
+        if (target_count) *target_count = count;
+        if (completed_time) *completed_time = 0;
+        if (count > 0) {
+            COMPOSITION_TARGET_STATS ts = {};
+            if (SUCCEEDED(FgDCompGetTargetStatistics(cfid, &targets[0], &ts)) && completed_time) {
+                *completed_time = ts.completedStats.time;
+            }
+        }
+        return true;
     }
 
     const IFgFenceSource* FenceSource() const override { return &fences12_; }
@@ -245,11 +341,23 @@ public:
     }
 
     void DestroyBuffers() override {
+        // Defer closing b.available until the worker thread exits WaitForMultipleObjects (DrainRetiredHandles)
+        // so Detach() / CompleteResize() never closes a HANDLE while Run() is waiting on it.
         for (Buffer& b : buffers_) {
-            if (b.available) CloseHandle(b.available);
+            if (b.available) {
+                retired_handles_.push_back(b.available);
+                b.available = nullptr;
+            }
             b = Buffer();
         }
         buffers_.clear();
+    }
+
+    void DrainRetiredHandles() override {
+        for (HANDLE h : retired_handles_) {
+            if (h) CloseHandle(h);
+        }
+        retired_handles_.clear();
     }
 
     HRESULT SetSourceRect(UINT width, UINT height) override {
@@ -265,15 +373,12 @@ public:
     void DetachVisual() override {
         if (detached_) return;
         detached_ = true;
-        if (surface_) {
-            (void)surface_->SetBuffer(nullptr);
-            if (manager_) (void)manager_->Present();
-        }
+        // Detach only the DirectComposition visual tree and commit asynchronously. Never call
+        // surface_->SetBuffer(nullptr) + manager_->Present() (which access-violates after DestroyBuffers()) and
+        // never block the HWND owner thread in WaitForCommitCompletion() during teardown.
         if (visual_) (void)visual_->SetContent(nullptr);
         if (target_) (void)target_->SetRoot(nullptr);
-        if (dcomp_) {
-            if (SUCCEEDED(dcomp_->Commit())) dcomp_->WaitForCommitCompletion();
-        }
+        if (dcomp_) (void)dcomp_->Commit();
     }
 
     bool IsBufferAvailable(std::uint32_t slot) const override {
@@ -321,6 +426,24 @@ public:
                 if (v == PresentStatus_Skipped) out->status = FgCompPresentStatus::Skipped;
                 else if (v == PresentStatus_Canceled) out->status = FgCompPresentStatus::Canceled;
                 else out->status = FgCompPresentStatus::Queued;
+                const COMPOSITION_FRAME_ID cfid = ps->GetCompositionFrameId();
+                out->comp_frame_id = cfid;
+                if (cfid != 0 && status_probes_ < 16) {
+                    COMPOSITION_FRAME_STATS fst = {};
+                    COMPOSITION_TARGET_ID targets[4] = {};
+                    UINT count = 0;
+                    if (SUCCEEDED(FgDCompGetStatistics(cfid, &fst, 4, targets, &count))) {
+                        ++status_probes_;
+                        out->status_target_count = count;
+                        if (count > 0) {
+                            COMPOSITION_TARGET_STATS ts = {};
+                            if (SUCCEEDED(FgDCompGetTargetStatistics(cfid, &targets[0], &ts))) {
+                                out->status_target_present_time = ts.presentTime;
+                                out->status_target_completed_time = ts.completedStats.time;
+                            }
+                        }
+                    }
+                }
                 return true;
             }
             case PresentStatisticsKind_IndependentFlipFrame: {
@@ -413,6 +536,9 @@ private:
     ComPtr<IPresentationFactory> factory_;
     ComPtr<IPresentationManager> manager_;
     ComPtr<IPresentationSurface> surface_;
+    ComPtr<ID3D11Texture2D> prime_texture_;
+    ComPtr<IPresentationBuffer> prime_buffer_;
+    ComPtr<ID3D11Fence> retiring_fence_;
     ComPtr<IDCompositionDesktopDevice> dcomp_;
     ComPtr<IDCompositionTarget> target_;
     ComPtr<IDCompositionVisual2> visual_;
@@ -422,9 +548,12 @@ private:
     HANDLE lost_event_ = nullptr;
     HANDLE fence_event_ = nullptr;
     std::vector<Buffer> buffers_;
+    std::vector<HANDLE> retired_handles_;
     FgD3D12FenceTable fences12_;
     std::vector<ComPtr<ID3D11Fence>> fences11_;  // index = fence id - 1
     FgClockMap clock_map_;
+    std::uint64_t prime_present_id_ = 0;
+    std::uint32_t status_probes_ = 0;
     UINT current_width_ = 0;
     UINT current_height_ = 0;
     LONG last_client_w_ = 0;
@@ -514,7 +643,11 @@ FgWinResult FgWinCompPresenter::Initialize() {
     info_.d3d11_displayable = bi.d3d11_displayable;
     info_.d3d11_misc_flags = bi.d3d11_misc_flags;
     info_.simultaneous_access = bi.simultaneous_access;
+    info_.primed = bi.primed;
+    info_.hwnd_is_root = bi.hwnd_is_root;
     info_.window_visible = backend_->IsWindowVisible();
+    info_.window_cloaked = backend_->IsWindowCloaked();
+    info_.retiring_fence_value = backend_->RetiringFenceValue();
 
     const HRESULT hr = backend_->ForceVSyncInterrupt(desc_.force_vsync_interrupt);
     if (FAILED(hr)) return FgWinFail(FgStatus::Refused, FgWinRefusal::StatisticsUnavailable, hr);
@@ -538,6 +671,7 @@ FgWinCompPresenter::~FgWinCompPresenter() {
         if (!submitted_.empty()) (void)backend_->CancelPresentsFrom(submitted_.front().platform_id);
         backend_->DetachVisual();
         backend_->DestroyBuffers();
+        backend_->DrainRetiredHandles();
     }
 }
 
@@ -554,6 +688,15 @@ FgTicks FgWinCompPresenter::RealOnlyLookahead() const {
                                                        : (desc_.refresh_period > 0 ? desc_.refresh_period : 10000))
                              : (info_.grid.period > 0 ? info_.grid.period : 166667);
     return std::min<FgTicks>(std::max<FgTicks>(base / 2, 5000), 20000);
+}
+
+FgTicks FgWinCompPresenter::ActiveWatchdogTicksLocked() const {
+    if (last_displayed_platform_ == 0 && info_.status_queued > 0) {
+        const FgTicks ref = desc_.refresh_period > 0 ? desc_.refresh_period
+                                                     : (info_.grid.period > 0 ? info_.grid.period : 166667);
+        return std::min<FgTicks>(kOcclusionWatchdogTicks, std::max<FgTicks>(ref * 3, 250000));
+    }
+    return kOcclusionWatchdogTicks;
 }
 
 void FgWinCompPresenter::SetRealRetireCallback(FgRealRetireFn fn, void* ctx) {
@@ -602,7 +745,20 @@ FgPresenterProbe FgWinCompPresenter::Probe() const {
 
 FgCompPresenterInfo FgWinCompPresenter::Info() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return info_;
+    FgCompPresenterInfo out = info_;
+    if (backend_) {
+        out.window_cloaked = backend_->IsWindowCloaked();
+        out.retiring_fence_value = backend_->RetiringFenceValue();
+        if (out.status_first_cfid != 0 && (out.status_target_count_max == 0 || out.status_target_completed_nonzero == 0)) {
+            std::uint32_t tc = 0;
+            std::uint64_t tct = 0;
+            if (backend_->ProbeCompFrame(out.status_first_cfid, &tc, &tct)) {
+                if (tc > out.status_target_count_max) out.status_target_count_max = tc;
+                if (tct != 0 && out.status_target_completed_nonzero == 0) out.status_target_completed_nonzero = 1;
+            }
+        }
+    }
+    return out;
 }
 
 FgDisplaySummary FgWinCompPresenter::ReadDisplayCadence(bool window) {
@@ -644,6 +800,7 @@ FgStatus FgWinCompPresenter::Attach(std::uint64_t chain_id, std::uint64_t epoch)
         info_.d3d11_misc_flags = bi.d3d11_misc_flags;
         info_.simultaneous_access = bi.simultaneous_access;
         need_buffers_ = false;
+        worker_.Wake();
     }
     if (!FgChainRegistry::Process().Claim(chain_id, this)) return engine_.Refuse(FgStatus::Refused);
     const FgStatus s = engine_.Attach(epoch);
@@ -751,6 +908,7 @@ FgStatus FgWinCompPresenter::CompleteResize(bool resize_ok, std::uint64_t new_ep
         const FgWinResult r = backend_->CreateBuffers(info_.slot_count, w, h, &bi);
         if (!r.Ok() || FAILED(backend_->SetSourceRect(w, h))) {
             engine_.MarkFailed();  // the route is unusable at the new size: refuse, never present stale buffers
+            worker_.Wake();
             return engine_.Refuse(FgStatus::ResizeFailed);
         }
         info_.d3d11_misc_flags = bi.d3d11_misc_flags;
@@ -765,6 +923,7 @@ FgStatus FgWinCompPresenter::CompleteResize(bool resize_ok, std::uint64_t new_ep
     next_pace_wake_ = 0;
     deferred_.clear();
     ForgetSubmittedLocked();
+    worker_.Wake();
     return s;
 }
 
@@ -798,9 +957,8 @@ FgStatus FgWinCompPresenter::Detach() {
         deferred_.clear();
         next_pace_wake_ = 0;
         ForgetSubmittedLocked();
-    } else {
-        worker_.Wake();  // producer leases still held: the caller retries (WaitIdle)
     }
+    worker_.Wake();  // drain retired availability handles (or wake producer retry on Busy)
     return s;
 }
 
@@ -892,13 +1050,22 @@ void FgWinCompPresenter::CancelOnDisplayLocked(std::uint64_t engine_from) {
 }
 
 void FgWinCompPresenter::DrainStatisticsLocked() {
+    const std::uint64_t prime_pid = backend_->PrimePresentId();
     for (int guard = 0; guard < 1024; ++guard) {
         FgCompStatistic st;
         if (!backend_->PopStatistic(&st)) break;
         const std::uint64_t pid = st.present_id;
+        if (prime_pid != 0 && pid == prime_pid) continue;
         Submitted submitted{};
         switch (st.kind) {
             case FgCompStatKind::PresentStatus: {
+                if (st.comp_frame_id != 0) {
+                    ++info_.status_frame_nonzero;
+                    if (info_.status_first_cfid == 0) info_.status_first_cfid = st.comp_frame_id;
+                    if (st.status_target_count > info_.status_target_count_max)
+                        info_.status_target_count_max = st.status_target_count;
+                    if (st.status_target_completed_time != 0) ++info_.status_target_completed_nonzero;
+                }
                 if (st.status == FgCompPresentStatus::Queued) {
                     ++info_.status_queued;
                 } else if (st.status == FgCompPresentStatus::Skipped || st.status == FgCompPresentStatus::Canceled) {
@@ -953,12 +1120,13 @@ void FgWinCompPresenter::ReleaseSlotsLocked() {
                 if (submitted_[i].engine_id != eid) continue;
                 const bool older_available =
                     last_displayed_platform_ != 0 && submitted_[i].platform_id < last_displayed_platform_;
-                // Windowed-only 250 ms occlusion watchdog (never triggers in headless bind_window==false validation):
-                // if DWM stops emitting statistics while occluded/minimized, ask the presentation manager to cancel
-                // the stalled suffix and retire a queued present only once IsBufferAvailable confirms the display has
-                // released the buffer.
+                // Windowed-only occlusion / never-displayed watchdog (never triggers in headless bind_window==false):
+                // if DWM stops emitting display statistics while occluded/minimized (250 ms) or after queuing presents
+                // with zero displayed frames (~3 refresh periods, >= 25 ms), ask the presentation manager to cancel
+                // the stalled suffix and retire a queued present only once IsBufferAvailable confirms release.
+                const FgTicks watchdog_ticks = ActiveWatchdogTicksLocked();
                 const bool occluded_timeout = desc_.bind_window && submitted_[i].vblank > 0 &&
-                                              now > submitted_[i].vblank + kOcclusionWatchdogTicks;
+                                              now > submitted_[i].vblank + watchdog_ticks;
                 if (older_available || occluded_timeout) {
                     if (backend_->IsBufferAvailable(slot)) {
                         if (occluded_timeout) ++info_.watchdog_retired;
@@ -1116,7 +1284,7 @@ void FgWinCompPresenter::Run(HANDLE stop, HANDLE wake) {
             if (next_pace_wake_ > 0) consider_timer(next_pace_wake_);
             if (desc_.bind_window && !submitted_.empty() && submitted_.front().vblank > 0 &&
                 !submitted_.front().watchdog_cancelled) {
-                consider_timer(submitted_.front().vblank + kOcclusionWatchdogTicks + 1);
+                consider_timer(submitted_.front().vblank + ActiveWatchdogTicksLocked() + 1);
             }
             if (next_timer > 0) timer_.ArmAt(next_timer);
             else timer_.Cancel();
@@ -1156,6 +1324,7 @@ void FgWinCompPresenter::Run(HANDLE stop, HANDLE wake) {
         const DWORD w = WaitForMultipleObjects(n, handles, FALSE, timeout);
         if (w == WAIT_OBJECT_0) break;
         std::lock_guard<std::mutex> lock(mutex_);
+        backend_->DrainRetiredHandles();
         const std::uint32_t free_before = engine_.FreeSlots();
         const std::size_t deferred_before = deferred_.size();
         const std::size_t submitted_before = submitted_.size();

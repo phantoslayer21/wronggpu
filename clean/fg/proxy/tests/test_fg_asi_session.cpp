@@ -2798,12 +2798,14 @@ void TestHwfqFallbackPolicy() {
     hidden.admission_timed_out = true;
     CHECK(CheckHwfqZeroDisplayFallback(hidden) == HwfqFallbackReason::None);
 
-    // Startup grace suppresses timeout fallback during the first window transition.
+    // Startup grace suppresses timeout fallback when fewer than 4 presents were queued by DWM.
     HwfqHealthSnapshot grace;
     grace.displayed = 0;
     grace.visible_submitted = 12;
     grace.resolved_unseen = 8;
+    grace.status_queued = 2;
     grace.visible_elapsed_ticks = 2000000;
+    grace.refresh_period = 27778;
     grace.admission_timed_out = true;
     grace.startup_grace = true;
     CHECK(CheckHwfqZeroDisplayFallback(grace) == HwfqFallbackReason::None);
@@ -2811,6 +2813,37 @@ void TestHwfqFallbackPolicy() {
     // Admission timeout past startup grace with 0 displayed on a visible window triggers fallback.
     grace.startup_grace = false;
     CHECK(CheckHwfqZeroDisplayFallback(grace) == HwfqFallbackReason::AdmissionTimeoutZeroDisplay);
+
+    // Fast queued-zero-display fallback: once >= 4 presents are queued by DWM across >= max(3 refreshes, 30 ms)
+    // with 0 displayed, fall back even during startup grace before the 100 ms admission timeout expires.
+    HwfqHealthSnapshot fast;
+    fast.displayed = 0;
+    fast.visible_submitted = 4;
+    fast.status_queued = 4;
+    fast.refresh_period = 27778;  // 360 Hz -> 30 ms floor
+    fast.startup_grace = true;
+    fast.visible_elapsed_ticks = 299999;
+    CHECK(CheckHwfqZeroDisplayFallback(fast) == HwfqFallbackReason::None);
+    fast.visible_elapsed_ticks = 300000;
+    CHECK(CheckHwfqZeroDisplayFallback(fast) == HwfqFallbackReason::QueuedZeroDisplay);
+
+    // On a 60 Hz display, 3 refreshes = 50 ms governs the fast queued-zero-display threshold.
+    fast.refresh_period = 166667;
+    fast.visible_elapsed_ticks = 400000;
+    CHECK(CheckHwfqZeroDisplayFallback(fast) == HwfqFallbackReason::None);
+    fast.visible_elapsed_ticks = 500001;
+    CHECK(CheckHwfqZeroDisplayFallback(fast) == HwfqFallbackReason::QueuedZeroDisplay);
+
+    // Admission timeout during startup grace STILL falls back if >= 4 presents were already queued with 0 displayed.
+    HwfqHealthSnapshot fast_to;
+    fast_to.displayed = 0;
+    fast_to.visible_submitted = 4;
+    fast_to.status_queued = 4;
+    fast_to.refresh_period = 27778;
+    fast_to.visible_elapsed_ticks = 100000;  // 10 ms (< 30 ms fast threshold)
+    fast_to.admission_timed_out = true;
+    fast_to.startup_grace = true;
+    CHECK(CheckHwfqZeroDisplayFallback(fast_to) == HwfqFallbackReason::AdmissionTimeoutZeroDisplay);
 
     // Sustained zero-display requires enough submits, elapsed time, and unseen/watchdog evidence.
     HwfqHealthSnapshot sustained;

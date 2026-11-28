@@ -1861,6 +1861,18 @@ public:
         SetAvailableLocked(slot, true);
     }
 
+    void PushQueuedStatus(std::uint64_t pid, std::uint64_t cfid, std::uint32_t targets, std::uint64_t completed_time) {
+        std::lock_guard<std::mutex> lock(mu_);
+        FgCompStatistic st;
+        st.kind = FgCompStatKind::PresentStatus;
+        st.present_id = pid;
+        st.status = FgCompPresentStatus::Queued;
+        st.comp_frame_id = cfid;
+        st.status_target_count = targets;
+        st.status_target_completed_time = completed_time;
+        PushStatLocked(st);
+    }
+
     void PushCustomStat(const FgCompStatistic& s) {
         std::lock_guard<std::mutex> lock(mu_);
         PushStatLocked(s);
@@ -2471,6 +2483,49 @@ void TestCompWatchdogAndIsAvailable() {
         backend->SetNow(700 * kMs + kMinInterval360 + 500 * kMs);
         p->StepForTest();
         CHECK(backend->CancelCalls().empty() && p->Info().watchdog_retired == 0 && p->Stats().display_skipped_real == 0);
+        CHECK(p->Detach() == FgStatus::Ok);
+    }
+
+    // 4) Queued-but-never-displayed fast watchdog + PresentStatus frame/target telemetry:
+    //    when PresentStatus_Queued arrives (display processed the queue) with zero displayed frames, the watchdog
+    //    cancels in max(3 refreshes, 25 ms) instead of waiting 250 ms.
+    {
+        auto backend_up = std::make_unique<FakeCompBackend>(10, 750 * kMs, false);
+        FakeCompBackend* backend = backend_up.get();
+        backend->SetCancelEmitsStat(false, false);
+        const std::uint32_t fid = backend->CreateFence();
+        FgCompPresenterDesc cd;
+        cd.bind_window = true;
+        cd.width = 1920;
+        cd.height = 1080;
+        cd.variable_refresh = true;
+        cd.refresh_period = kRefresh360;
+        cd.min_interval = kMinInterval360;
+        cd.slot_count = 10;
+        std::unique_ptr<FgWinCompPresenter> p;
+        CHECK(FgWinCompPresenter::CreateWithBackend(cd, std::move(backend_up), false, &p).Ok());
+        CHECK(p->Attach(0x5304, 1) == FgStatus::Ok);
+        std::uint32_t slot = 0;
+        CHECK(p->ReserveRealSlot(&slot) == FgStatus::Ok);
+        FgIntervalPlan pl = MakePlan(1, 1, 1, 750 * kMs, kMinInterval360, 0, 2500);
+        backend->SignalFence(fid, 1);
+        CHECK(p->PresentRealOnly(pl, FgRealImage{1, 1, FgReadyFence{fid, 1}}) == FgStatus::Ok);
+        backend->SetNow(750 * kMs + kMinInterval360);
+        p->StepForTest();
+        backend->PushQueuedStatus(1, 9001, 1, 123456);
+        p->StepForTest();
+        const FgCompPresenterInfo qi = p->Info();
+        CHECK(qi.status_queued == 1 && qi.status_frame_nonzero == 1 && qi.status_first_cfid == 9001 &&
+              qi.status_target_count_max == 1 && qi.status_target_completed_nonzero == 1);
+        backend->SetNow(750 * kMs + kMinInterval360 + 20 * kMs);
+        p->StepForTest();
+        CHECK(backend->CancelCalls().empty());
+        backend->SetNow(750 * kMs + kMinInterval360 + 30 * kMs);
+        p->StepForTest();
+        CHECK(backend->CancelCalls().size() == 1);
+        backend->ReleaseSlotBuffer(slot);
+        p->StepForTest();
+        CHECK(p->Info().watchdog_retired == 1 && p->FreeSlots() == 10);
         CHECK(p->Detach() == FgStatus::Ok);
     }
 }

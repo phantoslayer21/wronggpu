@@ -87,7 +87,15 @@ struct FgCompPresenterInfo {
     FgTicks last_visible_submit = 0;      // timestamp of the latest visible-window present submission
     bool force_vsync_interrupt = false;
     bool window_visible = false;
+    bool window_cloaked = false;
+    bool hwnd_is_root = true;
+    bool primed = false;
     long last_present_hr = 0;
+    std::uint64_t status_frame_nonzero = 0;            // PresentStatus reports with non-zero CompositionFrameId
+    std::uint64_t status_first_cfid = 0;               // first non-zero CompositionFrameId on PresentStatus
+    std::uint32_t status_target_count_max = 0;         // max DComp target count seen on first 16 PresentStatus frames
+    std::uint64_t status_target_completed_nonzero = 0; // first-16 PresentStatus frames with completedStats.time != 0
+    std::uint64_t retiring_fence_value = 0;            // IPresentationManager retiring fence completed value
 };
 
 class FgWinCompPresenter final : public IFgPresenter, private IFgWorkerBody {
@@ -156,6 +164,7 @@ private:
     FgWinResult Initialize();
     FgTicks NowLocked() const;
     FgTicks RealOnlyLookahead() const;
+    FgTicks ActiveWatchdogTicksLocked() const;
     void Run(HANDLE stop, HANDLE wake) override;
     void StepLocked();
     void DrainStatisticsLocked();

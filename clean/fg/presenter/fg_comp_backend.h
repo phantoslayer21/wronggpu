@@ -39,6 +39,10 @@ struct FgCompStatistic {
     FgCompPresentStatus status = FgCompPresentStatus::Queued;  // valid for PresentStatus
     FgTicks displayed_time = 0;                                // interrupt-time ticks (0 if unavailable)
     bool displayed_measured = false;                           // true only for measured hardware/compositor completion
+    std::uint64_t comp_frame_id = 0;                           // GetCompositionFrameId() on PresentStatus
+    std::uint32_t status_target_count = 0;                     // targets reported for comp_frame_id (first 16 statuses)
+    std::uint64_t status_target_present_time = 0;              // target presentTime (QPC) if target_count > 0
+    std::uint64_t status_target_completed_time = 0;            // target completedStats.time (QPC) if target_count > 0
 };
 
 struct FgCompBackendInfo {
@@ -48,6 +52,9 @@ struct FgCompBackendInfo {
     bool d3d11_displayable = false;
     std::uint32_t d3d11_misc_flags = 0;
     bool simultaneous_access = false;
+    bool primed = false;
+    bool hwnd_is_root = true;
+    bool window_cloaked = false;
 };
 
 class IFgCompBackend {
@@ -62,6 +69,13 @@ public:
     virtual HANDLE SlotAvailableEvent(std::uint32_t slot) const = 0;
     virtual bool IsLost() const = 0;
     virtual bool IsWindowVisible() const = 0;
+    virtual bool IsWindowCloaked() const { return false; }
+    virtual std::uint64_t RetiringFenceValue() const { return 0; }
+    virtual std::uint64_t PrimePresentId() const { return 0; }
+    virtual bool ProbeCompFrame(std::uint64_t /*cfid*/, std::uint32_t* /*target_count*/,
+                                std::uint64_t* /*completed_time*/) const {
+        return false;
+    }
 
     // Producer fences and D3D12 slot resources.
     virtual const IFgFenceSource* FenceSource() const = 0;
@@ -73,6 +87,7 @@ public:
     virtual FgCompBackendInfo BackendInfo() const = 0;
     virtual FgWinResult CreateBuffers(std::uint32_t slot_count, UINT width, UINT height, FgCompBackendInfo* info) = 0;
     virtual void DestroyBuffers() = 0;
+    virtual void DrainRetiredHandles() {}
     virtual HRESULT SetSourceRect(UINT width, UINT height) = 0;
     virtual void DetachVisual() = 0;
 
