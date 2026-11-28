@@ -21,6 +21,7 @@
 #include "../../wgshared/include/wg_host_menu_abi.h"
 #include "../../wgshared/include/wg_state.h"
 #include "wg_sr_modes.h"
+#include "../asi/asi_abi.h"
 
 static int failures = 0, checks = 0;
 #define CHECK(x) do { ++checks; if (!(x)) { ++failures; std::printf("FAIL line %d: %s\n", __LINE__, #x); } } while (0)
@@ -199,6 +200,55 @@ int main(int argc, char** argv) {
     showModel(0);
     DrawFrame();
     CHECK(HasText("AMD FSR is selected") && g_combos.size() == 3);
+
+    // rc3: once the front end reports what it actually runs (WrongGpuAsiReportSrV1), the status lines come from that report,
+    // never from the saved choice: switching, running with its mode, a model that could not start, idle.
+    auto report = reinterpret_cast<void (*)(const WrongGpuAsiSrV1*)>(GetProcAddress(asi, WRONGGPU_ASI_REPORT_SR));
+    CHECK(report != nullptr);
+    if (report) {
+        WrongGpuAsiSrV1 s{};
+        s.size = sizeof(s);
+        s.state = WG_ASI_SR_SWITCHING;
+        s.running_model = 'M';
+        s.pending_model = 'L';
+        s.running_mode = WG_SR_MODE_FAST;
+        report(&s);
+        DrawFrame();
+        CHECK(HasText("Switching to Model L... Model M (Fast) keeps running until it is ready.") && !HasText("Running:"));
+        s.state = WG_ASI_SR_RUNNING;
+        s.pending_model = 0;
+        s.error_model = 'L';
+        s.error_width = 1920;
+        s.error_height = 1080;
+        std::snprintf(s.error_reason, sizeof s.error_reason, "%s", "no converted Model L file was found");
+        report(&s);
+        DrawFrame();
+        CHECK(HasText("Running: Model M (Fast)"));
+        CHECK(HasText("Model L couldn't start at 1920x1080: no converted Model L file was found. Model M kept."));
+        // the case of 2026-11-27: OptiScaler runs its stock FSR 2.1.2; the saved choice (or a shown model) is no "Running"
+        s.state = WG_ASI_SR_IDLE;
+        s.running_model = 0;
+        report(&s);
+        showModel('M');
+        DrawFrame();
+        CHECK(HasText("Idle: WrongGPU is not upscaling (OptiScaler is running another upscaler).") && !HasText("Running:"));
+        CHECK(HasText("Model L couldn't start at 1920x1080: no converted Model L file was found.") && !HasText("kept"));
+        CHECK(g_combos.size() == 3);
+        WrongGpuAsiSrV1 small = s;  // a report smaller than the structure (an older or broken writer) is ignored
+        small.size = 8;
+        small.state = WG_ASI_SR_RUNNING;
+        small.running_model = 'M';
+        report(&small);
+        DrawFrame();
+        CHECK(HasText("Idle:"));
+        s.state = WG_ASI_SR_RUNNING;  // the mode of the last frame, as reported
+        s.running_model = 'M';
+        s.running_mode = WG_SR_MODE_EXACT;
+        s.error_model = 0;
+        report(&s);
+        DrawFrame();
+        CHECK(HasText("Running: Model M (Exact)") && !HasText("couldn't start"));
+    }
 
     block.close();
     std::filesystem::remove_all(game, ec);

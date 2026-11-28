@@ -273,6 +273,9 @@ FrontEnd& Get() {
             // mode as before.
             p.asiPlugin = [](char* model) { return QueryAsiPlugin(model); };
             p.asiShowModel = [](char model) { ShowAsiModel(model); };
+            p.asiReportSr = [](const SrReport& r) {  // the card's status lines (rc3): what runs, a switch, a start failure
+                ReportAsiSr(r.state, r.running, r.pending, r.runningMode, r.errorModel, r.errorWidth, r.errorHeight, r.errorReason);
+            };
         }
         // The game's model choice record (model_choice_record.h, in the game's WrongGPU state folder wronggpu-setup next to
         // wronggpu.ini) decides the WrongGPU model on every route; the plugin writes its menu's model clicks there too.

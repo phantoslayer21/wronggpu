@@ -41,6 +41,10 @@ struct Config {
     // or a custom slot without an AMD DLL of its own). After that the create is refused, logged, and the context goes to
     // the front end's upscaler (a create that hangs must not hang the game). create_giveup_ms.
     uint32_t createGiveUpMs = 30000;
+    // Model switch hand-over (custom slot, FrontEnd::FindLender): how long the game thread waits for the new model's
+    // create while the model that already runs can upscale meanwhile. After that the running model keeps upscaling until
+    // the new one has started. switch_wait_ms.
+    uint32_t switchWaitMs = 100;
     // A destroyed upscaler context keeps its upscaler warm ("parked") for this long; a context created with the same
     // device, sizes, flags, options and model within that time takes it over instead of creating one (games that
     // re-create their upscaler at every step of a dynamic resolution). One parked upscaler at most; 0: never.

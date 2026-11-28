@@ -55,12 +55,35 @@ const char* ModelWords(char model) { return model == 'K' ? "Model K" : model == 
 void Draw(void*) {
     const WgHostMenuApi* api = g_api;
     if (!api) return;
-    const char active = g_hooks.activeModel ? g_hooks.activeModel() : 'M';
+    WrongGpuAsiSrV1 sr{};
+    const bool reported = g_hooks.srStatus && g_hooks.srStatus(&sr);
+    // reported: only what the front end ran (never the saved choice); else (an older front end) as before
+    const char active = reported ? (sr.state != WG_ASI_SR_IDLE && wg_sr_mode_of(sr.running_model) ? sr.running_model : char(0))
+                                 : g_hooks.activeModel ? g_hooks.activeModel() : 'M';
     if (!g_card) api->section("WrongGPU Upscaler");
     static const char* const kTitles[2] = {"Fast", "Exact"};
     const char shown = wg_sr_mode_of(active) ? active : 'M';
-    if (wg_sr_mode_of(active)) {
-        const std::string line = std::string("Running: ") + ModelWords(active) + " (" + wg_sr_mode_title(CurrentMode(active)) + ")";
+    const int32_t activeMode = !wg_sr_mode_of(active) ? WG_SR_MODE_FAST
+                               : reported && (sr.running_mode == WG_SR_MODE_FAST || sr.running_mode == WG_SR_MODE_EXACT) ? sr.running_mode
+                                                                                                                       : CurrentMode(active);
+    if (reported) {
+        const std::string running = wg_sr_mode_of(active) ? std::string(ModelWords(active)) + " (" + wg_sr_mode_title(activeMode) + ")" : "";
+        if (sr.state == WG_ASI_SR_SWITCHING && wg_sr_mode_of(sr.pending_model) && !running.empty()) {
+            api->text((std::string("Switching to ") + ModelWords(sr.pending_model) + "... " + running + " keeps running until it is ready.").c_str());
+        } else if (!running.empty()) {
+            api->text(("Running: " + running).c_str());
+        } else {
+            api->text_disabled("Idle: WrongGPU is not upscaling (OptiScaler is running another upscaler).");
+        }
+        if (wg_sr_mode_of(sr.error_model)) {
+            std::string line = std::string(ModelWords(sr.error_model)) + " couldn't start";
+            if (sr.error_width && sr.error_height) line += " at " + std::to_string(sr.error_width) + "x" + std::to_string(sr.error_height);
+            if (sr.error_reason[0]) line += std::string(": ") + sr.error_reason;
+            line += running.empty() ? std::string(".") : std::string(". ") + ModelWords(active) + " kept.";
+            api->text(line.c_str());
+        }
+    } else if (wg_sr_mode_of(active)) {
+        const std::string line = std::string("Running: ") + ModelWords(active) + " (" + wg_sr_mode_title(activeMode) + ")";
         api->text(line.c_str());
     } else {
         api->text_disabled("AMD FSR is selected in OptiScaler's upscaler list. WrongGPU's modes apply when a WrongGPU model runs.");

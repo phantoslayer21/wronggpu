@@ -45,6 +45,21 @@ struct MenuSettings {
     uint64_t folderEntry = 0;
 };
 
+// rc3: what the front end actually runs, for WrongGPU.asi's card status lines (clean/fsr/asi/asi_abi.h WrongGpuAsiReportSrV1).
+struct SrReport {
+    uint32_t state = 0;       // 0 idle (WrongGPU upscales nothing), 1 running, 2 switching (asi_abi.h WG_ASI_SR_*)
+    char running = 0;         // the model that upscaled the last frame ('M', 'K', 'L'; 0 while idle)
+    char pending = 0;         // while switching: the model that is starting
+    int32_t runningMode = -1; // the running upscaler's mode (0 fast, 1 exact; -1 not known)
+    char errorModel = 0;      // the last model that could not start (0: none since a model last started)
+    uint32_t errorWidth = 0, errorHeight = 0;  // the output size it could not start at
+    std::string errorReason;  // short
+    bool operator==(const SrReport& o) const {
+        return state == o.state && running == o.running && pending == o.pending && runningMode == o.runningMode &&
+               errorModel == o.errorModel && errorWidth == o.errorWidth && errorHeight == o.errorHeight && errorReason == o.errorReason;
+    }
+};
+
 struct Platform {
     std::function<const OriginalApi*()> original;  // loads AMD's DLL on first use; null if it cannot be loaded
     // Resolves the upscaler implementation for this configuration; null (with the reason) when unavailable.
@@ -106,6 +121,8 @@ struct Platform {
     std::function<bool(char* model)> asiPlugin;
     // Tells the plugin which model the context runs (0 AMD, 'M', 'K', 'L'), so its menu marks that entry. May be empty.
     std::function<void(char model)> asiShowModel;
+    // rc3: tells the plugin what the front end actually runs (SrReport), on every change. May be empty.
+    std::function<void(const SrReport&)> asiReportSr;
     // The game's model choice record (model_choice_record.h: wronggpu-setup\model-choice.ini next to wronggpu.ini), read
     // and written with real files. Empty: no record (the launcher's model item decides, as before).
     std::filesystem::path choiceRecord;
@@ -175,6 +192,8 @@ public:
     }
     size_t OwnContextCount();  // for tests
     bool HasParked();          // for tests
+    static constexpr uint64_t kBridgeKeepFramesForTest() { return kBridgeKeepFrames; }  // for tests (model switch)
+    SrReport LastSrReport();   // for tests (the card's status)
 
     // The host tells the front end that the PLAYER selected the listed version `versionId` in its upscaler list (the
     // WrongGPU edition of OptiScaler calls the exported WrongGpuHostSelectedV1, before it would recreate the upscaler).
@@ -201,6 +220,32 @@ private:
     void DropParked(const std::string& tag, const char* why);
     void Retire(UpscaleContext* u, const std::string& tag, const char* why);  // really destroys a parked context
     uint32_t ParkTimer();
+    // Model switch hand-over (custom slot). A player who picks another WrongGPU model in OptiScaler's list makes the host
+    // create a new context while the old one still exists (it is destroyed after the new create returned). The new
+    // context borrows the upscaler that already runs (a live context of WrongGPU's with the same device, sizes and flags,
+    // or the parked one): it upscales with it while its own upscaler is created on the create thread, and takes its own
+    // over when that has finished (CheckPending). When the new model cannot run (its create fails, a failure remembered
+    // for the session, a refusal such as Model L without its file), the context keeps the borrowed model for its life and
+    // the log says why. So the game thread waits at most switch_wait_ms (Config::switchWaitMs), never the whole create,
+    // and the host never sees a failed create for a model switch (OptiScaler would drop to its stock FSR 2.1.2).
+    struct SharedUpscaler;
+    static constexpr uint64_t kBridgeKeepFrames = 8;  // frames a borrowed upscaler is kept after the context took its own
+    // A lender for a create of `u` with `backend`, or null. mutex_ / parkMutex_ are taken; a live lender's own lock is only
+    // tried, never waited for (the lock order context -> mutex_ holds).
+    std::shared_ptr<SharedUpscaler> FindLender(const WgUpscalerBackend* backend, const UpscaleContext& u, const std::string& tag);
+    // The lender is gone for good (its host context destroyed or parked, its last borrower gone): its upscaler and the
+    // context object (the upscaler's log callback and options point into it) are destroyed now.
+    void RetireLender(UpscaleContext* donor, uint32_t borrowerHint);
+    std::atomic<bool> exiting_{false};  // ~FrontEnd runs: GPU objects are left to the runtime
+    // rc3: the card's status (SrReport): `change` edits the last report; sent to Platform::asiReportSr when it changed.
+    void UpdateSr(const std::function<void(SrReport&)>& change);
+    // The model letter a context's upscaler runs ('M' when the options named none).
+    static char RunModelOf(const UpscaleContext& u);
+    // A model could not start: kept in the report until a model starts (`idle`: and WrongGPU upscales nothing now).
+    void ReportStartFailure(const UpscaleContext& u, const std::string& reason, bool idle);
+    std::mutex srMutex_;
+    SrReport sr_;
+    bool srSent_ = false;
     // One frame WrongGPU's upscaler cannot take (kBadFrameRun): the stand-in upscales it (`frame` usable) or AMD's FSR
     // does, and the context stays WrongGPU's; `amdOnly`: never the stand-in (perceptual colour).
     ffxReturnCode_t BadFrame(UpscaleContext& u, const ffxDispatchDescUpscale& d, uint64_t call, uint64_t frameIndex,
