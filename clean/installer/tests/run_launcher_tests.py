@@ -928,6 +928,9 @@ def test_launcher_uninstall(t, opti):
     cleanup_log = read(t.log)[uninstall_log_start:].decode("utf-8", "replace").splitlines()
     t.check("deferred cleanup never targets the install path that a reinstall will reuse",
             not any(line.endswith("removed once it is free: " + installed) for line in cleanup_log), cleanup_log)
+    t.check("a retired launcher in the data root is moved clear before deferred cleanup",
+            any("retired launcher program at " + shared + ".launcher.removed-" in line for line in cleanup_log),
+            cleanup_log)
     t.check("keep games: the game keeps WrongGPU with its own entry again; the launcher's settings gone; the shared data stays (the game uses it)",
             len(t.entries_for(b)) == 1 and "\nregkey\tWrongGPU-" in record_text(b) and not os.path.isfile(li) and os.path.isdir(os.path.join(shared, "model")),
             (t.entries_for(b), os.listdir(shared) if os.path.isdir(shared) else None))

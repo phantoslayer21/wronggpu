@@ -2417,17 +2417,25 @@ bool SelfUninstall(Context& ctx, const LauncherPaths& p, bool removeGames, const
             const wstring exeDir = Parent(program);
             LeaveProgramDirectory(exeDir);
             if (ownsRegistration || PathWithin(exeDir, p.dataDir, true)) scopedExeDir = exeDir;
-            retired = program + L".removed-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
-                      std::to_wstring(GetTickCount64());
-            if (!MoveFileExW(program.c_str(), retired.c_str(), MOVEFILE_WRITE_THROUGH)) {
-                retired.clear();
-                if (!DeleteFileW(program.c_str())) {
-                    const DWORD error = GetLastError();
-                    if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND)
-                        Fail(L"Could not retire the launcher program " + program + L": " + ErrText(error) +
-                             L". Close the program that has it open and try again.", EXIT_REFUSED);
-                }
+            const wstring suffix = L".removed-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+                                   std::to_wstring(GetTickCount64());
+            auto retireTo = [&](const wstring& path) {
+                if (!GamePathAllowed(path) || !MoveFileExW(program.c_str(), path.c_str(), MOVEFILE_WRITE_THROUGH)) return false;
+                retired = path;
+                return true;
+            };
+            // A running program may survive until this process exits. Move it clear of the data root so
+            // delayed deletion cannot keep that directory in place or contend with a quick reinstall.
+            const wstring outside = p.dataDir + L".launcher" + suffix;
+            const bool movedOutside = PathWithin(exeDir, p.dataDir, true) &&
+                !PathWithin(outside, p.dataDir) && PathWithin(outside, Parent(p.dataDir), true) && retireTo(outside);
+            if (!movedOutside && !retireTo(program + suffix) && !DeleteFileW(program.c_str())) {
+                const DWORD error = GetLastError();
+                if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND)
+                    Fail(L"Could not retire the launcher program " + program + L": " + ErrText(error) +
+                         L". Close the program that has it open and try again.", EXIT_REFUSED);
             }
+            if (!retired.empty()) LogLine(ctx, L"retired launcher program at " + retired);
         }
         if (ownsRegistration && (!p.custom || IEq(registeredLocation, RegString(UninstallHive(), key.c_str(), L"InstallLocation")))) {
             RegDeleteKeyW(UninstallHive(), key.c_str());
@@ -2499,10 +2507,9 @@ bool SelfUninstall(Context& ctx, const LauncherPaths& p, bool removeGames, const
         wstring upTo = installed && !madeAbove.empty() && StartsWithI(FullPath(Parent(installedExe)), FullPath(madeAbove) + L"\\") ? madeAbove : wstring();
         if (p.custom && !gamesLeft && PathWithin(scopedExeDir, p.dataDir, true)) upTo = p.dataDir;
         if (p.custom) {
-            if (!retired.empty() && !DeleteFileW(retired.c_str()))
-                DeleteWhenFree(ctx, retired, false, scopedExeDir, upTo);
             if (!scopedExeDir.empty() && !RemoveDirectoryW(scopedExeDir.c_str()) && IsDir(scopedExeDir)) exeDirLeft = scopedExeDir;
-            else if (!scopedExeDir.empty() && !upTo.empty()) RemoveEmptyUpTo(Parent(scopedExeDir), upTo);
+            else if (!scopedExeDir.empty() && !upTo.empty() && !IEq(FullPath(scopedExeDir), FullPath(upTo)))
+                RemoveEmptyUpTo(Parent(scopedExeDir), upTo);
         } else if (installed) {
             const wstring exeDir = Parent(installedExe);
             LeaveProgramDirectory(exeDir);
@@ -2533,6 +2540,10 @@ bool SelfUninstall(Context& ctx, const LauncherPaths& p, bool removeGames, const
         }
         if (!exeDirLeft.empty() && !IsDir(trash)) RemoveEmptyUpTo(exeDirLeft, upTo);
         if (p.custom && !gamesLeft) RemoveScopedDataFiles(p.dataDir);
+        if (!retired.empty() && !DeleteFileW(retired.c_str())) {
+            const bool inProgramDir = !scopedExeDir.empty() && IEq(Parent(retired), scopedExeDir);
+            DeleteWhenFree(ctx, retired, false, inProgramDir ? scopedExeDir : wstring(), inProgramDir ? upTo : wstring());
+        }
         return true;
     } catch (const SetupError& e) { if (why) *why = e.msg; return false; }
 }
