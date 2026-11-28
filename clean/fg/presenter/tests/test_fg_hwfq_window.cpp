@@ -2629,6 +2629,294 @@ void RunPhaseProbe(GpuHost& gpu) {
     if (sh) CloseHandle(sh);
 }
 
+void RunR5Probe(GpuHost& gpu) {
+    SetStage("r5probe");
+    EnablePerMonitorDpiV2();
+    const UINT scr_w = static_cast<UINT>(GetSystemMetrics(SM_CXSCREEN));
+    const UINT scr_h = static_cast<UINT>(GetSystemMetrics(SM_CYSCREEN));
+    TestWindow win;
+    win.Create(scr_w, scr_h, false, false, false);
+    ShowWindow(win.hwnd, SW_SHOW);
+    SetForegroundWindow(win.hwnd);
+    UpdateWindow(win.hwnd);
+    SleepPump(40);
+
+    // Attach a real game DXGI flip-model swapchain to the same HWND (identical to OptiScaler-hosted Cyberpunk),
+    // forcing true composed mode (indep_flip = 0).
+    ComPtr<IDXGISwapChain4> game_sc;
+    CHECK(gpu.CreateGameSwapChain(win.hwnd, scr_w, scr_h, DXGI_FORMAT_B8G8R8A8_UNORM, &game_sc, 5));
+
+    const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
+    const UINT flags11 = D3D11_CREATE_DEVICE_BGRA_SUPPORT |
+                         D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS;
+    ComPtr<ID3D11Device> d11r;
+    ComPtr<ID3D11DeviceContext> c11r;
+    HRESULT hr = D3D11CreateDevice(gpu.adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, flags11, levels, 2,
+                                   D3D11_SDK_VERSION, &d11r, nullptr, &c11r);
+    ComPtr<ID3D11Device5> d11;
+    ComPtr<ID3D11DeviceContext4> c11;
+    if (SUCCEEDED(hr)) hr = d11r.As(&d11);
+    if (SUCCEEDED(hr)) hr = c11r.As(&c11);
+    ComPtr<IPresentationFactory> pfac;
+    ComPtr<IPresentationManager> pmgr;
+    if (SUCCEEDED(hr)) hr = FgDCompCreatePresentationFactory(d11.Get(), IID_PPV_ARGS(&pfac));
+    if (SUCCEEDED(hr)) hr = pfac->CreatePresentationManager(&pmgr);
+
+    constexpr int kBufs = 6;
+    ComPtr<ID3D12Resource> res12[kBufs];
+    ComPtr<ID3D11Texture2D> tex[kBufs];
+    ComPtr<IPresentationBuffer> pbuf[kBufs];
+    for (int i = 0; i < kBufs && SUCCEEDED(hr); ++i) {
+        D3D12_HEAP_PROPERTIES hp = {};
+        hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        hp.CreationNodeMask = hp.VisibleNodeMask = 1;
+        D3D12_RESOURCE_DESC rd = {};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        rd.Width = scr_w;
+        rd.Height = scr_h;
+        rd.DepthOrArraySize = 1;
+        rd.MipLevels = 1;
+        rd.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        rd.SampleDesc.Count = 1;
+        rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+        hr = gpu.device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_SHARED | D3D12_HEAP_FLAG_ALLOW_DISPLAY, &rd,
+                                                 D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&res12[i]));
+        HANDLE h12 = nullptr;
+        if (SUCCEEDED(hr)) hr = gpu.device->CreateSharedHandle(res12[i].Get(), nullptr, GENERIC_ALL, nullptr, &h12);
+        if (SUCCEEDED(hr)) hr = d11->OpenSharedResource1(h12, IID_PPV_ARGS(&tex[i]));
+        if (h12) CloseHandle(h12);
+        if (SUCCEEDED(hr)) {
+            const std::uint64_t fv = gpu.RenderClear(res12[i].Get(), 0.0f, 0.8f, 0.0f);
+            gpu.WaitFence(fv);
+            hr = pmgr->AddBufferFromResource(tex[i].Get(), &pbuf[i]);
+        }
+    }
+
+    HANDLE sh = nullptr, stats_ev = nullptr;
+    ComPtr<IPresentationSurface> psurf;
+    ComPtr<IDCompositionDesktopDevice> dcomp;
+    ComPtr<IDCompositionTarget> dtarget;
+    ComPtr<IDCompositionVisual2> dvis;
+    ComPtr<IUnknown> dsurf;
+    ComPtr<ID3D11Fence> rfence;
+    if (SUCCEEDED(hr)) hr = FgDCompCreateSurfaceHandle(COMPOSITIONOBJECT_ALL_ACCESS, nullptr, &sh);
+    if (SUCCEEDED(hr)) hr = pmgr->CreatePresentationSurface(sh, &psurf);
+    if (SUCCEEDED(hr)) hr = psurf->SetAlphaMode(DXGI_ALPHA_MODE_IGNORE);
+    if (SUCCEEDED(hr)) hr = psurf->SetColorSpace(DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+    const RECT src = {0, 0, static_cast<LONG>(scr_w), static_cast<LONG>(scr_h)};
+    if (SUCCEEDED(hr)) hr = psurf->SetSourceRect(&src);
+    if (SUCCEEDED(hr)) {
+        psurf->SetBuffer(pbuf[0].Get());
+        pmgr->SetTargetTime(SystemInterruptTime{0});
+        pmgr->Present();
+    }
+    ComPtr<IDXGIDevice> dxgi_dev;
+    if (d11) d11.As(&dxgi_dev);
+    if (SUCCEEDED(hr)) hr = FgDCompCreateDevice3(dxgi_dev.Get(), IID_PPV_ARGS(&dcomp));
+    if (SUCCEEDED(hr)) hr = dcomp->CreateTargetForHwnd(win.hwnd, TRUE, &dtarget);
+    if (SUCCEEDED(hr)) hr = dcomp->CreateVisual(&dvis);
+    if (SUCCEEDED(hr)) hr = dcomp->CreateSurfaceFromHandle(sh, &dsurf);
+    if (SUCCEEDED(hr)) hr = dvis->SetContent(dsurf.Get());
+    if (SUCCEEDED(hr)) hr = dtarget->SetRoot(dvis.Get());
+    if (SUCCEEDED(hr)) hr = dcomp->Commit();
+    if (SUCCEEDED(hr)) dcomp->WaitForCommitCompletion();
+    if (game_sc) {
+        (void)game_sc->Present(0, 0);
+        PumpMessages();
+    }
+    if (SUCCEEDED(hr)) hr = pmgr->ForceVSyncInterrupt(1);
+    if (SUCCEEDED(hr)) hr = pmgr->EnablePresentStatisticsKind(PresentStatisticsKind_PresentStatus, 1);
+    if (SUCCEEDED(hr)) hr = pmgr->EnablePresentStatisticsKind(PresentStatisticsKind_CompositionFrame, 1);
+    if (SUCCEEDED(hr)) hr = pmgr->EnablePresentStatisticsKind(PresentStatisticsKind_IndependentFlipFrame, 1);
+    if (SUCCEEDED(hr)) hr = pmgr->GetPresentStatisticsAvailableEvent(&stats_ev);
+    if (SUCCEEDED(hr)) pmgr->GetPresentRetiringFence(IID_PPV_ARGS(&rfence));
+
+    FgClockMap clk;
+    FgRefreshGrid grid;
+    CHECK(FgReadCompositorGrid(clk, 0, &grid));
+    const FgTicks P = grid.period;
+    SleepPump(20);
+    {
+        ComPtr<IPresentStatistics> st;
+        while (pmgr->GetNextPresentStatistics(&st) == S_OK && st) st.Reset();
+    }
+
+    FgHighResTimer timer;
+    // Part 1: Exact composed-mode PresentStatus_Queued timing (with game swapchain on HWND).
+    std::printf("--- r5probe Part 1 (composed with game SC, P=%lldus) ---\n", static_cast<long long>(P / 10));
+    for (int ph = 0; ph < 6; ++ph) {
+        const FgTicks now = FgInterruptNow();
+        const FgTicks vk = grid.origin + ((now - grid.origin) / P + 4) * P;
+        const FgTicks wake = vk + (ph * P) / 6;
+        if (FgInterruptNow() < wake && timer.ArmAt(wake)) WaitForSingleObject(timer.Handle(), 20);
+        const UINT64 pid = pmgr->GetNextPresentId();
+        const FgTicks t_sub = FgInterruptNow();
+        psurf->SetBuffer(pbuf[(ph + 1) % kBufs].Get());
+        pmgr->SetTargetTime(SystemInterruptTime{0});
+        pmgr->Present();
+
+        COMPOSITION_FRAME_ID cfid = 0;
+        FgTicks t_stat = 0;
+        int ind = 0, cmp = 0;
+        const ULONGLONG deadline = GetTickCount64() + 50;
+        while (GetTickCount64() < deadline && cfid == 0) {
+            WaitForSingleObject(stats_ev, 5);
+            ComPtr<IPresentStatistics> st;
+            while (pmgr->GetNextPresentStatistics(&st) == S_OK && st) {
+                const PresentStatisticsKind k = st->GetKind();
+                if (k == PresentStatisticsKind_IndependentFlipFrame) ++ind;
+                else if (k == PresentStatisticsKind_CompositionFrame) ++cmp;
+                else if (st->GetPresentId() == pid && k == PresentStatisticsKind_PresentStatus) {
+                    t_stat = FgInterruptNow();
+                    ComPtr<IPresentStatusPresentStatistics> ps;
+                    if (SUCCEEDED(st.As(&ps))) cfid = ps->GetCompositionFrameId();
+                }
+                st.Reset();
+            }
+        }
+        COMPOSITION_FRAME_ID comp_id = 0;
+        while (cfid != 0 && comp_id < cfid && GetTickCount64() < deadline + 40) {
+            FgDCompGetFrameId(COMPOSITION_FRAME_ID_COMPLETED, &comp_id);
+            if (comp_id < cfid) Sleep(1);
+        }
+        COMPOSITION_FRAME_STATS fst = {};
+        COMPOSITION_TARGET_ID tgts[4] = {};
+        UINT cnt = 0;
+        FgTicks cf_start = 0, cf_tgt = 0;
+        if (cfid && SUCCEEDED(FgDCompGetStatistics(cfid, &fst, 4, tgts, &cnt))) {
+            cf_start = clk.FromQpc(static_cast<std::int64_t>(fst.startTime));
+            cf_tgt = clk.FromQpc(static_cast<std::int64_t>(fst.targetTime));
+        }
+        std::printf("ph=%d/6 sub-Vk=%4lldus | stat-sub=%4lldus stat-cf_start=%4lldus stat-cf_tgt=%5lldus | ind=%d cmp=%d\n",
+                    ph, static_cast<long long>((t_sub - vk) / 10),
+                    static_cast<long long>((t_stat - t_sub) / 10),
+                    static_cast<long long>(cf_start ? (t_stat - cf_start) / 10 : -9999),
+                    static_cast<long long>(cf_tgt ? (t_stat - cf_tgt) / 10 : -9999), ind, cmp);
+    }
+
+    // Part 2: Sweep step interval, waitQ, and SetTargetTime(0 vs future) in true composed mode (game SC bound).
+    struct Pol {
+        const char* name;
+        FgTicks step_us;
+        bool wait_queued;
+        FgTicks target_offset_us;  // 0 = SetTargetTime(0); >0 = SetTargetTime(now + offset)
+        FgTicks wall_floor_us;
+    };
+    const Pol pols[] = {
+        {"step1000_nowait_t0",       1000, false,    0, 1000},
+        {"step1500_nowait_t0",       1500, false,    0, 1500},
+        {"step2080_nowait_t0",       2080, false,    0, 2080},
+        {"step2080_nowait_t+2250",   2080, false, 2250, 2080},
+        {"step2776_nowait_t0",       2776, false,    0, 2776},
+        {"step2776_nowait_t+2250",   2776, false, 2250, 2776},
+        {"step1000_waitQ_t0",        1000, true,     0,    0},
+        {"step1000_waitQ_t+2250",    1000, true,  2250,    0},
+        {"step2080_waitQ_t0",        2080, true,     0,    0},
+        {"step2080_waitQ_t+2250",    2080, true,  2250,    0},
+        {"step2776_waitQ_t0",        2776, true,     0, 2776},
+    };
+    std::printf("--- r5probe Part 2: composed-mode skip rate vs policy (150 frames each) ---\n");
+    for (const Pol& pol : pols) {
+        SetStage(pol.name);
+        SleepPump(20);
+        {
+            ComPtr<IPresentStatistics> st;
+            while (pmgr->GetNextPresentStatistics(&st) == S_OK && st) st.Reset();
+        }
+        int sub = 0, q = 0, sk = 0, ind = 0, cmp = 0;
+        UINT64 last_pid = 0;
+        bool last_resolved = true;
+        FgTicks last_sub = 0;
+        std::vector<FgTicks> q_lat_us;
+        std::vector<COMPOSITION_FRAME_ID> q_cfids;
+        const FgTicks t0 = FgInterruptNow();
+        FgTicks next_at = t0;
+        auto drain_stats = [&]() {
+            ComPtr<IPresentStatistics> st;
+            while (pmgr->GetNextPresentStatistics(&st) == S_OK && st) {
+                const PresentStatisticsKind k = st->GetKind();
+                if (k == PresentStatisticsKind_IndependentFlipFrame) ++ind;
+                else if (k == PresentStatisticsKind_CompositionFrame) ++cmp;
+                else if (k == PresentStatisticsKind_PresentStatus) {
+                    ComPtr<IPresentStatusPresentStatistics> ps;
+                    if (SUCCEEDED(st.As(&ps))) {
+                        const PresentStatus pv = ps->GetPresentStatus();
+                        if (pv == PresentStatus_Queued) {
+                            ++q;
+                            q_cfids.push_back(ps->GetCompositionFrameId());
+                            if (st->GetPresentId() == last_pid) {
+                                last_resolved = true;
+                                q_lat_us.push_back((FgInterruptNow() - last_sub) / 10);
+                            }
+                        } else if (pv == PresentStatus_Skipped) {
+                            ++sk;
+                            if (st->GetPresentId() == last_pid) last_resolved = true;
+                        }
+                    }
+                }
+                st.Reset();
+            }
+        };
+        for (int f = 0; f < 150; ++f) {
+            if (pol.wait_queued && !last_resolved) {
+                const FgTicks w_end = FgInterruptNow() + 200000;
+                while (!last_resolved && FgInterruptNow() < w_end) {
+                    WaitForSingleObject(stats_ev, 5);
+                    drain_stats();
+                }
+            }
+            FgTicks target_sub = next_at;
+            if (last_sub > 0 && pol.wall_floor_us > 0) {
+                const FgTicks wf = last_sub + pol.wall_floor_us * 10;
+                if (wf > target_sub) target_sub = wf;
+            }
+            if (FgInterruptNow() < target_sub && timer.ArmAt(target_sub)) WaitForSingleObject(timer.Handle(), 20);
+            const int s = (f + 1) % kBufs;
+            boolean av = 0;
+            const ULONGLONG av_end = GetTickCount64() + 30;
+            while (GetTickCount64() < av_end) {
+                if (SUCCEEDED(pbuf[s]->IsAvailable(&av)) && av) break;
+                drain_stats();
+                Sleep(1);
+            }
+            last_pid = pmgr->GetNextPresentId();
+            last_resolved = false;
+            last_sub = FgInterruptNow();
+            const UINT64 tt = pol.target_offset_us > 0 ? static_cast<UINT64>(last_sub + pol.target_offset_us * 10) : 0ull;
+            psurf->SetBuffer(pbuf[s].Get());
+            pmgr->SetTargetTime(SystemInterruptTime{tt});
+            if (SUCCEEDED(pmgr->Present())) ++sub;
+            next_at = last_sub + pol.step_us * 10;
+            drain_stats();
+        }
+        const FgTicks elapsed = FgInterruptNow() - t0;
+        SleepPump(30);
+        drain_stats();
+        int same_cfid = 0, cf_gap_gt1 = 0;
+        for (std::size_t k = 1; k < q_cfids.size(); ++k) {
+            if (q_cfids[k] == q_cfids[k - 1]) ++same_cfid;
+            else if (q_cfids[k] > q_cfids[k - 1] + 1) ++cf_gap_gt1;
+        }
+        std::sort(q_lat_us.begin(), q_lat_us.end());
+        const long long ql50 = q_lat_us.empty() ? 0 : static_cast<long long>(q_lat_us[q_lat_us.size() / 2]);
+        const long long ql95 = q_lat_us.empty() ? 0 : static_cast<long long>(q_lat_us[(q_lat_us.size() - 1) * 95 / 100]);
+        const double q_fps = elapsed > 0 ? static_cast<double>(q) * 10000000.0 / static_cast<double>(elapsed) : 0.0;
+        std::printf("pol %-24s: sub=%3d q=%3d sk=%3d (%5.2f%%) ind=%d cmp=%d same_cf=%d gap2=%d q_fps=%5.1f qlat=%4lld/%4lldus\n",
+                    pol.name, sub, q, sk, sub > 0 ? 100.0 * sk / sub : 0.0, ind, cmp, same_cfid, cf_gap_gt1, q_fps,
+                    ql50, ql95);
+    }
+
+    if (dvis) dvis->SetContent(nullptr);
+    if (dtarget) dtarget->SetRoot(nullptr);
+    if (dcomp) dcomp->Commit();
+    dsurf.Reset(); dvis.Reset(); dtarget.Reset(); dcomp.Reset(); psurf.Reset();
+    for (int i = 0; i < kBufs; ++i) { pbuf[i].Reset(); tex[i].Reset(); res12[i].Reset(); }
+    rfence.Reset(); pmgr.Reset(); pfac.Reset(); c11.Reset(); d11.Reset(); c11r.Reset(); d11r.Reset();
+    if (stats_ev) CloseHandle(stats_ev);
+    if (sh) CloseHandle(sh);
+    game_sc.Reset();
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -2640,6 +2928,7 @@ int main(int argc, char** argv) {
     bool gate = false;
     bool r3probe = false;
     bool phaseprobe = false;
+    bool r5probe = false;
     int cycles = 5;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--probe") == 0) probe = true;
@@ -2649,9 +2938,10 @@ int main(int argc, char** argv) {
         else if (std::strcmp(argv[i], "--gate") == 0) gate = true;
         else if (std::strcmp(argv[i], "--r3probe") == 0) r3probe = true;
         else if (std::strcmp(argv[i], "--phaseprobe") == 0) phaseprobe = true;
+        else if (std::strcmp(argv[i], "--r5probe") == 0) r5probe = true;
         else if (std::strcmp(argv[i], "--cycles") == 0 && i + 1 < argc) cycles = std::atoi(argv[++i]);
     }
-    if (!probe && !diag && !smoke && !stress && !gate && !r3probe && !phaseprobe) smoke = true;
+    if (!probe && !diag && !smoke && !stress && !gate && !r3probe && !phaseprobe && !r5probe) smoke = true;
 
     SetStage("init");
     std::thread watchdog([]() {
@@ -2676,6 +2966,9 @@ int main(int argc, char** argv) {
         }
         if (phaseprobe) {
             RunPhaseProbe(gpu);
+        }
+        if (r5probe) {
+            RunR5Probe(gpu);
         }
         if (diag) {
             RunDiag(gpu);

@@ -662,7 +662,8 @@ FgWinResult FgWinCompPresenter::CreateWithBackend(const FgCompPresenterDesc& d,
     cfg.slot_count = slots;
     cfg.max_pending_intervals = d.max_pending_intervals >= 1 ? d.max_pending_intervals : 2u;
     cfg.refresh_period = d.refresh_period;
-    if (d.variable_refresh) cfg.pending_late_tolerance = 40000;  // 4 ms envelope matching FgPlanTearingImage
+    if (d.variable_refresh)
+        cfg.pending_late_tolerance = 80000;  // 8 ms pending envelope for composed GPU-loaded pipelines
     std::unique_ptr<FgWinCompPresenter> p(new FgWinCompPresenter(d, cfg, std::move(backend), start_worker));
     const FgWinResult r = p->Initialize();
     if (!r.Ok()) return r;
@@ -863,12 +864,18 @@ FgStatus FgWinCompPresenter::Attach(std::uint64_t chain_id, std::uint64_t epoch)
     chain_ = chain_id;
     claimed_ = true;
     have_vblank_ = false;
-    last_submit_at_ = 0;
+    qlat_low_ = 0;
+    qlat_med_ = 0;
+    slip_med_ = 0;
+    last_slip_id_ = 0;
     next_pace_wake_ = 0;
     return s;
 }
 
 FgStatus FgWinCompPresenter::BeginInterval(const FgIntervalPlan& plan, FgIntervalReservation* out) {
+    // Capture the call timestamp before waiting on mutex_ so a worker PresentSlot() call (160-350 us)
+    // cannot push a newly scheduled interval past its tight submit deadline (t.target - margin).
+    const FgTicks call_now = backend_ ? backend_->Now() : FgInterruptNow();
     std::lock_guard<std::mutex> lock(mutex_);
     // fixed refresh: an image interval that is not a whole number of refreshes cannot be shown evenly; refuse it
     // (the scheduler presents real-only or changes the count) instead of dropping images on the display path
@@ -877,7 +884,7 @@ FgStatus FgWinCompPresenter::BeginInterval(const FgIntervalPlan& plan, FgInterva
         if (out) *out = FgIntervalReservation();
         return engine_.Refuse(FgStatus::Unsupported);
     }
-    return engine_.BeginInterval(plan, NowLocked(), out);
+    return engine_.BeginInterval(plan, call_now, out);
 }
 
 FgStatus FgWinCompPresenter::SubmitInterval(const FgIntervalSubmission& submission) {
@@ -973,7 +980,10 @@ FgStatus FgWinCompPresenter::CompleteResize(bool resize_ok, std::uint64_t new_ep
     resize_width_ = 0;
     resize_height_ = 0;
     have_vblank_ = false;
-    last_submit_at_ = 0;
+    qlat_low_ = 0;
+    qlat_med_ = 0;
+    slip_med_ = 0;
+    last_slip_id_ = 0;
     next_pace_wake_ = 0;
     deferred_.clear();
     ForgetSubmittedLocked();
@@ -985,7 +995,10 @@ FgStatus FgWinCompPresenter::OnDeviceLost() {
     std::lock_guard<std::mutex> lock(mutex_);
     const FgStatus s = engine_.OnDeviceLost();
     deferred_.clear();
-    last_submit_at_ = 0;
+    qlat_low_ = 0;
+    qlat_med_ = 0;
+    slip_med_ = 0;
+    last_slip_id_ = 0;
     next_pace_wake_ = 0;
     ForgetSubmittedLocked();
     return s;
@@ -1010,7 +1023,10 @@ FgStatus FgWinCompPresenter::Detach() {
         if (claimed_) FgChainRegistry::Process().Release(chain_, this);
         claimed_ = false;
         deferred_.clear();
-        last_submit_at_ = 0;
+        qlat_low_ = 0;
+        qlat_med_ = 0;
+        slip_med_ = 0;
+        last_slip_id_ = 0;
         next_pace_wake_ = 0;
         ForgetSubmittedLocked();
     }
@@ -1069,7 +1085,10 @@ bool FgWinCompPresenter::TakePlatformPresent(std::uint64_t platform_id, Submitte
 void FgWinCompPresenter::LoseLocked() {
     engine_.OnDeviceLost();
     deferred_.clear();
-    last_submit_at_ = 0;
+    qlat_low_ = 0;
+    qlat_med_ = 0;
+    slip_med_ = 0;
+    last_slip_id_ = 0;
     next_pace_wake_ = 0;
     ForgetSubmittedLocked();
 }
@@ -1108,10 +1127,8 @@ void FgWinCompPresenter::CancelOnDisplayLocked(std::uint64_t engine_from) {
     if (!submitted_.empty()) {
         have_vblank_ = true;
         last_vblank_ = submitted_.back().vblank;
-        last_submit_at_ = submitted_.back().display.issue;
     } else {
         have_vblank_ = false;
-        last_submit_at_ = 0;
     }
 }
 
@@ -1135,6 +1152,7 @@ void FgWinCompPresenter::DrainStatisticsLocked() {
                 }
                 if (st.status == FgCompPresentStatus::Queued) {
                     ++info_.status_queued;
+                    const FgTicks queued_now = NowLocked();
                     if (st.comp_frame_id != 0) {
                         ++info_.status_queued_with_cfid;
                         FgCompFrameTiming timing;
@@ -1143,15 +1161,50 @@ void FgWinCompPresenter::DrainStatisticsLocked() {
                             if (s.platform_id == pid) {
                                 s.comp_frame_id = st.comp_frame_id;
                                 s.queued_confirmed = true;
-                                if (probed && timing.frame_target_time > 0) {
-                                    // Closed-loop collision guard: if DWM assigned a later composition frame than we
-                                    // predicted (e.g. OS scheduling delay crossed the cutoff), advance last_vblank_
-                                    // immediately so the next present targets the following composition frame.
-                                    if (have_vblank_ && timing.frame_target_time > last_vblank_) {
-                                        last_vblank_ = timing.frame_target_time;
-                                        ++info_.grid_phase_bumps;
+                                const FgTicks qlat =
+                                    queued_now > s.display.issue ? (queued_now - s.display.issue) : 0;
+                                const FgTicks grid_p =
+                                    info_.grid.period > 0 ? info_.grid.period : RefreshPeriodLocked();
+                                // Track both a lower-envelope (~p15) latch latency (for safe_lead without
+                                // double-packing a vblank) and a spike-immune online median (~p50) latch
+                                // latency (for target wake_lead, vblank prediction, and sustained GPU load).
+                                if (qlat > 0 && qlat <= grid_p * 4) {
+                                    if (qlat_low_ == 0) {
+                                        qlat_low_ = qlat;
+                                    } else if (qlat < qlat_low_) {
+                                        qlat_low_ -= (qlat_low_ - qlat) / 2;
+                                    } else {
+                                        qlat_low_ += (qlat - qlat_low_) / 12;
                                     }
-                                    s.vblank = timing.frame_target_time;
+                                    const FgTicks step = std::max<FgTicks>(grid_p / 32, 500);
+                                    const FgTicks cap_qlat = std::min<FgTicks>(qlat, grid_p * 2);
+                                    if (qlat_med_ == 0) {
+                                        qlat_med_ = cap_qlat;
+                                    } else if (cap_qlat > qlat_med_) {
+                                        qlat_med_ = std::min<FgTicks>(qlat_med_ + step, cap_qlat);
+                                    } else {
+                                        qlat_med_ = std::max<FgTicks>(qlat_med_ - step, cap_qlat);
+                                    }
+                                }
+                                FgTicks latched_vblank = 0;
+                                if (probed && timing.frame_target_time > 0) {
+                                    latched_vblank = timing.frame_target_time;
+                                } else if (info_.grid.period > 0) {
+                                    // On Windows 11 DWM, PresentStatus_Queued arrives ~33 us after cf_start while
+                                    // cfid is still in progress (DCompositionGetStatistics fails until COMPLETED).
+                                    // The frame's scan-out vblank is CeilToRefreshGrid(cf_start, grid).
+                                    const FgTicks cf_start_est = queued_now > 350 ? queued_now - 350 : queued_now;
+                                    latched_vblank = CeilToRefreshGrid(cf_start_est, info_.grid);
+                                }
+                                if (latched_vblank > 0) {
+                                    if (have_vblank_ && latched_vblank > last_vblank_) {
+                                        last_vblank_ = latched_vblank;
+                                        ++info_.grid_phase_bumps;
+                                    } else if (&s == &submitted_.back() && have_vblank_ &&
+                                               latched_vblank < last_vblank_) {
+                                        last_vblank_ = latched_vblank;
+                                    }
+                                    s.vblank = latched_vblank;
                                 }
                                 break;
                             }
@@ -1234,6 +1287,10 @@ void FgWinCompPresenter::ResolveQueuedDisplaysLocked() {
         const bool probed = backend_->ProbeCompFrameTiming(s.comp_frame_id, &timing);
         if (probed) {
             RefreshCompGridFromTimingLocked(timing);
+            if (have_vblank_ && timing.frame_target_time > last_vblank_) {
+                last_vblank_ = timing.frame_target_time;
+                ++info_.grid_phase_bumps;
+            }
             if (timing.target_count > info_.status_target_count_max)
                 info_.status_target_count_max = timing.target_count;
             if (timing.raw_presented_qpc != 0) ++info_.status_target_presented_nonzero;
@@ -1254,7 +1311,7 @@ void FgWinCompPresenter::ResolveQueuedDisplaysLocked() {
             if (timing.frame_target_time > actual && timing.frame_period > 0) {
                 const FgTicks delta = timing.frame_target_time - actual;
                 const FgTicks k = (delta + timing.frame_period / 2) / timing.frame_period;
-                if (k >= 1 && k <= 4 &&
+                if (k >= 1 && k <= 16 &&
                     std::llabs(delta - k * timing.frame_period) <= timing.frame_period / 4) {
                     actual = timing.presented_time + k * timing.frame_period;
                 }
@@ -1330,7 +1387,8 @@ void FgWinCompPresenter::SubmitOutboxLocked() {
         const std::size_t max_in_flight = real_only_plan ? kMaxRealOnlyInFlight : kMaxCompInFlight;
         if (submitted_.size() >= max_in_flight) break;
 
-        const bool composed_grid = desc_.variable_refresh && info_.indep_flip_frames < 4 && info_.grid.period > 0;
+        const bool composed_grid =
+            desc_.bind_window && desc_.variable_refresh && info_.indep_flip_frames < 4 && info_.grid.period > 0;
         FgTicks vblank = p.target;
         FgTicks when = p.target;
         FgTicks cutoff_lead = 0;
@@ -1356,66 +1414,95 @@ void FgWinCompPresenter::SubmitOutboxLocked() {
                 break;
             }
         } else if (composed_grid) {
-            // Composed-mode DWM grid alignment: DWM assigns each Present() by wall submit time against the live
-            // composition grid (origin + k * P) with an acceptance cutoff ~P/4 before V_k (capped at 3 ms).
-            // Never submit two images into the same composition frame; drop colliding or too-late generated images
-            // before submission, and gate every submission into the safe middle of its assigned frame's window.
+            // Composed-mode DWM pacing:
+            // 1) Latch gate: DWM holds a 1-deep pending buffer per surface until cf_start latches it and signals
+            //    PresentStatus_Queued (~33 us after cf_start). Never submit while the previous present is still
+            //    unlatched (bounded by latch_timeout so occluded windows still reach the 250 ms watchdog).
+            // 2) Vblank separation: once latched into last_vblank_ (V_m), wait until now >= last_vblank_ + guard
+            //    so the next present's cf_start lands strictly after V_m (on V_{m+1} or later, never same V_m).
+            // 3) Target pacing + now-based late/collision drop: do not backward-snap targets or inflate lateness
+            //    by CeilToRefreshGrid, keeping generated readiness drops within the VRR tolerance envelope.
             const FgTicks period = info_.grid.period;
             cutoff_lead = std::min<FgTicks>(period / 4, 30000);
-            const FgTicks cutoff_guard = std::min<FgTicks>(period / 5, 10000);
-            const FgTicks latest_lead = cutoff_lead + cutoff_guard;
-            const FgTicks wake_lead =
-                std::min<FgTicks>((period * 3) / 4 + std::min<FgTicks>(period / 16, 1500), period / 2 + 25000);
+            const FgTicks latch_timeout = std::max<FgTicks>(period * 12, 400000);  // >= 40 ms safety cap
 
-            FgTicks v_target = 0;
-            FgTicks unused_when = 0;
-            if (FgSnapToRefreshGrid(p.target, info_.grid, &v_target, &unused_when) != FgStatus::Ok) {
-                v_target = CeilToRefreshGrid(p.target, info_.grid);
-            }
-            const FgTicks v_now = CeilToRefreshGrid(now + latest_lead, info_.grid);
-            const FgTicks v_after_prev =
-                have_vblank_ ? CeilToRefreshGrid(last_vblank_ + period / 2, info_.grid) : v_now;
-            const FgTicks v_chosen = std::max({v_target, v_now, v_after_prev});
-
-            if (!p.real) {
-                const FgTicks next_target =
-                    i + 1 < deferred_.size() ? deferred_[i + 1].target : engine_.HeadPendingTarget();
-                const FgTicks slot = next_target > p.target ? next_target - p.target : 0;
-                const FgTicks slot_allow = slot > 0 ? (slot - slot / 8) : 0;
-                const FgTicks scaled = slot > 0 ? std::clamp<FgTicks>(slot_allow, 15000, 40000) : 20000;
-                const FgTicks late_tol = std::max<FgTicks>(period + period / 2, scaled);
-                if (v_chosen > p.target + late_tol) {
-                    const bool collision = have_vblank_ && v_after_prev > v_now && v_after_prev > v_target;
-                    if (collision) ++info_.composed_drop_collision;
-                    else ++info_.composed_drop_late;
-                    engine_.OnPresentDropped(p.present_id, collision ? FgDropReason::Pressure : FgDropReason::Late);
-                    continue;
-                }
-                if (next_target > p.target) {
-                    const FgTicks slip_allow =
-                        std::min<FgTicks>(late_tol, std::max<FgTicks>(period + period / 8, slot_allow));
-                    if (v_chosen + period > next_target + slip_allow) {
-                        const bool collision = have_vblank_ && v_after_prev >= v_now && v_after_prev > v_target;
-                        if (collision) ++info_.composed_drop_collision;
-                        else ++info_.composed_drop_late;
-                        engine_.OnPresentDropped(p.present_id,
-                                                 collision ? FgDropReason::Pressure : FgDropReason::Late);
-                        continue;
+            if (!submitted_.empty()) {
+                const Submitted& prev = submitted_.back();
+                if (!prev.queued_confirmed && !prev.watchdog_cancelled) {
+                    const FgTicks timeout_at = prev.display.issue + latch_timeout;
+                    if (now < timeout_at) {
+                        next_pace_wake_ = timeout_at;
+                        break;
                     }
                 }
             }
 
-            FgTicks submit_at = v_chosen - wake_lead;
-            if (have_vblank_ && last_submit_at_ > 0) {
-                const FgTicks wall_floor = last_submit_at_ + (period * 3) / 4;
-                if (wall_floor > submit_at) submit_at = wall_floor;
+            const FgTicks vblank_guard = std::min<FgTicks>(period / 16, 1000);  // 100 us
+            const FgTicks margin = std::min<FgTicks>(period / 6, 4500);         // 450 us safety margin against short
+            const FgTicks max_lead = period > vblank_guard * 2 ? (period - vblank_guard * 2) : 0;
+            // On time: reclaim conservative lower-envelope latch delay (qlat_low_ - margin) to minimize
+            // double-packed vblanks. Behind target: reclaim median latch delay (qlat_med_ - guard) so
+            // heavy GPU scenes do not stall on wasted refreshes and spiral queue latency.
+            FgTicks safe_lead =
+                qlat_low_ > margin ? std::min<FgTicks>(qlat_low_ - margin, max_lead) : 0;
+            if (now > p.target && qlat_med_ > margin / 2) {
+                const FgTicks catchup_lead = std::min<FgTicks>(qlat_med_ - margin / 2, max_lead);
+                if (catchup_lead > safe_lead) safe_lead = catchup_lead;
             }
+            const FgTicks earliest_submit = have_vblank_ ? (last_vblank_ + vblank_guard - safe_lead) : 0;
+            const FgTicks base_wake = std::min<FgTicks>(period, 30000);
+            const FgTicks adaptive_wake = qlat_med_ > 0 ? (qlat_med_ + (period * 3) / 4) : base_wake;
+            const FgTicks wake_lead = std::clamp<FgTicks>(adaptive_wake, base_wake, period * 2);
+            const FgTicks target_submit = p.target > wake_lead ? (p.target - wake_lead) : 0;
+            const FgTicks submit_at = earliest_submit > target_submit ? earliest_submit : target_submit;
+
+            if (!p.real) {
+                if (p.present_id != last_slip_id_) {
+                    last_slip_id_ = p.present_id;
+                    const FgTicks cur_slip = now > p.target ? (now - p.target) : 0;
+                    const FgTicks cap_slip = std::min<FgTicks>(cur_slip, 150000);
+                    constexpr FgTicks kSlipStep = 4000;  // 400 us/generated frame spike-immune online median
+                    if (cap_slip > slip_med_) {
+                        slip_med_ = std::min<FgTicks>(slip_med_ + kSlipStep, cap_slip);
+                    } else {
+                        slip_med_ =
+                            slip_med_ > kSlipStep ? std::max<FgTicks>(slip_med_ - kSlipStep, cap_slip) : cap_slip;
+                    }
+                }
+                const FgTicks next_target =
+                    i + 1 < deferred_.size() ? deferred_[i + 1].target : engine_.HeadPendingTarget();
+                const FgTicks slot = next_target > p.target ? (next_target - p.target) : 0;
+                const FgTicks base_tol =
+                    slot > 0 ? std::clamp<FgTicks>(slot - slot / 8, 25000, 40000) : 25000;
+                // Under sustained GPU pipeline load (median qlat above the ~400 us unloaded DWM floor) or
+                // sustained GPU-bound generated-frame slip (median arrival lateness > 1.5 ms, e.g. low-multiplier
+                // gameplay where DWM is not saturated and real frames finish at the same fence as gen1), relax
+                // the composed late cutoff while keeping isolated spikes on an on-time desktop stream tight.
+                const FgTicks idle_floor = std::min<FgTicks>(period / 7, 4000);
+                const FgTicks pipe_excess = qlat_med_ > idle_floor ? (qlat_med_ - idle_floor) : 0;
+                constexpr FgTicks kSlipFloor = 15000;
+                constexpr FgTicks kDeepSlipFloor = 25000;
+                const FgTicks slip_excess = slip_med_ > kSlipFloor ? (slip_med_ - kSlipFloor) : 0;
+                const FgTicks deep_excess = slip_med_ > kDeepSlipFloor ? (slip_med_ - kDeepSlipFloor) : 0;
+                const FgTicks slip_bonus = slip_excess * 6 + deep_excess * 16;
+                const FgTicks load_bonus = std::max<FgTicks>(pipe_excess * 24, slip_bonus);
+                const FgTicks comp_late_tol = std::min<FgTicks>(base_tol + load_bonus, 600000);
+                const FgTicks issue = now > submit_at ? now : submit_at;
+                if (issue > p.target + comp_late_tol) {
+                    ++info_.composed_drop_late;
+                    engine_.OnPresentDropped(p.present_id, FgDropReason::Late);
+                    continue;
+                }
+            }
+
             if (now < submit_at) {
                 next_pace_wake_ = submit_at;
                 break;
             }
-            vblank = v_chosen;
-            when = v_chosen;
+            const FgTicks pred_lead = std::max<FgTicks>(cutoff_lead, qlat_med_);
+            vblank = CeilToRefreshGrid(now + pred_lead, info_.grid);
+            if (have_vblank_ && vblank <= last_vblank_) vblank = last_vblank_ + period;
+            when = vblank;
         } else {
             const FgTicks min_gap =
                 desc_.min_interval > 0 ? desc_.min_interval : (desc_.refresh_period > 0 ? desc_.refresh_period : 1);
@@ -1475,7 +1562,6 @@ void FgWinCompPresenter::SubmitOutboxLocked() {
         }
         have_vblank_ = true;
         last_vblank_ = vblank;
-        last_submit_at_ = submitted_at;
     }
     deferred_.erase(deferred_.begin(), deferred_.begin() + static_cast<std::ptrdiff_t>(i));
 }

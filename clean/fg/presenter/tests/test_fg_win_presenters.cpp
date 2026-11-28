@@ -3084,6 +3084,209 @@ void TestCompComposedGridAlignmentAndCollisionDrop() {
         CHECK(count_360 == 3);  // 50 * 4 = 200 fps fits 360 Hz
         CHECK(count_120 == 1);  // 50 * 2 = 100 fps fits 120 Hz (50 * 3 = 150 fps exceeds 120 Hz)
     }
+
+    // 4) Composed-mode latch gate and in-progress cfid phase estimation: Present 2 is held while Present 1 is
+    //    unlatched (!queued_confirmed); when PresentStatus_Queued arrives with ProbeCompFrameTiming returning false
+    //    (live Windows 11 in-progress cfid), CeilToRefreshGrid(now - 350, grid) bumps last_vblank_ to V2 and Present 2
+    //    waits until V2 + guard before submitting for V3.
+    {
+        const FgTicks origin = 980 * kMs;
+        auto backend_up = std::make_unique<FakeCompBackend>(10, origin, false);
+        FakeCompBackend* backend = backend_up.get();
+        backend->SetRefreshGrid(origin, kCompPeriod360);
+        const std::uint32_t fid = backend->CreateFence();
+        FgCompPresenterDesc cd;
+        cd.bind_window = true;
+        cd.width = 2560;
+        cd.height = 1440;
+        cd.variable_refresh = true;
+        cd.refresh_period = kCompPeriod360;
+        cd.min_interval = kMinIntervalComp;
+        cd.slot_count = 10;
+        std::unique_ptr<FgWinCompPresenter> p;
+        CHECK(FgWinCompPresenter::CreateWithBackend(cd, std::move(backend_up), false, &p).Ok());
+        CHECK(p->Attach(0x5591, 1) == FgStatus::Ok);
+
+        const FgTicks v1 = origin + kCompPeriod360;
+        const FgTicks v3 = origin + 3 * kCompPeriod360;
+        std::uint32_t s1 = 0, s2 = 0;
+        CHECK(p->ReserveRealSlot(&s1) == FgStatus::Ok);
+        FgIntervalPlan pl1 = MakePlan(1, 1, 1, origin, kCompPeriod360, 0, 2500);
+        backend->SignalFence(fid, 1);
+        CHECK(p->PresentRealOnly(pl1, FgRealImage{1, 1, FgReadyFence{fid, 1}}) == FgStatus::Ok);
+        backend->SetNow(origin + 8000);
+        p->StepForTest();
+        CHECK(backend->SubmittedLog().size() == 1);
+        CHECK(backend->SubmittedLog()[0].target == v1);
+
+        // Queue Present 2 while Present 1 has NOT received PresentStatus_Queued yet.
+        CHECK(p->ReserveRealSlot(&s2) == FgStatus::Ok);
+        FgIntervalPlan pl2 = MakePlan(1, 2, 2, v1, kCompPeriod360, 0, 2500);
+        backend->SignalFence(fid, 2);
+        CHECK(p->PresentRealOnly(pl2, FgRealImage{1, 2, FgReadyFence{fid, 2}}) == FgStatus::Ok);
+        backend->SetNow(v1 + 10000);  // past V1, still within latch_timeout -> must NOT overwrite Present 1
+        p->StepForTest();
+        CHECK(backend->SubmittedLog().size() == 1);
+
+        // PresentStatus_Queued arrives at v1 + 12000 with no completed timing (ProbeCompFrameTiming == false).
+        // Latch estimation bumps last_vblank_ from V1 to V2, and adaptive qlat_low_ (3.18 ms measured latch)
+        // reclaims the wasted refresh so Present 2 submits immediately for V3 (never colliding with V2).
+        backend->SetNow(v1 + 12000);
+        backend->PushQueuedStatus(1, 6001, 0, 0, 0);
+        p->StepForTest();
+        CHECK(p->Info().grid_phase_bumps == 1);
+        CHECK(backend->SubmittedLog().size() == 2);
+        CHECK(backend->SubmittedLog()[1].target == v3);
+        CHECK(p->Detach() == FgStatus::Ok);
+    }
+
+    // 5) Sustained GPU-bound generated-frame slip vs isolated spike in composed mode:
+    //    (a) On an otherwise on-time stream (unloaded DWM qlat 250 us), a single 6 ms late generated spike
+    //        stays below the 1.5 ms slip_med_ deadband and is still dropped (composed_drop_late == 1).
+    //    (b) Once sustained generated-frame arrival slip (~5.2 ms, e.g. GPU-bound x2-raster with unloaded DWM
+    //        where real frames arrive near their own target at the same GPU fence as gen1) persists across
+    //        intervals, slip_med_ rises above 1.5 ms without real-frame cancellation and preserves gen1 (0 drops).
+    {
+        const FgTicks origin = 1200 * kMs;
+        auto backend_up = std::make_unique<FakeCompBackend>(16, origin, false);
+        FakeCompBackend* backend = backend_up.get();
+        backend->SetRefreshGrid(origin, kCompPeriod360);
+        const std::uint32_t fid = backend->CreateFence();
+        FgCompPresenterDesc cd;
+        cd.bind_window = true;
+        cd.width = 2560;
+        cd.height = 1440;
+        cd.variable_refresh = true;
+        cd.refresh_period = kCompPeriod360;
+        cd.min_interval = kMinIntervalComp;
+        cd.slot_count = 16;
+        cd.max_pending_intervals = 3;
+        std::unique_ptr<FgWinCompPresenter> p;
+        CHECK(FgWinCompPresenter::CreateWithBackend(cd, std::move(backend_up), false, &p).Ok());
+        CHECK(p->Attach(0x5592, 1) == FgStatus::Ok);
+
+        std::uint64_t fval = 0;
+        std::uint64_t next_cfid = 7000;
+        std::size_t next_stat = 0;
+        auto latch_pending = [&](FgTicks at) {
+            backend->SetNow(at);
+            const auto& log = backend->SubmittedLog();
+            while (next_stat < log.size()) {
+                const auto& sub = log[next_stat++];
+                backend->PushQueuedStatus(sub.pid, ++next_cfid, 0, 0, 0);
+                backend->SetCompletedCfid(next_cfid);
+                backend->SetRetiringFence(sub.pid);
+                backend->ReleaseSlotBuffer(sub.slot);
+            }
+            p->StepForTest();
+        };
+
+        // 10 on-time x2 intervals (qlat = 250 us, cur_slip = 0).
+        FgTicks t = origin + 5 * kMs;
+        for (int k = 1; k <= 10; ++k) {
+            FgIntervalPlan pl = MakePlan(1, static_cast<std::uint64_t>(k), static_cast<std::uint64_t>(k), t, 90000, 1,
+                                         2500);
+            pl.reanchored = true;
+            const FgTicks gen_t = pl.targets[0].target;
+            const FgTicks real_t = pl.targets[1].target;
+            backend->SetNow(t);
+            FgIntervalReservation res;
+            CHECK(p->BeginInterval(pl, &res) == FgStatus::Ok);
+            FgIntervalSubmission sub;
+            sub.epoch = 1;
+            sub.interval_id = static_cast<std::uint64_t>(k);
+            sub.count = res.count;
+            const std::uint64_t gfv = ++fval;
+            const std::uint64_t rfv = ++fval;
+            sub.produced[0] = true;
+            sub.ready[0] = FgReadyFence{fid, gfv};
+            sub.produced[1] = true;
+            sub.ready[1] = FgReadyFence{fid, rfv};
+            CHECK(p->SubmitInterval(sub) == FgStatus::Ok);
+            backend->SignalFence(fid, rfv);
+            backend->SetNow(gen_t - 10000);
+            p->StepForTest();
+            latch_pending(gen_t - 7500);
+            backend->SetNow(real_t - 10000);
+            p->StepForTest();
+            latch_pending(real_t - 7500);
+            t += 180000;
+        }
+        // Single isolated 6 ms late generated frame on the on-time stream -> must drop as composed_drop_late.
+        {
+            FgIntervalPlan pl = MakePlan(1, 11, 11, t, 90000, 1, 2500);
+            pl.reanchored = true;
+            const FgTicks gen_t = pl.targets[0].target;
+            const FgTicks real_t = pl.targets[1].target;
+            backend->SetNow(t);
+            FgIntervalReservation res;
+            CHECK(p->BeginInterval(pl, &res) == FgStatus::Ok);
+            CHECK(res.slots[0].reserved && res.slots[1].reserved);
+            FgIntervalSubmission sub;
+            sub.epoch = 1;
+            sub.interval_id = 11;
+            sub.count = res.count;
+            const std::uint64_t gfv = ++fval;
+            const std::uint64_t rfv = ++fval;
+            sub.produced[0] = true;
+            sub.ready[0] = FgReadyFence{fid, gfv};
+            sub.produced[1] = true;
+            sub.ready[1] = FgReadyFence{fid, rfv};
+            CHECK(p->SubmitInterval(sub) == FgStatus::Ok);
+            // GPU fence finishes +6.0 ms late (within 8 ms pending envelope, > 4.0 ms base_tol).
+            backend->SignalFence(fid, rfv);
+            backend->SetNow(gen_t + 60000);
+            p->StepForTest();
+            CHECK(p->Info().composed_drop_late == 1);
+            latch_pending(gen_t + 62500);
+            backend->SetNow(real_t + 60000);
+            p->StepForTest();
+            latch_pending(real_t + 62500);
+            t += 180000;
+        }
+
+        // Sustained GPU-bound x2-raster pattern: gen1 and real share the same GPU fence (+5.2 ms past gen_t,
+        // only +0.7 ms past real_t) with unloaded DWM qlat = 250 us. After 5 warm-up intervals slip_med_ > 2.0 ms
+        // without real-frame cancellation, so the next 10 x2 intervals preserve all 10 generated frames (0 drops).
+        auto run_x2_late = [&](int k) {
+            FgIntervalPlan pl = MakePlan(1, static_cast<std::uint64_t>(k), static_cast<std::uint64_t>(k), t, 90000, 1,
+                                         2500);
+            pl.reanchored = true;
+            const FgTicks gen_t = pl.targets[0].target;
+            const FgTicks real_t = pl.targets[1].target;
+            backend->SetNow(t);
+            FgIntervalReservation res;
+            CHECK(p->BeginInterval(pl, &res) == FgStatus::Ok);
+            CHECK(res.slots[0].reserved && res.slots[1].reserved);
+            FgIntervalSubmission sub;
+            sub.epoch = 1;
+            sub.interval_id = static_cast<std::uint64_t>(k);
+            sub.count = res.count;
+            const std::uint64_t gfv = ++fval;
+            const std::uint64_t rfv = ++fval;
+            sub.produced[0] = true;
+            sub.ready[0] = FgReadyFence{fid, gfv};
+            sub.produced[1] = true;
+            sub.ready[1] = FgReadyFence{fid, rfv};
+            CHECK(p->SubmitInterval(sub) == FgStatus::Ok);
+            backend->SignalFence(fid, rfv);
+            // Both gen1 and real become ready at gen_t + 5.2 ms (= real_t + 0.7 ms).
+            backend->SetNow(gen_t + 52000);
+            p->StepForTest();
+            latch_pending(gen_t + 54500);
+            backend->SetNow(real_t + 40000);
+            p->StepForTest();
+            latch_pending(real_t + 42500);
+            t += 180000;
+        };
+        for (int k = 12; k <= 16; ++k) run_x2_late(k);
+        const std::uint64_t drops_before = p->Info().composed_drop_late;
+        const std::uint64_t gen_before = p->Stats().displayed_generated;
+        for (int k = 17; k <= 26; ++k) run_x2_late(k);
+        CHECK(p->Info().composed_drop_late == drops_before);
+        CHECK(p->Stats().displayed_generated == gen_before + 10);
+        CHECK(p->Detach() == FgStatus::Ok);
+    }
 }
 
 }  // namespace

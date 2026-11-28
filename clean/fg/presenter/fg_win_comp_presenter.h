@@ -204,7 +204,10 @@ private:
     std::vector<std::uint32_t> scratch_slots_;
     bool have_vblank_ = false;
     FgTicks last_vblank_ = 0;
-    FgTicks last_submit_at_ = 0;
+    FgTicks qlat_low_ = 0;
+    FgTicks qlat_med_ = 0;
+    FgTicks slip_med_ = 0;
+    std::uint64_t last_slip_id_ = 0;
     FgTicks next_pace_wake_ = 0;
     FgTicks grid_updated_at_ = 0;
     std::uint64_t chain_ = 0;
