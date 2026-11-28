@@ -2487,11 +2487,21 @@ bool SelfUninstall(Context& ctx, const LauncherPaths& p, bool removeGames, const
                     if (IsFile(f) && !DeleteFileW(f.c_str())) MoveFileExW(f.c_str(), Join(trash, BaseName(f)).c_str(), MOVEFILE_REPLACE_EXISTING);
                 }
             }
-            if (moved || DeleteFileW(installedExe.c_str())) {
+            wstring retired;
+            if (p.custom && !moved) {
+                retired = installedExe + L".removed-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+                          std::to_wstring(GetTickCount64());
+                if (!GamePathAllowed(retired) || !MoveFileExW(installedExe.c_str(), retired.c_str(), MOVEFILE_WRITE_THROUGH))
+                    retired.clear();
+            }
+            if (!retired.empty() && !DeleteFileW(retired.c_str())) {
+                DeleteWhenFree(ctx, retired, false, exeDir, upTo);
+            } else if (moved || !retired.empty() || DeleteFileW(installedExe.c_str())) {
                 if (!RemoveDirectoryW(exeDir.c_str()) && IsDir(exeDir)) exeDirLeft = exeDir;
                 else if (!upTo.empty()) RemoveEmptyUpTo(Parent(exeDir), upTo);  // %LOCALAPPDATA%\Programs it made
             }
-            else DeleteWhenFree(ctx, installedExe, false, exeDir, upTo);  // another volume (a --dir install): deleted in place once it closes
+            else if (!p.custom) DeleteWhenFree(ctx, installedExe, false, exeDir, upTo);
+            else ui.log(L"The installed launcher is still in use and could not be removed: " + installedExe);
         }
         // the install folder that could not go yet goes after the moved exe (rmdir without /s: only while it is empty), and the
         // folders above it that the first install made with it (madeAbove), so no empty %LOCALAPPDATA%\Programs stays

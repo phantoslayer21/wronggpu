@@ -920,10 +920,14 @@ def test_launcher_uninstall(t, opti):
             read(li).decode() if os.path.isfile(li) else "(none)")
     # uninstalled by the installed copy itself (as its window and Apps & features do): its running exe is moved out at once.
     # Started as its Start-menu shortcut starts it: its install folder is its current directory
+    uninstall_log_start = os.path.getsize(t.log)
     rc = t.run("self-uninstall", "--keep-games", "--startmenu=" + menu, exe=installed, data=False, cwd=programs)
     t.check("self-uninstall by the installed copy (current directory: its install folder, as from the Start menu): its folder, entry and shortcut go",
             rc == 0 and wait_gone(programs) and
             "WrongGPU" not in t.reg_keys() and not os.path.isfile(os.path.join(menu, "WrongGPU.lnk")), (rc, t.j, os.listdir(programs) if os.path.isdir(programs) else None))
+    cleanup_log = read(t.log)[uninstall_log_start:].decode("utf-8", "replace").splitlines()
+    t.check("deferred cleanup never targets the install path that a reinstall will reuse",
+            not any(line.endswith("removed once it is free: " + installed) for line in cleanup_log), cleanup_log)
     t.check("keep games: the game keeps WrongGPU with its own entry again; the launcher's settings gone; the shared data stays (the game uses it)",
             len(t.entries_for(b)) == 1 and "\nregkey\tWrongGPU-" in record_text(b) and not os.path.isfile(li) and os.path.isdir(os.path.join(shared, "model")),
             (t.entries_for(b), os.listdir(shared) if os.path.isdir(shared) else None))
