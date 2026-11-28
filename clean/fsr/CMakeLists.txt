@@ -478,6 +478,15 @@ if(WIN32)
            $<TARGET_FILE:fake_amd_fidelityfx> $<TARGET_FILE:fake_runtime>
            WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/customslot/$<CONFIG>)
   set_tests_properties(fsr_custom_slot PROPERTIES SKIP_RETURN_CODE 77)
+
+  # rc3: real network-runtime creates, timed per model and size, and a model switch sequence (tests/create_times.cpp). A
+  # GPU tool, no ctest entry: run by hand through tools/gpu_slot.py, never while a game runs.
+  add_executable(wg_create_times tests/create_times.cpp)
+  target_link_libraries(wg_create_times PRIVATE d3d12 dxgi)
+  set_target_properties(wg_create_times PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  if(MINGW)
+    target_link_options(wg_create_times PRIVATE ${WG_STATIC_RUNTIME})
+  endif()
   add_dependencies(test_dll_d3d12 amd_fidelityfx_dx12 ffx_fsr3upscaler_x64 ffx_fsr3_x64 fake_amd_fidelityfx fake_fsr3upscaler fake_fsr3
                    fake_runtime)
   if(NOT CMAKE_CROSSCOMPILING)

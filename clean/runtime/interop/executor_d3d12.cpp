@@ -32,6 +32,7 @@
 // size above 0.68 x the output or a jitter outside [-0.5, 0.5] (only the tiled input stage has direct forms). Timing
 // marks: exposure, input, network, output (KRuntime::kTimingLabels).
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -114,6 +115,10 @@ class D3d12Executor : public Executor {
     // arena (kMeasureMaxBytes, WG_D3D12_ARENA_MB's upper bound) unless WG_D3D12_ARENA_MB is set. Without this the
     // context went to the HIP executor, whose process keeps HIP's instance and the pooled imported arena after the
     // context is destroyed (clean/FORMATS.md "Context teardown and re-creation"; issue #182).
+    // step times of the create, one log line (2026-11-27: a Model M create took 11.2 s in game; where it went was not logged)
+    using sclock = std::chrono::steady_clock;
+    auto ms_since = [](sclock::time_point t) { return (long long)std::chrono::duration_cast<std::chrono::milliseconds>(sclock::now() - t).count(); };
+    const sclock::time_point t_measure = sclock::now();
     uint64_t need = 0;
     {
       const char* arena_env = std::getenv("WG_D3D12_ARENA_MB");
@@ -149,6 +154,8 @@ class D3d12Executor : public Executor {
                         std::to_string((need + (1u << 20) - 1) >> 20) + " MiB; the D3D12 executor runs it in an arena "
                         "of that size");
     }
+    const long long measure_ms = ms_since(t_measure);
+    const sclock::time_point t_create = sclock::now();
     std::string e;
     std::unique_ptr<wgrt::Device> dev = wgrt::make_d3d12_device_on(device, queue_, build, &e, need + (1u << 20));
     if (!dev) return *err = "D3D12 device: " + e, false;
@@ -160,8 +167,16 @@ class D3d12Executor : public Executor {
     ext_ = wgrt::d3d12_ext(wgrt::runtime_device(rt_));
     // model K prepared exactly the kernels its context can select at create; warm_up would also compile the others
     // (unselected opt-in forms among them), so it runs only for a runtime that did not prepare its own
-    if (!(wgrt::runtime_prepared_kernels(rt_) || ext_->warm_up(&e)) || !wgrt::runtime_device(rt_)->sync())
+    const long long create_ms = ms_since(t_create);
+    const sclock::time_point t_warm = sclock::now();
+    const bool prepared = wgrt::runtime_prepared_kernels(rt_);
+    if (!(prepared || ext_->warm_up(&e)) || !wgrt::runtime_device(rt_)->sync())
       return *err = "D3D12 executor: " + (e.empty() ? wgrt::runtime_device(rt_)->err() : e), false;
+    if (log_)
+      log_(false, "create steps: arena measure pass " + std::to_string(measure_ms) + " ms, network create (model load, upload, kernels it "
+                  "selects) " + std::to_string(create_ms) + " ms, " +
+                  (prepared ? std::string("no warm-up (the network prepared its own kernels)")
+                            : "kernel warm-up (a pipeline state for every kernel of its code objects) " + std::to_string(ms_since(t_warm)) + " ms"));
     return true;
   }
 
