@@ -345,6 +345,7 @@ def run(t, opti, synth_f, m):
     os.unlink(outside)
     os.rmdir(os.path.dirname(outside))
     review_regressions(t, opti, m)
+    round_three(t, opti, m)
 
 
 
@@ -465,7 +466,7 @@ def review_regressions(t, opti, m):
     write(cfg + ":fixture", b"named stream")
     os.utime(cfg, (1590000000, 1590000000))
     timestamp = os.stat(cfg).st_mtime_ns
-    attrs = 0x1 | 0x2 | 0x4  # read-only, hidden, system
+    attrs = 0x1 | 0x2 | 0x4 | 0x2000  # read-only, hidden, system, no content indexing
     set_attrs = ctypes.windll.kernel32.SetFileAttributesW
     get_attrs = ctypes.windll.kernel32.GetFileAttributesW
     set_attrs.argtypes = (wintypes.LPCWSTR, wintypes.DWORD)
@@ -588,8 +589,9 @@ def review_regressions(t, opti, m):
     write(stale, b"stale staged bytes")
     write(original_sibling, b"original to keep")
     rc = t.run("set", exe, "fps_overlay=on", "--noscan")
-    t.check("the next staged write cleans an abandoned temporary and keeps the saved original",
-            rc == 0 and not os.path.exists(stale) and read(original_sibling) == b"original to keep", (rc, t.j, t.logtail()))
+    t.check("stage-like names do not confer ownership during replacement",
+            rc == 0 and os.path.isfile(stale) and read(stale) == b"stale staged bytes" and
+            read(original_sibling) == b"original to keep", (rc, t.j, t.logtail()))
     saved = read(cfg)
     t.env["WRONGGPU_TEST_REPLACE_RACE"] = cfg
     try:
@@ -601,8 +603,9 @@ def review_regressions(t, opti, m):
             rc != 0 and len(kept) == 1 and read(kept[0]) == saved and
             kept[0] in t.j.get("message", "") and read(cfg) == b"; competing fixture file\r\n",
             (rc, t.j, kept, t.logtail()))
-    write(cfg, saved)
     t.run("uninstall", exe, "--noscan")
+    t.check("leaving a changed install target also leaves the stage-like sibling",
+            os.path.isfile(stale) and read(stale) == b"stale staged bytes", (stale, t.logtail()))
 
     scoped_self_uninstall(t, opti, fixture)
     games = os.path.normcase(os.path.realpath(os.path.join(t.work, "games")))
@@ -653,3 +656,156 @@ def scoped_self_uninstall(t, opti, fixture):
     t.check("retry retires the registered launcher and removes only its registration",
             rc == 0 and "WrongGPU" not in t.reg_keys() and t.entries_for(b) == foreign, (rc, t.j, t.reg_keys()))
     t.run("uninstall", exe, "--noscan")
+
+
+
+def round_three(t, opti, m):
+    import hashlib
+    import launcher_safety_registry as registry
+
+    print("\n[launcher safety] binary pins, recovery ownership, and registry failure")
+    roots = []
+    def fixture(name, **kwargs):
+        root, folder, exe = m.game(t, name, **kwargs)
+        roots.append(root)
+        return root, folder, exe
+
+    set_attrs = ctypes.windll.kernel32.SetFileAttributesW
+    get_attrs = ctypes.windll.kernel32.GetFileAttributesW
+    set_attrs.argtypes = (wintypes.LPCWSTR, wintypes.DWORD)
+    get_attrs.argtypes = (wintypes.LPCWSTR,)
+    args = ("--opti=" + opti, "--noscan", "--force", "--experimental")
+    package = m.opti_package(t, "round-three-opti")
+    member = os.path.join(package, "extra", "companion.dll")
+    write(member, b"fixture package binary")
+    _, b, exe = fixture("Round Three Binary")
+    binary = os.path.join(b, "extra", "companion.dll")
+    old = b"fixture original binary"
+    write(binary, old)
+    assert set_attrs(binary, 0x2001)
+    first = t.run("install", exe, "--opti=" + package, *args[1:])
+    installed_attrs = get_attrs(binary)
+    undo = t.run("uninstall", exe, "--noscan")
+    t.check("install keeps its binary writable and restores the original binary attributes",
+            first == undo == 0 and not installed_attrs & 0x2001 and read(binary) == old and
+            get_attrs(binary) & 0x2001 == 0x2001, (first, undo, installed_attrs, t.j))
+    if os.path.isfile(binary):
+        set_attrs(binary, 0x80)
+    if undo:
+        t.run("uninstall", exe, "--noscan")
+        if os.path.isfile(binary):
+            set_attrs(binary, 0x80)
+
+    root, b, exe = fixture("Round Three Rename")
+    slot = os.path.join(b, "amd_fidelityfx_dx12.dll")
+    original = read(slot)
+    replacement = m.mockpe.make_dll({"ProductName": "WrongGPU"}, extra=b"another DLL fixture")
+    direct = t.raw([t.exe, "/S", "/FORCE", "/NOSCAN", "/EXPERIMENTAL", "/DIRECTFSR",
+                    "/DIR=" + root, "/LOG=" + t.log])
+    if direct != 10:
+        record = os.path.join(b, "wronggpu-setup", "install.record")
+        lines = read(record).splitlines(keepends=True)
+        def slot_copy(line):
+            return line.startswith(b"copy\t") and line.rstrip().endswith(b"\tamd_fidelityfx_dx12.dll")
+        assert any(slot_copy(line) for line in lines)
+        # The original was moved, but this recovery record has no published copy at the slot.
+        write(record, b"".join(line for line in lines if not slot_copy(line)))
+        source = os.path.join(t.work, "rename-occupant.dll")
+        write(source, replacement)
+        os.replace(source, slot)
+        undo = t.run("uninstall", exe, "--noscan")
+        kept = glob.glob(os.path.join(b, "WrongGPU-originals", "*", "amd_fidelityfx_dx12.dll"))
+        t.check("rename recovery preserves a replacement DLL even with WrongGPU version metadata",
+                direct == undo == 0 and read(slot) == replacement and any(read(p) == original for p in kept),
+                (direct, undo, kept, t.j, t.logtail()))
+
+    _, b, exe = fixture("Round Three Adopt")
+    assert t.run("install", exe, *args) == 0, t.j
+    state = os.path.join(b, "wronggpu-setup")
+    restorer, rec = (os.path.join(state, name) for name in ("uninstall.exe", "install.record"))
+    old_bytes = b"fixture older recorded restorer"
+    write(restorer, old_bytes)
+    write(rec, b"\r\n".join(
+        b"restorer-sha\t" + hashlib.sha256(old_bytes).hexdigest().encode() if line.startswith(b"restorer-sha\t") else line
+        for line in read(rec).split(b"\r\n")))
+    adopt = t.run("adopt", exe, "--noscan")
+    sha = hashlib.sha256(read(restorer)).hexdigest()
+    matches = any(line.lower() == "restorer-sha\t" + sha for line in m.record_text(b).splitlines())
+    undo = t.run("uninstall", exe, "--noscan")
+    t.check("adoption records the new restorer so uninstall removes it",
+            adopt == undo == 0 and matches and not os.path.exists(restorer), (adopt, undo, matches, t.j))
+
+    _, b, exe = fixture("Round Three Log and Metadata")
+    assert t.run("install", exe, *args) == 0, t.j
+    ini = os.path.join(b, "OptiScaler.ini")
+    t.env["WRONGGPU_TEST_STOP_AT"] = "opti-metadata-saved"
+    try:
+        stopped = t.run("repair", exe, *args)
+    finally:
+        del t.env["WRONGGPU_TEST_STOP_AT"]
+    t.check("abrupt process exit removes the private metadata snapshot",
+            stopped == 99 and not glob.glob(os.path.join(b, "wronggpu-setup", "opti-metadata-*.ini")),
+            (stopped, t.j, t.logtail()))
+    os.utime(ini, (1590000000, 1590000000))
+    game_log = os.path.join(b, "wronggpu-setup", "setup.log")
+    t.env["WRONGGPU_TEST_REPLACE_RACE"] = game_log
+    try:
+        rc = t.run("repair", exe, *args)
+    finally:
+        del t.env["WRONGGPU_TEST_REPLACE_RACE"]
+    t.check("a failed post-install log replacement warns without failing the repair",
+            rc == 0 and "refresh the game's setup.log" in str(t.j) and "original is kept at" in str(t.j),
+            (rc, t.j, t.logtail()))
+    t.check("merged INI content receives a new last-write time",
+            os.stat(ini).st_mtime > 1590000000, os.stat(ini).st_mtime)
+    t.run("uninstall", exe, "--noscan")
+
+    folder = os.path.join(t.work, "round-three-program")
+    installed = os.path.join(folder, "WrongGPU.exe")
+    assert t.run("self-install", "--dir=" + folder, "--startmenu=-") == 0, t.j
+    managed = os.path.join(t.data, "managed-games.txt")
+    original_list = b"; original managed-games fixture\r\n"
+    write(managed, original_list)
+    source = os.path.join(t.work, "alternate-managed-games.txt")
+    write(source, b"; unrelated sentinel\r\n")
+    hooks = {
+        "WRONGGPU_TEST_RENAME_AT": "self-uninstall-list",
+        "WRONGGPU_TEST_RENAME_FILE": managed,
+        "WRONGGPU_TEST_CREATE_AT": "self-uninstall-list",
+        "WRONGGPU_TEST_CREATE_FILE": managed,
+        "WRONGGPU_TEST_LINK_FROM": source,
+    }
+    t.env.update(hooks)
+    try:
+        rc = t.run("self-uninstall", "--keep-games", exe=installed)
+    finally:
+        for key in hooks:
+            del t.env[key]
+    t.check("scoped uninstall refuses a managed-games hard link swapped in after startup",
+            rc != 0 and "managed-games list" in str(t.j) and os.path.isfile(installed) and
+            os.path.samefile(managed, source) and read(source) == b"; unrelated sentinel\r\n", (rc, t.j))
+    if os.path.isfile(managed + ".race-test"):
+        os.replace(managed + ".race-test", managed)
+
+    blocker = t.uninstall + "\\WrongGPU\\fixture-subkey"
+    registry.set_location(t.registry, blocker, t.work)
+    try:
+        rc = t.run("self-uninstall", "--keep-games", exe=installed)
+        t.check("uninstall reports a registry deletion failure and restores the launcher name for retry",
+                rc != 0 and "Apps & features" in str(t.j) and "WrongGPU" in t.reg_keys() and os.path.isfile(installed),
+                (rc, t.j, t.reg_keys()))
+    finally:
+        registry.delete(t.registry, blocker)
+    if os.path.isfile(installed):
+        rc = t.run("self-uninstall", "--keep-games", exe=installed)
+        t.check("scoped uninstall retry removes the launcher entry", rc == 0 and "WrongGPU" not in t.reg_keys(),
+                (rc, t.j, t.reg_keys()))
+    else:
+        registry.delete(t.registry, t.uninstall + "\\WrongGPU")
+
+    games = os.path.normcase(os.path.realpath(os.path.join(t.work, "games")))
+    for root in roots:
+        path = os.path.realpath(root)
+        if os.path.normcase(os.path.dirname(path)) != games:
+            raise RuntimeError("refusing to clean up a fixture outside the games directory: " + path)
+        shutil.rmtree(path)

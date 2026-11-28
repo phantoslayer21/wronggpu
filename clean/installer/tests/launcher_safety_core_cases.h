@@ -69,4 +69,36 @@ void VerifyLauncherScope() {
     } else std::cout << "Skipped short-name check (volume does not expose short folder names).\n";
     RemoveTree(longFixture);
 }
+void VerifyPublishedBinaryPin() {
+    const wstring folder = TempFolder();
+    const wstring path = Join(folder, L"published.dll");
+    string image;
+    require(ReadAll(SelfPath(), image), "binary publication fixture can read its own PE image");
+    WriteFileAtomic(path, "old", 3);
+    HANDLE section = nullptr;
+    bool refused = false;
+    {
+        const auto operation = GuardOperation(folder, nullptr);
+        PinnedFile old;
+        require(old.Open(path, true), "binary publication fixture pins the old target");
+        SetFaultHook([&](const char* point) {
+            if (strcmp(point, "install-binary-reopen")) return false;
+            HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                      nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (file != INVALID_HANDLE_VALUE) {
+                section = CreateFileMappingW(file, nullptr, PAGE_READONLY | SEC_IMAGE, 0, 0, nullptr);
+                CloseHandle(file);
+            }
+            return false;
+        });
+        try { PutBinary(path, image.data(), image.size(), &old); }
+        catch (const SetupError& error) { refused = error.code == EXIT_REFUSED; }
+        SetFaultHook({});
+    }
+    const bool mapped = section != nullptr;
+    if (section) CloseHandle(section);
+    RemoveTree(folder);
+    require(mapped && refused, "re-opening a published binary refuses a mapped image");
+}
+
 }  // namespace

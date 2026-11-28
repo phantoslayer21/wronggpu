@@ -662,6 +662,11 @@ void RestoreStep(const char* name) {
         const wstring f = EnvVar(L"WRONGGPU_TEST_CREATE_FILE");
         if (!GamePathAllowed(f)) return;
         EnsureDir(Parent(f));
+        const wstring link = EnvVar(L"WRONGGPU_TEST_LINK_FROM");
+        if (!link.empty()) {
+            if (GamePathAllowed(link)) CreateHardLinkW(f.c_str(), link.c_str(), nullptr);
+            return;
+        }
         const wstring source = EnvVar(L"WRONGGPU_TEST_CREATE_FROM");
         if (!source.empty()) {
             if (GamePathAllowed(source)) CopyNew(source, f);
@@ -710,10 +715,8 @@ Holds WhatIsThere(Context& ctx, const wstring& dir, const Entry& e, const wstrin
         return e.existed && IEq(h, e.orig) ? Holds::Original : Holds::Other;
     if (!e.inst.empty() && IEq(h, e.inst)) return Holds::Ours;
     if (e.existed && !e.orig.empty() && IEq(h, e.orig)) return Holds::Original;
-    if (e.published.index) return Holds::Other;
+    if (e.published.index || SlotOf(e)) return Holds::Other;
     const wstring t = Target(dir, e.rel);
-    wstring info;
-    if (const FfxSlot* sl = SlotOf(e)) return ClassifySlot(*sl, t, nullptr, info) == FFX_OURS ? Holds::Ours : Holds::Other;  // the slot exception
     if (!EndsWithI(e.rel, L".ini") && KnownReleaseFile(ctx, t)) return Holds::Ours;  // a WrongGPU release's file (size and SHA-256)
     return Holds::Other;
 }
@@ -831,7 +834,8 @@ void PutBinary(const wstring& path, const void* data, size_t size, PinnedFile* h
     if (held) {
         DWORD error = 0;
         BY_HANDLE_FILE_INFORMATION published{};
-        if (!held->ReplaceBytes(path, data, size, &error, false, nullptr, &published)) FailPut(path, error);
+        if (!held->ReplaceBytes(path, data, size, &error, false, nullptr, &published, ReplacementMetadata::InstalledBinary))
+            FailPut(path, error);
         if (journal) JournalCreated(*journal, path, published);
         held->Close();
         if (t_gate) {
@@ -839,7 +843,8 @@ void PutBinary(const wstring& path, const void* data, size_t size, PinnedFile* h
             const FileIdentity identity{published.dwVolumeSerialNumber,
                 (static_cast<ULONGLONG>(published.nFileIndexHigh) << 32) | published.nFileIndexLow};
             if (TestFault("install-binary-reopen")) FailPut(path, ERROR_SHARING_VIOLATION);
-            if (!installed.Open(path, false, &error)) FailPut(path, error);
+            // A writable pin refuses an image mapped between publication and re-open.
+            if (!installed.Open(path, true, &error)) FailPut(path, error);
             if (!identity.Matches(installed)) FailPut(path, ERROR_FILE_INVALID);
             t_gate->guard.HoldVerified(path, installed.Release());
         }
@@ -974,45 +979,22 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
             continue;
         }
         if (e.action == L"rename") {
-            // the game's FSR DLL, renamed aside: back under its name when WrongGPU's DLL is still under it (no entry or no
-            // backup for that one: the renamed file is the game's only copy)
+            // The copy entry has already handled the install's DLL. The rename never removes the slot's occupant.
             const FfxSlot* sl = SlotOf(e);
             const wstring slot = sl ? Join(dir, sl->name) : wstring();
             PinnedFile original;
-            wstring info;
             DWORD sourceError = 0;
             if (sl && original.Open(t, false, &sourceError)) {
                 const wstring sha = original.Sha256();
                 if (!sha.empty() && (e.inst.empty() || IEq(sha, e.inst))) {
-                    auto restoreName = [&]() {
-                        DWORD err = 0;
-                        if (original.RenameNew(slot, &err)) {
-                            ui.log(L"restored " + wstring(sl->name) + L" from " + e.rel);
-                            original.Close();
-                        } else if (err != ERROR_ALREADY_EXISTS && err != ERROR_FILE_EXISTS) {
-                            Fail(L"Cannot put " + wstring(sl->name) + L" back: " + ErrText(err));
-                        }
-                    };
                     RestoreStep("rename-restore-locked");
-                    PinnedFile loader;
-                    DWORD err = 0;
-                    if (GateHolds(slot)) {
-                        if (ClassifySlot(*sl, slot, nullptr, info) == FFX_OURS) {
-                            const DWORD de = DeleteHeldBinary(slot);
-                            if (de != ERROR_SUCCESS) Fail(L"Cannot put " + wstring(sl->name) + L" back: " + ErrText(de));
-                            restoreName();
-                        }
-                    } else if (loader.Open(slot, false, &err)) {
-                        if (ClassifySlot(*sl, slot, nullptr, info) == FFX_OURS) {
-                            RestoreStep("locked");
-                            if (!loader.Delete(&err)) Fail(L"Cannot put " + wstring(sl->name) + L" back: " + ErrText(err));
-                            restoreName();
-                        }
-                        loader.Close();
-                    } else if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
-                        restoreName();
-                    } else if (err != ERROR_NOT_SUPPORTED) {
-                        Fail(L"Cannot put " + wstring(sl->name) + L" back: another program has it open.");
+                    DWORD error = 0;
+                    if (original.RenameNew(slot, &error)) {
+                        ui.log(L"restored " + wstring(sl->name) + L" from " + e.rel);
+                        original.Close();
+                    } else if (error != ERROR_ALREADY_EXISTS && error != ERROR_FILE_EXISTS &&
+                               !(error == ERROR_ACCESS_DENIED && Exists(slot))) {
+                        Fail(L"Cannot put " + wstring(sl->name) + L" back: " + ErrText(error));
                     }
                     // A newer game DLL kept its name. Preserve the original through the pin before removing its old name.
                     if (original.IsOpen() && !e.inst.empty()) {
@@ -1061,7 +1043,6 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
             }
             continue;
         }
-        CleanStaleStages(t);
         if (p.what == Do::Nothing || p.what == Do::Leave) { if (p.what == Do::Leave) ui.log(L"kept " + e.rel + L" as it is"); continue; }
         // The file is checked again, and changed, through one handle (PinnedFile, util.h): opened once without sharing for
         // writing, renaming or deleting, hashed through that handle, and deleted or overwritten through it. A file that is not
@@ -1087,7 +1068,7 @@ std::vector<wstring> DoRestore(Context& ctx, const wstring& dir, Ui& ui, bool fa
                 !IEq(Sha256Bytes(bytes.data(), bytes.size()), e.orig))
                 Fail(L"Cannot read the original backup, or its contents changed: " + e.rel);
             const bool fault = IsBinaryName(e.rel) && TestFault("restore-binary-write");
-            return held.ReplaceBytes(t, bytes.data(), bytes.size(), &err, fault, &source);
+            return held.ReplaceBytes(t, bytes.data(), bytes.size(), &err, fault, &source, nullptr, ReplacementMetadata::Restore);
         };
         PinnedFile held;
         if (GateHolds(t)) held.Adopt(t_gate->guard.TakeHeld(t));
@@ -1433,7 +1414,24 @@ std::vector<wstring> ManagedGames() {
     std::vector<wstring> r;
     string raw;
     const wstring p = ManagedListPath();
-    if (p.empty() || !ReadAll(p, raw)) return r;
+    if (!DataOverride().empty()) {
+        if (!PathWithin(p, DataOverride(), true))
+            Fail(L"The managed-games list resolves through a link: " + p, EXIT_REFUSED);
+        const HANDLE handle = CreateFileW(p.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                          FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+        if (handle == INVALID_HANDLE_VALUE) {
+            const DWORD error = GetLastError();
+            if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) return r;
+            Fail(L"Cannot secure the managed-games list: " + ErrText(error), EXIT_REFUSED);
+        }
+        PinnedFile list;
+        list.Adopt(handle);
+        BY_HANDLE_FILE_INFORMATION info{};
+        if (!GetFileInformationByHandle(handle, &info) || info.nNumberOfLinks != 1 ||
+            (info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) ||
+            !PathWithin(ResolvedHandlePath(handle), DataOverride(), true) || !list.ReadBytes(raw))
+            Fail(L"Cannot safely read the managed-games list: " + p, EXIT_REFUSED);
+    } else if (p.empty() || !ReadAll(p, raw)) return r;
     const wstring text = FromUtf8(raw);
     for (size_t a = 0; a < text.size();) {
         size_t e = text.find(L'\n', a);
@@ -1448,6 +1446,8 @@ std::vector<wstring> ManagedGames() {
 static void WriteManaged(const std::vector<wstring>& list) {
     const wstring p = ManagedListPath();
     if (p.empty()) return;
+    if (!DataOverride().empty() && !PathWithin(p, DataOverride(), true))
+        Fail(L"The managed-games list resolves through a link: " + p, EXIT_REFUSED);
     wstring t = L"; WrongGPU launcher: the game folders it manages (one per line). Uninstallers read it.\r\n";
     for (auto& l : list) t += l + L"\r\n";
     const string u = ToUtf8(t);

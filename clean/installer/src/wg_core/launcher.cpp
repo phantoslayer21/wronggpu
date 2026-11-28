@@ -1484,9 +1484,14 @@ std::vector<wstring> AdoptInstall(Context& ctx, const wstring& dir, bool* repair
     }
     if (ctx.restorer && ctx.restorerSize) {
         const wstring un = Join(StateDir(dir), L"uninstall.exe");
-        if (Sha256File(un) != Sha256Bytes(ctx.restorer, ctx.restorerSize)) {
+        const wstring sha = Sha256Bytes(ctx.restorer, ctx.restorerSize);
+        if (!IEq(Sha256File(un), sha)) {
             WriteFileAtomic(un, ctx.restorer, ctx.restorerSize);
             notes.push_back(L"uninstall.exe is now the launcher's restorer (reads the v1 and v2 records)");
+        }
+        if (!IEq(m.restorerSha, sha)) {
+            m.restorerSha = sha;
+            SaveRecord(RecordPath(dir), m);
         }
     }
     WriteOwnedFiles(dir, m);
@@ -2333,9 +2338,11 @@ bool SelfUninstall(Context& ctx, const LauncherPaths& p, bool removeGames, const
         //    stays installed with all its settings, the games done so far stay done, and trying again carries on.
         std::vector<std::pair<wstring, Record>> games;
         std::vector<wstring> offline;  // on a drive that is not connected now: left as it is (neither restored nor detached)
+        if (p.custom) RestoreStep("self-uninstall-list");
         const DWORD sharedStartAttrs = GetFileAttributesW(AppDataPath().c_str());
         const bool sharedStartsAsLink = sharedStartAttrs != INVALID_FILE_ATTRIBUTES && (sharedStartAttrs & FILE_ATTRIBUTE_REPARSE_POINT);
         // Do not rewrite a managed-games list reached through a linked shared-data root.
+        if (p.custom && sharedStartsAsLink) Fail(L"The launcher data folder resolves through a link.", EXIT_REFUSED);
         for (auto& dir : sharedStartsAsLink ? std::vector<wstring>{} : ManagedGames()) {
             Record m;
             if (!LoadRecord(RecordPath(dir), m) || m.legacy) {
@@ -2410,8 +2417,8 @@ bool SelfUninstall(Context& ctx, const LauncherPaths& p, bool removeGames, const
         // 2. The launcher: its entry, its shortcut and its own files. The games' shared files (the model data, the list the
         //    games' uninstallers read, compare.txt) stay while a game uses them.
         wstring retired, scopedExeDir;
+        const wstring program = ownsRegistration && installed ? installedExe : p.exe;
         if (p.custom) {
-            const wstring program = ownsRegistration && installed ? installedExe : p.exe;
             if (program.empty() || !GamePathAllowed(program))
                 Fail(L"Could not secure the launcher program for removal: " + program, EXIT_REFUSED);
             const wstring exeDir = Parent(program);
@@ -2438,7 +2445,13 @@ bool SelfUninstall(Context& ctx, const LauncherPaths& p, bool removeGames, const
             if (!retired.empty()) LogLine(ctx, L"retired launcher program at " + retired);
         }
         if (ownsRegistration && (!p.custom || IEq(registeredLocation, RegString(UninstallHive(), key.c_str(), L"InstallLocation")))) {
-            RegDeleteKeyW(UninstallHive(), key.c_str());
+            const LONG removed = RegDeleteKeyW(UninstallHive(), key.c_str());
+            if (p.custom && removed != ERROR_SUCCESS && removed != ERROR_FILE_NOT_FOUND) {
+                wstring message = L"Could not remove the launcher from Apps & features: " + ErrText(removed);
+                if (!retired.empty() && !MoveFileExW(retired.c_str(), program.c_str(), MOVEFILE_WRITE_THROUGH))
+                    message += L". The retired program is at " + retired;
+                Fail(message + L". Try again after the entry is available.", EXIT_REFUSED);
+            }
             const wstring menuLnk = !startMenu.empty() && startMenu != L"-" ? Join(startMenu, L"WrongGPU.lnk") : lnk;
             if (!menuLnk.empty()) DeleteFileW(menuLnk.c_str());
         }

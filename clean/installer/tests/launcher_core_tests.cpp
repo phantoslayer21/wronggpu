@@ -113,6 +113,7 @@ int main() {
     try {
         VerifyIniEncoding();
         VerifyLauncherScope();
+        VerifyPublishedBinaryPin();
 
         // ---- 0.6.1: Collect logs in uninstall.exe (no converter data) never claims the map is invalid ----------------
         {
@@ -575,8 +576,7 @@ int main() {
             require(!refused && !IsFile(Join(newDir, L"wronggpu_runtime.dll")) && !IsDir(StateDir(newDir)) && IsFile(Join(newDir, L"Game.exe")),
                     "moved game: the uninstall works in the new folder");
 
-            // ---- a hand-placed WrongGPU DLL under the game's FSR name (a direct install) goes only when the game's
-            // original is there to put back (the backup, or the kept *.wronggpu-original.dll); else the uninstall refuses ----
+            // ---- a hand-placed DLL under the game's FSR name stays even if its product is WrongGPU. ----
             {
                 const FfxSlot& sl = kSlots[0];
                 const string orig = "the game's own FidelityFX DLL (synthetic)", installed = "WrongGPU's FSR DLL as installed (synthetic)";
@@ -603,10 +603,13 @@ int main() {
                     std::vector<wstring> w;
                     bool threw = false;
                     try { w = DoRestore(mc, d, quiet, false, false); } catch (const SetupError&) { threw = true; }
-                    string now;
-                    require(!threw && ReadAll(Join(d, sl.name), now) && now == orig && !IsFile(Join(d, sl.original)) && !IsDir(StateDir(d)),
-                            how ? "hand-placed FSR DLL: no backup, the kept copy there: the hand-placed DLL is replaced by the game's original"
-                                : "hand-placed FSR DLL: the backup there: the hand-placed DLL is replaced by the game's original");
+                    string now, keptBytes;
+                    bool kept = false;
+                    for (const auto& folder : ListDirs(Join(d, kKeptDirName)))
+                        kept = kept || (ReadAll(Join(folder, sl.name), keptBytes) && keptBytes == orig);
+                    require(!threw && ReadAll(Join(d, sl.name), now) && now == hand && kept &&
+                                !IsFile(Join(d, sl.original)) && !IsDir(StateDir(d)) && AnyPartly(w),
+                            "a hand-placed WrongGPU DLL stays, and the original is kept from its backup or renamed copy");
                 }
                 {  // neither the backup nor the kept copy: the uninstall refuses, as before 0.6.1 ("Nothing was changed")
                     const wstring d = direct(L"No Original", false, false);
@@ -2292,13 +2295,17 @@ int main() {
                     require(RefreshRrSettings(sctx, sg, true) == 1 && ReadRrSettings(sg).enabled,
                             "RR refresh enables a recorded game outside the default data root with duplicate INI keys and no profile");
                     DeleteFileW(Join(sg, L"OptiScaler.ini").c_str());
-                    require(wgstate::SetSettings(sg, {{"rr_mode_pending", "exact"}}).ok() &&
-                            RefreshRrSettings(sctx, sg, true) == 1 && ReadRrSettings(sg).mode == "exact",
-                            "RR refresh applies the queued mode once the data is ready");
+                    require(wgstate::SetSettings(sg, {{"rr_mode", "accurate"}, {"rr_mode_pending", "exact"}}).ok() &&
+                            RefreshRrSettings(sctx, sg, true) == 1 && ReadRrSettings(sg).mode == "accurate" &&
+                            *wgstate::Get(wgstate::ReadSettings(sg), "rr_mode_pending") == "off",
+                            "RR refresh preserves the game mode when an older pending request has no baseline");
                     EnsureDir(Parent(RrDataFile()));
                     put(RrDataFile(), "incompatible cache fixture");
                     Profile chosen = DefaultProfile();
                     chosen.v["rr_mode"] = "exact";
+                    require(WriteRrState(sctx, sg, chosen, false, nullptr, true) == 1 &&
+                                RefreshRrSettings(sctx, sg, true) == 1 && ReadRrSettings(sg).mode == "exact",
+                            "RR refresh applies a pending request whose game mode still matches its baseline");
                     require(WriteRrState(sctx, sg, chosen, false, nullptr, true) == 1 &&
                                 wgstate::SetSettings(sg, {{"rr_mode", "accurate"}}).ok() &&
                                 RefreshRrSettings(sctx, sg, true) == 1 && ReadRrSettings(sg).mode == "accurate" &&

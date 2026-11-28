@@ -182,7 +182,8 @@ wstring HashHandle(HANDLE h) {
 
 namespace {
 // The attributes a person sets on a file; what is put back when a read-only bit that was cleared for a write is given up.
-constexpr DWORD kUserAttrs = FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_ARCHIVE;
+constexpr DWORD kUserAttrs = FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM |
+                             FILE_ATTRIBUTE_ARCHIVE | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED;
 bool SetAttrsByHandle(HANDLE h, DWORD attrs) {
     FILE_BASIC_INFO b{};  // (times 0: unchanged)
     b.FileAttributes = (attrs & kUserAttrs) ? (attrs & kUserAttrs) : FILE_ATTRIBUTE_NORMAL;
@@ -259,34 +260,9 @@ bool PinnedFile::RenameNew(const wstring& path, DWORD* err) {
     return false;
 }
 
-// Only clean up staging siblings made by a process that has exited.
-void CleanStaleStages(const wstring& path) {
-    const wstring prefix = BaseName(path) + L".wronggpu-tmp-";
-    for (const auto& temp : ListFiles(Parent(path), (prefix + L"*").c_str())) {
-        const wstring name = BaseName(temp);
-        if (!StartsWithI(name, prefix)) continue;
-        const wstring suffix = name.substr(prefix.size());
-        const size_t dash = suffix.find(L'-');
-        if (dash == 0 || dash == wstring::npos || dash + 1 == suffix.size() ||
-            suffix.find_first_not_of(L"0123456789") != dash ||
-            suffix.find_first_not_of(L"0123456789", dash + 1) != wstring::npos) continue;
-        const auto number = _wcstoui64(suffix.c_str(), nullptr, 10);
-        if (!number || number > MAXDWORD || number == GetCurrentProcessId()) continue;
-        HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, static_cast<DWORD>(number));
-        bool exited = process == nullptr && GetLastError() == ERROR_INVALID_PARAMETER;
-        if (process) {
-            exited = WaitForSingleObject(process, 0) == WAIT_OBJECT_0;
-            CloseHandle(process);
-        }
-        PinnedFile file;
-        if (exited && file.Open(temp, true)) file.Delete();
-    }
-}
-
 bool PinnedFile::ReplaceBytes(const wstring& path, const void* data, size_t size, DWORD* err, bool failWrite,
-                              PinnedFile* metadata, BY_HANDLE_FILE_INFORMATION* published) {
+                              PinnedFile* metadata, BY_HANDLE_FILE_INFORMATION* published, ReplacementMetadata kind) {
     if (!metadata && h_ == INVALID_HANDLE_VALUE) { if (err) *err = ERROR_INVALID_HANDLE; return false; }
-    CleanStaleStages(path);
     static volatile LONG serial = 0;
     PinnedFile stage;
     const wstring temp = path + L".wronggpu-tmp-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
@@ -297,7 +273,7 @@ bool PinnedFile::ReplaceBytes(const wstring& path, const void* data, size_t size
     if (!stage.OverwriteBytes(data, failWrite ? size / 2 : size, &error) || !stage.Flush(&error)) return fail(error);
     if (failWrite) return fail(ERROR_DISK_FULL);
     PinnedFile& source = metadata ? *metadata : *this;
-    if ((error = source.CopyMetadataTo(stage, temp, metadata != nullptr)) != ERROR_SUCCESS) return fail(error);
+    if ((error = source.CopyMetadataTo(stage, temp, kind)) != ERROR_SUCCESS) return fail(error);
     BY_HANDLE_FILE_INFORMATION identity{};
     if (published && !GetFileInformationByHandle(stage.h_, &identity)) return fail(GetLastError());
     wstring originalLeft;
@@ -428,7 +404,7 @@ bool PinnedFile::CopyFrom(HANDLE s, const wstring& srcSha, DWORD* err) {
     FILE_BASIC_INFO b{};  // the original's attributes and times (a restored file is the file it was)
     b.CreationTime.u.LowPart = si.ftCreationTime.dwLowDateTime; b.CreationTime.u.HighPart = (LONG)si.ftCreationTime.dwHighDateTime;
     b.LastWriteTime.u.LowPart = si.ftLastWriteTime.dwLowDateTime; b.LastWriteTime.u.HighPart = (LONG)si.ftLastWriteTime.dwHighDateTime;
-    b.FileAttributes = si.dwFileAttributes & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_ARCHIVE);
+    b.FileAttributes = si.dwFileAttributes & kUserAttrs;
     if (!b.FileAttributes) b.FileAttributes = FILE_ATTRIBUTE_NORMAL;
     SetFileInformationByHandle(h_, FileBasicInfo, &b, sizeof(b));  // (best effort: the content is what matters)
     restoreAttrs_ = 0;  // written: the source's attributes are on the file now
@@ -449,11 +425,13 @@ bool PinnedFile::OverwriteBytes(const void* data, size_t size, DWORD* err) {
     restoreAttrs_ = 0;
     return true;
 }
-bool PinnedFile::Create(const wstring& path, DWORD* err) {
+bool PinnedFile::Create(const wstring& path, DWORD* err, bool deleteOnClose) {
     Close();
     // CREATE_NEW fails on anything at the name (a file, a folder, a link: FILE_FLAG_OPEN_REPARSE_POINT, never its target)
+    DWORD flags = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT;
+    if (deleteOnClose) flags |= FILE_FLAG_DELETE_ON_CLOSE;
     h_ = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE | DELETE | FILE_WRITE_ATTRIBUTES | WRITE_DAC, FILE_SHARE_READ, nullptr, CREATE_NEW,
-                     FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+                     flags, nullptr);
     if (h_ == INVALID_HANDLE_VALUE) { if (err) *err = GetLastError(); return false; }
     restoreAttrs_ = 0;
     return true;
@@ -492,7 +470,7 @@ static DWORD CopyNamedStream(const wstring& from, const wstring& to) {
     return FlushFileBuffers(output.h) ? ERROR_SUCCESS : GetLastError();
 }
 
-DWORD PinnedFile::CopyMetadataTo(PinnedFile& target, const wstring& targetPath, bool restoreTimes) {
+DWORD PinnedFile::CopyMetadataTo(PinnedFile& target, const wstring& targetPath, ReplacementMetadata kind) {
     FILE_BASIC_INFO basic{};
     if (!GetFileInformationByHandleEx(h_, FileBasicInfo, &basic, sizeof(basic))) return GetLastError();
     DWORD volumeFlags = 0;
@@ -531,18 +509,20 @@ DWORD PinnedFile::CopyMetadataTo(PinnedFile& target, const wstring& targetPath, 
         if (error != ERROR_SUCCESS) return error;
     }
     basic.ChangeTime.QuadPart = 0;
-    if (!restoreTimes) basic.LastWriteTime.QuadPart = 0;
+    if (kind != ReplacementMetadata::Restore) basic.LastWriteTime.QuadPart = 0;
     basic.FileAttributes = (restoreAttrs_ ? restoreAttrs_ : basic.FileAttributes) & kUserAttrs;
+    if (kind == ReplacementMetadata::InstalledBinary)
+        basic.FileAttributes &= ~(FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED);
     if (!basic.FileAttributes) basic.FileAttributes = FILE_ATTRIBUTE_NORMAL;
     return SetFileInformationByHandle(target.h_, FileBasicInfo, &basic, sizeof(basic)) ? ERROR_SUCCESS : GetLastError();
 }
 
-bool PinnedFile::CopyOut(const wstring& dst, wstring* sha, DWORD* err, PinnedFile* created) {
+bool PinnedFile::CopyOut(const wstring& dst, wstring* sha, DWORD* err, PinnedFile* created, bool deleteOnClose) {
     auto fail = [&](DWORD e) { if (err) *err = e; return false; };
     if (h_ == INVALID_HANDLE_VALUE) return fail(ERROR_INVALID_HANDLE);
     PinnedFile local;
     PinnedFile& out = created ? *created : local;
-    if (!out.Create(dst, err)) return false;
+    if (!out.Create(dst, err, deleteOnClose)) return false;
     LARGE_INTEGER zero{};
     if (!SetFilePointerEx(h_, zero, nullptr, FILE_BEGIN)) { const DWORD e = GetLastError(); out.Delete(); return fail(e); }
     wgc::Sha256 hash;
@@ -555,7 +535,7 @@ bool PinnedFile::CopyOut(const wstring& dst, wstring* sha, DWORD* err, PinnedFil
         hash.update(buf.data(), n);
     }
     if (!FlushFileBuffers(out.h_)) { const DWORD e = GetLastError(); out.Delete(); return fail(e); }
-    const DWORD metadata = CopyMetadataTo(out, dst, true);
+    const DWORD metadata = CopyMetadataTo(out, dst, ReplacementMetadata::Restore);
     if (metadata != ERROR_SUCCESS) { out.Delete(); return fail(metadata); }
     if (sha) *sha = HexW(hash.finish());
     return true;

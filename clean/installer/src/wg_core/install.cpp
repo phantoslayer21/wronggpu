@@ -456,10 +456,6 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
     std::map<wstring, wstring> keptByRestore;  // recorded files the restore left in place (changed since the install), with its warning
     string carriedOpti;
     PinnedFile optiMetadata;
-    struct OptiMetadataCleanup {
-        PinnedFile& file;
-        ~OptiMetadataCleanup() { if (file.IsOpen()) file.Delete(); }
-    } cleanupOptiMetadata{optiMetadata};
     bool haveCarriedOpti = false, optiUnmodified = false;
     wstring carriedOptiSha, originalOptiSha, oldOptiDllSha, expectedOptiTarget;
     std::vector<IniEntry> optiDefaults;
@@ -479,8 +475,9 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
                 const wstring saved = Target(dir, Join(kStateDirName, L"opti-metadata-" + NewInstallId() + L".ini"));
                 wstring copied;
                 DWORD error = 0;
-                if (!file.CopyOut(saved, &copied, &error, &optiMetadata) || !IEq(copied, carriedOptiSha))
+                if (!file.CopyOut(saved, &copied, &error, &optiMetadata, true) || !IEq(copied, carriedOptiSha))
                     Fail(L"Cannot keep OptiScaler.ini metadata: " + ErrText(error));
+                RestoreStep("opti-metadata-saved");
             }
             for (const auto& e : priorOpti.e) {
                 if (IEq(e.rel, L"OptiScaler.ini")) {
@@ -1282,10 +1279,14 @@ std::vector<wstring> DoInstall(Context& ctx, const GameTarget& target, const Mod
     if (!IEq(ctx.logFile, gameLog) && GamePathAllowed(ctx.logFile) && GamePathAllowed(gameLog) && ReadAll(ctx.logFile, log)) {
         PinnedFile previous;
         DWORD error = 0;
-        if (previous.Open(gameLog, true, &error)) previous.ReplaceBytes(gameLog, log.data(), log.size(), &error);
-        else if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
-            error = wgstate::OperationGuard::PutNew(gameLog, log.data(), log.size());
-        if (error) warnings.push_back(L"Cannot refresh the game's setup.log: " + ErrText(error));
+        try {
+            if (previous.Open(gameLog, true, &error)) previous.ReplaceBytes(gameLog, log.data(), log.size(), &error);
+            else if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
+                error = wgstate::OperationGuard::PutNew(gameLog, log.data(), log.size());
+            if (error) warnings.push_back(L"Cannot refresh the game's setup.log: " + ErrText(error));
+        } catch (const SetupError& e) {
+            warnings.push_back(L"Cannot refresh the game's setup.log: " + e.msg);
+        }
     }
     return warnings;
 }

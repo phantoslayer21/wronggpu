@@ -556,7 +556,7 @@ int WriteRrState(Context& ctx, const wstring& dir, const Profile& p, bool dataRe
         const string* pending = wgstate::Get(now, "rr_mode_pending");
         const string* queuedFrom = wgstate::Get(now, "rr_mode_pending_from");
         const bool pendingReady = dataReady && pending && (*pending == "exact" || *pending == "accurate" || *pending == "fast");
-        const bool usePending = pendingReady && (!queuedFrom || *queuedFrom == (cur ? *cur : "unset"));
+        const bool usePending = pendingReady && queuedFrom && *queuedFrom == (cur ? *cur : "unset");
         const bool writeMode = !curValid || explicitMode || usePending;
         const string mode = explicitMode ? want : usePending ? *pending : writeMode ? want : *cur;
         if (pending && (pendingReady || explicitMode)) {

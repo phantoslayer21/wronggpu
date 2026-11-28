@@ -3374,18 +3374,6 @@ static wstring LauncherWindowClass() {
     return base + L"." + Sha256Bytes(scope.data(), scope.size());
 }
 
-static bool ThisLauncherWindow(HWND hwnd) {
-    DWORD pid = 0;
-    GetWindowThreadProcessId(hwnd, &pid);
-    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (!process) return false;
-    wchar_t exe[MAX_PATH * 2] = {};
-    DWORD size = static_cast<DWORD>(std::size(exe));
-    const bool got = QueryFullProcessImageNameW(process, 0, exe, &size) != 0;
-    CloseHandle(process);
-    return got && OwnsLauncherRegistration(true, ResolvedPath(SelfPath()), ResolvedPath(wstring(exe, size)));
-}
-
 HWND CreateLauncherWindow(bool live) {
     v.live = live;
     v.fgBuild = FgPayloadAvailable(g.ctx);  // this build has frame generation's files (fg.h)
@@ -3490,7 +3478,7 @@ int RunLauncherWindow(bool uninstall) {
     windowLock = &one;
     if (alreadyOpen && !offerReplace) {
         if (HWND other = FindWindowW(className.c_str(), nullptr)) {
-            if (uninstall && gl.paths.custom && !ThisLauncherWindow(other)) {
+            if (uninstall && gl.paths.custom && !LauncherWindowRuns(other, SelfPath())) {
                 LogLine(g.ctx, L"Close the other launcher using this data folder, then try uninstall again.");
                 return EXIT_REFUSED;
             }
