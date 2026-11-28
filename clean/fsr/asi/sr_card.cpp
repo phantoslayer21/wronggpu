@@ -87,6 +87,11 @@ void Draw(void*) {
             api->text((std::string(ModelWords(sr.error_model)) + " isn't converted on this PC, so " +
                        (running.empty() ? std::string("WrongGPU can't run it") : std::string(ModelWords(active)) + " is running") +
                        ". Convert " + ModelWords(sr.error_model) + " in the WrongGPU app.").c_str());
+        } else if (wg_sr_mode_of(sr.error_model) && sr.error_kind == WG_ASI_SR_ERROR_STALE_DATA) {
+            // its file was converted with another map (an older WrongGPU): converting it again fixes it
+            api->text((std::string(ModelWords(sr.error_model)) + "'s data doesn't match this version; convert it again in the WrongGPU app. " +
+                       (running.empty() ? std::string("WrongGPU can't run it until then.") : std::string(ModelWords(active)) + " is running."))
+                          .c_str());
         } else if (wg_sr_mode_of(sr.error_model)) {
             std::string line = std::string(ModelWords(sr.error_model)) + " couldn't start";
             if (sr.error_width && sr.error_height) line += " at " + std::to_string(sr.error_width) + "x" + std::to_string(sr.error_height);

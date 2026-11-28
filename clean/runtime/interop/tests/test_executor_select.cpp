@@ -535,7 +535,7 @@ int main() {
     const std::string d = wgi::dx12_refused_line(true, e), f = wgi::dx12_refused_line(false, e);
     expect("create refusal (default): one line with the reason, no HIP route, the front end's upscaler",
            has(d, "executor dx12 (default on RDNA 4) could not take this context") && has(d, "probe mismatch") &&
-               has(d, "there is no HIP route in a game") && has(d, "the front end's own upscaler (AMD FSR) keeps the game") &&
+               has(d, "there is no HIP route in a game") && has(d, "the context is not created") && !has(d, "keeps the game") &&
                !has(d, "the HIP executor runs it") && d.find('\n') == std::string::npos);
     expect("create refusal (executor=dx12): the same", has(f, "executor=dx12 could not take this context") && has(f, "no HIP route"));
     const std::string k = "D3D12 runtime: model K: the D3D12 build has no port of k_out_color_direct";

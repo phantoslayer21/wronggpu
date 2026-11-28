@@ -99,6 +99,7 @@ typedef void (*PfnWrongGpuAsiShowModelV1)(char model);
 #define WG_ASI_SR_SWITCHING 2u  // running_model upscales while pending_model starts
 #define WG_ASI_SR_ERROR_START_FAILED 0  // error_kind: error_model's create failed (error_reason says why)
 #define WG_ASI_SR_ERROR_NOT_CONVERTED 1 // error_kind: error_model is not converted on this PC (the stored choice is kept)
+#define WG_ASI_SR_ERROR_STALE_DATA 2    // error_kind: error_model's data was converted with another map (convert it again)
 typedef struct WrongGpuAsiSrV1 {
     uint32_t size;          // sizeof(WrongGpuAsiSrV1); a smaller report is ignored
     uint32_t state;         // WG_ASI_SR_*

@@ -267,6 +267,15 @@ int main(int argc, char** argv) {
         report(&s);
         DrawFrame();
         CHECK(HasText("Model L isn't converted on this PC, so WrongGPU can't run it. Convert Model L in the WrongGPU app."));
+        // the stored choice's data was converted with another map (rc3 round 3): Model M runs, convert it again
+        s.state = WG_ASI_SR_RUNNING;
+        s.running_model = 'M';
+        s.error_model = 'K';
+        s.error_kind = WG_ASI_SR_ERROR_STALE_DATA;
+        report(&s);
+        DrawFrame();
+        CHECK(HasText("Model K's data doesn't match this version; convert it again in the WrongGPU app. Model M is running."));
+        CHECK(!HasText("couldn't start") && !HasText("isn't converted"));
     }
 
     block.close();

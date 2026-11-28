@@ -275,12 +275,12 @@ inline std::string no_switch_line(uint64_t frame, const std::string& why) {
 
 // After choose_executor gave dx12: the D3D12 executor did not take the context at create (`err`: the driver-channel probe,
 // device preparation, the network's create on the D3D12 device, a context its kernels do not take). Every model has the
-// same answer (R1: no HIP route in a game): the context is not created, this is the one line, and the front end's own
-// upscaler (AMD FSR, else its stand-in) keeps the game.
+// same answer (R1: no HIP route in a game): the context is not created and this is the one line. What upscales instead
+// is the front end's decision (another WrongGPU model, AMD FSR, its stand-in), logged by the front end; this line names none.
 inline std::string dx12_refused_line(bool by_default, const std::string& err) {
   return std::string(by_default ? "executor dx12 (default on RDNA 4)" : "executor=dx12") +
          " could not take this context (" + err + "); there is no HIP route in a game (executor=hip selects the HIP "
-         "executor as a diagnostic): the front end's own upscaler (AMD FSR) keeps the game";
+         "executor as a diagnostic): the context is not created";
 }
 
 }  // namespace wgi

@@ -177,6 +177,10 @@ static std::mutex g_upscalerMutex;
 static std::map<WgUpscaler*, std::string> g_upscalerOptions;
 static std::vector<WgUpscaler*> g_dispatchedBy;
 static std::vector<char> g_dispatchedModel;  // the model (last model= of its options) of the upscaler that took each frame
+// FakeCreate fails for one model only (the last model= of its options), with this error line (as the runtime words it)
+static char g_failModel = 0;
+static std::string g_failModelMessage;
+static WgResult g_failModelResult = WG_ERROR_UNSUPPORTED;
 static WgResult FakeCreate(const WgCreateInfo* info, WgUpscaler** out) {
     ++g_createCalls;
     g_createInfo = *info;
@@ -187,6 +191,13 @@ static WgResult FakeCreate(const WgCreateInfo* info, WgUpscaler** out) {
     if (g_aboutTo) info->log(info->log_user, WG_LOG_INFO, "about to start the HIP runtime (test)");
     info->log(info->log_user, WG_LOG_INFO, "fake upscaler created");
     if (g_failCreateUnsupported) return WG_ERROR_UNSUPPORTED;
+    if (g_failModel) {
+        const std::string m = OptionValue(info->options ? info->options : "", "model");
+        if (m.size() == 1 && char(std::toupper(static_cast<unsigned char>(m[0]))) == g_failModel) {
+            info->log(info->log_user, WG_LOG_ERROR, g_failModelMessage.c_str());
+            return g_failModelResult;
+        }
+    }
     if (g_failCreate || (g_failCreateOutputWidth && info->output_width == g_failCreateOutputWidth)) return WG_ERROR_DEVICE;
     *out = reinterpret_cast<WgUpscaler*>(new FakeUpscaler{1});
     {
@@ -476,6 +487,9 @@ static void Reset() {
     }
     g_dispatchedBy.clear();
     g_dispatchedModel.clear();
+    g_failModel = 0;
+    g_failModelMessage.clear();
+    g_failModelResult = WG_ERROR_UNSUPPORTED;
 }
 
 static void* const kDevice = reinterpret_cast<void*>(uintptr_t(0xD3D0));
@@ -4293,6 +4307,132 @@ static void TestStartupModelNotConverted() {
     g_choiceRecord.clear();
 }
 
+// rc3 round 3 (live, 2026-11-28): the stored model's file EXISTS but its create fails (Model K converted with an older map:
+// "model data does not match this installation (converted with a different map)"). At a start with nothing to keep, the
+// other converted models are tried (M, then K, then L) before the create fails; the stored choice stays; the log and the
+// card say why in plain words. The failure is remembered, so a new context (re-selecting WrongGPU) runs the stand-in model
+// again at once instead of being refused for the session.
+static void TestStartupModelFails() {
+    const bool hasK = ModelOfName("K") >= 0, hasL = ModelOfName("L") >= 0;
+    const char chosen = hasK ? 'K' : hasL ? 'L' : 0;
+    if (!chosen) {
+        std::printf("start fallback: skipped (a build with Model M only)\n");
+        return;
+    }
+    auto idOf = [](char m) { return SrEntryOfModel(ModelOfName(std::string(1, m)))->id; };
+    RecordFolder folder("wg-frontend-startfail-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    const std::string local = "L:\\local\\WrongGPU\\model";
+    auto start = [&](char failModel, const std::string& message, WgResult result) {
+        Reset();
+        std::error_code ec;
+        std::filesystem::remove(folder.record(), ec);
+        g_resources[kColor] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+        g_resources[kDepth] = {dxgi::R32_FLOAT, 2560, 1440};
+        g_resources[kMotion] = {dxgi::R16G16_FLOAT, 2560, 1440};
+        g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+        g_originalAvailable = false;
+        g_choiceRecord = folder.record();
+        g_modelOn = true;
+        g_modelPlaces = {{local, "%LOCALAPPDATA%", true}};
+        g_modelFiles = {local + "\\model.wgcm", local + "\\K\\model.wgcm", local + "\\L\\model.wgcm"};  // all converted
+        g_failModel = failModel;
+        g_failModelMessage = message;
+        g_failModelResult = result;
+        Config c;
+        c.hosted = true;
+        c.customSlot = true;
+        c.contextParkMs = 0;
+        c.switchWaitMs = 20;
+        return MakeFrontEnd(c);
+    };
+    auto create = [](FrontEnd& fe, ffxContext* ctx) {
+        UpscaleCreate c(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE, true);
+        c.version.versionId = kWrongGpuProviderVersionId;
+        return fe.CreateContext(ctx, &c.upscale.header, nullptr);
+    };
+    auto frame = [](FrontEnd& fe, ffxContext* ctx) {
+        auto d = MakeDispatch();
+        return fe.Dispatch(ctx, &d.header);
+    };
+    auto lastModel = [] { return g_dispatchedModel.empty() ? char(0) : g_dispatchedModel.back(); };
+    const std::string chosenName = std::string("Model ") + chosen;
+    const std::string stale = std::string("network runtime unavailable: executor=dx12 could not take this context (D3D12 runtime: model ") +
+                              chosen + ": model data does not match this installation (converted with a different map): " + local +
+                              "/" + chosen + "/model.wgcm); there is no HIP route in a game (executor=hip selects the HIP executor as a "
+                              "diagnostic): the front end's own upscaler (AMD FSR) keeps the game";
+
+    // 1. The stored model's data is stale: Model M runs, the stored choice stays, the log and the card say why.
+    {
+        auto fe = start(chosen, stale, WG_ERROR_UNSUPPORTED);
+        CHECK(fe->HostSelected(idOf(chosen)) == WG_HOST_SELECTED_RECORDED);
+        ffxContext a = nullptr;
+        CHECK(create(*fe, &a) == FFX_API_RETURN_OK && a);  // was ERROR_RUNTIME_ERROR, then OptiScaler's FSR 2.1.2
+        CHECK(frame(*fe, &a) == FFX_API_RETURN_OK && lastModel() == 'M');
+        CHECK(g_createCalls == 2);  // the chosen model once, then Model M
+        CHECK(CountLog((" model choice: " + chosenName + "'s data doesn't match this version (converted with another map); convert it again "
+                        "in the WrongGPU app. Trying Model M instead; the stored choice stays " + chosenName + ".").c_str()) == 1);
+        CHECK(CountLog((" model choice: Model M runs (" + chosenName + " stays the stored choice)").c_str()) == 1);
+        CHECK(CountLog("the host's own upscaler takes over") == 0 && g_amd.empty());
+        CHECK(CountLog("keeps the game") == 0 && CountLog(": the context is not created") >= 1);  // (the old runtime's guess, replaced)
+        const SrReport sr = fe->LastSrReport();
+        CHECK(sr.state == 1 && sr.running == 'M' && sr.errorModel == chosen && sr.errorKind == 2);
+        CHECK(ReadRec(folder.record()).model == chosen);
+        // the host makes a new context (re-selecting WrongGPU, a resolution change): the remembered failure is not tried
+        // again and Model M runs at once, never "not created again until the game restarts" with the host's own upscaler
+        CHECK(fe->DestroyContext(&a, nullptr) == FFX_API_RETURN_OK);
+        ffxContext b = nullptr;
+        CHECK(create(*fe, &b) == FFX_API_RETURN_OK && b && g_createCalls == 3);  // Model M only
+        CHECK(frame(*fe, &b) == FFX_API_RETURN_OK && lastModel() == 'M');
+        CHECK(fe->LastSrReport().errorModel == chosen && fe->LastSrReport().errorKind == 2);
+        CHECK(fe->DestroyContext(&b, nullptr) == FFX_API_RETURN_OK && g_amd.empty());
+    }
+    // 2. Any other create failure of the stored model: Model M runs, the card has the runtime's reason.
+    {
+        auto fe = start(chosen, "fake runtime: the device refused the arena", WG_ERROR_DEVICE);
+        CHECK(fe->HostSelected(idOf(chosen)) == WG_HOST_SELECTED_RECORDED);
+        ffxContext a = nullptr;
+        CHECK(create(*fe, &a) == FFX_API_RETURN_OK && a && frame(*fe, &a) == FFX_API_RETURN_OK && lastModel() == 'M');
+        CHECK(CountLog((chosenName + " couldn't start (fake runtime: the device refused the arena). Trying Model M instead").c_str()) == 1);
+        const SrReport sr = fe->LastSrReport();
+        CHECK(sr.errorModel == chosen && sr.errorKind == 0 && sr.errorReason.find("the device refused the arena") != std::string::npos);
+        CHECK(fe->DestroyContext(&a, nullptr) == FFX_API_RETURN_OK);
+    }
+    // 3. Model M itself fails at the start: the next converted model runs (K, else L).
+    if (hasK || hasL) {
+        const char next = hasK ? 'K' : 'L';
+        auto fe = start('M', "fake runtime: Model M refused", WG_ERROR_DEVICE);
+        ffxContext a = nullptr;  // (no record choice: Model M, the default)
+        CHECK(create(*fe, &a) == FFX_API_RETURN_OK && a && frame(*fe, &a) == FFX_API_RETURN_OK && lastModel() == next);
+        CHECK(CountLog((std::string("Model M couldn't start (fake runtime: Model M refused). Trying Model ") + next + " instead").c_str()) == 1);
+        CHECK(fe->DestroyContext(&a, nullptr) == FFX_API_RETURN_OK);
+    }
+    // 4. Every model fails: nothing can run, the create fails as before, said once, and the card says WrongGPU runs nothing.
+    {
+        auto fe = start(chosen, stale, WG_ERROR_UNSUPPORTED);
+        g_failCreate = true;  // (every create)
+        CHECK(fe->HostSelected(idOf(chosen)) == WG_HOST_SELECTED_RECORDED);
+        ffxContext a = nullptr;
+        CHECK(create(*fe, &a) == FFX_API_RETURN_ERROR_RUNTIME_ERROR && !a);
+        CHECK(CountLog("no converted WrongGPU model could start") == 1);
+        CHECK(fe->LastSrReport().state == 0 && fe->LastSrReport().running == 0);
+    }
+    // 5. A switch to a model whose data is stale while Model M runs: Model M is kept (round 1), the card says why (kind 2).
+    {
+        auto fe = start(chosen, stale, WG_ERROR_UNSUPPORTED);
+        ffxContext a = nullptr, b = nullptr;
+        CHECK(create(*fe, &a) == FFX_API_RETURN_OK && frame(*fe, &a) == FFX_API_RETURN_OK && lastModel() == 'M');
+        CHECK(fe->HostSelected(idOf(chosen)) == WG_HOST_SELECTED_RECORDED);
+        CHECK(create(*fe, &b) == FFX_API_RETURN_OK && b);
+        CHECK(fe->DestroyContext(&a, nullptr) == FFX_API_RETURN_OK);
+        CHECK(frame(*fe, &b) == FFX_API_RETURN_OK && lastModel() == 'M');
+        const SrReport sr = fe->LastSrReport();
+        CHECK(sr.running == 'M' && sr.errorModel == chosen && sr.errorKind == 2);
+        CHECK(CountLog("keeps the game") == 0);
+        CHECK(fe->DestroyContext(&b, nullptr) == FFX_API_RETURN_OK && g_amd.empty());
+    }
+    g_choiceRecord.clear();
+}
+
 // The D3D12 hooks (Platform::activateServices) only after a successful create: never on a failed create or for AMD's
 // FSR, once after the create that worked, after a slow create only when it has finished well; when they cannot be
 // installed, the upscaler is created again without the split service (nothing left patched).
@@ -4769,6 +4909,7 @@ int main() {
     TestCustomSlotDestroyPath();
     TestModelSwitchHandover();
     TestStartupModelNotConverted();
+    TestStartupModelFails();
     TestHooksAfterCreate();
     TestModelLookup();
     TestModelLookupL();

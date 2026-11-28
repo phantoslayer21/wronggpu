@@ -560,7 +560,8 @@ int wmain(int argc, wchar_t** argv) {
         };
         std::printf("churn: 50 creates, %zu ffxCreateContext lines, %zu runtime attempts, %zu remembered-failure summaries\n",
                     count("ffxCreateContext"), count("create: interface="), count("custom slot: create "));
-        CHECK(count("U1 upscaler ERROR: fake runtime: no HIP device found") == 1);  // one real attempt
+        // one real attempt per model: Model M, then (rc3 round 3, a start falls back to the other converted models) Model K
+        CHECK(count("U1 upscaler ERROR: fake runtime: no HIP device found") == size_t(1 + (WRONGGPU_MODEL_K ? 1 : 0)));
         CHECK(count("create: interface=") == 1);
         CHECK(count("this failure is remembered for the session") == 1);
         CHECK(count("no context, the host's own upscaler takes over") == 1);
