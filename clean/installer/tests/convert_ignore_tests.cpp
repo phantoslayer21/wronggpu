@@ -510,8 +510,7 @@ int main() {
                     require(ok2, "RemoveSharedData, the list can't be put back: done");
                     cleanAfterBlocked(checkBlocked(kept, L".removed-", "RemoveSharedData: the list stays in the moved folder (the rest went), said where"));
                     LauncherPaths lp;
-                    lp.dataDir = Join(root, L"own-data");
-                    lp.custom = true;
+                    lp.dataDir = appData;  // exercise the default shared-data uninstall path
                     std::vector<wstring> uiLines;
                     Ui ui{[](int, int, const wstring&) {}, [&uiLines](const wstring& s) { uiLines.push_back(s); }};
                     auto uiSaid = [&uiLines] { wstring all; for (auto& s : uiLines) all += s + L"\n"; return all; };
