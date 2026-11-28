@@ -102,6 +102,9 @@ struct FgCompPresenterInfo {
     std::uint64_t display_time_comp = 0;               // displayed times sourced from CompositionFrame
     std::uint64_t display_time_dcomp_stats = 0;        // displayed times sourced from DComp target stats
     std::uint64_t display_time_estimated = 0;          // displayed times with no measured hardware/DComp timestamp
+    std::uint64_t composed_drop_late = 0;              // generated images dropped pre-submit on composed grid (late)
+    std::uint64_t composed_drop_collision = 0;         // generated images dropped pre-submit to avoid grid collision
+    std::uint64_t grid_phase_bumps = 0;                // closed-loop vblank bumps from DWM PresentStatus_Queued
 };
 
 class FgWinCompPresenter final : public IFgPresenter, private IFgWorkerBody {
@@ -183,6 +186,7 @@ private:
     void CancelOnDisplayLocked(std::uint64_t engine_from);
     void LoseLocked();
     void UpdateGridLocked();
+    void RefreshCompGridFromTimingLocked(const FgCompFrameTiming& timing);
     bool TakePlatformPresent(std::uint64_t platform_id, Submitted* out);
     void ForgetSubmittedLocked();
 
@@ -200,6 +204,7 @@ private:
     std::vector<std::uint32_t> scratch_slots_;
     bool have_vblank_ = false;
     FgTicks last_vblank_ = 0;
+    FgTicks last_submit_at_ = 0;
     FgTicks next_pace_wake_ = 0;
     FgTicks grid_updated_at_ = 0;
     std::uint64_t chain_ = 0;

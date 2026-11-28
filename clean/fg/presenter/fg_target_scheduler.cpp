@@ -256,6 +256,10 @@ void FgTargetScheduler::SetMaxGeneratedCap(std::uint32_t cap) {
     max_generated_cap_ = cap;
 }
 
+void FgTargetScheduler::SetDisplayMinInterval(FgTicks min_interval) {
+    config_.display.min_interval = min_interval < 1 ? 1 : min_interval;
+}
+
 FgTicks FgTargetScheduler::RequiredLead(FgTicks period, std::uint32_t n) const {
     if (period <= 0 || n == 0) return config_.real_min_lead;
     FgTicks offset = 0;

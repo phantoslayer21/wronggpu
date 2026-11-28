@@ -51,6 +51,9 @@ struct FgCompFrameTiming {
     FgTicks completed_time = 0;       // interrupt-time ticks from ts.completedStats.time (measured)
     FgTicks presented_time = 0;       // interrupt-time ticks from ts.presentedStats.time (measured)
     FgTicks target_present_time = 0;  // interrupt-time ticks from ts.presentTime (estimated / scheduled)
+    FgTicks frame_start_time = 0;     // interrupt-time ticks from fst.startTime
+    FgTicks frame_target_time = 0;    // interrupt-time ticks from fst.targetTime (composition grid vblank)
+    FgTicks frame_period = 0;         // interrupt-time ticks from fst.framePeriod (live composition period)
     std::uint64_t raw_completed_qpc = 0;
     std::uint64_t raw_presented_qpc = 0;
 };

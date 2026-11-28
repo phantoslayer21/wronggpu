@@ -151,6 +151,8 @@ public:
     // Optional upper cap on scheduled generated count when producer misses persist.
     // 0 clears the override.
     void SetMaxGeneratedCap(std::uint32_t cap);
+    // Updates the minimum per-image display interval when live composition rate changes at runtime.
+    void SetDisplayMinInterval(FgTicks min_interval);
     void SetOverflowReady(bool ready, std::uint32_t limit = 0) { overflow_ready_ = ready; overflow_cap_ = limit; }
     std::uint32_t PlanningCount() const { return last_requested_; }
     void SetConsumedLeadProtection(bool active) { protect_consumed_lead_ = active; }

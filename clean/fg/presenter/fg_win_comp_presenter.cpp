@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdlib>
 #include <utility>
 
 namespace wgfg {
@@ -15,11 +16,24 @@ using Microsoft::WRL::ComPtr;
 namespace {
 
 constexpr std::uint32_t kMaxSlots = 32;
-constexpr FgTicks kGridRefresh = 10000000;            // re-read the compositor's vblank phase once a second
+constexpr FgTicks kGridRefresh = 2500000;             // re-read the compositor's vblank phase every 250 ms
 constexpr FgTicks kOcclusionWatchdogTicks = 2500000;  // 250 ms windowed occlusion watchdog
 constexpr std::size_t kMaxSubmitted = 256;
 constexpr std::size_t kMaxRealOnlyInFlight = 4;       // bound real-only queue depth in IPresentationManager
 constexpr std::size_t kMaxCompInFlight = 8;           // bound generating queue depth (fits 6x + overlap)
+
+FgTicks CeilToRefreshGrid(FgTicks t, const FgRefreshGrid& grid) {
+    const FgTicks p = grid.period;
+    const FgTicks d = t - grid.origin;
+    FgTicks q = d / p;
+    FgTicks r = d % p;
+    if (r < 0) {
+        r += p;
+        --q;
+    }
+    if (r > 0) ++q;
+    return grid.origin + q * p;
+}
 
 bool ScanoutFormat(DXGI_FORMAT f) {
     return f == DXGI_FORMAT_B8G8R8A8_UNORM || f == DXGI_FORMAT_R8G8B8A8_UNORM || f == DXGI_FORMAT_R10G10B10A2_UNORM ||
@@ -247,6 +261,12 @@ public:
         UINT count = 0;
         if (FAILED(FgDCompGetStatistics(cfid, &fst, 4, targets, &count))) return false;
         out->target_count = count;
+        if (fst.startTime != 0)
+            out->frame_start_time = clock_map_.FromQpc(static_cast<std::int64_t>(fst.startTime));
+        if (fst.targetTime != 0)
+            out->frame_target_time = clock_map_.FromQpc(static_cast<std::int64_t>(fst.targetTime));
+        if (fst.framePeriod != 0)
+            out->frame_period = clock_map_.DurationFromQpc(fst.framePeriod);
         if (count > 0) {
             COMPOSITION_TARGET_STATS ts = {};
             if (SUCCEEDED(FgDCompGetTargetStatistics(cfid, &targets[0], &ts))) {
@@ -669,10 +689,9 @@ FgWinResult FgWinCompPresenter::Initialize() {
     if (FAILED(hr)) return FgWinFail(FgStatus::Refused, FgWinRefusal::StatisticsUnavailable, hr);
     info_.force_vsync_interrupt = desc_.force_vsync_interrupt;
 
-    if (!desc_.variable_refresh) {
-        UpdateGridLocked();  // no worker yet: nothing to lock against
-        if (info_.grid.period <= 0) return FgWinFail(FgStatus::Unsupported, FgWinRefusal::RefreshUnknown);
-    }
+    UpdateGridLocked();  // no worker yet: nothing to lock against
+    if (!desc_.variable_refresh && info_.grid.period <= 0)
+        return FgWinFail(FgStatus::Unsupported, FgWinRefusal::RefreshUnknown);
     if (start_worker_ && !worker_.Start(this, L"wg-fg-composition-presenter", desc_.worker_registration))
         return FgWinFail(FgStatus::Refused, FgWinRefusal::WorkerStart);
     return FgWinOk();
@@ -721,6 +740,7 @@ FgTicks FgWinCompPresenter::PresentLookaheadLocked(bool real_only_plan) const {
 }
 
 FgTicks FgWinCompPresenter::RefreshPeriodLocked() const {
+    if (desc_.variable_refresh && info_.grid.period > 0) return info_.grid.period;
     if (desc_.refresh_period > 0) return desc_.refresh_period;
     if (info_.grid.period > 0) return info_.grid.period;
     return 166667;
@@ -843,6 +863,7 @@ FgStatus FgWinCompPresenter::Attach(std::uint64_t chain_id, std::uint64_t epoch)
     chain_ = chain_id;
     claimed_ = true;
     have_vblank_ = false;
+    last_submit_at_ = 0;
     next_pace_wake_ = 0;
     return s;
 }
@@ -952,6 +973,7 @@ FgStatus FgWinCompPresenter::CompleteResize(bool resize_ok, std::uint64_t new_ep
     resize_width_ = 0;
     resize_height_ = 0;
     have_vblank_ = false;
+    last_submit_at_ = 0;
     next_pace_wake_ = 0;
     deferred_.clear();
     ForgetSubmittedLocked();
@@ -963,6 +985,7 @@ FgStatus FgWinCompPresenter::OnDeviceLost() {
     std::lock_guard<std::mutex> lock(mutex_);
     const FgStatus s = engine_.OnDeviceLost();
     deferred_.clear();
+    last_submit_at_ = 0;
     next_pace_wake_ = 0;
     ForgetSubmittedLocked();
     return s;
@@ -987,6 +1010,7 @@ FgStatus FgWinCompPresenter::Detach() {
         if (claimed_) FgChainRegistry::Process().Release(chain_, this);
         claimed_ = false;
         deferred_.clear();
+        last_submit_at_ = 0;
         next_pace_wake_ = 0;
         ForgetSubmittedLocked();
     }
@@ -1015,14 +1039,21 @@ bool FgWinCompPresenter::WaitIdle(DWORD timeout_ms) {
 
 void FgWinCompPresenter::UpdateGridLocked() {
     grid_updated_at_ = NowLocked();
-    if (desc_.variable_refresh) {
-        info_.grid = FgRefreshGrid();
-        return;
-    }
-    // The compositor's last completed frame is a vblank on the scan-out grid; the caller's exact period (from the
-    // display mode) wins when given. A failed read keeps the previous grid.
+    // The compositor's last completed frame is a vblank on the composition/scan-out grid. In VRR mode read the
+    // compositor's live period without overriding so composed-mode pacing matches DWM's exact cadence (no drift).
+    const FgTicks override_period = desc_.variable_refresh ? 0 : desc_.refresh_period;
     FgRefreshGrid grid;
-    if (backend_->ReadRefreshGrid(desc_.refresh_period, &grid)) info_.grid = grid;
+    if (backend_->ReadRefreshGrid(override_period, &grid) && grid.period > 0) info_.grid = grid;
+}
+
+void FgWinCompPresenter::RefreshCompGridFromTimingLocked(const FgCompFrameTiming& timing) {
+    if (timing.frame_target_time <= 0) return;
+    info_.grid.origin = timing.frame_target_time;
+    if (timing.frame_period >= 10000 && timing.frame_period <= 416667 &&
+        (desc_.variable_refresh || desc_.refresh_period == 0)) {
+        info_.grid.period = timing.frame_period;
+    }
+    grid_updated_at_ = NowLocked();
 }
 
 bool FgWinCompPresenter::TakePlatformPresent(std::uint64_t platform_id, Submitted* out) {
@@ -1038,6 +1069,7 @@ bool FgWinCompPresenter::TakePlatformPresent(std::uint64_t platform_id, Submitte
 void FgWinCompPresenter::LoseLocked() {
     engine_.OnDeviceLost();
     deferred_.clear();
+    last_submit_at_ = 0;
     next_pace_wake_ = 0;
     ForgetSubmittedLocked();
 }
@@ -1076,8 +1108,10 @@ void FgWinCompPresenter::CancelOnDisplayLocked(std::uint64_t engine_from) {
     if (!submitted_.empty()) {
         have_vblank_ = true;
         last_vblank_ = submitted_.back().vblank;
+        last_submit_at_ = submitted_.back().display.issue;
     } else {
         have_vblank_ = false;
+        last_submit_at_ = 0;
     }
 }
 
@@ -1103,10 +1137,22 @@ void FgWinCompPresenter::DrainStatisticsLocked() {
                     ++info_.status_queued;
                     if (st.comp_frame_id != 0) {
                         ++info_.status_queued_with_cfid;
+                        FgCompFrameTiming timing;
+                        const bool probed = backend_->ProbeCompFrameTiming(st.comp_frame_id, &timing);
                         for (Submitted& s : submitted_) {
                             if (s.platform_id == pid) {
                                 s.comp_frame_id = st.comp_frame_id;
                                 s.queued_confirmed = true;
+                                if (probed && timing.frame_target_time > 0) {
+                                    // Closed-loop collision guard: if DWM assigned a later composition frame than we
+                                    // predicted (e.g. OS scheduling delay crossed the cutoff), advance last_vblank_
+                                    // immediately so the next present targets the following composition frame.
+                                    if (have_vblank_ && timing.frame_target_time > last_vblank_) {
+                                        last_vblank_ = timing.frame_target_time;
+                                        ++info_.grid_phase_bumps;
+                                    }
+                                    s.vblank = timing.frame_target_time;
+                                }
                                 break;
                             }
                         }
@@ -1187,6 +1233,7 @@ void FgWinCompPresenter::ResolveQueuedDisplaysLocked() {
         FgCompFrameTiming timing;
         const bool probed = backend_->ProbeCompFrameTiming(s.comp_frame_id, &timing);
         if (probed) {
+            RefreshCompGridFromTimingLocked(timing);
             if (timing.target_count > info_.status_target_count_max)
                 info_.status_target_count_max = timing.target_count;
             if (timing.raw_presented_qpc != 0) ++info_.status_target_presented_nonzero;
@@ -1201,6 +1248,17 @@ void FgWinCompPresenter::ResolveQueuedDisplaysLocked() {
             ++info_.display_time_dcomp_stats;
         } else if (probed && timing.presented_time > 0) {
             actual = timing.presented_time;
+            // DWM snapshots target presentedStats.time when the composition frame completes on CPU/GPU, which can
+            // still hold an earlier scanout vblank (V_{m-k}) while fst.targetTime is exactly k * framePeriod later
+            // (V_m). Advance by k measured framePeriods so consecutive frames do not report duplicate vblanks.
+            if (timing.frame_target_time > actual && timing.frame_period > 0) {
+                const FgTicks delta = timing.frame_target_time - actual;
+                const FgTicks k = (delta + timing.frame_period / 2) / timing.frame_period;
+                if (k >= 1 && k <= 4 &&
+                    std::llabs(delta - k * timing.frame_period) <= timing.frame_period / 4) {
+                    actual = timing.presented_time + k * timing.frame_period;
+                }
+            }
             measured = true;
             ++info_.display_time_dcomp_stats;
         } else {
@@ -1261,7 +1319,7 @@ void FgWinCompPresenter::ReleaseSlotsLocked() {
 void FgWinCompPresenter::SubmitOutboxLocked() {
     engine_.TakeOutbox(&deferred_);
     next_pace_wake_ = 0;
-    const FgTicks now = NowLocked();
+    FgTicks now = NowLocked();
     std::size_t i = 0;
     for (; i < deferred_.size(); ++i) {
         const FgEnginePresent& p = deferred_[i];
@@ -1272,8 +1330,10 @@ void FgWinCompPresenter::SubmitOutboxLocked() {
         const std::size_t max_in_flight = real_only_plan ? kMaxRealOnlyInFlight : kMaxCompInFlight;
         if (submitted_.size() >= max_in_flight) break;
 
+        const bool composed_grid = desc_.variable_refresh && info_.indep_flip_frames < 4 && info_.grid.period > 0;
         FgTicks vblank = p.target;
         FgTicks when = p.target;
+        FgTicks cutoff_lead = 0;
         if (!desc_.variable_refresh) {
             if (FgSnapToRefreshGrid(p.target, info_.grid, &vblank, &when) != FgStatus::Ok) {
                 engine_.MarkFailed();
@@ -1290,6 +1350,72 @@ void FgWinCompPresenter::SubmitOutboxLocked() {
                 vblank = last_vblank_ + info_.grid.period;
                 when = vblank - info_.grid.period / 2;
             }
+            const FgTicks lookahead = PresentLookaheadLocked(real_only_plan);
+            if (lookahead > 0 && now + lookahead < when) {
+                next_pace_wake_ = when - lookahead;
+                break;
+            }
+        } else if (composed_grid) {
+            // Composed-mode DWM grid alignment: DWM assigns each Present() by wall submit time against the live
+            // composition grid (origin + k * P) with an acceptance cutoff ~P/4 before V_k (capped at 3 ms).
+            // Never submit two images into the same composition frame; drop colliding or too-late generated images
+            // before submission, and gate every submission into the safe middle of its assigned frame's window.
+            const FgTicks period = info_.grid.period;
+            cutoff_lead = std::min<FgTicks>(period / 4, 30000);
+            const FgTicks cutoff_guard = std::min<FgTicks>(period / 5, 10000);
+            const FgTicks latest_lead = cutoff_lead + cutoff_guard;
+            const FgTicks wake_lead =
+                std::min<FgTicks>((period * 3) / 4 + std::min<FgTicks>(period / 16, 1500), period / 2 + 25000);
+
+            FgTicks v_target = 0;
+            FgTicks unused_when = 0;
+            if (FgSnapToRefreshGrid(p.target, info_.grid, &v_target, &unused_when) != FgStatus::Ok) {
+                v_target = CeilToRefreshGrid(p.target, info_.grid);
+            }
+            const FgTicks v_now = CeilToRefreshGrid(now + latest_lead, info_.grid);
+            const FgTicks v_after_prev =
+                have_vblank_ ? CeilToRefreshGrid(last_vblank_ + period / 2, info_.grid) : v_now;
+            const FgTicks v_chosen = std::max({v_target, v_now, v_after_prev});
+
+            if (!p.real) {
+                const FgTicks next_target =
+                    i + 1 < deferred_.size() ? deferred_[i + 1].target : engine_.HeadPendingTarget();
+                const FgTicks slot = next_target > p.target ? next_target - p.target : 0;
+                const FgTicks slot_allow = slot > 0 ? (slot - slot / 8) : 0;
+                const FgTicks scaled = slot > 0 ? std::clamp<FgTicks>(slot_allow, 15000, 40000) : 20000;
+                const FgTicks late_tol = std::max<FgTicks>(period + period / 2, scaled);
+                if (v_chosen > p.target + late_tol) {
+                    const bool collision = have_vblank_ && v_after_prev > v_now && v_after_prev > v_target;
+                    if (collision) ++info_.composed_drop_collision;
+                    else ++info_.composed_drop_late;
+                    engine_.OnPresentDropped(p.present_id, collision ? FgDropReason::Pressure : FgDropReason::Late);
+                    continue;
+                }
+                if (next_target > p.target) {
+                    const FgTicks slip_allow =
+                        std::min<FgTicks>(late_tol, std::max<FgTicks>(period + period / 8, slot_allow));
+                    if (v_chosen + period > next_target + slip_allow) {
+                        const bool collision = have_vblank_ && v_after_prev >= v_now && v_after_prev > v_target;
+                        if (collision) ++info_.composed_drop_collision;
+                        else ++info_.composed_drop_late;
+                        engine_.OnPresentDropped(p.present_id,
+                                                 collision ? FgDropReason::Pressure : FgDropReason::Late);
+                        continue;
+                    }
+                }
+            }
+
+            FgTicks submit_at = v_chosen - wake_lead;
+            if (have_vblank_ && last_submit_at_ > 0) {
+                const FgTicks wall_floor = last_submit_at_ + (period * 3) / 4;
+                if (wall_floor > submit_at) submit_at = wall_floor;
+            }
+            if (now < submit_at) {
+                next_pace_wake_ = submit_at;
+                break;
+            }
+            vblank = v_chosen;
+            when = v_chosen;
         } else {
             const FgTicks min_gap =
                 desc_.min_interval > 0 ? desc_.min_interval : (desc_.refresh_period > 0 ? desc_.refresh_period : 1);
@@ -1306,14 +1432,12 @@ void FgWinCompPresenter::SubmitOutboxLocked() {
             FgTicks effective = td.issue_at > now ? td.issue_at : now;
             if (have_vblank_ && effective < last_vblank_ + min_gap) effective = last_vblank_ + min_gap;
             when = vblank = effective;
-        }
 
-        // Pace submission so real-only startup loops never flood IPresentationManager and composed-mode intervals
-        // arrive just before each image's target time instead of bursting all N+1 frames into one composition frame.
-        const FgTicks lookahead = PresentLookaheadLocked(real_only_plan);
-        if (lookahead > 0 && now + lookahead < when) {
-            next_pace_wake_ = when - lookahead;
-            break;
+            const FgTicks lookahead = PresentLookaheadLocked(real_only_plan);
+            if (lookahead > 0 && now + lookahead < when) {
+                next_pace_wake_ = when - lookahead;
+                break;
+            }
         }
 
         std::uint64_t pid = 0;
@@ -1330,6 +1454,10 @@ void FgWinCompPresenter::SubmitOutboxLocked() {
             return;
         }
         const FgTicks submitted_at = NowLocked();
+        if (composed_grid && cutoff_lead > 0 && submitted_at > vblank - cutoff_lead) {
+            vblank = CeilToRefreshGrid(submitted_at + cutoff_lead, info_.grid);
+        }
+        now = submitted_at;
         const bool visible = backend_->IsWindowVisible();
         info_.window_visible = visible;
         if (visible) {
@@ -1347,6 +1475,7 @@ void FgWinCompPresenter::SubmitOutboxLocked() {
         }
         have_vblank_ = true;
         last_vblank_ = vblank;
+        last_submit_at_ = submitted_at;
     }
     deferred_.erase(deferred_.begin(), deferred_.begin() + static_cast<std::ptrdiff_t>(i));
 }
@@ -1359,7 +1488,8 @@ void FgWinCompPresenter::StepLocked() {
         return;
     }
     const FgTicks now = NowLocked();
-    if (!desc_.variable_refresh && now - grid_updated_at_ > kGridRefresh) UpdateGridLocked();
+    if ((!desc_.variable_refresh || info_.indep_flip_frames < 4) && now - grid_updated_at_ > kGridRefresh)
+        UpdateGridLocked();
     DrainStatisticsLocked();
     ResolveQueuedDisplaysLocked();
     ReleaseSlotsLocked();

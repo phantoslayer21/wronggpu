@@ -289,6 +289,7 @@ struct FgAsiSessionHost::Impl {
     uint64_t hwfq_last_queued_cfid = 0;
     uint64_t hwfq_last_vis_sub_at_progress = 0;
     wgfg::FgTicks hwfq_last_progress_tick = 0;
+    wgfg::FgTicks hwfq_comp_period = 0;
     HANDLE wait_timer = nullptr;      // back-pressure waits (high resolution)
     uint64_t back_pressure_waits = 0; // game frames that waited for a presenter slot
     bool back_pressure_logged = false;
@@ -1467,6 +1468,10 @@ struct FgAsiSessionHost::Impl {
                            "/comp:" + std::to_string(in.display_time_comp) +
                            "/dcomp:" + std::to_string(in.display_time_dcomp_stats) +
                            "/est:" + std::to_string(in.display_time_estimated) +
+                           " comp_grid_us=" + std::to_string(in.grid.period / 10) +
+                           " comp_drop_late=" + std::to_string(in.composed_drop_late) +
+                           " comp_drop_coll=" + std::to_string(in.composed_drop_collision) +
+                           " grid_bumps=" + std::to_string(in.grid_phase_bumps) +
                            " watchdog_retired=" + std::to_string(in.watchdog_retired) +
                            " visible_sub=" + std::to_string(in.visible_submitted) +
                            " primed=" + (in.primed ? "yes" : "no") +
@@ -1507,6 +1512,7 @@ struct FgAsiSessionHost::Impl {
         hwfq_last_queued_cfid = 0;
         hwfq_last_vis_sub_at_progress = 0;
         hwfq_last_progress_tick = 0;
+        hwfq_comp_period = 0;
         previous_fill_wait = current_fill_wait = current_fill_period = 0;
         fill_cap_intervals = fill_high_intervals = fill_gameplay_intervals = 0;
         fill_trim_sum = 0.0;
@@ -1949,16 +1955,29 @@ struct FgAsiSessionHost::Impl {
                 d.scheduler.bridge_and_submit_margin = 2500;
             {
                 // O-A4 / M1: query active monitor refresh via EnumDisplaySettingsExW (fallback to compositor grid).
-                // The planner and presenter use the same refresh-derived minimum spacing.
+                // For HWFQ prefer DComp's live composition period so composed-mode count adaptation tracks the real
+                // compositor cadence without integer-Hz drift.
                 wgfg::FgTicks refresh_period = 0;
                 uint32_t refresh_hz = 0;
-                bool from_mode = QueryMonitorRefresh(hwnd, &refresh_period, &refresh_hz);
-                if (!from_mode) {
+                bool from_mode = false;
+                if (hwfq_mode) {
                     wgfg::FgClockMap map;
                     wgfg::FgRefreshGrid grid;
-                    if (wgfg::FgReadCompositorGrid(map, 0, &grid) && grid.period > 0) {
+                    if (wgfg::FgReadCompositorGrid(map, 0, &grid) && grid.period >= 10000 && grid.period <= 416667) {
                         refresh_period = grid.period;
                         refresh_hz = static_cast<uint32_t>((10000000ll + grid.period / 2) / grid.period);
+                        hwfq_comp_period = grid.period;
+                    }
+                }
+                if (refresh_period <= 0) {
+                    from_mode = QueryMonitorRefresh(hwnd, &refresh_period, &refresh_hz);
+                    if (!from_mode) {
+                        wgfg::FgClockMap map;
+                        wgfg::FgRefreshGrid grid;
+                        if (wgfg::FgReadCompositorGrid(map, 0, &grid) && grid.period > 0) {
+                            refresh_period = grid.period;
+                            refresh_hz = static_cast<uint32_t>((10000000ll + grid.period / 2) / grid.period);
+                        }
                     }
                 }
                 if (refresh_period > 0) {
@@ -1969,7 +1988,8 @@ struct FgAsiSessionHost::Impl {
                         base.display.variable_refresh ? 208333 : 1000000;  // 48 Hz VRR floor vs 10 Hz fixed
                     d.scheduler.adaptive_count = true;
                     if (base.display.variable_refresh) {
-                        d.scheduler.display.min_interval = wgfg::FgVrrMinInterval(refresh_period, vsync_mode);
+                        d.scheduler.display.min_interval =
+                            wgfg::FgVrrMinInterval(refresh_period, vsync_mode || hwfq_mode);
                         d.scheduler.display.margin = 200;
                         d.scheduler.display.hysteresis = 400;
                         d.scheduler.display.exit_intervals = 2;
@@ -2426,6 +2446,27 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
             const wgfg::FgPresentStats ps = cp->Stats();
             const wgfg::FgCompPresenterInfo ci = cp->Info();
             const wgfg::FgPresenterState pstate = cp->State();
+            // Adapt scheduled generated count to live DWM composition rate whenever composed mode is active and the
+            // live compositor period shifts by more than 2% (e.g. display mode switch or DWM cadence throttle).
+            if (ci.indep_flip_frames < 4 && ci.grid.period >= 10000 && ci.grid.period <= 416667) {
+                const wgfg::FgTicks diff = ci.grid.period > m.hwfq_comp_period
+                                               ? (ci.grid.period - m.hwfq_comp_period)
+                                               : (m.hwfq_comp_period - ci.grid.period);
+                if (m.hwfq_comp_period == 0 || diff * 50 > m.hwfq_comp_period) {
+                    m.hwfq_comp_period = ci.grid.period;
+                    const wgfg::FgTicks new_min = wgfg::FgVrrMinInterval(ci.grid.period, true);
+                    m.session->SetDisplayMinInterval(new_min);
+                    m.st_refresh_hz.store(
+                        static_cast<uint32_t>((10000000ll + ci.grid.period / 2) / ci.grid.period));
+                    char rbuf[160];
+                    std::snprintf(rbuf, sizeof rbuf,
+                                  "fg host: hwfq live composition rate %.1f Hz (period=%lld ticks, min_interval=%lld "
+                                  "ticks)",
+                                  10000000.0 / static_cast<double>(ci.grid.period),
+                                  static_cast<long long>(ci.grid.period), static_cast<long long>(new_min));
+                    m.Log(rbuf);
+                }
+            }
             if (ci.retiring_fence_value > m.hwfq_last_retire_fence ||
                 ci.status_queued_with_cfid > m.hwfq_last_queued_cfid) {
                 m.hwfq_last_retire_fence = ci.retiring_fence_value;

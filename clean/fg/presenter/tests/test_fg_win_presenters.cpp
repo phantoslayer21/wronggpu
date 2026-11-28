@@ -2793,6 +2793,299 @@ void TestCompFixedRefreshStepDownAndWorker() {
     }
 }
 
+void TestCompComposedGridAlignmentAndCollisionDrop() {
+    g_case = "hwfq-composed-grid-and-collision-drop";
+    constexpr FgTicks kCompPeriod360 = 27762;  // exact measured DComp 360.20 Hz period
+    const FgTicks kMinIntervalComp = FgVrrMinInterval(kCompPeriod360, true);
+    const FgTicks kCutoffLead = kCompPeriod360 / 4;  // ~694 us (matches realdesk r4-phase1)
+
+    auto ceil_grid = [](FgTicks t, FgTicks origin, FgTicks p) -> FgTicks {
+        const FgTicks d = t - origin;
+        FgTicks q = d / p;
+        FgTicks r = d % p;
+        if (r < 0) {
+            r += p;
+            --q;
+        }
+        if (r > 0) ++q;
+        return origin + q * p;
+    };
+
+    // 1) Jittered 90-130 fps base + periodic late GPU bursts at x2..x6 against a DWM composed-mode simulator
+    //    (assigns cf_tgt = ceil_grid(t_sub + cutoff, grid); two presents on the same cf_tgt skip the earlier one).
+    //    Must produce 0 DWM skips, 0 duplicate cf_tgt, 0 short intervals, and drop colliding/late generated images
+    //    before submission while displaying every real frame.
+    for (std::uint32_t req_n = 1; req_n <= 5; ++req_n) {
+        const FgTicks origin = 900 * kMs;
+        auto backend_up = std::make_unique<FakeCompBackend>(20, origin, false);
+        FakeCompBackend* backend = backend_up.get();
+        backend->SetRefreshGrid(origin, kCompPeriod360);
+        const std::uint32_t fid = backend->CreateFence();
+
+        FgCompPresenterDesc cd;
+        cd.bind_window = true;
+        cd.width = 2560;
+        cd.height = 1440;
+        cd.variable_refresh = true;
+        cd.refresh_period = kCompPeriod360;
+        cd.min_interval = kMinIntervalComp;
+        cd.max_generated = 5;
+        cd.slot_count = 20;
+        cd.max_pending_intervals = 3;
+        std::unique_ptr<FgWinCompPresenter> p;
+        CHECK(FgWinCompPresenter::CreateWithBackend(cd, std::move(backend_up), false, &p).Ok());
+        CHECK(p->Attach(0x5500 + req_n, 1) == FgStatus::Ok);
+        CHECK(p->Info().grid.period == kCompPeriod360);
+
+        FgSchedulerConfig sc;
+        sc.display.min_interval = kMinIntervalComp;
+        sc.display.max_interval = 208333;
+        sc.display.margin = 200;
+        sc.display.hysteresis = 400;
+        sc.display.exit_intervals = 2;
+        sc.display.reenter_intervals = 3;
+        sc.adaptive_count = true;
+        sc.bridge_and_submit_margin = 2500;
+        sc.first_image_budget = 60000;  // 6 ms
+        sc.max_lead = 500000;
+        FgTargetScheduler sched(sc);
+        CHECK(sched.BeginEpoch(1) == FgStatus::Ok);
+
+        struct PendingFence {
+            std::uint64_t value = 0;
+            FgTicks ready_at = 0;
+        };
+        std::deque<PendingFence> pending_fences;
+        struct CompFrameEntry {
+            std::uint64_t pid = 0;
+            std::uint32_t slot = 0;
+            std::uint64_t cfid = 0;
+            FgTicks cf_tgt = 0;
+        };
+        std::deque<CompFrameEntry> in_dwm;
+        std::size_t processed_log = 0;
+        std::uint64_t next_cfid = 1000;
+        std::uint64_t dup_cf_tgt = 0;
+        FgTicks last_cf_tgt = 0;
+        int displayed_slot = -1;
+
+        auto pump_dwm = [&](FgTicks now) {
+            backend->SetNow(now);
+            while (!pending_fences.empty() && pending_fences.front().ready_at <= now) {
+                backend->SignalFence(fid, pending_fences.front().value);
+                pending_fences.pop_front();
+            }
+            p->StepForTest();
+            const auto log = backend->SubmittedLog();
+            while (processed_log < log.size()) {
+                const auto& qp = log[processed_log++];
+                const FgTicks cf_tgt = ceil_grid(qp.submitted_at + kCutoffLead, origin, kCompPeriod360);
+                // If another present already claimed cf_tgt, DWM skips the earlier one.
+                if (!in_dwm.empty() && in_dwm.back().cf_tgt == cf_tgt) {
+                    ++dup_cf_tgt;
+                    const auto old = in_dwm.back();
+                    in_dwm.pop_back();
+                    FgCompStatistic sk;
+                    sk.kind = FgCompStatKind::PresentStatus;
+                    sk.present_id = old.pid;
+                    sk.status = FgCompPresentStatus::Skipped;
+                    sk.comp_frame_id = old.cfid;
+                    backend->PushCustomStat(sk);
+                    backend->ReleaseSlotBuffer(old.slot);
+                } else if (last_cf_tgt == cf_tgt) {
+                    ++dup_cf_tgt;
+                }
+                const std::uint64_t cfid = next_cfid++;
+                FgCompFrameTiming ft;
+                ft.target_count = 1;
+                ft.frame_start_time = cf_tgt - kCompPeriod360 + 11000;
+                ft.frame_target_time = cf_tgt;
+                ft.frame_period = kCompPeriod360;
+                // Alternate between DWM snapping presented_time to V_{k-1} and V_k (exact r4-phase1 behavior).
+                ft.presented_time = (cfid % 2 == 0) ? (cf_tgt - kCompPeriod360) : cf_tgt;
+                ft.raw_presented_qpc = static_cast<std::uint64_t>(ft.presented_time);
+                backend->SetCompFrameTiming(cfid, ft);
+                backend->PushQueuedStatus(qp.pid, cfid, 1, 0, ft.raw_presented_qpc);
+                in_dwm.push_back(CompFrameEntry{qp.pid, qp.slot, cfid, cf_tgt});
+                last_cf_tgt = cf_tgt;
+            }
+            while (!in_dwm.empty() && in_dwm.front().cf_tgt <= now) {
+                const auto done = in_dwm.front();
+                in_dwm.pop_front();
+                if (displayed_slot >= 0 && static_cast<std::uint32_t>(displayed_slot) != done.slot)
+                    backend->ReleaseSlotBuffer(static_cast<std::uint32_t>(displayed_slot));
+                displayed_slot = static_cast<int>(done.slot);
+                backend->SetCompletedCfid(done.cfid);
+                backend->SetRetiringFence(done.pid);
+            }
+            p->StepForTest();
+        };
+
+        FgTicks t = origin + 5000;
+        std::uint64_t fv = 0;
+        constexpr int kFrames = 60;
+        // Deterministic 90-130 fps jitter pattern (7.7 ms .. 11.1 ms, centered ~9.26 ms = 108 fps).
+        const FgTicks jitter_deltas[12] = {
+            92600, 81000, 108000, 77000, 102000, 86000, 111000, 79000, 96000, 84000, 105000, 91000
+        };
+        for (int j = 1; j <= kFrames; ++j) {
+            pump_dwm(t);
+            FgGameFrame gf;
+            gf.epoch = 1;
+            gf.frame_id = static_cast<std::uint64_t>(j);
+            gf.arrival = t;
+            gf.budget_origin = t;
+            gf.requested_count = req_n;
+            gf.generation_enabled = true;
+            FgIntervalPlan plan;
+            CHECK(sched.Commit(gf, &plan) == FgStatus::Ok);
+            // Every 10th frame simulate a late GPU readiness burst (+7.5 ms) where all images finish together.
+            const FgTicks gpu_lag = (j % 10 == 0) ? 75000 : (30000 + (j % 4) * 5000);
+            if (plan.generated_count == 0) {
+                std::uint32_t slot = 0;
+                CHECK(p->ReserveRealSlot(&slot) == FgStatus::Ok);
+                ++fv;
+                pending_fences.push_back(PendingFence{fv, t + gpu_lag});
+                CHECK(p->PresentRealOnly(plan, FgRealImage{1, gf.frame_id, FgReadyFence{fid, fv}}) == FgStatus::Ok);
+            } else {
+                FgIntervalReservation res;
+                CHECK(p->BeginInterval(plan, &res) == FgStatus::Ok);
+                FgIntervalSubmission sub;
+                sub.epoch = 1;
+                sub.interval_id = plan.interval_id;
+                sub.count = res.count;
+                for (std::uint32_t k = 0; k < res.count; ++k) {
+                    sub.produced[k] = res.slots[k].reserved;
+                    if (sub.produced[k]) {
+                        ++fv;
+                        pending_fences.push_back(PendingFence{fv, t + gpu_lag});
+                        sub.ready[k] = FgReadyFence{fid, fv};
+                    }
+                }
+                CHECK(p->SubmitInterval(sub) == FgStatus::Ok);
+            }
+            const FgTicks next_t = t + jitter_deltas[j % 12];
+            for (FgTicks step = t + 2500; step <= next_t; step += 2500) pump_dwm(step);
+            t = next_t;
+        }
+        for (int drain = 0; drain < 120; ++drain) {
+            t += 2500;
+            pump_dwm(t);
+        }
+        const FgPresentStats st = p->Stats();
+        const FgCompPresenterInfo info = p->Info();
+        const FgDisplaySummary cad = p->ReadDisplayCadence(false);
+        CHECK(dup_cf_tgt == 0);
+        CHECK(st.display_skipped == 0);
+        CHECK(st.displayed_real == static_cast<std::uint64_t>(kFrames));
+        CHECK(st.displayed_generated >= static_cast<std::uint64_t>(req_n == 1 ? 45 : 70));
+        CHECK(st.display_collisions == 0);
+        CHECK(st.display_time_measured == true);
+        CHECK(info.display_time_dcomp_stats == st.displayed_real + st.displayed_generated);
+        CHECK(info.display_time_estimated == 0);
+        CHECK(cad.short_intervals == 0);
+        CHECK(p->Detach() == FgStatus::Ok);
+    }
+
+    // 2) Closed-loop phase bump: DWM queues Present 1 onto V_{k+1} instead of predicted V_k -> grid_phase_bumps >= 1
+    //    and Present 2 advances to V_{k+2} instead of colliding on V_{k+1}.
+    {
+        const FgTicks origin = 950 * kMs;
+        auto backend_up = std::make_unique<FakeCompBackend>(10, origin, false);
+        FakeCompBackend* backend = backend_up.get();
+        backend->SetRefreshGrid(origin, kCompPeriod360);
+        const std::uint32_t fid = backend->CreateFence();
+        FgCompPresenterDesc cd;
+        cd.bind_window = true;
+        cd.width = 2560;
+        cd.height = 1440;
+        cd.variable_refresh = true;
+        cd.refresh_period = kCompPeriod360;
+        cd.min_interval = kMinIntervalComp;
+        cd.slot_count = 10;
+        std::unique_ptr<FgWinCompPresenter> p;
+        CHECK(FgWinCompPresenter::CreateWithBackend(cd, std::move(backend_up), false, &p).Ok());
+        CHECK(p->Attach(0x5590, 1) == FgStatus::Ok);
+
+        const FgTicks v1 = origin + kCompPeriod360;
+        const FgTicks v2 = origin + 2 * kCompPeriod360;
+        const FgTicks v3 = origin + 3 * kCompPeriod360;
+        std::uint32_t s1 = 0, s2 = 0;
+        CHECK(p->ReserveRealSlot(&s1) == FgStatus::Ok);
+        FgIntervalPlan pl1 = MakePlan(1, 1, 1, origin, kCompPeriod360, 0, 2500);
+        backend->SignalFence(fid, 1);
+        CHECK(p->PresentRealOnly(pl1, FgRealImage{1, 1, FgReadyFence{fid, 1}}) == FgStatus::Ok);
+        backend->SetNow(origin + 8000);  // inside V1 window -> submits predicting V1
+        p->StepForTest();
+        CHECK(backend->SubmittedLog().size() == 1);
+        CHECK(backend->SubmittedLog()[0].target == v1);
+
+        // DWM reports Present 1 actually landed on V2 (one refresh later than predicted).
+        FgCompFrameTiming ft1;
+        ft1.target_count = 1;
+        ft1.frame_start_time = v2 - kCompPeriod360 + 12000;
+        ft1.frame_target_time = v2;
+        ft1.frame_period = kCompPeriod360;
+        ft1.presented_time = v1;  // pre-frame snapshot -> must advance to v2
+        ft1.raw_presented_qpc = static_cast<std::uint64_t>(v1);
+        backend->SetCompFrameTiming(5001, ft1);
+        backend->PushQueuedStatus(1, 5001, 1, 0, ft1.raw_presented_qpc);
+        p->StepForTest();
+        CHECK(p->Info().grid_phase_bumps == 1);
+
+        // Queue Present 2 targeting V2 -> closed-loop bump must push it to V3 (not V2!).
+        CHECK(p->ReserveRealSlot(&s2) == FgStatus::Ok);
+        FgIntervalPlan pl2 = MakePlan(1, 2, 2, v1, kCompPeriod360, 0, 2500);
+        backend->SignalFence(fid, 2);
+        CHECK(p->PresentRealOnly(pl2, FgRealImage{1, 2, FgReadyFence{fid, 2}}) == FgStatus::Ok);
+        backend->SetNow(v2 + 8000);  // inside V3 window
+        p->StepForTest();
+        CHECK(backend->SubmittedLog().size() == 2);
+        CHECK(backend->SubmittedLog()[1].target == v3);
+
+        // Complete Present 1 and verify pre-frame presented_time snapshot advanced cleanly to V2.
+        backend->SetCompletedCfid(5001);
+        p->StepForTest();
+        CHECK(p->Stats().displayed_real == 1 && p->Stats().display_time_measured);
+        CHECK(p->Detach() == FgStatus::Ok);
+    }
+
+    // 3) Live composition rate change (360 Hz -> 120 Hz): SetDisplayMinInterval adapts count cleanly.
+    {
+        FgSchedulerConfig sc;
+        sc.display.min_interval = FgVrrMinInterval(kCompPeriod360, true);
+        sc.display.max_interval = 208333;
+        sc.display.margin = 200;
+        sc.display.hysteresis = 400;
+        sc.display.exit_intervals = 2;
+        sc.display.reenter_intervals = 3;
+        sc.adaptive_count = true;
+        sc.bridge_and_submit_margin = 2500;
+        sc.first_image_budget = 40000;
+        sc.max_lead = 500000;
+        FgTargetScheduler sched(sc);
+        CHECK(sched.BeginEpoch(1) == FgStatus::Ok);
+        FgTicks t = 100 * kMs;
+        std::uint32_t count_360 = 0, count_120 = 0;
+        for (int j = 1; j <= 20; ++j) {
+            if (j == 11) sched.SetDisplayMinInterval(FgVrrMinInterval(83333, true));  // 120 Hz live comp rate
+            FgGameFrame gf;
+            gf.epoch = 1;
+            gf.frame_id = static_cast<std::uint64_t>(j);
+            gf.arrival = t;
+            gf.requested_count = 3;  // x4 requested on 50 fps base (200 fps > 120 Hz, <= 360 Hz)
+            gf.generation_enabled = true;
+            FgIntervalPlan plan;
+            CHECK(sched.Commit(gf, &plan) == FgStatus::Ok);
+            if (j == 10) count_360 = plan.generated_count;
+            if (j == 20) count_120 = plan.generated_count;
+            t += 200000;  // 50 fps
+        }
+        CHECK(count_360 == 3);  // 50 * 4 = 200 fps fits 360 Hz
+        CHECK(count_120 == 1);  // 50 * 2 = 100 fps fits 120 Hz (50 * 3 = 150 fps exceeds 120 Hz)
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -2816,6 +3109,7 @@ int main(int argc, char** argv) {
     TestCompMeasuredProvenance();
     TestCompWatchdogAndIsAvailable();
     TestCompFixedRefreshStepDownAndWorker();
+    TestCompComposedGridAlignmentAndCollisionDrop();
     TestDxgiWorkerLeaseAndJitter();
     TestCadenceMatrix();
     TestSelection();

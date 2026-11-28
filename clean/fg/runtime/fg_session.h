@@ -340,6 +340,7 @@ public:
     // scheduler made again after a resize. false: no session.
     bool SetFirstImageBudget(FgTicks budget);
     bool SetMaxGeneratedCap(uint32_t cap);
+    bool SetDisplayMinInterval(FgTicks min_interval);
     void SetOverflowReady(bool ready, uint32_t limit = 0) {
         if (scheduler_) scheduler_->SetOverflowReady(ready, limit);
     }
