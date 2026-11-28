@@ -40,7 +40,10 @@ if(WIN32)
   add_executable(test_fg_win_presenters ${CMAKE_CURRENT_LIST_DIR}/tests/test_fg_win_presenters.cpp)
   target_link_libraries(test_fg_win_presenters PRIVATE wg_fg_win_presenter)
 
-  list(APPEND WG_FG_PRESENTER_TARGETS wg_fg_win_presenter test_fg_win_presenters)
+  add_executable(test_fg_hwfq_window ${CMAKE_CURRENT_LIST_DIR}/tests/test_fg_hwfq_window.cpp)
+  target_link_libraries(test_fg_hwfq_window PRIVATE wg_fg_win_presenter dwmapi.lib)
+
+  list(APPEND WG_FG_PRESENTER_TARGETS wg_fg_win_presenter test_fg_win_presenters test_fg_hwfq_window)
 endif()
 
 foreach(t ${WG_FG_PRESENTER_TARGETS})

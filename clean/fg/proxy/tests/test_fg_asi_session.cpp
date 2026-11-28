@@ -141,7 +141,8 @@ void TestFlags() {
     DXGI_SWAP_CHAIN_DESC1 d = {};
     const FgPresenterChoice choices[4] = {FgPresenterChoice::Auto, FgPresenterChoice::Hwfq, FgPresenterChoice::DxgiTearing,
                                           FgPresenterChoice::DxgiVsync};
-    const UINT want[4] = {DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT, 0,
+    const UINT want[4] = {DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
+                          DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
                           DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
                           DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT};
     for (int i = 0; i < 4; ++i) {
@@ -2775,6 +2776,112 @@ void TestAdmissionPolicyAliasLogsOnce() {
     CHECK(alias_logs == 1);
 }
 
+void TestHwfqFallbackPolicy() {
+    g_case = "hwfq-zero-display-fallback";
+    // Working HWFQ never falls back while retiring fence / queued-with-cfid keep moving (stall_elapsed == 0),
+    // even if CompositionFrame / IndependentFlipFrame are absent.
+    HwfqHealthSnapshot ok;
+    ok.displayed = 1;
+    ok.visible_submitted = 80;
+    ok.resolved_unseen = 10;
+    ok.status_queued_with_cfid = 70;
+    ok.retiring_fence_value = 69;
+    ok.visible_elapsed_ticks = 20000000;
+    ok.stall_elapsed_ticks = 0;
+    ok.admission_timed_out = true;
+    CHECK(CheckHwfqZeroDisplayFallback(ok) == HwfqFallbackReason::None);
+
+    // Even with displayed == 0 at startup, advancing retiring fence or queued-with-cfid MUST NOT trigger fallback.
+    HwfqHealthSnapshot composed_progress;
+    composed_progress.displayed = 0;
+    composed_progress.visible_submitted = 20;
+    composed_progress.status_queued_with_cfid = 18;
+    composed_progress.retiring_fence_value = 17;
+    composed_progress.visible_elapsed_ticks = 2000000;
+    composed_progress.stall_elapsed_ticks = 0;
+    composed_progress.refresh_period = 27778;
+    CHECK(CheckHwfqZeroDisplayFallback(composed_progress) == HwfqFallbackReason::None);
+
+    // Device / present error always falls back immediately.
+    HwfqHealthSnapshot dev_err;
+    dev_err.displayed = 50;
+    dev_err.visible_submitted = 50;
+    dev_err.last_present_hr = static_cast<long>(0x88810001L);
+    CHECK(CheckHwfqZeroDisplayFallback(dev_err) == HwfqFallbackReason::DeviceError);
+    dev_err.last_present_hr = 0;
+    dev_err.presenter_failed = true;
+    CHECK(CheckHwfqZeroDisplayFallback(dev_err) == HwfqFallbackReason::DeviceError);
+
+    // Hidden / minimized window (visible_submitted == 0) never falls back for stalls.
+    HwfqHealthSnapshot hidden;
+    hidden.displayed = 0;
+    hidden.visible_submitted = 0;
+    hidden.resolved_unseen = 60;
+    hidden.watchdog_retired = 3;
+    hidden.visible_elapsed_ticks = 20000000;
+    hidden.stall_elapsed_ticks = 20000000;
+    hidden.admission_timed_out = true;
+    CHECK(CheckHwfqZeroDisplayFallback(hidden) == HwfqFallbackReason::None);
+
+    // Startup cancel storm with zero displayed falls back immediately.
+    HwfqHealthSnapshot cstorm;
+    cstorm.displayed = 0;
+    cstorm.visible_submitted = 16;
+    cstorm.status_canceled = 16;
+    CHECK(CheckHwfqZeroDisplayFallback(cstorm) == HwfqFallbackReason::CancelStorm);
+
+    // Startup grace suppresses timeout fallback when no hard error or cancel storm occurred.
+    HwfqHealthSnapshot grace;
+    grace.displayed = 0;
+    grace.visible_submitted = 12;
+    grace.resolved_unseen = 2;
+    grace.status_queued_with_cfid = 0;
+    grace.retiring_fence_value = 0;
+    grace.visible_elapsed_ticks = 1000000;  // 100 ms (< 150 ms stall floor)
+    grace.refresh_period = 27778;
+    grace.admission_timed_out = true;
+    grace.startup_grace = true;
+    CHECK(CheckHwfqZeroDisplayFallback(grace) == HwfqFallbackReason::None);
+
+    // Admission timeout past startup grace with 0 retiring fence & 0 queued-cfid on visible window falls back.
+    grace.startup_grace = false;
+    CHECK(CheckHwfqZeroDisplayFallback(grace) == HwfqFallbackReason::AdmissionTimeoutZeroDisplay);
+
+    // Startup stall: retiring fence == 0 AND queued_with_cfid == 0 across >= 12 submits and >= max(12 refreshes, 150 ms).
+    HwfqHealthSnapshot stalled_start;
+    stalled_start.displayed = 0;
+    stalled_start.visible_submitted = 12;
+    stalled_start.resolved_unseen = 4;
+    stalled_start.status_queued_with_cfid = 0;
+    stalled_start.retiring_fence_value = 0;
+    stalled_start.refresh_period = 27778;  // 360 Hz -> 150 ms floor
+    stalled_start.visible_elapsed_ticks = 1499999;
+    CHECK(CheckHwfqZeroDisplayFallback(stalled_start) == HwfqFallbackReason::None);
+    stalled_start.visible_elapsed_ticks = 1500000;
+    CHECK(CheckHwfqZeroDisplayFallback(stalled_start) == HwfqFallbackReason::FenceAndQueueStalled);
+
+    // Mid-session stall: both retiring fence and queued_with_cfid stopped moving for >= 500 ms.
+    HwfqHealthSnapshot mid_stall;
+    mid_stall.displayed = 100;
+    mid_stall.visible_submitted = 120;
+    mid_stall.status_queued_with_cfid = 100;
+    mid_stall.retiring_fence_value = 99;
+    mid_stall.refresh_period = 27778;
+    mid_stall.stall_elapsed_ticks = 4999999;
+    CHECK(CheckHwfqZeroDisplayFallback(mid_stall) == HwfqFallbackReason::None);
+    mid_stall.stall_elapsed_ticks = 5000000;
+    CHECK(CheckHwfqZeroDisplayFallback(mid_stall) == HwfqFallbackReason::FenceAndQueueStalled);
+
+    // Watchdog-only zero-display (silent compositor, 0 retiring fence, 0 queued-cfid) triggers fallback.
+    HwfqHealthSnapshot silent;
+    silent.displayed = 0;
+    silent.visible_submitted = kHwfqFallbackMinVisibleSubmits;
+    silent.resolved_unseen = 0;
+    silent.watchdog_retired = kHwfqFallbackMinWatchdog;
+    silent.visible_elapsed_ticks = kHwfqFallbackMinElapsedTicks;
+    CHECK(CheckHwfqZeroDisplayFallback(silent) == HwfqFallbackReason::FenceAndQueueStalled);
+}
+
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     bool gpu = false;
@@ -2802,6 +2909,7 @@ int main(int argc, char** argv) {
     TestOneImageCleanBudgetCanEaseWithMeasuredHeadroom();
     TestBudgetControllerUsesProducerMissesAndResetsItsBaseline();
     if (only == "admission-alias") TestAdmissionPolicyAliasLogsOnce();
+    TestHwfqFallbackPolicy();
     TestMissFloorDecaysAfterCleanWindows();
     TestBudgetNeedsTwoMissesToRaise();
     TestOverflowDeliveryRequiresHeadroomAndStepsBackOnMisses();

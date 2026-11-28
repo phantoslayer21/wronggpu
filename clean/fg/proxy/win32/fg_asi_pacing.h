@@ -177,4 +177,88 @@ inline void ResetFirstImageBudgetWindow(FirstImageBudgetLimits& limits, wgfg::Fg
     baseline = current;
 }
 
+// Runtime health check for Windows composition (HWFQ) safety-net fallback to DXGI.
+// Missing CompositionFrame / IndependentFlipFrame statistics alone must never trigger a fallback:
+// fall back only on device/present errors, cancel storms, or when BOTH the retiring fence and
+// PresentStatus_Queued (with nonzero composition frame ID) stop progressing on a visible window.
+enum class HwfqFallbackReason : uint8_t {
+    None = 0,
+    ZeroDisplaySustained = 1,
+    AdmissionTimeoutZeroDisplay = 2,
+    DeviceError = 3,
+    CancelStorm = 4,
+    FenceAndQueueStalled = 5,
+};
+
+struct HwfqHealthSnapshot {
+    uint64_t displayed = 0;                 // displayed_real + displayed_generated
+    uint64_t visible_submitted = 0;         // presents submitted while the bound window was visible
+    uint64_t resolved_unseen = 0;           // display_skipped_real + display_skipped_generated
+    uint64_t status_queued_with_cfid = 0;   // PresentStatus_Queued reports with non-zero CompositionFrameId
+    uint64_t status_canceled = 0;           // PresentStatus_Canceled reports from DWM
+    uint64_t retiring_fence_value = 0;      // IPresentationManager retiring fence completed value
+    uint64_t watchdog_retired = 0;          // presents retired by the 250 ms occlusion watchdog
+    wgfg::FgTicks visible_elapsed_ticks = 0;// ticks since the first visible-window present submission
+    wgfg::FgTicks stall_elapsed_ticks = 0;  // ticks since last retiring-fence or queued-cfid progress while submitting
+    wgfg::FgTicks refresh_period = 0;       // display refresh period in 100 ns ticks (0 if unknown)
+    long last_present_hr = 0;               // non-zero HRESULT from a failed PresentSlot call
+    bool admission_timed_out = false;
+    bool startup_grace = false;
+    bool presenter_failed = false;          // presenter entered Failed or Lost state
+};
+
+constexpr uint64_t kHwfqFallbackMinVisibleSubmits = 30;
+constexpr uint64_t kHwfqFallbackMinUnseen = 15;
+constexpr uint64_t kHwfqFallbackMinWatchdog = 2;
+constexpr uint64_t kHwfqFallbackTimeoutMinVisibleSubmits = 4;
+constexpr uint64_t kHwfqFallbackMinCancelStorm = 16;
+constexpr uint64_t kHwfqFallbackMidSessionCancelStorm = 32;
+constexpr uint64_t kHwfqFallbackStallRefreshes = 12;
+constexpr uint64_t kHwfqFallbackMidSessionStallRefreshes = 30;
+constexpr wgfg::FgTicks kHwfqFallbackMinElapsedTicks = 7500000;            // 750 ms
+constexpr wgfg::FgTicks kHwfqFallbackStallMinElapsedTicks = 1500000;       // 150 ms floor
+constexpr wgfg::FgTicks kHwfqFallbackMidStallMinElapsedTicks = 5000000;    // 500 ms mid-session stall floor
+
+constexpr HwfqFallbackReason CheckHwfqZeroDisplayFallback(const HwfqHealthSnapshot& h) {
+    if (h.last_present_hr != 0 || h.presenter_failed) return HwfqFallbackReason::DeviceError;
+    if (h.visible_submitted == 0) return HwfqFallbackReason::None;
+
+    const wgfg::FgTicks ref = h.refresh_period > 0 ? h.refresh_period : 166667;
+    const wgfg::FgTicks stall_min =
+        ref * kHwfqFallbackStallRefreshes > kHwfqFallbackStallMinElapsedTicks
+            ? ref * kHwfqFallbackStallRefreshes
+            : kHwfqFallbackStallMinElapsedTicks;
+    const wgfg::FgTicks mid_stall_min =
+        ref * kHwfqFallbackMidSessionStallRefreshes > kHwfqFallbackMidStallMinElapsedTicks
+            ? ref * kHwfqFallbackMidSessionStallRefreshes
+            : kHwfqFallbackMidStallMinElapsedTicks;
+
+    if (h.displayed == 0 && h.visible_submitted >= 8 && h.status_canceled >= kHwfqFallbackMinCancelStorm)
+        return HwfqFallbackReason::CancelStorm;
+    if (h.status_canceled >= kHwfqFallbackMidSessionCancelStorm && h.stall_elapsed_ticks >= stall_min)
+        return HwfqFallbackReason::CancelStorm;
+
+    // Never fall back while the retiring fence or queued-with-frame-id counter is actively progressing.
+    const bool any_startup_progress = h.retiring_fence_value > 0 || h.status_queued_with_cfid > 0;
+    if (h.displayed == 0 && !any_startup_progress) {
+        if (h.admission_timed_out && !h.startup_grace && h.visible_submitted >= kHwfqFallbackTimeoutMinVisibleSubmits)
+            return HwfqFallbackReason::AdmissionTimeoutZeroDisplay;
+        if (h.visible_submitted >= kHwfqFallbackStallRefreshes && h.visible_elapsed_ticks >= stall_min &&
+            (h.resolved_unseen >= kHwfqFallbackTimeoutMinVisibleSubmits || h.watchdog_retired >= 1 ||
+             h.visible_elapsed_ticks >= mid_stall_min))
+            return HwfqFallbackReason::FenceAndQueueStalled;
+        if (h.visible_submitted >= kHwfqFallbackMinVisibleSubmits &&
+            h.visible_elapsed_ticks >= kHwfqFallbackMinElapsedTicks &&
+            (h.resolved_unseen >= kHwfqFallbackMinUnseen || h.watchdog_retired >= kHwfqFallbackMinWatchdog))
+            return HwfqFallbackReason::ZeroDisplaySustained;
+        return HwfqFallbackReason::None;
+    }
+
+    // Mid-session stall: both retiring fence and queued-with-cfid stopped advancing despite continued visible submits.
+    if (h.stall_elapsed_ticks >= mid_stall_min) return HwfqFallbackReason::FenceAndQueueStalled;
+    if (h.admission_timed_out && !h.startup_grace && h.stall_elapsed_ticks >= stall_min)
+        return HwfqFallbackReason::FenceAndQueueStalled;
+    return HwfqFallbackReason::None;
+}
+
 }  // namespace wgfgp::win32

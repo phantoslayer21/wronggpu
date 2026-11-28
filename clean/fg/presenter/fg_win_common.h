@@ -91,6 +91,7 @@ class FgClockMap {
 public:
     FgClockMap();
     FgTicks FromQpc(std::int64_t qpc) const;
+    FgTicks DurationFromQpc(std::uint64_t qpc_ticks) const;
 
 private:
     std::int64_t qpc0_ = 0;

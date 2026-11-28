@@ -157,6 +157,13 @@ bool FgSession::SetMaxGeneratedCap(uint32_t cap) {
     return true;
 }
 
+bool FgSession::SetDisplayMinInterval(FgTicks min_interval) {
+    if (!scheduler_) return false;
+    scheduler_->SetDisplayMinInterval(min_interval);
+    desc_.scheduler.display.min_interval = scheduler_->Config().display.min_interval;
+    return true;
+}
+
 FgSessionResult FgSession::Lose(FgSessionResult r) {
     if (presenter_ && presenter_->State() != FgPresenterState::Detached && presenter_->State() != FgPresenterState::Lost)
         presenter_->OnDeviceLost();

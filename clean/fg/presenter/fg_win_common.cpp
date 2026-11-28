@@ -59,14 +59,26 @@ FgTicks FgInterruptNow() {
 
 FgClockMap::FgClockMap() {
     LARGE_INTEGER f = {};
-    LARGE_INTEGER c = {};
     QueryPerformanceFrequency(&f);
-    ULONGLONG it = 0;
-    QueryInterruptTimePrecise(&it);
-    QueryPerformanceCounter(&c);
     freq_ = f.QuadPart > 0 ? f.QuadPart : 1;
-    qpc0_ = c.QuadPart;
-    it0_ = static_cast<FgTicks>(it);
+    // Bracket QPC between two interrupt-time reads and keep the tightest sample so a thread preemption between the
+    // two clock queries cannot skew FromQpc() by milliseconds and shift DWM composition-grid phase.
+    ULONGLONG best_span = ~0ull;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        ULONGLONG it_a = 0;
+        ULONGLONG it_b = 0;
+        LARGE_INTEGER c = {};
+        QueryInterruptTimePrecise(&it_a);
+        QueryPerformanceCounter(&c);
+        QueryInterruptTimePrecise(&it_b);
+        const ULONGLONG span = it_b >= it_a ? (it_b - it_a) : ~0ull;
+        if (span < best_span) {
+            best_span = span;
+            qpc0_ = c.QuadPart;
+            it0_ = static_cast<FgTicks>(it_a + span / 2);
+        }
+        if (span <= 20) break;  // <= 2 us bracket
+    }
 }
 
 FgTicks FgClockMap::FromQpc(std::int64_t qpc) const {
@@ -75,6 +87,13 @@ FgTicks FgClockMap::FromQpc(std::int64_t qpc) const {
     const std::int64_t secs = d / freq_;
     const std::int64_t rem = d % freq_;
     return it0_ + secs * 10000000 + (rem * 10000000) / freq_;
+}
+
+FgTicks FgClockMap::DurationFromQpc(std::uint64_t qpc_ticks) const {
+    const std::uint64_t f = static_cast<std::uint64_t>(freq_);
+    const std::uint64_t secs = qpc_ticks / f;
+    const std::uint64_t rem = qpc_ticks % f;
+    return static_cast<FgTicks>(secs * 10000000ull + (rem * 10000000ull + f / 2) / f);
 }
 
 namespace {
@@ -153,11 +172,7 @@ bool FgReadCompositorGrid(const FgClockMap& map, FgTicks period_override, FgRefr
     COMPOSITION_TARGET_ID targets[4] = {};
     UINT count = 0;
     if (FAILED(FgDCompGetStatistics(id, &st, 4, targets, &count)) || st.targetTime == 0) return false;
-    LARGE_INTEGER f = {};
-    QueryPerformanceFrequency(&f);
-    if (f.QuadPart <= 0) return false;
-    const FgTicks measured =
-        static_cast<FgTicks>((st.framePeriod * 10000000ull) / static_cast<std::uint64_t>(f.QuadPart));
+    const FgTicks measured = st.framePeriod != 0 ? map.DurationFromQpc(st.framePeriod) : 0;
     const FgTicks period = period_override > 0 ? period_override : measured;
     if (period <= 0) return false;
     out->origin = map.FromQpc(static_cast<std::int64_t>(st.targetTime));
