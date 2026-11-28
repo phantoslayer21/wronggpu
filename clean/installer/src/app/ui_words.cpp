@@ -201,7 +201,8 @@ wstring PlainWarning(const wstring& w) {
     if (w.rfind(kLeftUnrecorded, 0) == 0)  // named like WrongGPU's own files, but not in the install's record: never deleted by their names
         return L"Some files were left where they are: WrongGPU deletes only files it can prove are its own (logs and reports with its name, copies it didn't record, other files in its folders). Delete them yourself if you don't need them.";
     if (Has(w, L"another name, a hard link")) return L"A file that has another name (a hard link) was left as it is, because writing to it would change that other name too.";
-    if (Has(w, L"The game replaced ")) return L"The game had replaced one of its files since WrongGPU was installed (probably a game update). Its newer file was kept.";
+    if (w.rfind(L"Another file is at ", 0) == 0 && Has(w, L". It was left in place."))
+        return L"Another file was already there, so WrongGPU left it in place.";
     if (Has(w, L"exists again with different content") || Has(w, L"The backup folder was kept"))
         return L"A game file the game changed was kept as it is. Its original stays in a backup folder in the game's folder.";
     if (Has(w, L"Older install: left in place")) return L"A file of the older WrongGPU install was changed since, so it was left in place.";

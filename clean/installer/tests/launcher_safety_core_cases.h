@@ -102,13 +102,32 @@ void VerifyPublishedBinaryPin() {
 }
 
 void VerifyAdoptionRecordLock() {
-    const wstring folder = TempFolder();
+    const wstring root = TempFolder();
+    const wstring folder = Join(root, L"game");
+    const wstring local = Join(root, L"localappdata");
+    EnsureDir(local);
+    struct RestoreLocalAppData {
+        wstring previous;
+        ~RestoreLocalAppData() {
+            SetEnvironmentVariableW(L"LOCALAPPDATA", previous.empty() ? nullptr : previous.c_str());
+        }
+    } restoreLocal{EnvVar(L"LOCALAPPDATA")};
+    require(SetEnvironmentVariableW(L"LOCALAPPDATA", local.c_str()), "adoption fixture redirects LOCALAPPDATA");
+
     const wstring record = RecordPath(folder);
     Record initial;
     initial.game = folder;
     initial.exe = Join(folder, L"Game.exe");
     initial.version = L"before update";
     EnsureDir(StateDir(folder));
+    const wstring binary = Join(folder, L"fixture.dll");
+    WriteFileAtomic(binary, "fixture", 7);
+    require(SetFileAttributesW(binary.c_str(), FILE_ATTRIBUTE_READONLY), "adoption fixture has a read-only binary");
+    Entry file;
+    file.action = L"copy";
+    file.rel = L"fixture.dll";
+    file.inst = Sha256Bytes("fixture", 7);
+    initial.e.push_back(file);
     SaveRecord(record, initial);
     SaveProfile(ProfilePath(folder), DefaultProfile());
 
@@ -146,8 +165,16 @@ void VerifyAdoptionRecordLock() {
     const bool correct = LoadRecord(record, actual) && actual.version == L"concurrent update" &&
         actual.restorerSha == Sha256Bytes(restorer.data(), restorer.size()) &&
         actual.extra == std::vector<wstring>{L"fixture-field\tpublished by update"};
-    RemoveTree(folder);
-    require(updateHeld && updateSaved && adoptedOK && correct, "adoption waits for an update and saves its restorer hash on the updated record");
+    string managed;
+    const bool isolated = ReadAll(Join(Join(local, L"WrongGPU"), L"managed-games.txt"), managed) &&
+        managed.find(ToUtf8(folder)) != string::npos;
+    string bytes;
+    const DWORD attrs = GetFileAttributesW(binary.c_str());
+    const bool untouched = attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_READONLY) &&
+        ReadAll(binary, bytes) && bytes == "fixture";
+    RemoveTree(root);
+    require(updateHeld && updateSaved && adoptedOK && correct && isolated && untouched,
+            "adoption waits for an update, leaves the read-only binary alone and uses the fixture's managed list");
 }
 
 #ifdef WRONGGPU_TESTING

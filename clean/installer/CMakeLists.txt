@@ -358,6 +358,8 @@ add_executable(model-choice-k-only-tests tests/model_choice_k_tests.cpp src/wg_c
 target_compile_definitions(model-choice-k-only-tests PRIVATE WRONGGPU_MODEL_K=1 WRONGGPU_MODEL_L=0)
 target_link_libraries(model-choice-k-only-tests PRIVATE wg_core)
 add_test(NAME launcher-core COMMAND launcher-core-tests)
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/launcher-core-localappdata")
+set_tests_properties(launcher-core PROPERTIES ENVIRONMENT "LOCALAPPDATA=${CMAKE_CURRENT_BINARY_DIR}/launcher-core-localappdata")
 add_test(NAME model-choice COMMAND model-choice-tests)
 add_test(NAME model-choice-k COMMAND model-choice-k-tests)
 add_test(NAME model-choice-k-only COMMAND model-choice-k-only-tests)

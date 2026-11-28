@@ -1453,7 +1453,7 @@ void ApplyOptiTab(Context& ctx, const wstring& dir, const OpRequest& r, std::vec
 }
 
 std::vector<wstring> AdoptInstall(Context& ctx, const wstring& dir, bool* repair) {
-    const auto operation = GuardOperation(dir, nullptr);
+    const auto operation = GuardOperation(dir, nullptr, false);
     std::vector<wstring> notes;
     Record m;
     if (!LoadRecord(RecordPath(dir), m) || m.legacy) Fail(L"No WrongGPU installation record was found in " + dir + L".", EXIT_NOT_INSTALLED);

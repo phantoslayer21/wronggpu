@@ -811,7 +811,7 @@ static wstring HoldersOf(const wstring& path) {
 std::unique_ptr<OperationGate> GuardOperation(const wstring& dir, const Record* m, bool holdBinaries) {
     if (t_gate && IEq(FullPath(t_gate->dir), FullPath(dir))) return nullptr;  // this thread's operation holds the gate already
     Record loaded;
-    if (!m && LoadRecord(RecordPath(dir), loaded) && !loaded.legacy) m = &loaded;
+    if (holdBinaries && !m && LoadRecord(RecordPath(dir), loaded) && !loaded.legacy) m = &loaded;
     auto gate = std::make_unique<OperationGate>(dir, m && holdBinaries ? GuardedBinaries(dir, *m) : std::vector<wstring>{});
     if (!gate->guard.ok()) {
         wstring which = gate->guard.which().empty() ? wstring() : L" (" + BaseName(gate->guard.which()) + L")";
