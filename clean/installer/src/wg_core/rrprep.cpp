@@ -77,7 +77,7 @@ std::vector<wchar_t> RrHelperEnvironment(const wstring& log) {
 #ifdef WRONGGPU_TESTING
     if (!DataOverride().empty()) local = Join(DataOverride(), L"localappdata");
 #endif
-    else if (real && SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DONT_VERIFY, nullptr, &p)) && p) local = p;
+    if (local.empty() && real && SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DONT_VERIFY, nullptr, &p)) && p) local = p;
     if (p) CoTaskMemFree(p);
     std::vector<wchar_t> env;
     LPWCH block = GetEnvironmentStringsW();
