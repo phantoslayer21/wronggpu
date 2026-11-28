@@ -350,6 +350,13 @@ def run(t, opti, synth_f, m):
 
 def review_regressions(t, opti, m):
     print("\n[launcher safety] rollback recovery, file metadata, and explicit roots")
+    fixtures = []
+
+    def fixture(name, **kwargs):
+        root, folder, exe = m.game(t, name, **kwargs)
+        fixtures.append(root)
+        return root, folder, exe
+
     package = os.path.join(t.work, "round-two-opti")
     edition = os.path.join(t.work, "round-two-edition")
     for folder, version, default in ((package, b"5", b"auto"), (edition, b"6", b"0x1234")):
@@ -389,7 +396,7 @@ def review_regressions(t, opti, m):
         f.write(b"[Plugins]\nPath=auto\n")
     asi_loader = m.mockpe.make_dll({"ProductName": "Ultimate ASI Loader", "CompanyName": "ThirteenAG"})
     for suffix in (" #2", " ; notes"):
-        _, b, exe = m.game(t, "Safety special path" + suffix, extra={"bin/x64/dinput8.dll": asi_loader})
+        _, b, exe = fixture("Safety special path" + suffix, extra={"bin/x64/dinput8.dll": asi_loader})
         expected = {b"Path": os.path.join(b, "wronggpu-plugins").encode(),
                     b"FfxDx12SRPath": os.path.join(b, "wronggpu_ffx_dx12.dll").encode()}
         for verb in ("install", "repair", "update"):
@@ -402,8 +409,8 @@ def review_regressions(t, opti, m):
                     rc == 0 and all(lines.get(key) == value for key, value in expected.items()), (rc, lines, t.j))
         t.run("uninstall", exe, "--noscan")
 
-    _, b, exe = m.game(t, "Safety library duplicate")
-    _, _, other = m.game(t, "Safety separate install")
+    _, b, exe = fixture("Safety library duplicate")
+    _, _, other = fixture("Safety separate install")
     assert t.run("install", exe, *args) == 0, t.j
     profile = os.path.join(b, "wronggpu-setup", "profile.ini")
     os.unlink(profile)
@@ -423,7 +430,7 @@ def review_regressions(t, opti, m):
     t.run("uninstall", exe, "--noscan")
     t.run("uninstall", other, "--noscan")
 
-    _, b, exe = m.game(t, "Safety opt-in journal", exe="Spider-Man2.exe")
+    _, b, exe = fixture("Safety opt-in journal", exe="Spider-Man2.exe")
     cfg = settings_path(b)
     assert t.run("install", exe, *args) == 0, t.j
     assert t.run("set", exe, "sm2_rr_experimental=on", "--noscan") == 0, t.j
@@ -451,7 +458,7 @@ def review_regressions(t, opti, m):
             (rc, t.j, m.record_text(b)))
     t.run("uninstall", exe, "--noscan")
 
-    _, b, exe = m.game(t, "Safety protected metadata")
+    _, b, exe = fixture("Safety protected metadata")
     cfg = settings_path(b)
     content = m.OPTI_INI.encode()
     write(cfg, content)
@@ -483,10 +490,12 @@ def review_regressions(t, opti, m):
     t.check("uninstall restores original INI bytes, attributes, stream and last-write time",
             rc == 0 and metadata_ok() and read(cfg) == content and os.stat(cfg).st_mtime_ns == timestamp,
             (rc, t.j, t.logtail()))
+    if os.path.isfile(cfg):
+        set_attrs(cfg, 0x80)  # the metadata assertions above used the restored attributes
 
     for guarded in (True, False):
         label = "guarded" if guarded else "unguarded"
-        _, b, exe = m.game(t, "Safety staged binary restore " + label)
+        _, b, exe = fixture("Safety staged binary restore " + label)
         companion = os.path.join(b, "OptiScaler", "companion.dll")
         player_binary = b"fixture player's original binary"
         write(companion, player_binary)
@@ -513,7 +522,7 @@ def review_regressions(t, opti, m):
                 rc == 0 and read(companion) == player_binary and os.stat(companion).st_mtime_ns == timestamp and
                 "restored OptiScaler\\companion.dll" in t.logtail(10000), (rc, t.j, t.logtail()))
 
-    _, b, exe = m.game(t, "Safety rollback sharing lock")
+    _, b, exe = fixture("Safety rollback sharing lock")
     companion = os.path.join(b, "OptiScaler", "companion.dll")
     source = os.path.join(package, "OptiScaler", "companion.dll")
     hooks = {
@@ -544,7 +553,7 @@ def review_regressions(t, opti, m):
     ):
         if before is None:
             continue
-        _, b, exe = m.game(t, "Safety " + name)
+        _, b, exe = fixture("Safety " + name)
         restorer = os.path.join(b, "wronggpu-setup", "uninstall.exe")
         write(restorer, before)
         identity = os.stat(restorer).st_ino
@@ -559,7 +568,7 @@ def review_regressions(t, opti, m):
         if should_keep:
             t.check("uninstall leaves the kept unknown executable available", len(kept) == 1 and read(kept[0]) == before, kept)
 
-    _, b, exe = m.game(t, "Safety linked companion")
+    _, b, exe = fixture("Safety linked companion")
     link = os.path.join(package, "OptiScaler", "linked.dll")
     outside_package = os.path.join(t.work, "companion-outside-package.dll")
     write(outside_package, b"outside package")
@@ -571,7 +580,7 @@ def review_regressions(t, opti, m):
     finally:
         os.unlink(link)
 
-    _, b, exe = m.game(t, "Safety stale staging files")
+    _, b, exe = fixture("Safety stale staging files")
     assert t.run("install", exe, *args) == 0, t.j
     cfg = settings_path(b)
     stale = cfg + ".wronggpu-tmp-4294967295-1"
@@ -595,16 +604,22 @@ def review_regressions(t, opti, m):
     write(cfg, saved)
     t.run("uninstall", exe, "--noscan")
 
-    scoped_self_uninstall(t, opti, m)
+    scoped_self_uninstall(t, opti, fixture)
+    games = os.path.normcase(os.path.realpath(os.path.join(t.work, "games")))
+    for root in fixtures:
+        path = os.path.realpath(root)
+        if os.path.normcase(os.path.dirname(path)) != games:
+            raise RuntimeError("refusing to clean up a fixture outside the games directory: " + path)
+        shutil.rmtree(path)
 
 
-def scoped_self_uninstall(t, opti, m):
+def scoped_self_uninstall(t, opti, fixture):
     programs = os.path.join(t.work, "round-two-registered")
     installed = os.path.join(programs, "WrongGPU.exe")
     portable = os.path.join(t.work, "round-two-portable", "WrongGPU.exe")
     menu = os.path.join(t.work, "round-two-menu")
     args = ("--opti=" + opti, "--noscan", "--force", "--experimental")
-    _, b, exe = m.game(t, "Safety off-list game")
+    _, b, exe = fixture("Safety off-list game")
     assert t.run("install", exe, *args) == 0, t.j
     # This per-game entry is deliberately not in the explicit root's managed list.
     managed = os.path.join(t.data, "managed-games.txt")
