@@ -2,6 +2,7 @@
 // WrongGPU frame generation (issue #96, F8b): the Win32 hook transport. See fg_asi_transport.h.
 // Written for this project.
 #include "fg_asi_transport.h"
+#include "fg_latency_route.h"
 
 #ifndef PSAPI_VERSION
 #define PSAPI_VERSION 2  // K32EnumProcessModules from kernel32: no extra library
@@ -36,6 +37,9 @@ struct FgAsiTransport::Impl {
     FgProxy* core = nullptr;
     IFgNativeCodec* codec = nullptr;
     uint32_t fg_feature = WG_FEAT_FRAME_GENERATION;
+    uint32_t reflex_feature = WG_FEAT_LATENCY;
+    uint32_t pcl_feature = WG_FEAT_PC_LATENCY;
+    IFgLatencyRoute* latency = nullptr;
     std::string fn_options, fn_state;
     IFgPresentCallback* presenter = nullptr;  // behind the present bridge (null: the bridge presents itself)
     FgPresentRouteFn present_route = nullptr;
@@ -409,6 +413,161 @@ WgResultCode H_Requirements(uint32_t feature, WgRequirements* q) {
     }
 }
 
+enum LatencyFunction { ReflexOptions, ReflexSleep, ReflexState, PclOptions, PclMarker, PclState };
+
+struct LatencyBinding {
+    const char* name;
+    void* handler;
+    std::atomic<void*> next{nullptr};
+};
+
+struct PresentMarker {
+    const FgAsiTransport::Impl* route = nullptr;
+    std::optional<uint32_t> frame;
+};
+thread_local PresentMarker t_present_marker;
+
+bool LatencyActive(FgAsiTransport::Impl* route) {
+    return route && route->latency && route->core->fg_taken() && route->core->state().enabled &&
+           route->latency->LatencyActive();
+}
+
+struct SlReflexOptions {
+    WgHeader header;
+    uint32_t mode;
+    uint32_t frame_limit_us;
+};
+
+struct SlReflexState {
+    WgHeader header;
+    bool available, report_available;
+    uint32_t stats_message;
+    uint64_t reports[64][19];
+    bool driver_flash;
+};
+
+struct SlPclState {
+    WgHeader header;
+    uint32_t stats_message;
+};
+
+static_assert(offsetof(SlReflexState, reports) == 40 && offsetof(SlReflexState, driver_flash) == 9768);
+
+// Layout and IDs are the version-1 prefixes in the public Streamline Reflex and PCL headers.
+constexpr WgGuid kReflexOptionsId{{0x1a, 0xf8, 0x3a, 0xf0, 0x0b, 0x6d, 0x02, 0x49,
+                                  0xa6, 0x51, 0xc4, 0x96, 0x5e, 0x21, 0x54, 0x34}};
+constexpr WgGuid kReflexStateId{{0x85, 0x59, 0xbb, 0xf0, 0xf9, 0xda, 0x28, 0x47,
+                                0xb2, 0xfd, 0xae, 0x80, 0xa2, 0xbd, 0x79, 0x89}};
+constexpr WgGuid kPclOptionsId{{0x9b, 0x2f, 0xa3, 0xcf, 0x3c, 0x02, 0x0e, 0x42,
+                                0x90, 0x56, 0x68, 0x32, 0xb7, 0x4f, 0x89, 0xb4}};
+constexpr WgGuid kPclStateId{{0x9b, 0x2f, 0xa3, 0xcf, 0x3c, 0x02, 0x0e, 0x42,
+                              0x90, 0x56, 0x68, 0x32, 0xb7, 0x4f, 0x89, 0xb5}};
+
+bool LatencyHeaderIs(const WgHeader* header, const WgGuid& id) {
+    WgHeader copy;
+    return header && g::safe_get(header, &copy) && copy.version >= 1 && memcmp(&copy.type, &id, sizeof(id)) == 0;
+}
+
+std::optional<uint32_t> LatencyFrameIndex(const WgFrameToken* token) {
+    const WgFrameTokenIndexFn* table = nullptr;
+    WgFrameTokenIndexFn index = nullptr;
+    if (!token || !g::safe_get(token, &table) || !table || !g::safe_get(table, &index) || !index) return {};
+    return index(token);
+}
+
+template <LatencyFunction Function>
+WgResultCode H_LatencyData(WgHeader* data);
+
+WgResultCode H_LatencySleep(const WgFrameToken* token);
+WgResultCode H_LatencyMarker(uint32_t marker, const WgFrameToken* token);
+
+LatencyBinding g_latency_bindings[] = {
+    {"slReflexSetOptions", reinterpret_cast<void*>(&H_LatencyData<ReflexOptions>)},
+    {"slReflexSleep", reinterpret_cast<void*>(&H_LatencySleep)},
+    {"slReflexGetState", reinterpret_cast<void*>(&H_LatencyData<ReflexState>)},
+    {"slPCLSetOptions", reinterpret_cast<void*>(&H_LatencyData<PclOptions>)},
+    {"slPCLSetMarker", reinterpret_cast<void*>(&H_LatencyMarker)},
+    {"slPCLGetState", reinterpret_cast<void*>(&H_LatencyData<PclState>)}
+};
+
+template <LatencyFunction Function, typename... Args>
+WgResultCode ForwardLatency(Args... args) {
+    const auto next = reinterpret_cast<WgResultCode (*)(Args...)>(g_latency_bindings[Function].next.load());
+    return next ? next(args...) : WG_E_MISSING_OR_INVALID_API;
+}
+
+template <LatencyFunction Function>
+WgResultCode H_LatencyData(WgHeader* data) {
+    InFlight in;
+    auto* route = g_route.load();
+    const bool active = LatencyActive(route);
+    if constexpr (Function == ReflexOptions) {
+        SlReflexOptions options{};
+        const bool valid = LatencyHeaderIs(data, kReflexOptionsId) && g::safe_get(data, &options) && options.mode <= 2;
+        if (route && route->latency && valid)
+            route->latency->LatencyOptions(options.mode != 0, options.frame_limit_us);
+        if (active) return valid ? WG_OK : WG_E_INVALID_PARAMETER;
+    }
+    if (active) {
+        if constexpr (Function == PclOptions) {
+            return LatencyHeaderIs(data, kPclOptionsId) ? WG_OK : WG_E_INVALID_PARAMETER;
+        }
+        if constexpr (Function == ReflexState) {
+            if (!LatencyHeaderIs(data, kReflexStateId)) return WG_E_INVALID_PARAMETER;
+            auto* state = reinterpret_cast<SlReflexState*>(data);
+            state->available = true;
+            state->report_available = false;
+            state->stats_message = 0;
+            memset(state->reports, 0, sizeof(state->reports));
+            state->driver_flash = false;
+            return WG_OK;
+        }
+        if constexpr (Function == PclState) {
+            if (!LatencyHeaderIs(data, kPclStateId)) return WG_E_INVALID_PARAMETER;
+            reinterpret_cast<SlPclState*>(data)->stats_message = 0;
+            return WG_OK;
+        }
+    }
+    return ForwardLatency<Function>(data);
+}
+
+WgResultCode H_LatencySleep(const WgFrameToken* token) {
+    InFlight in;
+    auto* route = g_route.load();
+    if (route && route->latency) {
+        const bool active = LatencyActive(route);
+        const auto frame = LatencyFrameIndex(token);
+        if (!frame && active) return WG_E_INVALID_PARAMETER;
+        if (frame && route->latency->LatencySleep(*route->core, *frame, active)) return WG_OK;
+    }
+    return ForwardLatency<ReflexSleep>(token);
+}
+
+WgResultCode H_LatencyMarker(uint32_t marker, const WgFrameToken* token) {
+    InFlight in;
+    auto* route = g_route.load();
+    if (route && route->latency) {
+        const auto decoded = wgfg::FgDecodeLatencyMarker(marker);
+        const auto frame = LatencyFrameIndex(token);
+        if (frame) {
+            route->latency->LatencyMarker(*frame, decoded);
+            if (decoded == wgfg::FgLatencyMarker::PresentStart) t_present_marker = {route, frame};
+        }
+        if (LatencyActive(route)) return frame ? WG_OK : WG_E_INVALID_PARAMETER;
+    }
+    return ForwardLatency<PclMarker>(marker, token);
+}
+
+LatencyBinding* FindLatencyFunction(const FgAsiTransport::Impl& route, uint32_t feature, const char* name) {
+    if (!route.latency || !name) return nullptr;
+    if (feature != route.reflex_feature && feature != route.pcl_feature) return nullptr;
+    const int first = feature == route.reflex_feature ? ReflexOptions : PclOptions;
+    for (int i = first; i < first + 3; ++i) {
+        if (strcmp(name, g_latency_bindings[i].name) == 0) return &g_latency_bindings[i];
+    }
+    return nullptr;
+}
+
 WgResultCode H_GetFunction(uint32_t feature, const char* name, void** out) {
     InFlight in;
     g_ctr.calls[kFgRoleGetFunction].fetch_add(1);
@@ -418,6 +577,15 @@ WgResultCode H_GetFunction(uint32_t feature, const char* name, void** out) {
     f.role = kFgRoleGetFunction;
     FrameScope s(&f);
     try {
+        if (auto* fn = FindLatencyFunction(*r, feature, name); fn && out) {
+            const auto result = FwdGetFunction(feature, name, out);
+            if (result == WG_OK && *out && *out != fn->handler) fn->next.store(*out);
+            if ((result == WG_OK && *out) || LatencyActive(r)) {
+                *out = fn->handler;
+                return WG_OK;
+            }
+            return result;
+        }
         const WgResultCode res = r->core->get_function(feature, name, out);
         if (!f.forwarded) g_ctr.fg_answered.fetch_add(1);
         if (feature == r->fg_feature) {
@@ -808,6 +976,11 @@ private:
             uint32_t vp = 0;
             if (r.core->session_viewport(&vp)) d.viewport_id = vp;
             d.frame_token = r.codec->frame_for_present();
+            if (r.latency) {
+                r.latency->LatencyPresent(d.frame_token, t_present_marker.route == &r ? t_present_marker.frame
+                                                                                    : std::nullopt);
+                t_present_marker = {};
+            }
             d.swapchain_id = call.swapchain_id;
             d.swapchain_epoch = call.swapchain_epoch;
             d.queue_epoch = 0;
@@ -1401,6 +1574,9 @@ void FgAsiTransport::start_routing(const FgAsiConfig& cfg, std::unique_ptr<FgPro
     impl_->fn_options = cfg.imports.fn_options;
     impl_->fn_state = cfg.imports.fn_state;
     impl_->presenter = cfg.presenter;
+    impl_->latency = cfg.settings.low_latency ? cfg.latency : nullptr;
+    impl_->reflex_feature = cfg.core.ids.latency;
+    impl_->pcl_feature = cfg.core.ids.pc_latency;
     impl_->present_route = cfg.present_route;
     impl_->present_route_ctx = cfg.present_route_ctx;
     impl_->factory_note = cfg.factory_note;

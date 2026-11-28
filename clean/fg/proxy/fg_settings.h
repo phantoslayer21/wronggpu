@@ -2,10 +2,11 @@
 // WrongGPU frame generation (issue #96, F8a): the per-game FG settings keys.
 //
 // They live with the other per-game settings in <game folder>\wronggpu-setup\settings.ini (clean/wgshared/include/
-// wg_state.h: key=value lines, the launcher writes them under the state lock). Four keys, all optional:
+// wg_state.h: key=value lines, the launcher writes them under the state lock). Keys, all optional:
 //
 //   fg=off|on                                   default off: WrongGPU never takes frame generation unless the player
 //                                               turns it on (and the route qualifies, fg_proxy_core.h)
+//   fg_low_latency=off|on                       default off
 //   fg_preset=A|B|C                             default A
 //   fg_multiplier=auto|2|3|4|5|6                default auto (game request; 2x if none is supplied)
 //   fg_presenter=auto|hwfq|dxgi_tearing|dxgi_vsync   default auto
@@ -13,7 +14,7 @@
 // Strict: a value is taken only in exactly the spelling above (no case folding, no leading zeros or signs, no spaces
 // inside). A missing key takes its default; an invalid value also leaves the default in place AND is reported, so the
 // launcher can show it and a reader never acts on a guess. Keys that are not FG keys are not looked at: the SR / RR keys
-// and everything else in the file stay exactly as they are (FgApplySettings changes only the four FG keys).
+// and everything else in the file stay exactly as they are (FgApplySettings changes only the FG keys).
 // Platform-free (no Windows headers): works on the key/value list wgstate::Settings::kv holds.
 // Written for this project.
 #pragma once
@@ -25,6 +26,7 @@
 namespace wgfgp {
 
 inline constexpr const char* kFgKeyEnable = "fg";
+inline constexpr const char* kFgKeyLowLatency = "fg_low_latency";
 inline constexpr const char* kFgKeyPreset = "fg_preset";
 inline constexpr const char* kFgKeyMultiplier = "fg_multiplier";
 inline constexpr const char* kFgKeyPresenter = "fg_presenter";
@@ -40,6 +42,7 @@ struct FgSettings {
     uint32_t preset = 0;           // fg_preset: WgFgPreset (A = 0, B = 1, C = 2)
     uint32_t multiplier = kFgAutoMultiplier;  // fg_multiplier: Auto or a manual fallback (2..6)
     FgPresenterChoice presenter = FgPresenterChoice::Auto;  // fg_presenter
+    bool low_latency = false;      // fg_low_latency
 };
 
 struct FgSettingsIssue {
@@ -57,9 +60,9 @@ bool FgParseSetting(const std::string& key, const std::string& value, FgSettings
 // The FG settings from a key/value list (the first line of a key counts, as in wg_state.h). Missing keys keep their
 // defaults; invalid values keep the default and are listed in `issues` (optional). Other keys are ignored.
 FgSettings FgSettingsFromKeyValues(const FgKeyValues& kv, std::vector<FgSettingsIssue>* issues);
-// The four keys in their canonical spelling, in the order above.
+// The FG keys in their canonical spelling. The optional low-latency opt-in follows the original four.
 FgKeyValues FgSettingsToKeyValues(const FgSettings& s);
-// Writes the four keys into `kv`: an existing key's value is replaced in place, a missing one is appended; every other
+// Writes the FG keys into `kv`: an existing key's value is replaced in place, a missing one is appended; every other
 // entry stays where it is with its value. false (kv unchanged): `s` is not valid.
 bool FgApplySettings(const FgSettings& s, FgKeyValues* kv);
 bool FgSettingsValid(const FgSettings& s);

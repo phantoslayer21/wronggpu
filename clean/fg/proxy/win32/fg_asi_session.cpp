@@ -261,6 +261,10 @@ struct FgAsiSessionHost::Impl {
     bool handled = false;  // the current interval was presented by the session
     uint64_t handled_interval_id = 0;
     wgfg::FgHighResTimer fill_timer;
+    std::mutex latency_mu;
+    wgfg::FgLatencyPacer latency;
+    uint64_t latency_generation = 0, latency_present_frame = 0;
+    bool latency_waiting = false, latency_paced_present = false;
     wgfg::FgTicks previous_fill_wait = 0;
     wgfg::FgTicks current_fill_wait = 0, current_fill_period = 0;
     uint64_t fill_cap_intervals = 0, fill_high_intervals = 0, fill_gameplay_intervals = 0;
@@ -513,6 +517,10 @@ struct FgAsiSessionHost::Impl {
             }
             m.current_plan_consumed = it != m.presenter_intervals.end() && it->consumed;
         }
+        if (m.cfg.settings.low_latency) {
+            std::lock_guard<std::mutex> lock(m.latency_mu);
+            m.latency.ObservePlan(plan, m.next_trace.t_arrival);
+        }
         IntervalTrace tr = m.next_trace;
         tr.frame_token = plan.real_frame_id;
         tr.interval_id = plan.interval_id;
@@ -553,6 +561,10 @@ struct FgAsiSessionHost::Impl {
         }
         if (kind == 1 || kind == 3 || kind == 4 || kind == 7) m->EndAdmissionAt(frame_id, false);
         const wgfg::FgTicks now = ts != 0 ? ts : wgfg::FgInterruptNow();
+        if (m->cfg.settings.low_latency && real && kind == 0) {
+            std::lock_guard<std::mutex> lock(m->latency_mu);
+            m->latency.ObserveReady(frame_id, interval_id, now);
+        }
         std::lock_guard<std::mutex> lock(m->trace_mu);
         // Linear scan of recent entries (at most 32 back — intervals complete in FIFO order).
         const uint32_t scan = m->trace_count < 32 ? m->trace_count : 32;
@@ -821,6 +833,7 @@ struct FgAsiSessionHost::Impl {
             return pending_admissions.size() < latency_limit && !PresenterAdmissionFullLocked(consume);
         };
         if (has_room()) return true;
+        if (max_ms == 0) return false;
         ++credit_waits;
         if (PresenterAdmissionFullLocked(consume)) ++presenter_queue_waits;
         if (credit_cv.wait_for(lock, std::chrono::milliseconds(max_ms), has_room)) return true;
@@ -1262,6 +1275,11 @@ struct FgAsiSessionHost::Impl {
 
     bool DestroySession(const char* why, bool final_detach = false) {
         startup_admission_until = 0;
+        if (cfg.settings.low_latency) {
+            std::lock_guard<std::mutex> lock(latency_mu);
+            latency.Reset();
+            ++latency_generation;
+        }
         if (!session) {
             exec_source.reset();
             win_source.reset();
@@ -2272,6 +2290,63 @@ bool FgAsiSessionHost::RetainTag(void* ctx, uint32_t buffer_type, bool transient
     }
 }
 
+bool FgAsiSessionHost::LatencyActive() {
+    std::lock_guard<std::mutex> lock(impl_->latency_mu);
+    return impl_->latency.Generating();
+}
+
+void FgAsiSessionHost::LatencyOptions(bool enabled, uint32_t frame_limit_us) {
+    std::lock_guard<std::mutex> lock(impl_->latency_mu);
+    if (impl_->latency.SetOptions(enabled, frame_limit_us)) ++impl_->latency_generation;
+}
+
+void FgAsiSessionHost::LatencyMarker(uint32_t frame, wgfg::FgLatencyMarker marker) {
+    std::lock_guard<std::mutex> lock(impl_->latency_mu);
+    impl_->latency.Marker(frame, marker, wgfg::FgInterruptNow());
+}
+
+void FgAsiSessionHost::LatencyPresent(uint64_t frame, std::optional<uint32_t> native_frame) {
+    std::lock_guard<std::recursive_mutex> lock(impl_->mu);
+    std::lock_guard<std::mutex> timing(impl_->latency_mu);
+    impl_->latency_present_frame = frame;
+    impl_->latency_paced_present = impl_->latency.BeginPresent(frame, native_frame, wgfg::FgInterruptNow());
+}
+
+bool FgAsiSessionHost::LatencySleep(FgProxy& core, uint32_t frame, bool allow_local) {
+    Impl& m = *impl_;
+    wgfg::FgLatencyPacer::Sleep sleep;
+    uint64_t generation;
+    wgfg::FgTicks wake;
+    {
+        std::lock_guard<std::mutex> lock(m.latency_mu);
+        const auto now = wgfg::FgInterruptNow();
+        sleep = m.latency.RequestSleep(frame, now, m.latency_waiting, allow_local);
+        if (sleep.wake == 0) return sleep.handled;
+        wake = std::min(sleep.wake, now + wgfg::FgLatencyPacer::kMaxSleep);
+        m.latency_waiting = true;
+        generation = m.latency_generation;
+    }
+
+    // No session, credit or presenter mutex is held across a wait. Recheck on short timer boundaries so the game
+    // resumes promptly after a change. If the timer fails, this call still has one owner and returns to the game.
+    wgfg::FgHighResTimer timer;
+    while (core.state().enabled && core.fg_taken()) {
+        const auto now = wgfg::FgInterruptNow();
+        if (now >= wake) break;
+        {
+            std::lock_guard<std::mutex> lock(m.latency_mu);
+            if (generation != m.latency_generation) break;
+        }
+        if (!timer.ArmAt(std::min(wake, now + 10000))) break;
+        if (WaitForSingleObject(timer.Handle(), 2) != WAIT_OBJECT_0) break;
+    }
+    {
+        std::lock_guard<std::mutex> lock(m.latency_mu);
+        m.latency_waiting = false;
+    }
+    return true;
+}
+
 int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc* desc, WgFgPresentResult* out) {
     FgAsiSessionHost* self = static_cast<FgAsiSessionHost*>(ctx);
     if (!core) return -1;
@@ -2280,6 +2355,9 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
     std::lock_guard<std::recursive_mutex> lock(m.mu);
     m.handled = false;
     m.current_plan_consumed = false;
+    const bool paced = m.cfg.settings.low_latency && desc && m.latency_paced_present &&
+                       desc->frame_token == m.latency_present_frame;
+    m.latency_paced_present = false;
     m.current_fill_wait = m.current_fill_period = 0;
     bool admitted = false;
     WgFgPresentResult local = {};
@@ -2297,7 +2375,7 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
         if (fg_enabled) m.startup_admission_until = 0;
         const bool startup_grace = t_arrival < m.startup_admission_until &&
                                    m.st_presents.load() - m.startup_present_base < 4;
-        const DWORD admission_wait = startup_grace ? kStartupAdmissionWaitMs : kLatencyWaitMs;
+        const DWORD admission_wait = paced ? 0 : (startup_grace ? kStartupAdmissionWaitMs : kLatencyWaitMs);
         if (m.session && !m.session_draining && desc && !m.WaitForCreditRoom(admission_wait, consume)) {
             if (!m.admission_timeout_logged)
                 m.Log("fg host: Present admission timed out; handing this frame to the real-only copy path");
@@ -2312,7 +2390,7 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
             m.admission_timeout_logged = false;
         }
         // N-B3: skip presenter-room back-pressure wait when the in-game FG toggle is OFF.
-        if (fg_enabled) m.WaitForPresenterRoom();
+        if (fg_enabled && !paced) m.WaitForPresenterRoom();
         const wgfg::FgTicks t_after_wait = wgfg::FgInterruptNow();
         if (m.session && !m.session_draining && desc) {
             m.session->SetNextArrival(t_arrival, t_after_wait, m.previous_fill_wait);
@@ -2333,6 +2411,13 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
         const uint64_t now = GetTickCount64();
         const bool route_generating = out && out->status == WG_FG_PRESENT_GENERATE;
         const bool sched_generating = route_generating && sr.scheduled > 0;
+        if (m.cfg.settings.low_latency) {
+            const bool generating = fg_enabled && sched_generating && sr.generated_recorded > 0 &&
+                                    !sr.menu_detected && !sr.menu_copy && sr.error == wgfg::FgSessionError::None;
+            std::lock_guard<std::mutex> timing(m.latency_mu);
+            if (generating != m.latency.Generating()) ++m.latency_generation;
+            m.latency.SetGenerating(generating);
+        }
         if (const auto* presenter = m.session ? m.session->Presenter() : nullptr) {
             if (sched_generating && !m.display_sample_generating) {
                 // R3A-9: start a clean rate window on RealOnly/Waiting -> Generating so no stale 1.0 ratio carries over.
@@ -2464,7 +2549,7 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
                     if (sr.fill_period > 0) {
                         ++m.fill_high_intervals;
                         m.current_fill_period = sr.fill_period;
-                        m.current_fill_wait = sr.fill_release_wait;
+                        if (!paced) m.current_fill_wait = sr.fill_release_wait;
                     }
                 }
             } else if (admitted) {
@@ -2486,6 +2571,11 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
     } catch (...) {
         if (admitted && desc) m.CancelAdmission(desc->frame_token);
         m.handled = false;
+        if (m.cfg.settings.low_latency) {
+            std::lock_guard<std::mutex> timing(m.latency_mu);
+            m.latency.Reset();
+            ++m.latency_generation;
+        }
         m.st_schedule_reason.store(0);
         m.st_sched_count.store(0);
         m.st_cap_reason.store(kFgCapNone);

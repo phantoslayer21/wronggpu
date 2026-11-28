@@ -230,6 +230,7 @@ bool SetUpBinding(const FgTitleBinding& binding, const wgstate::Settings& st) {
     g_codec = new (std::nothrow) FgSl214Codec(binding.layout);
     g_cfg.codec = g_codec;
     g_cfg.presenter = g_host;
+    g_cfg.latency = g_host;
     g_cfg.present_route = &PresentRoute;
     g_cfg.present_route_ctx = g_host;
     g_cfg.factory_note = &FgAsiSessionHost::FactoryNote;

@@ -82,6 +82,7 @@
 
 #include "../fg_proxy_core.h"
 #include "../fg_settings.h"
+#include "fg_latency_route.h"
 #include "fg_swapchain_hook.h"
 
 namespace wgfg {
@@ -167,7 +168,7 @@ struct FgAsiLiveStatus {
     uint64_t displayed_generated = 0;  // cumulative generated images presented by the session's presenter
 };
 
-class FgAsiSessionHost final : public IFgPresentCallback {
+class FgAsiSessionHost final : public IFgPresentCallback, public IFgLatencyRoute {
 public:
     // Takes the weights over (copied into the executor's arena at each session creation).
     FgAsiSessionHost(const FgAsiSessionConfig& cfg, std::unique_ptr<wgfg::FgExecWeights> weights);
@@ -194,6 +195,12 @@ public:
     // OptiScaler hosts this plugin (see HOST OVERLAY above): fg_presenter=auto takes a DXGI flip presenter from the next
     // session. `why` is logged once.
     void SetHostOverlay(const char* why);
+
+    bool LatencyActive() override;
+    bool LatencySleep(FgProxy& core, uint32_t frame, bool allow_local) override;
+    void LatencyOptions(bool enabled, uint32_t frame_limit_us) override;
+    void LatencyMarker(uint32_t frame, wgfg::FgLatencyMarker marker) override;
+    void LatencyPresent(uint64_t frame, std::optional<uint32_t> native_frame) override;
 
     // ---- IFgPresentCallback ----
     void BeginInterval(const FgPresentCall&) override {}
