@@ -16,8 +16,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #include "../fg_presenter_factory.h"
@@ -1730,6 +1732,893 @@ void TestRc2EngineContracts() {
     }
 }
 
+// --- Fake compositor backend for CPU HWFQ tests (zero GPU / zero window) -------------------------------------------
+
+class FakeCompBackend final : public IFgCompBackend {
+public:
+    struct QueuedPresent {
+        std::uint64_t pid = 0;
+        std::uint32_t slot = 0;
+        FgTicks target = 0;
+        FgTicks submitted_at = 0;
+    };
+
+    explicit FakeCompBackend(std::uint32_t slot_count, FgTicks start_now = 100 * kMs, bool real_clock = false)
+        : use_real_clock_(real_clock), now_(start_now), available_(slot_count, true) {
+        stats_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        lost_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        fence_event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        avail_events_.resize(slot_count, nullptr);
+        for (std::uint32_t i = 0; i < slot_count; ++i)
+            avail_events_[i] = CreateEventW(nullptr, TRUE, TRUE, nullptr);
+        info_.adapter.queried = true;
+        info_.adapter.hw_flip_queue_support_state = 2;
+        info_.adapter.hw_flip_queue_enabled = true;
+        info_.adapter.displayable_supported = true;
+        info_.adapter.hw_sch_queried = true;
+        info_.adapter.hw_sch_enabled = true;
+        info_.presentation_supported = true;
+        info_.independent_flip_supported = true;
+        info_.d3d11_displayable = true;
+        info_.d3d11_misc_flags =
+            D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED_DISPLAYABLE;
+        info_.simultaneous_access = true;
+    }
+
+    ~FakeCompBackend() override {
+        if (stats_event_) CloseHandle(stats_event_);
+        if (lost_event_) CloseHandle(lost_event_);
+        if (fence_event_) CloseHandle(fence_event_);
+        for (HANDLE h : avail_events_)
+            if (h) CloseHandle(h);
+    }
+
+    std::uint32_t CreateFence() { return fences_.Create(); }
+    void SignalFence(std::uint32_t f, std::uint64_t v) {
+        fences_.Set(f, v);
+        if (fence_event_) SetEvent(fence_event_);
+    }
+
+    void SetNow(FgTicks t) {
+        std::lock_guard<std::mutex> lock(mu_);
+        now_ = t;
+    }
+    void SetWindowVisible(bool v) {
+        std::lock_guard<std::mutex> lock(mu_);
+        window_visible_ = v;
+    }
+    void SetRefreshGrid(FgTicks origin, FgTicks period) {
+        std::lock_guard<std::mutex> lock(mu_);
+        grid_origin_ = origin;
+        grid_period_ = period;
+    }
+    void SetCancelEmitsStat(bool emit, bool release_buf) {
+        std::lock_guard<std::mutex> lock(mu_);
+        cancel_emits_stat_ = emit;
+        cancel_releases_buf_ = release_buf;
+    }
+    void SetAutoDisplayOnPresent(bool enable) {
+        std::lock_guard<std::mutex> lock(mu_);
+        auto_display_on_present_ = enable;
+    }
+    void SetDetachCounter(int* counter) {
+        std::lock_guard<std::mutex> lock(mu_);
+        detach_counter_ = counter;
+    }
+
+    // Reproduces the 2026-11-27 20:18 failure: presents whose target has passed are superseded and reported as
+    // PresentStatus_Skipped with zero displayed statistics.
+    void ProcessSkipOnly(FgTicks at) {
+        std::lock_guard<std::mutex> lock(mu_);
+        now_ = at;
+        while (pending_.size() >= 2 && pending_.front().target <= at && pending_[1].target <= at) {
+            const QueuedPresent qp = pending_.front();
+            pending_.pop_front();
+            FgCompStatistic st;
+            st.kind = FgCompStatKind::PresentStatus;
+            st.present_id = qp.pid;
+            st.status = FgCompPresentStatus::Skipped;
+            PushStatLocked(st);
+            SetAvailableLocked(qp.slot, true);
+        }
+    }
+
+    // Simulates a working HWFQ (or DWM CompositionFrame) compositor displaying due presents at max(submitted, target).
+    // Respects force_vsync_enabled_: when false, CPU feedback is deferred (matching Microsoft Example 13) until forced.
+    void ProcessDisplays(FgTicks at, bool use_comp_frame = false, bool measured_ts = true) {
+        std::lock_guard<std::mutex> lock(mu_);
+        now_ = at;
+        if (!force_vsync_enabled_) return;  // HWFQ defers CPU feedback when ForceVSyncInterrupt is false
+        while (!pending_.empty() && pending_.front().target <= at) {
+            const QueuedPresent qp = pending_.front();
+            pending_.pop_front();
+            // If another present is already ready within the same instant (< 10 ticks), skip the earlier one.
+            if (!pending_.empty() && pending_.front().target <= qp.target + 10) {
+                FgCompStatistic sk;
+                sk.kind = FgCompStatKind::PresentStatus;
+                sk.present_id = qp.pid;
+                sk.status = FgCompPresentStatus::Skipped;
+                PushStatLocked(sk);
+                SetAvailableLocked(qp.slot, true);
+                continue;
+            }
+            if (displayed_slot_ >= 0 && static_cast<std::uint32_t>(displayed_slot_) != qp.slot) {
+                SetAvailableLocked(static_cast<std::uint32_t>(displayed_slot_), true);
+            }
+            displayed_slot_ = static_cast<int>(qp.slot);
+            FgCompStatistic st;
+            st.kind = use_comp_frame ? FgCompStatKind::CompositionFrame : FgCompStatKind::IndependentFlipFrame;
+            st.present_id = qp.pid;
+            const FgTicks actual = std::max(qp.target, qp.submitted_at);
+            st.displayed_time = measured_ts ? actual : 0;
+            st.displayed_measured = measured_ts;
+            PushStatLocked(st);
+        }
+    }
+
+    void ReleaseSlotBuffer(std::uint32_t slot) {
+        std::lock_guard<std::mutex> lock(mu_);
+        SetAvailableLocked(slot, true);
+    }
+
+    void PushCustomStat(const FgCompStatistic& s) {
+        std::lock_guard<std::mutex> lock(mu_);
+        PushStatLocked(s);
+    }
+
+    bool ForceVsyncCalled() const {
+        std::lock_guard<std::mutex> lock(mu_);
+        return force_vsync_called_;
+    }
+    bool ForceVsyncEnabled() const {
+        std::lock_guard<std::mutex> lock(mu_);
+        return force_vsync_enabled_;
+    }
+    std::size_t PeakPending() const {
+        std::lock_guard<std::mutex> lock(mu_);
+        return peak_pending_;
+    }
+    std::vector<QueuedPresent> SubmittedLog() const {
+        std::lock_guard<std::mutex> lock(mu_);
+        return submitted_log_;
+    }
+    std::vector<std::uint64_t> CancelCalls() const {
+        std::lock_guard<std::mutex> lock(mu_);
+        return cancel_calls_;
+    }
+
+    // IFgCompBackend
+    FgTicks Now() const override {
+        if (use_real_clock_) return FgInterruptNow();
+        std::lock_guard<std::mutex> lock(mu_);
+        return now_;
+    }
+    HANDLE StatsEvent() const override { return stats_event_; }
+    HANDLE LostEvent() const override { return lost_event_; }
+    HANDLE FenceEvent() const override { return fence_event_; }
+    HANDLE SlotAvailableEvent(std::uint32_t slot) const override {
+        std::lock_guard<std::mutex> lock(mu_);
+        return slot < avail_events_.size() ? avail_events_[slot] : nullptr;
+    }
+    bool IsLost() const override {
+        std::lock_guard<std::mutex> lock(mu_);
+        return lost_;
+    }
+    bool IsWindowVisible() const override {
+        std::lock_guard<std::mutex> lock(mu_);
+        return window_visible_;
+    }
+    const IFgFenceSource* FenceSource() const override { return &fences_; }
+    void WatchFence(const FgReadyFence&) override {}
+    std::uint32_t RegisterFence(ID3D12Fence*, FgWinResult* why) override {
+        if (why) *why = FgWinOk();
+        return fences_.Create();
+    }
+    ID3D12Resource* SlotResource(std::uint32_t) const override { return nullptr; }
+    FgCompBackendInfo BackendInfo() const override { return info_; }
+
+    FgWinResult CreateBuffers(std::uint32_t slot_count, UINT, UINT, FgCompBackendInfo* out_info) override {
+        std::lock_guard<std::mutex> lock(mu_);
+        available_.assign(slot_count, true);
+        for (HANDLE h : avail_events_)
+            if (h) CloseHandle(h);
+        avail_events_.assign(slot_count, nullptr);
+        for (std::uint32_t i = 0; i < slot_count; ++i)
+            avail_events_[i] = CreateEventW(nullptr, TRUE, TRUE, nullptr);
+        displayed_slot_ = -1;
+        if (out_info) *out_info = info_;
+        return FgWinOk();
+    }
+    void DestroyBuffers() override {
+        std::lock_guard<std::mutex> lock(mu_);
+        available_.clear();
+        displayed_slot_ = -1;
+    }
+    HRESULT SetSourceRect(UINT, UINT) override { return S_OK; }
+    void DetachVisual() override {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (detach_counter_) ++(*detach_counter_);
+    }
+
+    bool IsBufferAvailable(std::uint32_t slot) const override {
+        std::lock_guard<std::mutex> lock(mu_);
+        return slot < available_.size() && available_[slot];
+    }
+    HRESULT ForceVSyncInterrupt(bool enable) override {
+        std::lock_guard<std::mutex> lock(mu_);
+        force_vsync_called_ = true;
+        force_vsync_enabled_ = enable;
+        return S_OK;
+    }
+    HRESULT PresentSlot(std::uint32_t slot, FgTicks target_time, const FgReadyFence&,
+                        std::uint64_t* platform_id_out) override {
+        std::lock_guard<std::mutex> lock(mu_);
+        const std::uint64_t pid = next_pid_++;
+        if (platform_id_out) *platform_id_out = pid;
+        const FgTicks cur = use_real_clock_ ? FgInterruptNow() : now_;
+        SetAvailableLocked(slot, false);
+        QueuedPresent qp{pid, slot, target_time, cur};
+        submitted_log_.push_back(qp);
+        if (auto_display_on_present_ && force_vsync_enabled_) {
+            if (displayed_slot_ >= 0 && static_cast<std::uint32_t>(displayed_slot_) != slot) {
+                SetAvailableLocked(static_cast<std::uint32_t>(displayed_slot_), true);
+            }
+            displayed_slot_ = static_cast<int>(slot);
+            FgCompStatistic st;
+            st.kind = FgCompStatKind::IndependentFlipFrame;
+            st.present_id = pid;
+            st.displayed_time = std::max(cur, target_time);
+            st.displayed_measured = true;
+            PushStatLocked(st);
+        } else {
+            pending_.push_back(qp);
+            if (pending_.size() > peak_pending_) peak_pending_ = pending_.size();
+        }
+        return S_OK;
+    }
+    HRESULT CancelPresentsFrom(std::uint64_t platform_id) override {
+        std::lock_guard<std::mutex> lock(mu_);
+        cancel_calls_.push_back(platform_id);
+        std::deque<QueuedPresent> keep;
+        for (const QueuedPresent& qp : pending_) {
+            if (qp.pid >= platform_id) {
+                if (cancel_emits_stat_) {
+                    FgCompStatistic st;
+                    st.kind = FgCompStatKind::PresentStatus;
+                    st.present_id = qp.pid;
+                    st.status = FgCompPresentStatus::Canceled;
+                    PushStatLocked(st);
+                }
+                if (cancel_releases_buf_) SetAvailableLocked(qp.slot, true);
+            } else {
+                keep.push_back(qp);
+            }
+        }
+        pending_.swap(keep);
+        return S_OK;
+    }
+    bool PopStatistic(FgCompStatistic* out) override {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (stats_.empty()) {
+            if (stats_event_) ResetEvent(stats_event_);
+            return false;
+        }
+        *out = stats_.front();
+        stats_.pop_front();
+        if (stats_.empty() && stats_event_) ResetEvent(stats_event_);
+        return true;
+    }
+    bool ReadRefreshGrid(FgTicks period_override, FgRefreshGrid* out) override {
+        std::lock_guard<std::mutex> lock(mu_);
+        const FgTicks p = period_override > 0 ? period_override : grid_period_;
+        if (p <= 0) return false;
+        out->origin = grid_origin_;
+        out->period = p;
+        return true;
+    }
+
+private:
+    void PushStatLocked(const FgCompStatistic& s) {
+        stats_.push_back(s);
+        if (stats_event_) SetEvent(stats_event_);
+    }
+    void SetAvailableLocked(std::uint32_t slot, bool avail) {
+        if (slot >= available_.size()) return;
+        available_[slot] = avail;
+        if (slot < avail_events_.size() && avail_events_[slot]) {
+            if (avail) SetEvent(avail_events_[slot]);
+            else ResetEvent(avail_events_[slot]);
+        }
+    }
+
+    mutable std::mutex mu_;
+    bool use_real_clock_ = false;
+    FgTicks now_ = 0;
+    bool window_visible_ = true;
+    bool lost_ = false;
+    bool force_vsync_called_ = false;
+    bool force_vsync_enabled_ = false;
+    bool cancel_emits_stat_ = false;
+    bool cancel_releases_buf_ = false;
+    bool auto_display_on_present_ = false;
+    int* detach_counter_ = nullptr;
+    FgTicks grid_origin_ = 0;
+    FgTicks grid_period_ = 0;
+    ScriptFences fences_;
+    FgCompBackendInfo info_;
+    HANDLE stats_event_ = nullptr;
+    HANDLE lost_event_ = nullptr;
+    HANDLE fence_event_ = nullptr;
+    std::vector<bool> available_;
+    std::vector<HANDLE> avail_events_;
+    int displayed_slot_ = -1;
+    std::uint64_t next_pid_ = 1;
+    std::deque<QueuedPresent> pending_;
+    std::vector<QueuedPresent> submitted_log_;
+    std::size_t peak_pending_ = 0;
+    std::deque<FgCompStatistic> stats_;
+    std::vector<std::uint64_t> cancel_calls_;
+};
+
+void TestCompLoggedFailureAndPacingFix() {
+    g_case = "hwfq-fake-compositor-repro-and-fix";
+    const FgTicks kMinInterval360 = FgVrrMinInterval(kRefresh360, false);  // 28333 ticks (352.9 Hz)
+
+    // 1) Reproduce the 2026-11-27 20:18 failure: 1000 fps real-only startup against a skip-only compositor.
+    //    Verify bounded queue depth (never 20-deep flood), paced targets (never runaway), ForceVSyncInterrupt(true),
+    //    and visible zero-display telemetry matching what triggers the host's DXGI safety-net fallback.
+    {
+        int detach_calls = 0;
+        auto backend_up = std::make_unique<FakeCompBackend>(20, 100 * kMs, false);
+        FakeCompBackend* backend = backend_up.get();
+        backend->SetDetachCounter(&detach_calls);
+        const std::uint32_t fid = backend->CreateFence();
+
+        FgCompPresenterDesc cd;
+        cd.bind_window = true;
+        cd.width = 2560;
+        cd.height = 1440;
+        cd.variable_refresh = true;
+        cd.refresh_period = kRefresh360;
+        cd.min_interval = kMinInterval360;
+        cd.max_generated = 5;
+        cd.slot_count = 20;
+        CHECK(cd.force_vsync_interrupt == true);  // default must keep VSync interrupts on
+
+        std::unique_ptr<FgWinCompPresenter> p;
+        CHECK(FgWinCompPresenter::CreateWithBackend(cd, std::move(backend_up), false, &p).Ok() && p);
+        CHECK(backend->ForceVsyncCalled() && backend->ForceVsyncEnabled());
+        CHECK(p->Attach(0x5001, 1) == FgStatus::Ok);
+
+        FgSchedulerConfig sc;
+        sc.display.min_interval = kMinInterval360;
+        sc.display.max_interval = 208333;
+        sc.display.margin = 200;
+        sc.display.hysteresis = 400;
+        sc.adaptive_count = true;
+        sc.bridge_and_submit_margin = 2500;
+        sc.first_image_budget = 40000;
+        FgTargetScheduler sched(sc);
+        CHECK(sched.BeginEpoch(1) == FgStatus::Ok);
+
+        FgTicks t = 100 * kMs;
+        std::uint64_t fv = 0;
+        std::uint64_t frames_sent = 0;
+        // Simulate 1000 ms of 1000 fps game attempts, paced by waiting until the previous real-only submits (L=1).
+        std::uint64_t submitted_count = 0;
+        p->SetTraceCallback(
+            [](void* ctx, std::uint64_t, std::uint64_t, std::uint32_t, bool, std::uint8_t kind, FgTicks, FgTicks) {
+                if (kind == 1) ++(*static_cast<std::uint64_t*>(ctx));
+            },
+            &submitted_count);
+        for (int iter = 0; iter < 120; ++iter) {
+            if (frames_sent == submitted_count) {
+                std::uint32_t slot = 0;
+                if (p->ReserveRealSlot(&slot) == FgStatus::Ok) {
+                    FgGameFrame gf;
+                    gf.epoch = 1;
+                    gf.frame_id = ++frames_sent;
+                    gf.arrival = t;
+                    gf.requested_count = 0;
+                    gf.generation_enabled = false;
+                    FgIntervalPlan plan;
+                    CHECK(sched.Commit(gf, &plan) == FgStatus::Ok);
+                    backend->SignalFence(fid, ++fv);
+                    CHECK(p->PresentRealOnly(plan, FgRealImage{1, gf.frame_id, FgReadyFence{fid, fv}}) == FgStatus::Ok);
+                }
+            }
+            p->StepForTest();
+            t += 10000;  // 1 ms
+            backend->ProcessSkipOnly(t);
+            p->StepForTest();
+        }
+        const FgPresentStats st = p->Stats();
+        const FgCompPresenterInfo info = p->Info();
+        CHECK(backend->PeakPending() <= 4);  // bounded: never 20-deep flood
+        CHECK(st.displayed_real == 0);
+        CHECK(st.display_skipped_real >= 30);
+        CHECK(info.visible_submitted >= 35);
+        CHECK(info.status_skipped >= 30);
+        CHECK(info.force_vsync_interrupt == true);
+        // Verify targets were paced cleanly at >= min_interval and never ran away past wall-clock time.
+        const auto log = backend->SubmittedLog();
+        CHECK(log.size() >= 35);
+        for (std::size_t k = 1; k < log.size(); ++k) {
+            CHECK(log[k].target - log[k - 1].target >= kMinInterval360);
+            CHECK(log[k].target - log[k].submitted_at <= kMinInterval360);
+        }
+        CHECK(p->Detach() == FgStatus::Ok);
+        p.reset();
+        CHECK(detach_calls == 1);
+    }
+
+    // 2) Prove ForceVSyncInterrupt(false) starves feedback vs ForceVSyncInterrupt(true) delivers immediate display stats.
+    {
+        auto b_off_up = std::make_unique<FakeCompBackend>(12, 200 * kMs, false);
+        FakeCompBackend* b_off = b_off_up.get();
+        const std::uint32_t fid = b_off->CreateFence();
+        FgCompPresenterDesc cd;
+        cd.bind_window = true;
+        cd.width = 2560;
+        cd.height = 1440;
+        cd.variable_refresh = true;
+        cd.refresh_period = kRefresh360;
+        cd.min_interval = kMinInterval360;
+        cd.slot_count = 12;
+        cd.force_vsync_interrupt = false;  // old broken setting
+        std::unique_ptr<FgWinCompPresenter> p;
+        CHECK(FgWinCompPresenter::CreateWithBackend(cd, std::move(b_off_up), false, &p).Ok());
+        CHECK(b_off->ForceVsyncCalled() && !b_off->ForceVsyncEnabled());
+        CHECK(p->Attach(0x5002, 1) == FgStatus::Ok);
+        FgTicks t = 200 * kMs;
+        for (std::uint64_t k = 1; k <= 6; ++k) {
+            std::uint32_t slot = 0;
+            CHECK(p->ReserveRealSlot(&slot) == FgStatus::Ok);
+            FgIntervalPlan pl = MakePlan(1, k, k, t, kMinInterval360, 0, 2500);
+            b_off->SignalFence(fid, k);
+            CHECK(p->PresentRealOnly(pl, FgRealImage{1, k, FgReadyFence{fid, k}}) == FgStatus::Ok);
+            t += kMinInterval360;
+            b_off->SetNow(t);
+            p->StepForTest();
+            b_off->ProcessDisplays(t);
+            p->StepForTest();
+        }
+        CHECK(p->Stats().displayed_real == 0);  // deferred feedback with ForceVSyncInterrupt(false)
+        CHECK(p->Detach() == FgStatus::Ok);
+    }
+
+    // 3) Prove the fix on 360 Hz VRR at 2x, 3x, 4x and 6x (N = 1, 2, 3, 5): all real and generated frames display
+    //    with measured timestamps, zero skips, zero collisions and >= min_interval target spacing.
+    struct Case {
+        std::uint32_t n;
+        FgTicks base_period;
+    };
+    const Case cases[] = {
+        {1, 111111},  // 90 fps -> 180 fps (2x)
+        {2, 111111},  // 90 fps -> 270 fps (3x)
+        {3, 142857},  // 70 fps -> 280 fps (4x)
+        {5, 181818},  // 55 fps -> 330 fps (6x)
+    };
+    for (const Case& c : cases) {
+        int detach_calls = 0;
+        auto backend_up = std::make_unique<FakeCompBackend>(20, 300 * kMs, false);
+        FakeCompBackend* backend = backend_up.get();
+        backend->SetDetachCounter(&detach_calls);
+        const std::uint32_t fid = backend->CreateFence();
+
+        FgCompPresenterDesc cd;
+        cd.bind_window = true;
+        cd.width = 2560;
+        cd.height = 1440;
+        cd.variable_refresh = true;
+        cd.refresh_period = kRefresh360;
+        cd.min_interval = kMinInterval360;
+        cd.max_generated = 5;
+        cd.slot_count = 20;
+        std::unique_ptr<FgWinCompPresenter> p;
+        CHECK(FgWinCompPresenter::CreateWithBackend(cd, std::move(backend_up), false, &p).Ok());
+        CHECK(p->Attach(0x5100 + c.n, 1) == FgStatus::Ok);
+
+        FgSchedulerConfig sc;
+        sc.display.min_interval = kMinInterval360;
+        sc.display.max_interval = 208333;
+        sc.display.margin = 200;
+        sc.display.hysteresis = 400;
+        sc.adaptive_count = true;
+        sc.bridge_and_submit_margin = 2500;
+        sc.first_image_budget = 40000;
+        sc.max_lead = 500000;
+        FgTargetScheduler sched(sc);
+        CHECK(sched.BeginEpoch(1) == FgStatus::Ok);
+
+        FgTicks t = 300 * kMs;
+        std::uint64_t fv = 0;
+        const int total_frames = 24;
+        for (int j = 1; j <= total_frames; ++j) {
+            backend->SetNow(t);
+            backend->ProcessDisplays(t);
+            p->StepForTest();
+            FgGameFrame gf;
+            gf.epoch = 1;
+            gf.frame_id = static_cast<std::uint64_t>(j);
+            gf.arrival = t;
+            gf.requested_count = c.n;
+            gf.generation_enabled = true;
+            FgIntervalPlan plan;
+            CHECK(sched.Commit(gf, &plan) == FgStatus::Ok);
+            if (plan.generated_count == 0) {
+                std::uint32_t slot = 0;
+                CHECK(p->ReserveRealSlot(&slot) == FgStatus::Ok);
+                backend->SignalFence(fid, ++fv);
+                CHECK(p->PresentRealOnly(plan, FgRealImage{1, gf.frame_id, FgReadyFence{fid, fv}}) == FgStatus::Ok);
+            } else {
+                FgIntervalReservation res;
+                CHECK(p->BeginInterval(plan, &res) == FgStatus::Ok);
+                FgIntervalSubmission sub;
+                sub.epoch = 1;
+                sub.interval_id = plan.interval_id;
+                sub.count = res.count;
+                for (std::uint32_t i = 0; i < res.count; ++i) {
+                    CHECK(res.slots[i].reserved);
+                    sub.produced[i] = true;
+                    sub.ready[i] = FgReadyFence{fid, ++fv};
+                }
+                CHECK(p->SubmitInterval(sub) == FgStatus::Ok);
+                backend->SignalFence(fid, fv);
+            }
+            // Step across this game frame in 1 ms slices so HWFQ displays each scheduled image at its target time.
+            const FgTicks next_t = t + c.base_period;
+            for (FgTicks step = t + 10000; step <= next_t; step += 10000) {
+                backend->SetNow(step);
+                backend->ProcessDisplays(step);
+                p->StepForTest();
+            }
+            t = next_t;
+        }
+        // Drain final interval targets.
+        for (int k = 0; k < 60; ++k) {
+            t += 10000;
+            backend->SetNow(t);
+            backend->ProcessDisplays(t);
+            p->StepForTest();
+        }
+        const FgPresentStats st = p->Stats();
+        const FgCompPresenterInfo info = p->Info();
+        const FgDisplaySummary cad = p->ReadDisplayCadence(false);
+        CHECK(st.displayed_real == static_cast<std::uint64_t>(total_frames));
+        CHECK(st.displayed_generated >= static_cast<std::uint64_t>(18) * c.n);
+        CHECK(st.display_skipped == 0);
+        CHECK(st.display_collisions == 0);
+        CHECK(st.display_time_measured == true);
+        CHECK(cad.real == st.displayed_real && cad.generated == st.displayed_generated);
+        CHECK(cad.untimed == 0 && cad.unseen == 0);
+        CHECK(info.indep_flip_frames == st.displayed_real + st.displayed_generated);
+        const auto log = backend->SubmittedLog();
+        CHECK(log.size() == st.displayed_real + st.displayed_generated);
+        for (std::size_t k = 1; k < log.size(); ++k) {
+            CHECK(log[k].target - log[k - 1].target >= kMinInterval360);
+        }
+        CHECK(p->Detach() == FgStatus::Ok);
+        p.reset();
+        CHECK(detach_calls == 1);
+    }
+}
+
+void TestCompMeasuredProvenance() {
+    g_case = "hwfq-display-time-provenance";
+    const FgTicks kMinInterval360 = FgVrrMinInterval(kRefresh360, false);
+
+    auto run_case = [&](bool use_comp_frame, bool measured_ts) {
+        auto backend_up = std::make_unique<FakeCompBackend>(12, 400 * kMs, false);
+        FakeCompBackend* backend = backend_up.get();
+        const std::uint32_t fid = backend->CreateFence();
+        FgCompPresenterDesc cd;
+        cd.bind_window = true;
+        cd.width = 1920;
+        cd.height = 1080;
+        cd.variable_refresh = true;
+        cd.refresh_period = kRefresh360;
+        cd.min_interval = kMinInterval360;
+        cd.slot_count = 12;
+        std::unique_ptr<FgWinCompPresenter> p;
+        CHECK(FgWinCompPresenter::CreateWithBackend(cd, std::move(backend_up), false, &p).Ok());
+        CHECK(p->Attach(0x5200, 1) == FgStatus::Ok);
+        FgTicks t = 400 * kMs;
+        std::uint32_t slot = 0;
+        CHECK(p->ReserveRealSlot(&slot) == FgStatus::Ok);
+        FgIntervalPlan pl = MakePlan(1, 1, 1, t, kMinInterval360, 0, 2500);
+        backend->SignalFence(fid, 1);
+        CHECK(p->PresentRealOnly(pl, FgRealImage{1, 1, FgReadyFence{fid, 1}}) == FgStatus::Ok);
+        t += kMinInterval360;
+        backend->SetNow(t);
+        p->StepForTest();
+        backend->ProcessDisplays(t, use_comp_frame, measured_ts);
+        p->StepForTest();
+        const FgPresentStats st = p->Stats();
+        const FgCompPresenterInfo info = p->Info();
+        const FgDisplaySummary cad = p->ReadDisplayCadence(false);
+        CHECK(st.displayed_real == 1);
+        CHECK(st.display_time_measured == measured_ts);
+        CHECK(cad.untimed == (measured_ts ? 0u : 1u));
+        CHECK((use_comp_frame ? info.comp_frames : info.indep_flip_frames) == 1);
+        CHECK(p->Detach() == FgStatus::Ok);
+    };
+    run_case(false, true);   // IndependentFlipFrame with hardware timestamp -> measured
+    run_case(false, false);  // IndependentFlipFrame with timestamp 0 -> NOT measured
+    run_case(true, true);    // CompositionFrame with completedStats.time -> measured
+    run_case(true, false);   // CompositionFrame fallback time -> NOT measured
+}
+
+void TestCompWatchdogAndIsAvailable() {
+    g_case = "hwfq-watchdog-and-is-available";
+    const FgTicks kMinInterval360 = FgVrrMinInterval(kRefresh360, false);
+
+    // 1) Windowed watchdog without stat: cancels after 250 ms, NEVER releases slot while IsAvailable == false,
+    //    and retires + releases once IsAvailable becomes true.
+    {
+        auto backend_up = std::make_unique<FakeCompBackend>(10, 500 * kMs, false);
+        FakeCompBackend* backend = backend_up.get();
+        backend->SetCancelEmitsStat(false, false);
+        const std::uint32_t fid = backend->CreateFence();
+        FgCompPresenterDesc cd;
+        cd.bind_window = true;
+        cd.width = 1920;
+        cd.height = 1080;
+        cd.variable_refresh = true;
+        cd.refresh_period = kRefresh360;
+        cd.min_interval = kMinInterval360;
+        cd.slot_count = 10;
+        std::unique_ptr<FgWinCompPresenter> p;
+        CHECK(FgWinCompPresenter::CreateWithBackend(cd, std::move(backend_up), false, &p).Ok());
+        int retires = 0;
+        p->SetRealRetireCallback(
+            [](void* ctx, std::uint64_t, std::uint64_t, bool displayed) {
+                CHECK(!displayed);
+                ++(*static_cast<int*>(ctx));
+            },
+            &retires);
+        CHECK(p->Attach(0x5301, 1) == FgStatus::Ok);
+
+        std::uint32_t slot = 0;
+        CHECK(p->ReserveRealSlot(&slot) == FgStatus::Ok);
+        FgIntervalPlan pl = MakePlan(1, 1, 1, 500 * kMs, kMinInterval360, 0, 2500);
+        backend->SignalFence(fid, 1);
+        CHECK(p->PresentRealOnly(pl, FgRealImage{1, 1, FgReadyFence{fid, 1}}) == FgStatus::Ok);
+        backend->SetNow(500 * kMs + kMinInterval360);
+        p->StepForTest();
+        CHECK(p->Stats().real_submitted == 1 && p->FreeSlots() == 9);
+
+        // Before 250 ms: no watchdog cancellation, slot held.
+        backend->SetNow(500 * kMs + kMinInterval360 + 200 * kMs);
+        p->StepForTest();
+        CHECK(backend->CancelCalls().empty() && p->FreeSlots() == 9 && retires == 0);
+
+        // Past 250 ms while buffer is STILL unavailable: watchdog asks presentation manager to cancel,
+        // does NOT retire or release the slot yet.
+        backend->SetNow(500 * kMs + kMinInterval360 + 260 * kMs);
+        p->StepForTest();
+        CHECK(backend->CancelCalls().size() == 1);
+        CHECK(p->Stats().display_skipped_real == 0 && p->FreeSlots() == 9 && retires == 0);
+
+        // Once compositor releases the buffer (IsAvailable == true): retires as skipped and frees the slot.
+        backend->ReleaseSlotBuffer(slot);
+        p->StepForTest();
+        CHECK(p->Stats().display_skipped_real == 1 && p->Info().watchdog_retired == 1);
+        CHECK(retires == 1 && p->FreeSlots() == 10);
+        CHECK(p->Detach() == FgStatus::Ok);
+    }
+
+    // 2) Windowed watchdog where CancelPresentsFrom emits PresentStatus_Canceled before IsAvailable turns true.
+    {
+        auto backend_up = std::make_unique<FakeCompBackend>(10, 600 * kMs, false);
+        FakeCompBackend* backend = backend_up.get();
+        backend->SetCancelEmitsStat(true, false);  // stat arrives before buffer release
+        const std::uint32_t fid = backend->CreateFence();
+        FgCompPresenterDesc cd;
+        cd.bind_window = true;
+        cd.width = 1920;
+        cd.height = 1080;
+        cd.variable_refresh = true;
+        cd.refresh_period = kRefresh360;
+        cd.min_interval = kMinInterval360;
+        cd.slot_count = 10;
+        std::unique_ptr<FgWinCompPresenter> p;
+        CHECK(FgWinCompPresenter::CreateWithBackend(cd, std::move(backend_up), false, &p).Ok());
+        CHECK(p->Attach(0x5302, 1) == FgStatus::Ok);
+
+        std::uint32_t slot = 0;
+        CHECK(p->ReserveRealSlot(&slot) == FgStatus::Ok);
+        FgIntervalPlan pl = MakePlan(1, 1, 1, 600 * kMs, kMinInterval360, 0, 2500);
+        backend->SignalFence(fid, 1);
+        CHECK(p->PresentRealOnly(pl, FgRealImage{1, 1, FgReadyFence{fid, 1}}) == FgStatus::Ok);
+        backend->SetNow(600 * kMs + kMinInterval360);
+        p->StepForTest();
+        backend->SetNow(600 * kMs + kMinInterval360 + 260 * kMs);
+        p->StepForTest();  // sends CancelPresentsFrom -> queues PresentStatus_Canceled
+        p->StepForTest();  // drains PresentStatus_Canceled -> slot Retired, buffer still !available
+        CHECK(p->Stats().display_skipped_real == 1 && p->Info().watchdog_retired == 1 && p->Info().status_canceled == 1);
+        CHECK(p->FreeSlots() == 9);  // still protected until IsAvailable == true
+        backend->ReleaseSlotBuffer(slot);
+        p->StepForTest();
+        CHECK(p->FreeSlots() == 10);
+        CHECK(p->Detach() == FgStatus::Ok);
+    }
+
+    // 3) Headless (bind_window == false): 250 ms occlusion watchdog must NOT fire.
+    {
+        auto backend_up = std::make_unique<FakeCompBackend>(10, 700 * kMs, false);
+        FakeCompBackend* backend = backend_up.get();
+        const std::uint32_t fid = backend->CreateFence();
+        FgCompPresenterDesc cd;
+        cd.bind_window = false;
+        cd.width = 256;
+        cd.height = 144;
+        cd.variable_refresh = true;
+        cd.refresh_period = kRefresh360;
+        cd.min_interval = kMinInterval360;
+        cd.slot_count = 10;
+        std::unique_ptr<FgWinCompPresenter> p;
+        CHECK(FgWinCompPresenter::CreateWithBackend(cd, std::move(backend_up), false, &p).Ok());
+        CHECK(p->Attach(0x5303, 1) == FgStatus::Ok);
+        std::uint32_t slot = 0;
+        CHECK(p->ReserveRealSlot(&slot) == FgStatus::Ok);
+        FgIntervalPlan pl = MakePlan(1, 1, 1, 700 * kMs, kMinInterval360, 0, 2500);
+        backend->SignalFence(fid, 1);
+        CHECK(p->PresentRealOnly(pl, FgRealImage{1, 1, FgReadyFence{fid, 1}}) == FgStatus::Ok);
+        backend->SetNow(700 * kMs + kMinInterval360);
+        p->StepForTest();
+        backend->ReleaseSlotBuffer(slot);
+        backend->SetNow(700 * kMs + kMinInterval360 + 500 * kMs);
+        p->StepForTest();
+        CHECK(backend->CancelCalls().empty() && p->Info().watchdog_retired == 0 && p->Stats().display_skipped_real == 0);
+        CHECK(p->Detach() == FgStatus::Ok);
+    }
+}
+
+void TestCompFixedRefreshStepDownAndWorker() {
+    g_case = "hwfq-fixed-refresh-and-worker";
+    constexpr FgTicks kRefresh60 = 166667;
+
+    // 1) Non-VRR / fixed-refresh HWFQ across cadence changes and step-downs: zero FgPlanFitsRefresh refusals.
+    {
+        auto backend_up = std::make_unique<FakeCompBackend>(16, 800 * kMs, false);
+        FakeCompBackend* backend = backend_up.get();
+        backend->SetRefreshGrid(800 * kMs, kRefresh60);
+        const std::uint32_t fid = backend->CreateFence();
+        FgCompPresenterDesc cd;
+        cd.bind_window = true;
+        cd.width = 1920;
+        cd.height = 1080;
+        cd.variable_refresh = false;
+        cd.refresh_period = kRefresh60;
+        cd.min_interval = kRefresh60;
+        cd.max_generated = 3;
+        cd.slot_count = 16;
+        std::unique_ptr<FgWinCompPresenter> p;
+        CHECK(FgWinCompPresenter::CreateWithBackend(cd, std::move(backend_up), false, &p).Ok());
+        CHECK(p->Attach(0x5401, 1) == FgStatus::Ok);
+
+        FgSchedulerConfig sc;
+        sc.display.min_interval = kRefresh60;
+        sc.display.max_interval = 1000000;
+        sc.display.margin = 0;
+        sc.display.hysteresis = 0;
+        sc.display.reenter_intervals = 3;
+        sc.fixed_refresh_period = kRefresh60;
+        sc.adaptive_count = true;
+        sc.first_image_budget = 40000;
+        sc.max_lead = 800000;
+        FgTargetScheduler sched(sc);
+        CHECK(sched.BeginEpoch(1) == FgStatus::Ok);
+
+        FgTicks t = 800 * kMs;
+        std::uint64_t fv = 0;
+        // Phase 1 (12 frames): 30 fps (2x fits 1 refresh per image).
+        // Phase 2 (14 frames): 15 fps (4x fits 1 refresh per image; at frame 20 cap to 2 forces fixed-grid step-down
+        //   from 3 -> 1 instead of non-integer 2, with zero FgPlanFitsRefresh refusals).
+        // Phase 3 (10 frames): 45 fps (222222 ticks, non-integer multiple -> steps cleanly to real-only).
+        std::vector<FgTicks> deltas;
+        for (int k = 0; k < 12; ++k) deltas.push_back(kRefresh60 * 2);
+        for (int k = 0; k < 14; ++k) deltas.push_back(kRefresh60 * 4);
+        for (int k = 0; k < 10; ++k) deltas.push_back(222222);
+        std::uint64_t saw_n3 = 0;
+        std::uint64_t saw_step_down = 0;
+        for (std::size_t idx = 0; idx < deltas.size(); ++idx) {
+            if (idx == 20) sched.SetMaxGeneratedCap(2);  // force step-down from N=3 on fixed 60 Hz grid
+            backend->SetNow(t);
+            backend->ProcessDisplays(t);
+            p->StepForTest();
+            FgGameFrame gf;
+            gf.epoch = 1;
+            gf.frame_id = idx + 1;
+            gf.arrival = t;
+            gf.requested_count = 3;
+            gf.generation_enabled = true;
+            FgIntervalPlan plan;
+            CHECK(sched.Commit(gf, &plan) == FgStatus::Ok);
+            if (plan.generated_count == 3) ++saw_n3;
+            if (idx >= 20 && idx < 26 && plan.generated_count == 1) ++saw_step_down;
+            if (plan.generated_count == 0) {
+                std::uint32_t slot = 0;
+                CHECK(p->ReserveRealSlot(&slot) == FgStatus::Ok);
+                backend->SignalFence(fid, ++fv);
+                CHECK(p->PresentRealOnly(plan, FgRealImage{1, gf.frame_id, FgReadyFence{fid, fv}}) == FgStatus::Ok);
+            } else {
+                FgIntervalReservation res;
+                CHECK(p->BeginInterval(plan, &res) == FgStatus::Ok);
+                FgIntervalSubmission sub;
+                sub.epoch = 1;
+                sub.interval_id = plan.interval_id;
+                sub.count = res.count;
+                for (std::uint32_t i = 0; i < res.count; ++i) {
+                    sub.produced[i] = res.slots[i].reserved;
+                    if (sub.produced[i]) sub.ready[i] = FgReadyFence{fid, ++fv};
+                }
+                CHECK(p->SubmitInterval(sub) == FgStatus::Ok);
+                backend->SignalFence(fid, fv);
+            }
+            const FgTicks next_t = t + deltas[idx];
+            for (FgTicks step = t + kRefresh60 / 2; step <= next_t; step += kRefresh60 / 2) {
+                backend->SetNow(step);
+                backend->ProcessDisplays(step);
+                p->StepForTest();
+            }
+            t = next_t;
+        }
+        for (int k = 0; k < 20; ++k) {
+            t += kRefresh60 / 2;
+            backend->SetNow(t);
+            backend->ProcessDisplays(t);
+            p->StepForTest();
+        }
+        const FgPresentStats st = p->Stats();
+        CHECK(st.refused_calls == 0);
+        CHECK(saw_n3 >= 1 && saw_step_down >= 1);
+        CHECK(st.displayed_real == deltas.size());
+        CHECK(st.displayed_generated >= 10);
+        CHECK(p->Detach() == FgStatus::Ok);
+    }
+
+    // 2) Real worker thread over FakeCompBackend: verifies Run() timer pacing + stats wake + clean teardown.
+    {
+        int detach_calls = 0;
+        auto backend_up = std::make_unique<FakeCompBackend>(12, 0, true);
+        FakeCompBackend* backend = backend_up.get();
+        backend->SetAutoDisplayOnPresent(true);
+        backend->SetDetachCounter(&detach_calls);
+        const std::uint32_t fid = backend->CreateFence();
+
+        FgCompPresenterDesc cd;
+        cd.bind_window = true;
+        cd.width = 1920;
+        cd.height = 1080;
+        cd.variable_refresh = true;
+        cd.refresh_period = kRefresh360;
+        cd.min_interval = FgVrrMinInterval(kRefresh360, false);
+        cd.slot_count = 12;
+        std::unique_ptr<FgWinCompPresenter> p;
+        CHECK(FgWinCompPresenter::CreateWithBackend(cd, std::move(backend_up), true, &p).Ok());
+        CHECK(p->Attach(0x5402, 1) == FgStatus::Ok);
+
+        FgTicks target_base = FgInterruptNow();
+        for (std::uint64_t k = 1; k <= 4; ++k) {
+            std::uint32_t slot = 0;
+            CHECK(p->ReserveRealSlot(&slot) == FgStatus::Ok);
+            FgIntervalPlan pl = MakePlan(1, k, k, target_base, cd.min_interval, 0, 2500);
+            target_base = pl.targets[0].target;
+            backend->SignalFence(fid, k);
+            CHECK(p->PresentRealOnly(pl, FgRealImage{1, k, FgReadyFence{fid, k}}) == FgStatus::Ok);
+            const ULONGLONG until = GetTickCount64() + 500;
+            while (p->Stats().displayed_real < k && GetTickCount64() < until) Sleep(1);
+            CHECK(p->Stats().displayed_real >= k);
+        }
+        CHECK(p->Stats().displayed_real == 4 && p->Stats().display_time_measured == true);
+        CHECK(p->Detach() == FgStatus::Ok);
+        p.reset();
+        CHECK(detach_calls == 1);
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1749,6 +2638,10 @@ int main(int argc, char** argv) {
     TestEngineFeedback();
     TestEngineLifecycle();
     TestRc2EngineContracts();
+    TestCompLoggedFailureAndPacingFix();
+    TestCompMeasuredProvenance();
+    TestCompWatchdogAndIsAvailable();
+    TestCompFixedRefreshStepDownAndWorker();
     TestDxgiWorkerLeaseAndJitter();
     TestCadenceMatrix();
     TestSelection();

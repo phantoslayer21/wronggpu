@@ -89,7 +89,9 @@ FgWinResult FgProbePresenterCapabilities(ID3D12Device* device, FgPresenterCapabi
     if (FAILED(hr)) return FgWinFail(FgStatus::Unsupported, FgWinRefusal::AdapterNotFound, hr);
     const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
     ComPtr<ID3D11Device> dev;
-    hr = D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels, 2,
+    const UINT d3d11_flags =
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS;
+    hr = D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, d3d11_flags, levels, 2,
                            D3D11_SDK_VERSION, &dev, nullptr, nullptr);
     if (FAILED(hr)) return FgWinFail(FgStatus::Unsupported, FgWinRefusal::D3D11DeviceFailed, hr);
     caps->presentation_probed = true;

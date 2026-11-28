@@ -177,4 +177,40 @@ inline void ResetFirstImageBudgetWindow(FirstImageBudgetLimits& limits, wgfg::Fg
     baseline = current;
 }
 
+// Runtime health check for Windows composition (HWFQ) safety-net fallback to DXGI.
+// Triggers only when the bound window is visible and composition has observed zero displayed frames across sustained
+// submissions or an admission timeout past startup grace.
+enum class HwfqFallbackReason : uint8_t {
+    None = 0,
+    ZeroDisplaySustained = 1,
+    AdmissionTimeoutZeroDisplay = 2,
+};
+
+struct HwfqHealthSnapshot {
+    uint64_t displayed = 0;            // displayed_real + displayed_generated
+    uint64_t visible_submitted = 0;    // presents submitted while the bound window was visible
+    uint64_t resolved_unseen = 0;      // display_skipped_real + display_skipped_generated
+    uint64_t watchdog_retired = 0;     // queued presents retired by the 250 ms occlusion watchdog
+    wgfg::FgTicks visible_elapsed_ticks = 0;  // ticks since the first visible-window present submission
+    bool admission_timed_out = false;
+    bool startup_grace = false;
+};
+
+constexpr uint64_t kHwfqFallbackMinVisibleSubmits = 30;
+constexpr uint64_t kHwfqFallbackMinUnseen = 15;
+constexpr uint64_t kHwfqFallbackMinWatchdog = 2;
+constexpr uint64_t kHwfqFallbackTimeoutMinVisibleSubmits = 4;
+constexpr wgfg::FgTicks kHwfqFallbackMinElapsedTicks = 7500000;  // 750 ms
+
+constexpr HwfqFallbackReason CheckHwfqZeroDisplayFallback(const HwfqHealthSnapshot& h) {
+    if (h.displayed > 0) return HwfqFallbackReason::None;
+    if (h.admission_timed_out && !h.startup_grace && h.visible_submitted >= kHwfqFallbackTimeoutMinVisibleSubmits)
+        return HwfqFallbackReason::AdmissionTimeoutZeroDisplay;
+    if (h.visible_submitted >= kHwfqFallbackMinVisibleSubmits &&
+        h.visible_elapsed_ticks >= kHwfqFallbackMinElapsedTicks &&
+        (h.resolved_unseen >= kHwfqFallbackMinUnseen || h.watchdog_retired >= kHwfqFallbackMinWatchdog))
+        return HwfqFallbackReason::ZeroDisplaySustained;
+    return HwfqFallbackReason::None;
+}
+
 }  // namespace wgfgp::win32

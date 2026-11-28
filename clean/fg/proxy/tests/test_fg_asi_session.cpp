@@ -141,7 +141,8 @@ void TestFlags() {
     DXGI_SWAP_CHAIN_DESC1 d = {};
     const FgPresenterChoice choices[4] = {FgPresenterChoice::Auto, FgPresenterChoice::Hwfq, FgPresenterChoice::DxgiTearing,
                                           FgPresenterChoice::DxgiVsync};
-    const UINT want[4] = {DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT, 0,
+    const UINT want[4] = {DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
+                          DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
                           DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
                           DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT};
     for (int i = 0; i < 4; ++i) {
@@ -2775,6 +2776,65 @@ void TestAdmissionPolicyAliasLogsOnce() {
     CHECK(alias_logs == 1);
 }
 
+void TestHwfqFallbackPolicy() {
+    g_case = "hwfq-zero-display-fallback";
+    // Working HWFQ never falls back, even if skips or an isolated timeout occur.
+    HwfqHealthSnapshot ok;
+    ok.displayed = 1;
+    ok.visible_submitted = 80;
+    ok.resolved_unseen = 60;
+    ok.watchdog_retired = 3;
+    ok.visible_elapsed_ticks = 20000000;
+    ok.admission_timed_out = true;
+    CHECK(CheckHwfqZeroDisplayFallback(ok) == HwfqFallbackReason::None);
+
+    // Hidden / minimized window (visible_submitted == 0) never falls back.
+    HwfqHealthSnapshot hidden;
+    hidden.displayed = 0;
+    hidden.visible_submitted = 0;
+    hidden.resolved_unseen = 60;
+    hidden.watchdog_retired = 3;
+    hidden.visible_elapsed_ticks = 20000000;
+    hidden.admission_timed_out = true;
+    CHECK(CheckHwfqZeroDisplayFallback(hidden) == HwfqFallbackReason::None);
+
+    // Startup grace suppresses timeout fallback during the first window transition.
+    HwfqHealthSnapshot grace;
+    grace.displayed = 0;
+    grace.visible_submitted = 12;
+    grace.resolved_unseen = 8;
+    grace.visible_elapsed_ticks = 2000000;
+    grace.admission_timed_out = true;
+    grace.startup_grace = true;
+    CHECK(CheckHwfqZeroDisplayFallback(grace) == HwfqFallbackReason::None);
+
+    // Admission timeout past startup grace with 0 displayed on a visible window triggers fallback.
+    grace.startup_grace = false;
+    CHECK(CheckHwfqZeroDisplayFallback(grace) == HwfqFallbackReason::AdmissionTimeoutZeroDisplay);
+
+    // Sustained zero-display requires enough submits, elapsed time, and unseen/watchdog evidence.
+    HwfqHealthSnapshot sustained;
+    sustained.displayed = 0;
+    sustained.visible_submitted = kHwfqFallbackMinVisibleSubmits;
+    sustained.resolved_unseen = kHwfqFallbackMinUnseen - 1;
+    sustained.visible_elapsed_ticks = kHwfqFallbackMinElapsedTicks;
+    CHECK(CheckHwfqZeroDisplayFallback(sustained) == HwfqFallbackReason::None);
+    sustained.resolved_unseen = kHwfqFallbackMinUnseen;
+    sustained.visible_elapsed_ticks = kHwfqFallbackMinElapsedTicks - 1;
+    CHECK(CheckHwfqZeroDisplayFallback(sustained) == HwfqFallbackReason::None);
+    sustained.visible_elapsed_ticks = kHwfqFallbackMinElapsedTicks;
+    CHECK(CheckHwfqZeroDisplayFallback(sustained) == HwfqFallbackReason::ZeroDisplaySustained);
+
+    // Watchdog-only zero-display (silent compositor, no skipped stats) also triggers sustained fallback.
+    HwfqHealthSnapshot silent;
+    silent.displayed = 0;
+    silent.visible_submitted = kHwfqFallbackMinVisibleSubmits;
+    silent.resolved_unseen = 0;
+    silent.watchdog_retired = kHwfqFallbackMinWatchdog;
+    silent.visible_elapsed_ticks = kHwfqFallbackMinElapsedTicks;
+    CHECK(CheckHwfqZeroDisplayFallback(silent) == HwfqFallbackReason::ZeroDisplaySustained);
+}
+
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     bool gpu = false;
@@ -2802,6 +2862,7 @@ int main(int argc, char** argv) {
     TestOneImageCleanBudgetCanEaseWithMeasuredHeadroom();
     TestBudgetControllerUsesProducerMissesAndResetsItsBaseline();
     if (only == "admission-alias") TestAdmissionPolicyAliasLogsOnce();
+    TestHwfqFallbackPolicy();
     TestMissFloorDecaysAfterCleanWindows();
     TestBudgetNeedsTwoMissesToRaise();
     TestOverflowDeliveryRequiresHeadroomAndStepsBackOnMisses();

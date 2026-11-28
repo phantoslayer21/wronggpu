@@ -284,6 +284,7 @@ struct FgAsiSessionHost::Impl {
     uint64_t display_sample_at = 0, display_sample_frames = 0, display_sample_real = 0, display_sample_gen = 0;
     bool display_sample_generating = false;
     bool overlay_choice_logged = false;
+    bool hwfq_fallback_to_dxgi = false;
     HANDLE wait_timer = nullptr;      // back-pressure waits (high resolution)
     uint64_t back_pressure_waits = 0; // game frames that waited for a presenter slot
     bool back_pressure_logged = false;
@@ -974,6 +975,7 @@ struct FgAsiSessionHost::Impl {
         if (reset_failures) {
             stats.session_failures = 0;
             stats.gave_up = false;
+            hwfq_fallback_to_dxgi = false;
             if (st_phase.load() == kFgPhaseStopped) st_phase.store(kFgPhaseWaiting);
         }
     }
@@ -1405,6 +1407,17 @@ struct FgAsiSessionHost::Impl {
                        " wrapped_stall_us_max_real=" + std::to_string(stalls.max[1] / 10) +
                        " wrapped_stall_us_max_menu=" + std::to_string(stalls.max[2] / 10) +
                        " wrapped_stalls_wait_ge_500us=" + std::to_string(stalls.with_admission_wait);
+            } else if (const auto* cp = dynamic_cast<const wgfg::FgWinCompPresenter*>(pr)) {
+                const wgfg::FgCompPresenterInfo in = cp->Info();
+                reasons += "; hwfq indep_flip=" + std::to_string(in.indep_flip_frames) +
+                           " comp=" + std::to_string(in.comp_frames) +
+                           " status_queued=" + std::to_string(in.status_queued) +
+                           " status_skipped=" + std::to_string(in.status_skipped) +
+                           " status_canceled=" + std::to_string(in.status_canceled) +
+                           " watchdog_retired=" + std::to_string(in.watchdog_retired) +
+                           " visible_sub=" + std::to_string(in.visible_submitted) +
+                           " window_visible=" + (in.window_visible ? "yes" : "no") +
+                           " force_vsync=" + (in.force_vsync_interrupt ? "yes" : "no");
             }
             uint64_t ret = 0, cw = 0, timeouts = 0, qw = 0;
             size_t queue_peak = 0;
@@ -1818,6 +1831,10 @@ struct FgAsiSessionHost::Impl {
                     ", so OptiScaler's menu and overlay are drawn on every presented image");
             }
         }
+        if (sd.presenter_mode == WG_FG_PRESENTER_HWFQ && hwfq_fallback_to_dxgi) {
+            const bool tear = tearing_supported && (chain_flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0;
+            sd.presenter_mode = tear ? WG_FG_PRESENTER_DXGI_TEARING : WG_FG_PRESENTER_DXGI_VSYNC;
+        }
         if (!exec) {
             wgfg::FgD3d12ExecutorDesc ed;
             ed.dxil_dir = cfg.dxil_dir;
@@ -1831,116 +1848,138 @@ struct FgAsiSessionHost::Impl {
             if (!exec) return;
         }
         wgfg::FgPresenterFactoryDesc base;
-        base.slot_count = kPresenterSlots;
-        base.max_pending_intervals = kPresenterMaxPendingIntervals;  // N-B3: aligned to 20 slots (3 full 6x intervals)
-        base.dxgi_timer_lead = 2000;                                 // 0.2 ms wake lead for DXGI tearing
-        base.dxgi_late_tolerance = 20000;                            // 2.0 ms base tolerance (scaled per slot in worker)
-        base.device = device.Get();
-        base.queue = chain_queue ? chain_queue.Get() : queue.Get();  // the queue the real chain presents on
-        base.swap_chain = inner;
-        base.hwnd = hwnd;
-        // On tearing/VRR-capable systems let HWFQ use unsnapped SetTargetTime flip metering so arbitrary uncapped
-        // framerates are paced smoothly without fixed-grid BeginInterval refusals; AUTO only enables variable_refresh
-        // when the chain itself allows tearing (otherwise FgSelectPresenter would pick DxgiFlipTearing and fail).
-        const bool chain_tearing = tearing_supported && (chain_flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0;
-        const bool vsync_mode = sd.presenter_mode == WG_FG_PRESENTER_DXGI_VSYNC;
-        base.display.variable_refresh =
-            sd.presenter_mode == WG_FG_PRESENTER_HWFQ || vsync_mode ? tearing_supported : chain_tearing;
-        base.worker_registration = {
-            &FgSwapChain::RegisterWorkerThread, &FgSwapChain::UnregisterWorkerThread,
-            [](void* ctx, DWORD tid, bool priority, bool mmcss) {
-                static_cast<Impl*>(ctx)->Log("fg host: presenter worker tid=" + std::to_string(tid) +
-                    " priority_highest=" + (priority ? "yes" : "no") + " mmcss_games=" + (mmcss ? "yes" : "no"));
-            }, this};
-
-        session.reset(new (std::nothrow) wgfg::FgSession());
-        if (!session) {
-            DestroySession("allocation");
-            return;
-        }
         wgfg::FgSessionDesc d;
-        d.create = ToRuntime(sd);
-        d.scheduler.first_image_budget = budget;  // 4.0 ms base, dynamically bounded [8.0, 32.0] ms
-        d.scheduler.max_lead = 500000;            // 50 ms playout lead cap (fits 50-60 fps 4x/6x with GPU-bound budget)
-        const bool tearing_mode = sd.presenter_mode == WG_FG_PRESENTER_DXGI_TEARING ||
-                                  (sd.presenter_mode == WG_FG_PRESENTER_AUTO && base.display.variable_refresh);
-        if (tearing_mode || (vsync_mode && base.display.variable_refresh))
-            d.scheduler.bridge_and_submit_margin = 2500;
-        {
-            // O-A4 / M1: query active monitor refresh via EnumDisplaySettingsExW (fallback to compositor grid).
-            // The planner and presenter use the same refresh-derived minimum spacing.
-            wgfg::FgTicks refresh_period = 0;
-            uint32_t refresh_hz = 0;
-            bool from_mode = QueryMonitorRefresh(hwnd, &refresh_period, &refresh_hz);
-            if (!from_mode) {
-                wgfg::FgClockMap map;
-                wgfg::FgRefreshGrid grid;
-                if (wgfg::FgReadCompositorGrid(map, 0, &grid) && grid.period > 0) {
-                    refresh_period = grid.period;
-                    refresh_hz = static_cast<uint32_t>((10000000ll + grid.period / 2) / grid.period);
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            base = wgfg::FgPresenterFactoryDesc{};
+            base.slot_count = kPresenterSlots;
+            base.max_pending_intervals = kPresenterMaxPendingIntervals;  // N-B3: aligned to 20 slots (3 full 6x intervals)
+            base.dxgi_timer_lead = 2000;                                 // 0.2 ms wake lead for DXGI tearing
+            base.dxgi_late_tolerance = 20000;                            // 2.0 ms base tolerance (scaled per slot in worker)
+            base.device = device.Get();
+            base.queue = chain_queue ? chain_queue.Get() : queue.Get();  // the queue the real chain presents on
+            base.swap_chain = inner;
+            base.hwnd = hwnd;
+            // On tearing/VRR-capable systems let HWFQ use unsnapped SetTargetTime flip metering so arbitrary uncapped
+            // framerates are paced smoothly without fixed-grid BeginInterval refusals; AUTO only enables variable_refresh
+            // when the chain itself allows tearing (otherwise FgSelectPresenter would pick DxgiFlipTearing and fail).
+            const bool chain_tearing = tearing_supported && (chain_flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0;
+            const bool vsync_mode = sd.presenter_mode == WG_FG_PRESENTER_DXGI_VSYNC;
+            const bool hwfq_mode = sd.presenter_mode == WG_FG_PRESENTER_HWFQ;
+            base.display.variable_refresh =
+                hwfq_mode || vsync_mode ? tearing_supported : chain_tearing;
+            base.worker_registration = {
+                &FgSwapChain::RegisterWorkerThread, &FgSwapChain::UnregisterWorkerThread,
+                [](void* ctx, DWORD tid, bool priority, bool mmcss) {
+                    static_cast<Impl*>(ctx)->Log("fg host: presenter worker tid=" + std::to_string(tid) +
+                        " priority_highest=" + (priority ? "yes" : "no") + " mmcss_games=" + (mmcss ? "yes" : "no"));
+                }, this};
+
+            session.reset(new (std::nothrow) wgfg::FgSession());
+            if (!session) {
+                DestroySession("allocation");
+                return;
+            }
+            d = wgfg::FgSessionDesc{};
+            d.create = ToRuntime(sd);
+            d.scheduler.first_image_budget = budget;  // 4.0 ms base, dynamically bounded [8.0, 32.0] ms
+            d.scheduler.max_lead = 500000;            // 50 ms playout lead cap (fits 50-60 fps 4x/6x with GPU-bound budget)
+            const bool tearing_mode = sd.presenter_mode == WG_FG_PRESENTER_DXGI_TEARING ||
+                                      (sd.presenter_mode == WG_FG_PRESENTER_AUTO && base.display.variable_refresh);
+            if (tearing_mode || ((vsync_mode || hwfq_mode) && base.display.variable_refresh))
+                d.scheduler.bridge_and_submit_margin = 2500;
+            {
+                // O-A4 / M1: query active monitor refresh via EnumDisplaySettingsExW (fallback to compositor grid).
+                // The planner and presenter use the same refresh-derived minimum spacing.
+                wgfg::FgTicks refresh_period = 0;
+                uint32_t refresh_hz = 0;
+                bool from_mode = QueryMonitorRefresh(hwnd, &refresh_period, &refresh_hz);
+                if (!from_mode) {
+                    wgfg::FgClockMap map;
+                    wgfg::FgRefreshGrid grid;
+                    if (wgfg::FgReadCompositorGrid(map, 0, &grid) && grid.period > 0) {
+                        refresh_period = grid.period;
+                        refresh_hz = static_cast<uint32_t>((10000000ll + grid.period / 2) / grid.period);
+                    }
+                }
+                if (refresh_period > 0) {
+                    st_refresh_hz.store(refresh_hz);
+                    base.display.refresh_period = refresh_period;
+                    d.scheduler.display.min_interval = refresh_period + refresh_period / 33;  // ~3% ceiling headroom
+                    d.scheduler.display.max_interval =
+                        base.display.variable_refresh ? 208333 : 1000000;  // 48 Hz VRR floor vs 10 Hz fixed
+                    d.scheduler.adaptive_count = true;
+                    if (base.display.variable_refresh) {
+                        d.scheduler.display.min_interval = wgfg::FgVrrMinInterval(refresh_period, vsync_mode);
+                        d.scheduler.display.margin = 200;
+                        d.scheduler.display.hysteresis = 400;
+                        d.scheduler.display.exit_intervals = 2;
+                        d.scheduler.display.reenter_intervals = 3;
+                    }
+                    const bool fixed_grid_presenter = !base.display.variable_refresh &&
+                                                      sd.presenter_mode != WG_FG_PRESENTER_DXGI_TEARING;
+                    if (fixed_grid_presenter) {
+                        d.scheduler.fixed_refresh_period = refresh_period;
+                        d.scheduler.display.min_interval = refresh_period;
+                        d.scheduler.display.margin = 0;
+                    }
+                    char line[224];
+                    std::snprintf(line, sizeof line,
+                                  "fg host: display refresh %.1f Hz (%s, vrr=%s): VRR ceiling %.1f Hz (min_interval=%lld "
+                                  "ticks, max_interval=%lld ticks, count adapted)",
+                                  10000000.0 / static_cast<double>(refresh_period),
+                                  from_mode ? "display mode" : "compositor grid",
+                                  base.display.variable_refresh ? "yes" : "no",
+                                  10000000.0 / static_cast<double>(d.scheduler.display.min_interval),
+                                  static_cast<long long>(d.scheduler.display.min_interval),
+                                  static_cast<long long>(d.scheduler.display.max_interval));
+                    Log(line);
+                } else {
+                    Log("fg host: the display refresh is not readable; the scheduler's own output window stays");
                 }
             }
-            if (refresh_period > 0) {
-                st_refresh_hz.store(refresh_hz);
-                base.display.refresh_period = refresh_period;
-                d.scheduler.display.min_interval = refresh_period + refresh_period / 33;  // ~3% ceiling headroom
-                d.scheduler.display.max_interval =
-                    base.display.variable_refresh ? 208333 : 1000000;  // 48 Hz VRR floor vs 10 Hz fixed
-                d.scheduler.adaptive_count = true;
-                if (base.display.variable_refresh) {
-                    d.scheduler.display.min_interval = wgfg::FgVrrMinInterval(refresh_period, vsync_mode);
-                    d.scheduler.display.margin = 200;
-                    d.scheduler.display.hysteresis = 400;
-                    d.scheduler.display.exit_intervals = 2;
-                    d.scheduler.display.reenter_intervals = 3;
-                }
-                const bool fixed_grid_presenter = !base.display.variable_refresh &&
-                                                  sd.presenter_mode != WG_FG_PRESENTER_DXGI_TEARING;
-                if (fixed_grid_presenter) {
-                    d.scheduler.fixed_refresh_period = refresh_period;
-                    d.scheduler.display.min_interval = refresh_period;
-                    d.scheduler.display.margin = 0;
-                }
-                char line[224];
-                std::snprintf(line, sizeof line,
-                              "fg host: display refresh %.1f Hz (%s, vrr=%s): VRR ceiling %.1f Hz (min_interval=%lld "
-                              "ticks, max_interval=%lld ticks, count adapted)",
-                              10000000.0 / static_cast<double>(refresh_period),
-                              from_mode ? "display mode" : "compositor grid",
-                              base.display.variable_refresh ? "yes" : "no",
-                              10000000.0 / static_cast<double>(d.scheduler.display.min_interval),
-                              static_cast<long long>(d.scheduler.display.min_interval),
-                              static_cast<long long>(d.scheduler.display.max_interval));
-                Log(line);
-            } else {
-                Log("fg host: the display refresh is not readable; the scheduler's own output window stays");
+            base.min_interval = d.scheduler.display.min_interval;
+            char fill_env[8] = {};
+            const auto fill_length = GetEnvironmentVariableA("WG_FG_FILL", fill_env, sizeof(fill_env));
+            const bool fill_on = fill_length == 2 && std::strcmp(fill_env, "on") == 0;
+            d.scheduler.overflow_fill = base.display.variable_refresh && base.display.refresh_period > 0 &&
+                                        fill_timer.Valid() && fill_on;
+            d.scheduler.first_present_admission = base.display.variable_refresh && admission_mode == AdmissionMode::Present;
+            d.scheduler.consumed_admission = base.display.variable_refresh && admission_mode == AdmissionMode::Consumed;
+            d.scheduler.guard_overflow_delivery = base.display.variable_refresh;
+            win_source.reset(new (std::nothrow) wgfg::FgWinPresenterSource(base));
+            if (win_source)
+                exec_source.reset(new (std::nothrow) wgfg::FgExecutorPresenterSource(win_source.get(), exec.get()));
+            if (!exec_source) {
+                DestroySession("allocation");
+                return;
             }
-        }
-        base.min_interval = d.scheduler.display.min_interval;
-        char fill_env[8] = {};
-        const auto fill_length = GetEnvironmentVariableA("WG_FG_FILL", fill_env, sizeof(fill_env));
-        const bool fill_on = fill_length == 2 && std::strcmp(fill_env, "on") == 0;
-        d.scheduler.overflow_fill = base.display.variable_refresh && base.display.refresh_period > 0 &&
-                                    fill_timer.Valid() && fill_on;
-        d.scheduler.first_present_admission = base.display.variable_refresh && admission_mode == AdmissionMode::Present;
-        d.scheduler.consumed_admission = base.display.variable_refresh && admission_mode == AdmissionMode::Consumed;
-        d.scheduler.guard_overflow_delivery = base.display.variable_refresh;
-        win_source.reset(new (std::nothrow) wgfg::FgWinPresenterSource(base));
-        if (win_source)
-            exec_source.reset(new (std::nothrow) wgfg::FgExecutorPresenterSource(win_source.get(), exec.get()));
-        if (!exec_source) {
-            DestroySession("allocation");
-            return;
-        }
-        d.on_plan = &Impl::OnPlanThunk;
-        d.plan_ctx = this;
-        d.executor = exec.get();
-        d.presenter_source = exec_source.get();
-        d.clock = &HostClock;
-        d.log = cfg.log;
-        d.log_ctx = cfg.log_ctx;
-        const wgfg::FgSessionResult r = session->Create(d);
-        if (r.error != wgfg::FgSessionError::None) {
+            d.on_plan = &Impl::OnPlanThunk;
+            d.plan_ctx = this;
+            d.executor = exec.get();
+            d.presenter_source = exec_source.get();
+            d.clock = &HostClock;
+            d.log = cfg.log;
+            d.log_ctx = cfg.log_ctx;
+            const wgfg::FgSessionResult r = session->Create(d);
+            if (r.error == wgfg::FgSessionError::None) break;
+            if (attempt == 0 && hwfq_mode &&
+                (r.error == wgfg::FgSessionError::PresenterSource ||
+                 r.error == wgfg::FgSessionError::PresenterAttach)) {
+                const wgfg::FgWinResult wr = win_source ? win_source->LastResult() : wgfg::FgWinResult{};
+                char fbuf[320];
+                std::snprintf(fbuf, sizeof fbuf,
+                              "fg host: hwfq presenter unavailable (%s / %s, hr=0x%08lx); falling back to %s for this "
+                              "run without disabling frame generation",
+                              wgfg::FgSessionErrorName(r.error), wgfg::FgWinRefusalName(wr.refusal),
+                              static_cast<unsigned long>(wr.hr), chain_tearing ? "dxgi_tearing" : "dxgi_vsync");
+                Log(fbuf);
+                hwfq_fallback_to_dxgi = true;
+                sd.presenter_mode = chain_tearing ? WG_FG_PRESENTER_DXGI_TEARING : WG_FG_PRESENTER_DXGI_VSYNC;
+                session.reset();
+                exec_source.reset();
+                win_source.reset();
+                continue;
+            }
             ++stats.session_failures;
             Log(std::string("fg host: session not created: ") + wgfg::FgSessionErrorName(r.error) + " (refusal " +
                 wgfg::FgRefusalName(r.refusal) + ", executor " + wgfg::FgExecRefusalName(exec->LastRefusal()) + ": " +
@@ -1973,9 +2012,10 @@ struct FgAsiSessionHost::Impl {
         const wgfg::FgPresenterChoice chosen = win_source->LastSelection().chosen;
         const bool dxgi = chosen == wgfg::FgPresenterChoice::DxgiFlipTearing ||
                           chosen == wgfg::FgPresenterChoice::DxgiFlipVsync;
-        if (stats.sessions_created == 1 && dxgi) {
+        const bool hwfq = chosen == wgfg::FgPresenterChoice::WindowsCompositionHwfq;
+        if (stats.sessions_created == 1 && (dxgi || hwfq)) {
             startup_present_base = st_presents.load();
-            startup_admission_until = wgfg::FgInterruptNow() + 10000000;  // first second on the first chain
+            startup_admission_until = wgfg::FgInterruptNow() + (hwfq ? 15000000 : 10000000);
         }
         tearing_schedule_interval = dxgi ? base.min_interval : 0;
         st_presenter.store(static_cast<uint32_t>(chosen));
@@ -2292,22 +2332,69 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
         // frame 1's target/slip) and BEFORE any host credit/slot wait so throttling never perturbs the cadence estimate.
         const wgfg::FgTicks t_arrival = wgfg::FgInterruptNow();
         if (m.session_draining) m.DestroySession("previous interval drain");
-        // A cold wrapped Present can hold up the first real-only queue. Restrict the extra wait
-        // to the first four Presents and end it as soon as the game enables generation.
+        // A cold wrapped Present or initial window creation can hold up the first real-only queue. End startup grace
+        // as soon as the game enables generation.
         if (fg_enabled) m.startup_admission_until = 0;
+        const bool is_hwfq_session =
+            m.session && dynamic_cast<wgfg::FgWinCompPresenter*>(m.session->Presenter()) != nullptr;
         const bool startup_grace = t_arrival < m.startup_admission_until &&
-                                   m.st_presents.load() - m.startup_present_base < 4;
+                                   (is_hwfq_session ? !fg_enabled : (m.st_presents.load() - m.startup_present_base < 4));
         const DWORD admission_wait = startup_grace ? kStartupAdmissionWaitMs : kLatencyWaitMs;
+        auto check_hwfq_fallback = [&](bool timed_out) -> bool {
+            if (!m.session || m.session_draining) return false;
+            const auto* cp = dynamic_cast<const wgfg::FgWinCompPresenter*>(m.session->Presenter());
+            if (!cp) return false;
+            const wgfg::FgPresentStats ps = cp->Stats();
+            const wgfg::FgCompPresenterInfo ci = cp->Info();
+            HwfqHealthSnapshot snap;
+            snap.displayed = ps.displayed_real + ps.displayed_generated;
+            snap.visible_submitted = ci.visible_submitted;
+            snap.resolved_unseen = ps.display_skipped_real + ps.display_skipped_generated;
+            snap.watchdog_retired = ci.watchdog_retired;
+            snap.visible_elapsed_ticks =
+                ci.first_visible_submit > 0 && t_arrival > ci.first_visible_submit
+                    ? (t_arrival - ci.first_visible_submit)
+                    : 0;
+            snap.admission_timed_out = timed_out;
+            snap.startup_grace = startup_grace;
+            const HwfqFallbackReason fr = CheckHwfqZeroDisplayFallback(snap);
+            if (fr == HwfqFallbackReason::None) return false;
+            const bool tear = m.tearing_supported && (m.chain_flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0;
+            char fbuf[384];
+            std::snprintf(fbuf, sizeof fbuf,
+                          "fg host: hwfq composition displayed 0 presents (%s; real_sub=%llu visible_sub=%llu "
+                          "skipped=%llu indep_flip=%llu comp=%llu watchdog=%llu elapsed_ms=%lld); falling back to %s "
+                          "for this run without disabling frame generation",
+                          fr == HwfqFallbackReason::AdmissionTimeoutZeroDisplay ? "admission timeout"
+                                                                                : "sustained zero-display",
+                          static_cast<unsigned long long>(ps.real_submitted),
+                          static_cast<unsigned long long>(ci.visible_submitted),
+                          static_cast<unsigned long long>(snap.resolved_unseen),
+                          static_cast<unsigned long long>(ci.indep_flip_frames),
+                          static_cast<unsigned long long>(ci.comp_frames),
+                          static_cast<unsigned long long>(ci.watchdog_retired),
+                          static_cast<long long>(snap.visible_elapsed_ticks / 10000),
+                          tear ? "dxgi_tearing" : "dxgi_vsync");
+            m.Log(fbuf);
+            m.hwfq_fallback_to_dxgi = true;
+            m.DestroySession(fr == HwfqFallbackReason::AdmissionTimeoutZeroDisplay
+                                 ? "hwfq admission-timeout fallback"
+                                 : "hwfq zero-display fallback");
+            return true;
+        };
+        check_hwfq_fallback(false);
         if (m.session && !m.session_draining && desc && !m.WaitForCreditRoom(admission_wait, consume)) {
-            if (!m.admission_timeout_logged)
-                m.Log("fg host: Present admission timed out; handing this frame to the real-only copy path");
-            m.admission_timeout_logged = true;
-            // Only the first real-only startup window gets grace. Later stalls still count toward
-            // the failure limit so a persistent problem ends in passthrough.
-            if (!startup_grace) m.RecordSessionFailure();
-            // Only one owner may present on the real chain. Discard queued work and drain the in-progress lease
-            // before passing through. The next frame may create a session again unless the failure limit was reached.
-            m.DestroySession("admission timeout");
+            if (!check_hwfq_fallback(true)) {
+                if (!m.admission_timeout_logged)
+                    m.Log("fg host: Present admission timed out; handing this frame to the real-only copy path");
+                m.admission_timeout_logged = true;
+                // Only the first real-only startup window gets grace. Later stalls still count toward
+                // the failure limit so a persistent problem ends in passthrough.
+                if (!startup_grace) m.RecordSessionFailure();
+                // Only one owner may present on the real chain. Discard queued work and drain the in-progress lease
+                // before passing through. The next frame may create a session again unless the failure limit was reached.
+                m.DestroySession("admission timeout");
+            }
         } else {
             m.admission_timeout_logged = false;
         }
@@ -2849,13 +2936,16 @@ void FgAsiSessionHost::AttachedPresentQueue(IUnknown* q) {
 }
 
 UINT FgAsiSessionHost::ExtraSwapChainFlags(const DXGI_SWAP_CHAIN_DESC1&) {
-    // the DXGI flip presenters pace on the chain's frame-latency object; tearing is added only when the system has it
+    // The DXGI flip presenters pace on the chain's frame-latency object; tearing is added only when the system has it.
+    // Request the same flags for Hwfq so a safety-net fallback to DXGI always has a compatible swap chain.
     UINT f = 0;
     const FgPresenterChoice p = impl_->cfg.settings.presenter;
-    if (p == FgPresenterChoice::Auto || p == FgPresenterChoice::DxgiTearing || p == FgPresenterChoice::DxgiVsync)
+    if (p == FgPresenterChoice::Auto || p == FgPresenterChoice::Hwfq || p == FgPresenterChoice::DxgiTearing ||
+        p == FgPresenterChoice::DxgiVsync)
         f |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
     std::lock_guard<std::recursive_mutex> lock(impl_->mu);
-    if ((p == FgPresenterChoice::Auto || p == FgPresenterChoice::DxgiTearing) && impl_->tearing_supported)
+    if ((p == FgPresenterChoice::Auto || p == FgPresenterChoice::Hwfq || p == FgPresenterChoice::DxgiTearing) &&
+        impl_->tearing_supported)
         f |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
     return f;
 }
