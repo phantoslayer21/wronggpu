@@ -123,6 +123,10 @@ public:
             FAILED(hr = surface_->SetColorSpace(ColorSpaceFor(desc_.format, desc_.hdr))) ||
             FAILED(hr = SetSourceRect(desc_.width, desc_.height)))
             return FgWinFail(FgStatus::Refused, FgWinRefusal::CompositionTarget, hr);
+        if (desc_.hdr || desc_.format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+            ComPtr<IPresentationSurface2> surf2;
+            if (SUCCEEDED(surface_.As(&surf2)) && surf2) surf2->SetIsHdrContent(1);
+        }
 
         info_.hwnd_is_root = !desc_.bind_window || (desc_.hwnd && ::GetAncestor(desc_.hwnd, GA_ROOT) == desc_.hwnd);
         info_.window_cloaked = IsWindowCloaked();
@@ -230,19 +234,30 @@ public:
 
     std::uint64_t PrimePresentId() const override { return prime_present_id_; }
 
-    bool ProbeCompFrame(std::uint64_t cfid, std::uint32_t* target_count,
-                        std::uint64_t* completed_time) const override {
-        if (cfid == 0) return false;
+    std::uint64_t CompletedCompositionFrameId() const override {
+        COMPOSITION_FRAME_ID id = 0;
+        return SUCCEEDED(FgDCompGetFrameId(COMPOSITION_FRAME_ID_COMPLETED, &id)) ? static_cast<std::uint64_t>(id) : 0u;
+    }
+
+    bool ProbeCompFrameTiming(std::uint64_t cfid, FgCompFrameTiming* out) const override {
+        if (cfid == 0 || !out) return false;
+        *out = FgCompFrameTiming{};
         COMPOSITION_FRAME_STATS fst = {};
         COMPOSITION_TARGET_ID targets[4] = {};
         UINT count = 0;
         if (FAILED(FgDCompGetStatistics(cfid, &fst, 4, targets, &count))) return false;
-        if (target_count) *target_count = count;
-        if (completed_time) *completed_time = 0;
+        out->target_count = count;
         if (count > 0) {
             COMPOSITION_TARGET_STATS ts = {};
-            if (SUCCEEDED(FgDCompGetTargetStatistics(cfid, &targets[0], &ts)) && completed_time) {
-                *completed_time = ts.completedStats.time;
+            if (SUCCEEDED(FgDCompGetTargetStatistics(cfid, &targets[0], &ts))) {
+                out->raw_completed_qpc = ts.completedStats.time;
+                out->raw_presented_qpc = ts.presentedStats.time;
+                if (ts.completedStats.time != 0)
+                    out->completed_time = clock_map_.FromQpc(static_cast<std::int64_t>(ts.completedStats.time));
+                if (ts.presentedStats.time != 0)
+                    out->presented_time = clock_map_.FromQpc(static_cast<std::int64_t>(ts.presentedStats.time));
+                if (ts.presentTime != 0)
+                    out->target_present_time = clock_map_.FromQpc(static_cast<std::int64_t>(ts.presentTime));
             }
         }
         return true;
@@ -439,6 +454,7 @@ public:
                             COMPOSITION_TARGET_STATS ts = {};
                             if (SUCCEEDED(FgDCompGetTargetStatistics(cfid, &targets[0], &ts))) {
                                 out->status_target_present_time = ts.presentTime;
+                                out->status_target_presented_time = ts.presentedStats.time;
                                 out->status_target_completed_time = ts.completedStats.time;
                             }
                         }
@@ -460,19 +476,19 @@ public:
                 out->kind = FgCompStatKind::CompositionFrame;
                 if (SUCCEEDED(st.As(&cs))) {
                     const COMPOSITION_FRAME_ID fid = cs->GetCompositionFrameId();
-                    COMPOSITION_FRAME_STATS fst = {};
-                    COMPOSITION_TARGET_ID targets[4] = {};
-                    UINT count = 0;
-                    COMPOSITION_TARGET_STATS ts = {};
-                    if (SUCCEEDED(FgDCompGetStatistics(fid, &fst, 4, targets, &count)) && count > 0 &&
-                        SUCCEEDED(FgDCompGetTargetStatistics(fid, &targets[0], &ts))) {
-                        // Prefer completedStats.time (actual hardware/compositor completion time, per Microsoft
-                        // Composition Swapchain Example 16). Target presentTime alone is not a measured display time.
-                        if (ts.completedStats.time != 0) {
-                            out->displayed_time = clock_map_.FromQpc(static_cast<std::int64_t>(ts.completedStats.time));
+                    out->comp_frame_id = fid;
+                    FgCompFrameTiming timing;
+                    if (ProbeCompFrameTiming(fid, &timing) && timing.target_count > 0) {
+                        // Prefer completedStats.time, then presentedStats.time (both measured DComp target timestamps
+                        // in QPC, mapped into SystemInterruptTime). Target presentTime alone is not measured.
+                        if (timing.completed_time > 0) {
+                            out->displayed_time = timing.completed_time;
                             out->displayed_measured = true;
-                        } else if (ts.presentTime != 0) {
-                            out->displayed_time = clock_map_.FromQpc(static_cast<std::int64_t>(ts.presentTime));
+                        } else if (timing.presented_time > 0) {
+                            out->displayed_time = timing.presented_time;
+                            out->displayed_measured = true;
+                        } else if (timing.target_present_time > 0) {
+                            out->displayed_time = timing.target_present_time;
                             out->displayed_measured = false;
                         }
                     }
@@ -690,13 +706,24 @@ FgTicks FgWinCompPresenter::RealOnlyLookahead() const {
     return std::min<FgTicks>(std::max<FgTicks>(base / 2, 5000), 20000);
 }
 
-FgTicks FgWinCompPresenter::ActiveWatchdogTicksLocked() const {
-    if (last_displayed_platform_ == 0 && info_.status_queued > 0) {
-        const FgTicks ref = desc_.refresh_period > 0 ? desc_.refresh_period
-                                                     : (info_.grid.period > 0 ? info_.grid.period : 166667);
-        return std::min<FgTicks>(kOcclusionWatchdogTicks, std::max<FgTicks>(ref * 3, 250000));
-    }
-    return kOcclusionWatchdogTicks;
+FgTicks FgWinCompPresenter::PresentLookaheadLocked(bool real_only_plan) const {
+    if (real_only_plan) return RealOnlyLookahead();
+    // Once hardware Independent Flip is active, allow deeper future target submission into the hardware flip queue.
+    // In composed mode DWM does not hold a multi-frame future flip queue per visual (submitting a whole interval at
+    // once causes later images in the burst to skip earlier ones and display early), so pace every image to ~half a
+    // refresh ahead of its target time.
+    if (info_.indep_flip_frames >= 4) return 0;  // 0 = unbounded lookahead (up to kMaxCompInFlight)
+    const FgTicks base = desc_.variable_refresh
+                             ? (desc_.min_interval > 0 ? desc_.min_interval
+                                                       : (desc_.refresh_period > 0 ? desc_.refresh_period : 10000))
+                             : (info_.grid.period > 0 ? info_.grid.period : 166667);
+    return std::min<FgTicks>(std::max<FgTicks>(base / 2, 5000), 15000);
+}
+
+FgTicks FgWinCompPresenter::RefreshPeriodLocked() const {
+    if (desc_.refresh_period > 0) return desc_.refresh_period;
+    if (info_.grid.period > 0) return info_.grid.period;
+    return 166667;
 }
 
 void FgWinCompPresenter::SetRealRetireCallback(FgRealRetireFn fn, void* ctx) {
@@ -749,12 +776,17 @@ FgCompPresenterInfo FgWinCompPresenter::Info() const {
     if (backend_) {
         out.window_cloaked = backend_->IsWindowCloaked();
         out.retiring_fence_value = backend_->RetiringFenceValue();
-        if (out.status_first_cfid != 0 && (out.status_target_count_max == 0 || out.status_target_completed_nonzero == 0)) {
-            std::uint32_t tc = 0;
-            std::uint64_t tct = 0;
-            if (backend_->ProbeCompFrame(out.status_first_cfid, &tc, &tct)) {
-                if (tc > out.status_target_count_max) out.status_target_count_max = tc;
-                if (tct != 0 && out.status_target_completed_nonzero == 0) out.status_target_completed_nonzero = 1;
+        if (out.status_first_cfid != 0 &&
+            (out.status_target_count_max == 0 ||
+             (out.status_target_completed_nonzero == 0 && out.status_target_presented_nonzero == 0))) {
+            FgCompFrameTiming timing;
+            if (backend_->ProbeCompFrameTiming(out.status_first_cfid, &timing)) {
+                if (timing.target_count > out.status_target_count_max)
+                    out.status_target_count_max = timing.target_count;
+                if (timing.raw_presented_qpc != 0 && out.status_target_presented_nonzero == 0)
+                    out.status_target_presented_nonzero = 1;
+                if (timing.raw_completed_qpc != 0 && out.status_target_completed_nonzero == 0)
+                    out.status_target_completed_nonzero = 1;
             }
         }
     }
@@ -1064,10 +1096,21 @@ void FgWinCompPresenter::DrainStatisticsLocked() {
                     if (info_.status_first_cfid == 0) info_.status_first_cfid = st.comp_frame_id;
                     if (st.status_target_count > info_.status_target_count_max)
                         info_.status_target_count_max = st.status_target_count;
+                    if (st.status_target_presented_time != 0) ++info_.status_target_presented_nonzero;
                     if (st.status_target_completed_time != 0) ++info_.status_target_completed_nonzero;
                 }
                 if (st.status == FgCompPresentStatus::Queued) {
                     ++info_.status_queued;
+                    if (st.comp_frame_id != 0) {
+                        ++info_.status_queued_with_cfid;
+                        for (Submitted& s : submitted_) {
+                            if (s.platform_id == pid) {
+                                s.comp_frame_id = st.comp_frame_id;
+                                s.queued_confirmed = true;
+                                break;
+                            }
+                        }
+                    }
                 } else if (st.status == FgCompPresentStatus::Skipped || st.status == FgCompPresentStatus::Canceled) {
                     if (st.status == FgCompPresentStatus::Skipped) ++info_.status_skipped;
                     else ++info_.status_canceled;
@@ -1085,6 +1128,8 @@ void FgWinCompPresenter::DrainStatisticsLocked() {
                 const bool measured = st.displayed_measured && st.displayed_time > 0;
                 const FgTicks actual = measured ? st.displayed_time : NowLocked();
                 if (TakePlatformPresent(pid, &submitted)) {
+                    if (measured) ++info_.display_time_iflip;
+                    else ++info_.display_time_estimated;
                     engine_.OnPresentDisplayed(submitted.engine_id, actual, measured);
                     display_.Displayed(submitted.display, measured ? actual : 0);
                 }
@@ -1097,6 +1142,8 @@ void FgWinCompPresenter::DrainStatisticsLocked() {
                 const FgTicks actual =
                     measured ? st.displayed_time : (st.displayed_time > 0 ? st.displayed_time : NowLocked());
                 if (TakePlatformPresent(pid, &submitted)) {
+                    if (measured) ++info_.display_time_comp;
+                    else ++info_.display_time_estimated;
                     engine_.OnPresentDisplayed(submitted.engine_id, actual, measured);
                     display_.Displayed(submitted.display, measured ? actual : 0);
                 }
@@ -1105,6 +1152,68 @@ void FgWinCompPresenter::DrainStatisticsLocked() {
             case FgCompStatKind::None:
                 break;
         }
+    }
+}
+
+void FgWinCompPresenter::ResolveQueuedDisplaysLocked() {
+    if (submitted_.empty()) return;
+    const std::uint64_t completed_cfid = backend_->CompletedCompositionFrameId();
+    const std::uint64_t retire_val = backend_->RetiringFenceValue();
+    info_.retiring_fence_value = retire_val;
+    if (completed_cfid == 0 && retire_val == 0) return;
+
+    const FgTicks now = NowLocked();
+    const FgTicks dcomp_grace = std::max<FgTicks>(RefreshPeriodLocked() * 4, 400000);  // >= 40 ms
+    std::size_t i = 0;
+    while (i < submitted_.size()) {
+        const Submitted& s = submitted_[i];
+        if (!s.queued_confirmed || s.comp_frame_id == 0) {
+            ++i;
+            continue;
+        }
+        const bool cfid_done = completed_cfid != 0 && completed_cfid >= s.comp_frame_id;
+        const bool fence_done = retire_val != 0 && retire_val >= s.platform_id;
+        if (!cfid_done && !fence_done) {
+            ++i;
+            continue;
+        }
+        // When DCompositionGetFrameId(COMPLETED) is available but has not yet crossed s.comp_frame_id, wait briefly
+        // before falling back to retiring-fence confirmation so we retrieve the measured DComp target timestamp.
+        if (!cfid_done && completed_cfid != 0 && s.vblank > 0 && now < s.vblank + dcomp_grace) {
+            ++i;
+            continue;
+        }
+
+        FgCompFrameTiming timing;
+        const bool probed = backend_->ProbeCompFrameTiming(s.comp_frame_id, &timing);
+        if (probed) {
+            if (timing.target_count > info_.status_target_count_max)
+                info_.status_target_count_max = timing.target_count;
+            if (timing.raw_presented_qpc != 0) ++info_.status_target_presented_nonzero;
+            if (timing.raw_completed_qpc != 0) ++info_.status_target_completed_nonzero;
+        }
+
+        bool measured = false;
+        FgTicks actual = 0;
+        if (probed && timing.completed_time > 0) {
+            actual = timing.completed_time;
+            measured = true;
+            ++info_.display_time_dcomp_stats;
+        } else if (probed && timing.presented_time > 0) {
+            actual = timing.presented_time;
+            measured = true;
+            ++info_.display_time_dcomp_stats;
+        } else {
+            actual = (probed && timing.target_present_time > 0) ? timing.target_present_time : now;
+            measured = false;
+            ++info_.display_time_estimated;
+        }
+
+        const Submitted done = s;
+        submitted_.erase(submitted_.begin() + static_cast<std::ptrdiff_t>(i));
+        if (done.platform_id > last_displayed_platform_) last_displayed_platform_ = done.platform_id;
+        engine_.OnPresentDisplayed(done.engine_id, actual, measured);
+        display_.Displayed(done.display, measured ? actual : 0);
     }
 }
 
@@ -1118,15 +1227,13 @@ void FgWinCompPresenter::ReleaseSlotsLocked() {
             const std::uint64_t eid = engine_.SlotPresentId(slot);
             for (std::size_t i = 0; i < submitted_.size(); ++i) {
                 if (submitted_[i].engine_id != eid) continue;
-                const bool older_available =
-                    last_displayed_platform_ != 0 && submitted_[i].platform_id < last_displayed_platform_;
-                // Windowed-only occlusion / never-displayed watchdog (never triggers in headless bind_window==false):
-                // if DWM stops emitting display statistics while occluded/minimized (250 ms) or after queuing presents
-                // with zero displayed frames (~3 refresh periods, >= 25 ms), ask the presentation manager to cancel
-                // the stalled suffix and retire a queued present only once IsBufferAvailable confirms release.
-                const FgTicks watchdog_ticks = ActiveWatchdogTicksLocked();
+                const bool older_available = !submitted_[i].queued_confirmed && last_displayed_platform_ != 0 &&
+                                             submitted_[i].platform_id < last_displayed_platform_;
+                // Windowed-only 250 ms occlusion watchdog (never triggers in headless bind_window==false):
+                // if DWM stops progressing the queue while occluded/minimized, cancel the stalled suffix and retire
+                // a queued present only once IsBufferAvailable confirms release.
                 const bool occluded_timeout = desc_.bind_window && submitted_[i].vblank > 0 &&
-                                              now > submitted_[i].vblank + watchdog_ticks;
+                                              now > submitted_[i].vblank + kOcclusionWatchdogTicks;
                 if (older_available || occluded_timeout) {
                     if (backend_->IsBufferAvailable(slot)) {
                         if (occluded_timeout) ++info_.watchdog_retired;
@@ -1201,14 +1308,12 @@ void FgWinCompPresenter::SubmitOutboxLocked() {
             when = vblank = effective;
         }
 
-        // Pace real-only presents so fast uncapped startup / menu loops do not flood IPresentationManager far ahead
-        // of wall-clock time or let consecutive real-only targets run away past the display rate.
-        if (real_only_plan) {
-            const FgTicks lookahead = RealOnlyLookahead();
-            if (now + lookahead < when) {
-                next_pace_wake_ = when - lookahead;
-                break;
-            }
+        // Pace submission so real-only startup loops never flood IPresentationManager and composed-mode intervals
+        // arrive just before each image's target time instead of bursting all N+1 frames into one composition frame.
+        const FgTicks lookahead = PresentLookaheadLocked(real_only_plan);
+        if (lookahead > 0 && now + lookahead < when) {
+            next_pace_wake_ = when - lookahead;
+            break;
         }
 
         std::uint64_t pid = 0;
@@ -1234,7 +1339,8 @@ void FgWinCompPresenter::SubmitOutboxLocked() {
         }
         engine_.OnPresentSubmitted(p.present_id, submitted_at);
         display_.Submitted();
-        submitted_.push_back(Submitted{p.present_id, pid, vblank, {p.target, submitted_at, p.real, p.gameplay}, false});
+        submitted_.push_back(
+            Submitted{p.present_id, pid, vblank, {p.target, submitted_at, p.real, p.gameplay}, 0, false, false});
         if (submitted_.size() > kMaxSubmitted) {
             display_.Unresolved(1);
             submitted_.erase(submitted_.begin());
@@ -1255,6 +1361,7 @@ void FgWinCompPresenter::StepLocked() {
     const FgTicks now = NowLocked();
     if (!desc_.variable_refresh && now - grid_updated_at_ > kGridRefresh) UpdateGridLocked();
     DrainStatisticsLocked();
+    ResolveQueuedDisplaysLocked();
     ReleaseSlotsLocked();
     engine_.Pump(now);
     if (engine_.State() == FgPresenterState::Attached) SubmitOutboxLocked();
@@ -1282,9 +1389,20 @@ void FgWinCompPresenter::Run(HANDLE stop, HANDLE wake) {
             const FgTicks deadline = engine_.NextDeadline();
             if (deadline > 0) consider_timer(deadline + 1);
             if (next_pace_wake_ > 0) consider_timer(next_pace_wake_);
+            bool awaiting_dcomp_completion = false;
+            for (const Submitted& s : submitted_) {
+                if (s.queued_confirmed && s.comp_frame_id != 0) {
+                    awaiting_dcomp_completion = true;
+                    break;
+                }
+            }
+            if (awaiting_dcomp_completion) {
+                const FgTicks poll_step = std::min<FgTicks>(RefreshPeriodLocked(), 30000);
+                consider_timer(NowLocked() + std::max<FgTicks>(poll_step, 10000));
+            }
             if (desc_.bind_window && !submitted_.empty() && submitted_.front().vblank > 0 &&
                 !submitted_.front().watchdog_cancelled) {
-                consider_timer(submitted_.front().vblank + ActiveWatchdogTicksLocked() + 1);
+                consider_timer(submitted_.front().vblank + kOcclusionWatchdogTicks + 1);
             }
             if (next_timer > 0) timer_.ArmAt(next_timer);
             else timer_.Cancel();

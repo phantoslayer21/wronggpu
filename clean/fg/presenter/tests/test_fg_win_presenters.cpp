@@ -1861,7 +1861,8 @@ public:
         SetAvailableLocked(slot, true);
     }
 
-    void PushQueuedStatus(std::uint64_t pid, std::uint64_t cfid, std::uint32_t targets, std::uint64_t completed_time) {
+    void PushQueuedStatus(std::uint64_t pid, std::uint64_t cfid, std::uint32_t targets, std::uint64_t completed_time,
+                          std::uint64_t presented_time = 0) {
         std::lock_guard<std::mutex> lock(mu_);
         FgCompStatistic st;
         st.kind = FgCompStatKind::PresentStatus;
@@ -1869,8 +1870,30 @@ public:
         st.status = FgCompPresentStatus::Queued;
         st.comp_frame_id = cfid;
         st.status_target_count = targets;
+        st.status_target_presented_time = presented_time;
         st.status_target_completed_time = completed_time;
         PushStatLocked(st);
+    }
+
+    void SetCompletedCfid(std::uint64_t cfid) {
+        std::lock_guard<std::mutex> lock(mu_);
+        completed_cfid_ = cfid;
+    }
+
+    void SetRetiringFence(std::uint64_t val) {
+        std::lock_guard<std::mutex> lock(mu_);
+        retiring_fence_ = val;
+    }
+
+    void SetCompFrameTiming(std::uint64_t cfid, const FgCompFrameTiming& timing) {
+        std::lock_guard<std::mutex> lock(mu_);
+        for (auto& kv : cfid_timings_) {
+            if (kv.first == cfid) {
+                kv.second = timing;
+                return;
+            }
+        }
+        cfid_timings_.push_back({cfid, timing});
     }
 
     void PushCustomStat(const FgCompStatistic& s) {
@@ -1919,6 +1942,25 @@ public:
     bool IsWindowVisible() const override {
         std::lock_guard<std::mutex> lock(mu_);
         return window_visible_;
+    }
+    std::uint64_t RetiringFenceValue() const override {
+        std::lock_guard<std::mutex> lock(mu_);
+        return retiring_fence_;
+    }
+    std::uint64_t CompletedCompositionFrameId() const override {
+        std::lock_guard<std::mutex> lock(mu_);
+        return completed_cfid_;
+    }
+    bool ProbeCompFrameTiming(std::uint64_t cfid, FgCompFrameTiming* out) const override {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (!out) return false;
+        for (const auto& kv : cfid_timings_) {
+            if (kv.first == cfid) {
+                *out = kv.second;
+                return true;
+            }
+        }
+        return false;
     }
     const IFgFenceSource* FenceSource() const override { return &fences_; }
     void WatchFence(const FgReadyFence&) override {}
@@ -2070,6 +2112,9 @@ private:
     std::size_t peak_pending_ = 0;
     std::deque<FgCompStatistic> stats_;
     std::vector<std::uint64_t> cancel_calls_;
+    std::uint64_t completed_cfid_ = 0;
+    std::uint64_t retiring_fence_ = 0;
+    std::vector<std::pair<std::uint64_t, FgCompFrameTiming>> cfid_timings_;
 };
 
 void TestCompLoggedFailureAndPacingFix() {
@@ -2486,13 +2531,96 @@ void TestCompWatchdogAndIsAvailable() {
         CHECK(p->Detach() == FgStatus::Ok);
     }
 
-    // 4) Queued-but-never-displayed fast watchdog + PresentStatus frame/target telemetry:
-    //    when PresentStatus_Queued arrives (display processed the queue) with zero displayed frames, the watchdog
-    //    cancels in max(3 refreshes, 25 ms) instead of waiting 250 ms.
+    // 4) Composed-mode display confirmation with 0 CompositionFrame and 0 IndependentFlipFrame statistics:
+    //    PresentStatus_Queued + nonzero CompositionFrameId confirms display once COMPLETED >= cfid and resolves
+    //    measured display time from DComp presentedStats.time, releases superseded slots via IsAvailable, never fires
+    //    a false watchdog, and never double-counts if a late CompositionFrame arrives afterward.
     {
         auto backend_up = std::make_unique<FakeCompBackend>(10, 750 * kMs, false);
         FakeCompBackend* backend = backend_up.get();
-        backend->SetCancelEmitsStat(false, false);
+        const std::uint32_t fid = backend->CreateFence();
+        FgCompPresenterDesc cd;
+        cd.bind_window = true;
+        cd.width = 2560;
+        cd.height = 1440;
+        cd.variable_refresh = true;
+        cd.refresh_period = kRefresh360;
+        cd.min_interval = kMinInterval360;
+        cd.slot_count = 10;
+        std::unique_ptr<FgWinCompPresenter> p;
+        CHECK(FgWinCompPresenter::CreateWithBackend(cd, std::move(backend_up), false, &p).Ok());
+        CHECK(p->Attach(0x5304, 1) == FgStatus::Ok);
+
+        FgTicks t = 750 * kMs;
+        std::uint32_t slot1 = 0, slot2 = 0;
+        CHECK(p->ReserveRealSlot(&slot1) == FgStatus::Ok);
+        FgIntervalPlan pl1 = MakePlan(1, 1, 1, t, kMinInterval360, 0, 2500);
+        backend->SignalFence(fid, 1);
+        CHECK(p->PresentRealOnly(pl1, FgRealImage{1, 1, FgReadyFence{fid, 1}}) == FgStatus::Ok);
+        t += kMinInterval360;
+        backend->SetNow(t);
+        p->StepForTest();
+        // DWM queues present 1 on cfid 9001, retiring fence still 0, completed cfid still 9000 -> not displayed yet.
+        backend->SetCompletedCfid(9000);
+        backend->PushQueuedStatus(1, 9001, 1, 0, 0);
+        p->StepForTest();
+        CHECK(p->Stats().displayed_real == 0);
+        CHECK(p->Info().status_queued == 1 && p->Info().status_queued_with_cfid == 1 &&
+              p->Info().status_first_cfid == 9001);
+
+        // Once COMPLETED crosses 9001 with presentedStats.time populated (completedStats.time == 0): displayed & measured.
+        FgCompFrameTiming ft1;
+        ft1.target_count = 1;
+        ft1.presented_time = t + 2000;
+        ft1.raw_presented_qpc = 99001;
+        backend->SetCompFrameTiming(9001, ft1);
+        backend->SetCompletedCfid(9001);
+        p->StepForTest();
+        CHECK(p->Stats().displayed_real == 1 && p->Stats().display_time_measured == true);
+        CHECK(p->Info().display_time_dcomp_stats == 1 && p->Info().display_time_estimated == 0);
+        CHECK(p->Info().comp_frames == 0 && p->Info().indep_flip_frames == 0 && p->Info().watchdog_retired == 0);
+
+        // A late CompositionFrame for the same present must NOT double-count displayed_real.
+        FgCompStatistic late_cf;
+        late_cf.kind = FgCompStatKind::CompositionFrame;
+        late_cf.present_id = 1;
+        late_cf.comp_frame_id = 9001;
+        late_cf.displayed_time = t + 2000;
+        late_cf.displayed_measured = true;
+        backend->PushCustomStat(late_cf);
+        p->StepForTest();
+        CHECK(p->Stats().displayed_real == 1 && p->Info().comp_frames == 1);
+
+        // Present 2 supersedes present 1 -> slot1 transitions to Retired and frees as soon as IsAvailable == true.
+        CHECK(p->ReserveRealSlot(&slot2) == FgStatus::Ok);
+        FgIntervalPlan pl2 = MakePlan(1, 2, 2, t + kMinInterval360, kMinInterval360, 0, 2500);
+        pl2.reanchored = true;
+        backend->SignalFence(fid, 2);
+        CHECK(p->PresentRealOnly(pl2, FgRealImage{1, 2, FgReadyFence{fid, 2}}) == FgStatus::Ok);
+        t += kMinInterval360 * 2;
+        backend->SetNow(t);
+        p->StepForTest();
+        backend->PushQueuedStatus(2, 9005, 1, 0, 0);
+        FgCompFrameTiming ft2;
+        ft2.target_count = 1;
+        ft2.presented_time = t + 1000;
+        ft2.raw_presented_qpc = 99005;
+        backend->SetCompFrameTiming(9005, ft2);
+        backend->SetCompletedCfid(9005);
+        backend->SetRetiringFence(1);
+        backend->ReleaseSlotBuffer(slot1);
+        p->StepForTest();
+        CHECK(p->Stats().displayed_real == 2 && p->Stats().display_time_measured == true);
+        CHECK(p->Info().display_time_dcomp_stats == 2 && p->Info().retiring_fence_value == 1);
+        CHECK(p->FreeSlots() == 9);  // slot1 released by IsAvailable; only slot2 (Displayed) held
+        CHECK(backend->CancelCalls().empty());
+        CHECK(p->Detach() == FgStatus::Ok);
+    }
+
+    // 5) Retiring-fence-only confirmation (DComp COMPLETED unavailable -> 0): confirms display honestly as unmeasured.
+    {
+        auto backend_up = std::make_unique<FakeCompBackend>(10, 800 * kMs, false);
+        FakeCompBackend* backend = backend_up.get();
         const std::uint32_t fid = backend->CreateFence();
         FgCompPresenterDesc cd;
         cd.bind_window = true;
@@ -2504,28 +2632,19 @@ void TestCompWatchdogAndIsAvailable() {
         cd.slot_count = 10;
         std::unique_ptr<FgWinCompPresenter> p;
         CHECK(FgWinCompPresenter::CreateWithBackend(cd, std::move(backend_up), false, &p).Ok());
-        CHECK(p->Attach(0x5304, 1) == FgStatus::Ok);
+        CHECK(p->Attach(0x5305, 1) == FgStatus::Ok);
         std::uint32_t slot = 0;
         CHECK(p->ReserveRealSlot(&slot) == FgStatus::Ok);
-        FgIntervalPlan pl = MakePlan(1, 1, 1, 750 * kMs, kMinInterval360, 0, 2500);
+        FgIntervalPlan pl = MakePlan(1, 1, 1, 800 * kMs, kMinInterval360, 0, 2500);
         backend->SignalFence(fid, 1);
         CHECK(p->PresentRealOnly(pl, FgRealImage{1, 1, FgReadyFence{fid, 1}}) == FgStatus::Ok);
-        backend->SetNow(750 * kMs + kMinInterval360);
+        backend->SetNow(800 * kMs + kMinInterval360);
         p->StepForTest();
-        backend->PushQueuedStatus(1, 9001, 1, 123456);
+        backend->PushQueuedStatus(1, 7001, 0, 0, 0);
+        backend->SetRetiringFence(1);  // retiring fence passed present 1; CompletedCompositionFrameId == 0
         p->StepForTest();
-        const FgCompPresenterInfo qi = p->Info();
-        CHECK(qi.status_queued == 1 && qi.status_frame_nonzero == 1 && qi.status_first_cfid == 9001 &&
-              qi.status_target_count_max == 1 && qi.status_target_completed_nonzero == 1);
-        backend->SetNow(750 * kMs + kMinInterval360 + 20 * kMs);
-        p->StepForTest();
-        CHECK(backend->CancelCalls().empty());
-        backend->SetNow(750 * kMs + kMinInterval360 + 30 * kMs);
-        p->StepForTest();
-        CHECK(backend->CancelCalls().size() == 1);
-        backend->ReleaseSlotBuffer(slot);
-        p->StepForTest();
-        CHECK(p->Info().watchdog_retired == 1 && p->FreeSlots() == 10);
+        CHECK(p->Stats().displayed_real == 1 && p->Stats().display_time_measured == false);
+        CHECK(p->Info().display_time_estimated == 1 && p->Info().display_time_dcomp_stats == 0);
         CHECK(p->Detach() == FgStatus::Ok);
     }
 }

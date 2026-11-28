@@ -39,10 +39,20 @@ struct FgCompStatistic {
     FgCompPresentStatus status = FgCompPresentStatus::Queued;  // valid for PresentStatus
     FgTicks displayed_time = 0;                                // interrupt-time ticks (0 if unavailable)
     bool displayed_measured = false;                           // true only for measured hardware/compositor completion
-    std::uint64_t comp_frame_id = 0;                           // GetCompositionFrameId() on PresentStatus
+    std::uint64_t comp_frame_id = 0;                           // GetCompositionFrameId() on PresentStatus / CompositionFrame
     std::uint32_t status_target_count = 0;                     // targets reported for comp_frame_id (first 16 statuses)
     std::uint64_t status_target_present_time = 0;              // target presentTime (QPC) if target_count > 0
+    std::uint64_t status_target_presented_time = 0;            // target presentedStats.time (QPC) if target_count > 0
     std::uint64_t status_target_completed_time = 0;            // target completedStats.time (QPC) if target_count > 0
+};
+
+struct FgCompFrameTiming {
+    std::uint32_t target_count = 0;
+    FgTicks completed_time = 0;       // interrupt-time ticks from ts.completedStats.time (measured)
+    FgTicks presented_time = 0;       // interrupt-time ticks from ts.presentedStats.time (measured)
+    FgTicks target_present_time = 0;  // interrupt-time ticks from ts.presentTime (estimated / scheduled)
+    std::uint64_t raw_completed_qpc = 0;
+    std::uint64_t raw_presented_qpc = 0;
 };
 
 struct FgCompBackendInfo {
@@ -72,10 +82,8 @@ public:
     virtual bool IsWindowCloaked() const { return false; }
     virtual std::uint64_t RetiringFenceValue() const { return 0; }
     virtual std::uint64_t PrimePresentId() const { return 0; }
-    virtual bool ProbeCompFrame(std::uint64_t /*cfid*/, std::uint32_t* /*target_count*/,
-                                std::uint64_t* /*completed_time*/) const {
-        return false;
-    }
+    virtual std::uint64_t CompletedCompositionFrameId() const { return 0; }
+    virtual bool ProbeCompFrameTiming(std::uint64_t /*cfid*/, FgCompFrameTiming* /*out*/) const { return false; }
 
     // Producer fences and D3D12 slot resources.
     virtual const IFgFenceSource* FenceSource() const = 0;

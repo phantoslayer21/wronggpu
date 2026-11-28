@@ -285,6 +285,10 @@ struct FgAsiSessionHost::Impl {
     bool display_sample_generating = false;
     bool overlay_choice_logged = false;
     bool hwfq_fallback_to_dxgi = false;
+    uint64_t hwfq_last_retire_fence = 0;
+    uint64_t hwfq_last_queued_cfid = 0;
+    uint64_t hwfq_last_vis_sub_at_progress = 0;
+    wgfg::FgTicks hwfq_last_progress_tick = 0;
     HANDLE wait_timer = nullptr;      // back-pressure waits (high resolution)
     uint64_t back_pressure_waits = 0; // game frames that waited for a presenter slot
     bool back_pressure_logged = false;
@@ -359,9 +363,24 @@ struct FgAsiSessionHost::Impl {
     uint32_t trace_since_summary = 0;
     bool trace_csv_enabled = false;
     std::string trace_csv_path;
+    struct HwfqTrace {
+        bool valid = false;
+        uint64_t indep_flip = 0;
+        uint64_t comp = 0;
+        uint64_t status_queued = 0;
+        uint64_t status_queued_cfid = 0;
+        uint64_t status_skipped = 0;
+        uint64_t status_canceled = 0;
+        uint64_t retire_fence = 0;
+        uint64_t dt_iflip = 0;
+        uint64_t dt_comp = 0;
+        uint64_t dt_dcomp = 0;
+        uint64_t dt_est = 0;
+    };
     struct DisplayTrace {
         const char* source = "unavailable";
         wgfg::FgDisplaySummary samples;
+        HwfqTrace hwfq;
     };
     bool logged_display_disjoint = false;
     bool logged_display_unsupported = false;
@@ -603,10 +622,24 @@ struct FgAsiSessionHost::Impl {
     DisplayTrace ReadDisplayCadence(bool window) {
         auto* pr = session ? session->Presenter() : nullptr;
         if (auto* dx = dynamic_cast<wgfg::FgDxgiPresenter*>(pr)) {
-            return {"dxgi-vblank", dx->ReadDisplayCadence(window)};
+            return {"dxgi-vblank", dx->ReadDisplayCadence(window), {}};
         }
         if (auto* cp = dynamic_cast<wgfg::FgWinCompPresenter*>(pr)) {
-            return {"composition", cp->ReadDisplayCadence(window)};
+            const wgfg::FgCompPresenterInfo in = cp->Info();
+            HwfqTrace ht;
+            ht.valid = true;
+            ht.indep_flip = in.indep_flip_frames;
+            ht.comp = in.comp_frames;
+            ht.status_queued = in.status_queued;
+            ht.status_queued_cfid = in.status_queued_with_cfid;
+            ht.status_skipped = in.status_skipped;
+            ht.status_canceled = in.status_canceled;
+            ht.retire_fence = in.retiring_fence_value;
+            ht.dt_iflip = in.display_time_iflip;
+            ht.dt_comp = in.display_time_comp;
+            ht.dt_dcomp = in.display_time_dcomp_stats;
+            ht.dt_est = in.display_time_estimated;
+            return {"composition", cp->ReadDisplayCadence(window), ht};
         }
         return {};
     }
@@ -617,19 +650,28 @@ struct FgAsiSessionHost::Impl {
         const auto count = [](uint64_t n) { return std::to_string(n); };
         char fps[32] = "n/a";
         if (t.gameplay_time > 0) std::snprintf(fps, sizeof(fps), "%.1f", t.GameplayFps());
-        return std::string("display_source=") + display.source +
-               " display_observed=" + count(t.real + t.generated) +
-               " display_unseen=" + count(t.unseen) + " display_unresolved=" + count(t.unresolved) +
-               " display_pending=" + count(t.pending) + " display_polled_submitted=" + count(t.submitted) +
-               " display_untimed=" + count(t.untimed) + " display_disjoint=" + count(t.disjoint) +
-               " display_unsupported=" + count(t.unsupported) + " display_read_errors=" + count(t.read_errors) +
-               " | display_dt_us p50=" + us(t.interval_p50) + " p95=" + us(t.interval_p95) +
-               " p99=" + us(t.interval_p99) + " max=" + us(t.interval_max) + " n=" + count(t.interval_samples) +
-               " short=" + count(t.short_intervals) + " | display_latency_us p50=" + us(t.latency_p50) +
-               " p95=" + us(t.latency_p95) + " n=" + count(t.real + t.generated - t.untimed) +
-               " | gameplay_display_fps=" + fps +
-               " gameplay_display_real=" + count(t.gameplay_real) +
-               " gameplay_display_generated=" + count(t.gameplay_generated);
+        std::string out = std::string("display_source=") + display.source +
+                          " display_observed=" + count(t.real + t.generated) +
+                          " display_unseen=" + count(t.unseen) + " display_unresolved=" + count(t.unresolved) +
+                          " display_pending=" + count(t.pending) + " display_polled_submitted=" + count(t.submitted) +
+                          " display_untimed=" + count(t.untimed) + " display_disjoint=" + count(t.disjoint) +
+                          " display_unsupported=" + count(t.unsupported) + " display_read_errors=" + count(t.read_errors) +
+                          " | display_dt_us p50=" + us(t.interval_p50) + " p95=" + us(t.interval_p95) +
+                          " p99=" + us(t.interval_p99) + " max=" + us(t.interval_max) + " n=" + count(t.interval_samples) +
+                          " short=" + count(t.short_intervals) + " | display_latency_us p50=" + us(t.latency_p50) +
+                          " p95=" + us(t.latency_p95) + " n=" + count(t.real + t.generated - t.untimed) +
+                          " | gameplay_display_fps=" + fps +
+                          " gameplay_display_real=" + count(t.gameplay_real) +
+                          " gameplay_display_generated=" + count(t.gameplay_generated);
+        if (display.hwfq.valid) {
+            const auto& h = display.hwfq;
+            out += " | hwfq indep_flip=" + count(h.indep_flip) + " comp=" + count(h.comp) +
+                   " q=" + count(h.status_queued) + " q_cfid=" + count(h.status_queued_cfid) +
+                   " sk=" + count(h.status_skipped) + " ca=" + count(h.status_canceled) +
+                   " rf=" + count(h.retire_fence) + " dt_src=iflip:" + count(h.dt_iflip) +
+                   "/comp:" + count(h.dt_comp) + "/dcomp:" + count(h.dt_dcomp) + "/est:" + count(h.dt_est);
+        }
+        return out;
     }
 
     void QueueTraceSummary(const char* tag, bool closing, const DisplayTrace& display) {
@@ -1412,13 +1454,19 @@ struct FgAsiSessionHost::Impl {
                 reasons += "; hwfq indep_flip=" + std::to_string(in.indep_flip_frames) +
                            " comp=" + std::to_string(in.comp_frames) +
                            " status_queued=" + std::to_string(in.status_queued) +
+                           " status_queued_cfid=" + std::to_string(in.status_queued_with_cfid) +
                            " status_skipped=" + std::to_string(in.status_skipped) +
                            " status_canceled=" + std::to_string(in.status_canceled) +
                            " status_cfid_nz=" + std::to_string(in.status_frame_nonzero) +
                            " status_first_cfid=" + std::to_string(in.status_first_cfid) +
                            " status_tgts_max=" + std::to_string(in.status_target_count_max) +
+                           " status_pct_nz=" + std::to_string(in.status_target_presented_nonzero) +
                            " status_tct_nz=" + std::to_string(in.status_target_completed_nonzero) +
                            " retire_fence=" + std::to_string(in.retiring_fence_value) +
+                           " dt_src=iflip:" + std::to_string(in.display_time_iflip) +
+                           "/comp:" + std::to_string(in.display_time_comp) +
+                           "/dcomp:" + std::to_string(in.display_time_dcomp_stats) +
+                           "/est:" + std::to_string(in.display_time_estimated) +
                            " watchdog_retired=" + std::to_string(in.watchdog_retired) +
                            " visible_sub=" + std::to_string(in.visible_submitted) +
                            " primed=" + (in.primed ? "yes" : "no") +
@@ -1455,6 +1503,10 @@ struct FgAsiSessionHost::Impl {
         Log(std::string("fg host: session destroyed (") + why + "): " + wgfg::FgSessionErrorName(r.error));
         session.reset();
         QueueTraceSummary(why, true, closing_display);
+        hwfq_last_retire_fence = 0;
+        hwfq_last_queued_cfid = 0;
+        hwfq_last_vis_sub_at_progress = 0;
+        hwfq_last_progress_tick = 0;
         previous_fill_wait = current_fill_wait = current_fill_period = 0;
         fill_cap_intervals = fill_high_intervals = fill_gameplay_intervals = 0;
         fill_trim_sum = 0.0;
@@ -2373,59 +2425,98 @@ int32_t FgAsiSessionHost::Route(void* ctx, FgProxy* core, const WgFgPresentDesc*
             if (!cp) return false;
             const wgfg::FgPresentStats ps = cp->Stats();
             const wgfg::FgCompPresenterInfo ci = cp->Info();
+            const wgfg::FgPresenterState pstate = cp->State();
+            if (ci.retiring_fence_value > m.hwfq_last_retire_fence ||
+                ci.status_queued_with_cfid > m.hwfq_last_queued_cfid) {
+                m.hwfq_last_retire_fence = ci.retiring_fence_value;
+                m.hwfq_last_queued_cfid = ci.status_queued_with_cfid;
+                m.hwfq_last_vis_sub_at_progress = ci.visible_submitted;
+                m.hwfq_last_progress_tick = t_arrival;
+            } else if (m.hwfq_last_progress_tick == 0 && ci.first_visible_submit > 0) {
+                m.hwfq_last_progress_tick = ci.first_visible_submit;
+                m.hwfq_last_vis_sub_at_progress = 0;
+            }
             HwfqHealthSnapshot snap;
             snap.displayed = ps.displayed_real + ps.displayed_generated;
             snap.visible_submitted = ci.visible_submitted;
             snap.resolved_unseen = ps.display_skipped_real + ps.display_skipped_generated;
-            snap.status_queued = ci.status_queued;
+            snap.status_queued_with_cfid = ci.status_queued_with_cfid;
+            snap.status_canceled = ci.status_canceled;
+            snap.retiring_fence_value = ci.retiring_fence_value;
             snap.watchdog_retired = ci.watchdog_retired;
             snap.visible_elapsed_ticks =
                 ci.first_visible_submit > 0 && t_arrival > ci.first_visible_submit
                     ? (t_arrival - ci.first_visible_submit)
                     : 0;
+            snap.stall_elapsed_ticks =
+                ci.visible_submitted > m.hwfq_last_vis_sub_at_progress && m.hwfq_last_progress_tick > 0 &&
+                        t_arrival > m.hwfq_last_progress_tick
+                    ? (t_arrival - m.hwfq_last_progress_tick)
+                    : 0;
             const uint32_t hz = m.st_refresh_hz.load();
             snap.refresh_period = hz > 0 ? static_cast<wgfg::FgTicks>(10000000ull / hz) : ci.grid.period;
+            snap.last_present_hr = ci.last_present_hr;
             snap.admission_timed_out = timed_out;
             snap.startup_grace = startup_grace;
+            snap.presenter_failed = pstate == wgfg::FgPresenterState::Failed || pstate == wgfg::FgPresenterState::Lost;
             const HwfqFallbackReason fr = CheckHwfqZeroDisplayFallback(snap);
             if (fr == HwfqFallbackReason::None) return false;
             const bool tear = m.tearing_supported && (m.chain_flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0;
-            const char* reason_text = fr == HwfqFallbackReason::QueuedZeroDisplay
-                                          ? "queued zero-display"
-                                          : (fr == HwfqFallbackReason::AdmissionTimeoutZeroDisplay
-                                                 ? "admission timeout"
-                                                 : "sustained zero-display");
-            char fbuf[512];
+            const char* reason_text = "sustained zero-display";
+            const char* destroy_why = "hwfq zero-display fallback";
+            switch (fr) {
+                case HwfqFallbackReason::DeviceError:
+                    reason_text = "device/present error";
+                    destroy_why = "hwfq device-error fallback";
+                    break;
+                case HwfqFallbackReason::CancelStorm:
+                    reason_text = "cancel storm";
+                    destroy_why = "hwfq cancel-storm fallback";
+                    break;
+                case HwfqFallbackReason::FenceAndQueueStalled:
+                    reason_text = "fence and queue stalled";
+                    destroy_why = "hwfq fence-queue-stalled fallback";
+                    break;
+                case HwfqFallbackReason::AdmissionTimeoutZeroDisplay:
+                    reason_text = "admission timeout";
+                    destroy_why = "hwfq admission-timeout fallback";
+                    break;
+                case HwfqFallbackReason::ZeroDisplaySustained:
+                case HwfqFallbackReason::None:
+                    break;
+            }
+            char fbuf[576];
             std::snprintf(fbuf, sizeof fbuf,
-                          "fg host: hwfq composition displayed 0 presents (%s; real_sub=%llu visible_sub=%llu "
-                          "queued=%llu skipped=%llu cfid_nz=%llu first_cfid=%llu tgts_max=%u tct_nz=%llu "
-                          "retire_fence=%llu indep_flip=%llu comp=%llu watchdog=%llu primed=%s cloaked=%s "
-                          "hwnd_root=%s elapsed_ms=%lld); falling back to %s for this run without disabling "
-                          "frame generation",
+                          "fg host: hwfq composition health fallback (%s; disp=%llu real_sub=%llu visible_sub=%llu "
+                          "queued=%llu q_cfid=%llu skipped=%llu canceled=%llu cfid_nz=%llu tgts_max=%u pct_nz=%llu "
+                          "tct_nz=%llu retire_fence=%llu indep_flip=%llu comp=%llu watchdog=%llu hr=0x%08lx "
+                          "primed=%s cloaked=%s hwnd_root=%s elapsed_ms=%lld stall_ms=%lld); falling back to %s "
+                          "for this run without disabling frame generation",
                           reason_text,
+                          static_cast<unsigned long long>(snap.displayed),
                           static_cast<unsigned long long>(ps.real_submitted),
                           static_cast<unsigned long long>(ci.visible_submitted),
                           static_cast<unsigned long long>(ci.status_queued),
+                          static_cast<unsigned long long>(ci.status_queued_with_cfid),
                           static_cast<unsigned long long>(snap.resolved_unseen),
+                          static_cast<unsigned long long>(ci.status_canceled),
                           static_cast<unsigned long long>(ci.status_frame_nonzero),
-                          static_cast<unsigned long long>(ci.status_first_cfid),
                           static_cast<unsigned>(ci.status_target_count_max),
+                          static_cast<unsigned long long>(ci.status_target_presented_nonzero),
                           static_cast<unsigned long long>(ci.status_target_completed_nonzero),
                           static_cast<unsigned long long>(ci.retiring_fence_value),
                           static_cast<unsigned long long>(ci.indep_flip_frames),
                           static_cast<unsigned long long>(ci.comp_frames),
                           static_cast<unsigned long long>(ci.watchdog_retired),
+                          static_cast<unsigned long>(ci.last_present_hr),
                           ci.primed ? "yes" : "no", ci.window_cloaked ? "yes" : "no",
                           ci.hwnd_is_root ? "yes" : "no",
                           static_cast<long long>(snap.visible_elapsed_ticks / 10000),
+                          static_cast<long long>(snap.stall_elapsed_ticks / 10000),
                           tear ? "dxgi_tearing" : "dxgi_vsync");
             m.Log(fbuf);
             m.hwfq_fallback_to_dxgi = true;
-            m.DestroySession(fr == HwfqFallbackReason::QueuedZeroDisplay
-                                 ? "hwfq queued-zero-display fallback"
-                                 : (fr == HwfqFallbackReason::AdmissionTimeoutZeroDisplay
-                                        ? "hwfq admission-timeout fallback"
-                                        : "hwfq zero-display fallback"));
+            m.DestroySession(destroy_why);
             return true;
         };
         check_hwfq_fallback(false);

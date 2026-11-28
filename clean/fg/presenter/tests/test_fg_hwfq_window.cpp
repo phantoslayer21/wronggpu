@@ -16,11 +16,13 @@
 #include <presentation.h>
 #include <wrl/client.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <string>
 #include <thread>
@@ -970,19 +972,202 @@ void RunPresenterProbe(GpuHost& gpu) {
     std::fflush(stdout);
 }
 
-void RunLongHwfqRun(GpuHost& gpu) {
-    SetStage("long-hwfq-run");
+void EnablePerMonitorDpiV2() {
+    using SetDpiCtxFn = BOOL(WINAPI*)(DPI_AWARENESS_CONTEXT);
+    if (const HMODULE u32 = GetModuleHandleW(L"user32.dll")) {
+        if (auto fn = reinterpret_cast<SetDpiCtxFn>(reinterpret_cast<void*>(
+                GetProcAddress(u32, "SetProcessDpiAwarenessContext")))) {
+            fn(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        }
+    }
+}
+
+bool IsGreenPixel(COLORREF px) {
+    return px != CLR_INVALID && GetGValue(px) >= 0xC0 && GetRValue(px) <= 0x40 && GetBValue(px) <= 0x40;
+}
+
+long long SignedPercentileUs(std::vector<FgTicks> v, int pct) {
+    if (v.empty()) return 0;
+    std::sort(v.begin(), v.end());
+    const std::size_t idx = (v.size() - 1) * static_cast<std::size_t>(pct) / 100;
+    return static_cast<long long>(v[idx] / 10);
+}
+
+long long AbsMaxUs(const std::vector<FgTicks>& v) {
+    FgTicks m = 0;
+    for (FgTicks x : v) {
+        const FgTicks a = x < 0 ? -x : x;
+        if (a > m) m = a;
+    }
+    return static_cast<long long>(m / 10);
+}
+
+void RunFullscreenPaced240Gate(GpuHost& gpu) {
+    SetStage("fs-240hz-gate");
+    EnablePerMonitorDpiV2();
+    const UINT scr_w = static_cast<UINT>(GetSystemMetrics(SM_CXSCREEN));
+    const UINT scr_h = static_cast<UINT>(GetSystemMetrics(SM_CYSCREEN));
+
     TestWindow win;
-    CHECK(win.Create(1920, 1080, false));
-    ComPtr<IDXGISwapChain4> sc;
-    CHECK(gpu.CreateGameSwapChain(win.hwnd, 1920, 1080, DXGI_FORMAT_R8G8B8A8_UNORM, &sc, 1));
+    CHECK(win.Create(scr_w, scr_h, false, false, false));
+    ShowWindow(win.hwnd, SW_SHOW);
+    SetForegroundWindow(win.hwnd);
+    UpdateWindow(win.hwnd);
+    SleepPump(40);
 
     FgCompPresenterDesc cd;
     cd.device = gpu.device.Get();
     cd.hwnd = win.hwnd;
     cd.bind_window = true;
-    cd.width = 1920;
-    cd.height = 1080;
+    cd.width = scr_w;
+    cd.height = scr_h;
+    cd.format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    cd.variable_refresh = true;
+    cd.refresh_period = kRefresh360;
+    cd.min_interval = FgVrrMinInterval(kRefresh360, false);
+    cd.max_generated = 5;
+    cd.slot_count = 16;
+    cd.max_pending_intervals = 3;
+
+    std::unique_ptr<FgWinCompPresenter> p;
+    const FgWinResult cr = FgWinCompPresenter::Create(cd, &p);
+    CHECK(cr.Ok() && p);
+    if (!p) return;
+
+    FgWinResult fw;
+    const std::uint32_t fid = p->RegisterFence(gpu.fence.Get(), &fw);
+    CHECK(fid >= 1 && fw.Ok());
+    CHECK(p->Attach(0xB100, 1) == FgStatus::Ok);
+
+    struct ErrTrack {
+        std::mutex mu;
+        std::vector<FgTicks> errs;
+    } err_track;
+    p->SetTraceCallback(
+        [](void* ctx, std::uint64_t, std::uint64_t, std::uint32_t, bool, std::uint8_t kind, FgTicks ts,
+           FgTicks target) {
+            if (kind == 2 && ts > 0 && target > 0) {
+                auto* et = static_cast<ErrTrack*>(ctx);
+                std::lock_guard<std::mutex> lock(et->mu);
+                et->errs.push_back(ts - target);
+            }
+        },
+        &err_track);
+
+    // 2.5 seconds at 240 Hz = 600 frames on 2560x1440 opaque fullscreen borderless popup.
+    constexpr int kFrames = 600;
+    constexpr FgTicks kStep240 = 41667;
+    FgHighResTimer pace;
+    FgTicks next_target = FgInterruptNow() + 60000;
+    for (int f = 1; f <= kFrames; ++f) {
+        SetStage("fs-240hz-present");
+        const FgTicks wake_at = next_target - 25000;
+        if (FgInterruptNow() < wake_at && pace.ArmAt(wake_at)) WaitForSingleObject(pace.Handle(), 15);
+        PumpMessages();
+        std::uint32_t slot = 0;
+        FgStatus rs = p->ReserveRealSlot(&slot);
+        for (int w = 0; w < 20 && rs == FgStatus::NoSlot; ++w) {
+            SleepPump(1);
+            rs = p->ReserveRealSlot(&slot);
+        }
+        CHECK(rs == FgStatus::Ok);
+        if (rs == FgStatus::Ok) {
+            const std::uint64_t fv = gpu.RenderClear(p->SlotResource(slot), 0.0f, 1.0f, 0.0f);
+            const FgTicks base = next_target - kStep240;
+            const FgIntervalPlan plan = MakePlan(1, static_cast<std::uint64_t>(f), static_cast<std::uint64_t>(f),
+                                                 base, kStep240, 0, 2500, f > 1);
+            CHECK(p->PresentRealOnly(plan, FgRealImage{1, static_cast<std::uint64_t>(f), FgReadyFence{fid, fv}}) ==
+                  FgStatus::Ok);
+        }
+        next_target += kStep240;
+    }
+    SleepPump(80);
+    COLORREF px = 0xFFFFFFFFu;
+    {
+        HDC sdc = GetDC(nullptr);
+        if (sdc) {
+            px = GetPixel(sdc, 200, 200);
+            ReleaseDC(nullptr, sdc);
+        }
+    }
+    const FgPresentStats st = p->Stats();
+    const FgCompPresenterInfo in = p->Info();
+    const FgDisplaySummary disp = p->ReadDisplayCadence(false);
+    std::vector<FgTicks> errs;
+    {
+        std::lock_guard<std::mutex> lock(err_track.mu);
+        errs = err_track.errs;
+    }
+    const long long err_p50 = SignedPercentileUs(errs, 50);
+    const long long err_p95 = SignedPercentileUs(errs, 95);
+    const long long err_max = AbsMaxUs(errs);
+    const double skip_pct =
+        (st.displayed_real + st.display_skipped) > 0
+            ? (100.0 * static_cast<double>(st.display_skipped) /
+               static_cast<double>(st.displayed_real + st.display_skipped))
+            : 0.0;
+    std::printf("fs-240hz-gate (%ux%u): px=0x%06lx disp=%llu skip=%llu(%.2f%%) canc=%llu refused=%llu measured=%d "
+                "indep=%llu comp=%llu q=%llu q_cfid=%llu sk=%llu ca=%llu rf=%llu wd=%llu "
+                "dt_src=iflip:%llu/comp:%llu/dcomp:%llu/est:%llu | dt_p50=%lldus err_us(p50/p95/max)=%lld/%lld/%lld\n",
+                scr_w, scr_h, static_cast<unsigned long>(px),
+                static_cast<unsigned long long>(st.displayed_real),
+                static_cast<unsigned long long>(st.display_skipped), skip_pct,
+                static_cast<unsigned long long>(st.cancelled), static_cast<unsigned long long>(st.refused_calls),
+                st.display_time_measured ? 1 : 0, static_cast<unsigned long long>(in.indep_flip_frames),
+                static_cast<unsigned long long>(in.comp_frames), static_cast<unsigned long long>(in.status_queued),
+                static_cast<unsigned long long>(in.status_queued_with_cfid),
+                static_cast<unsigned long long>(in.status_skipped),
+                static_cast<unsigned long long>(in.status_canceled),
+                static_cast<unsigned long long>(in.retiring_fence_value),
+                static_cast<unsigned long long>(in.watchdog_retired),
+                static_cast<unsigned long long>(in.display_time_iflip),
+                static_cast<unsigned long long>(in.display_time_comp),
+                static_cast<unsigned long long>(in.display_time_dcomp_stats),
+                static_cast<unsigned long long>(in.display_time_estimated),
+                static_cast<long long>(disp.interval_p50 / 10), err_p50, err_p95, err_max);
+    std::fflush(stdout);
+
+    CHECK(IsGreenPixel(px));
+    CHECK(st.displayed_real >= 550);
+    CHECK(st.display_skipped * 20 <= st.displayed_real);  // <= 5% skips
+    CHECK(st.display_time_measured);
+    CHECK(in.display_time_iflip + in.display_time_comp + in.display_time_dcomp_stats >= 550);
+    CHECK(std::abs(err_p50) <= 5000);
+    CHECK(std::abs(err_p95) <= 12000);
+    CHECK(st.refused_calls == 0);
+    CHECK(in.watchdog_retired == 0);
+
+    SetStage("fs-240hz-gate:Detach");
+    FgStatus ds = p->Detach();
+    for (int i = 0; i < 100 && ds == FgStatus::Busy; ++i) {
+        SleepPump(5);
+        ds = p->Detach();
+    }
+    CHECK(ds == FgStatus::Ok);
+    p.reset();
+    gpu.WaitIdle();
+}
+
+void RunLongHwfqRun(GpuHost& gpu) {
+    SetStage("long-hwfq-run");
+    EnablePerMonitorDpiV2();
+    const UINT scr_w = static_cast<UINT>(GetSystemMetrics(SM_CXSCREEN));
+    const UINT scr_h = static_cast<UINT>(GetSystemMetrics(SM_CYSCREEN));
+    TestWindow win;
+    CHECK(win.Create(scr_w, scr_h, false, false, false));
+    ShowWindow(win.hwnd, SW_SHOW);
+    SetForegroundWindow(win.hwnd);
+    UpdateWindow(win.hwnd);
+    SleepPump(40);
+    ComPtr<IDXGISwapChain4> sc;
+    CHECK(gpu.CreateGameSwapChain(win.hwnd, scr_w, scr_h, DXGI_FORMAT_R8G8B8A8_UNORM, &sc, 2));
+
+    FgCompPresenterDesc cd;
+    cd.device = gpu.device.Get();
+    cd.hwnd = win.hwnd;
+    cd.bind_window = true;
+    cd.width = scr_w;
+    cd.height = scr_h;
     cd.format = DXGI_FORMAT_R8G8B8A8_UNORM;
     cd.variable_refresh = true;
     cd.refresh_period = kRefresh360;
@@ -996,10 +1181,36 @@ void RunLongHwfqRun(GpuHost& gpu) {
     CHECK(cr.Ok() && p);
     if (!p) return;
 
+    // Startup chain kick matching TryCreateSession in fg_asi_session.cpp.
+    if (sc) {
+        HANDLE w = sc->GetFrameLatencyWaitableObject();
+        if (w) {
+            WaitForSingleObject(w, 50);
+            CloseHandle(w);
+        }
+        (void)sc->Present(0, 0);
+        PumpMessages();
+    }
+
     FgWinResult fw;
     const std::uint32_t fid = p->RegisterFence(gpu.fence.Get(), &fw);
     CHECK(fid >= 1 && fw.Ok());
     CHECK(p->Attach(0xB001, 1) == FgStatus::Ok);
+
+    struct ErrTrack {
+        std::mutex mu;
+        std::vector<FgTicks> errs;
+    } err_track;
+    p->SetTraceCallback(
+        [](void* ctx, std::uint64_t, std::uint64_t, std::uint32_t, bool, std::uint8_t kind, FgTicks ts,
+           FgTicks target) {
+            if (kind == 2 && ts > 0 && target > 0) {
+                auto* et = static_cast<ErrTrack*>(ctx);
+                std::lock_guard<std::mutex> lock(et->mu);
+                et->errs.push_back(ts - target);
+            }
+        },
+        &err_track);
 
     FgSchedulerConfig scfg;
     scfg.max_generated = 5;
@@ -1016,7 +1227,7 @@ void RunLongHwfqRun(GpuHost& gpu) {
     FgTargetScheduler sched(scfg);
     CHECK(sched.BeginEpoch(1) == FgStatus::Ok);
 
-    // 4 phases: real-only warmup (20 frames), 2x (60 frames), 3x (60 frames), 4x (60 frames) at ~60 fps (~16.67 ms).
+    // 4 phases: real-only warmup (16 frames), 2x (50 frames), 3x (50 frames), 4x (50 frames) at ~60 fps (~16.67 ms).
     struct Phase {
         const char* name;
         std::uint32_t req_n;
@@ -1055,7 +1266,7 @@ void RunLongHwfqRun(GpuHost& gpu) {
                 const FgStatus rs = p->ReserveRealSlot(&slot);
                 CHECK(rs == FgStatus::Ok);
                 if (rs == FgStatus::Ok) {
-                    const std::uint64_t fv = gpu.RenderClear(p->SlotResource(slot), 0.1f, 0.4f, 0.2f);
+                    const std::uint64_t fv = gpu.RenderClear(p->SlotResource(slot), 0.0f, 1.0f, 0.0f);
                     CHECK(p->PresentRealOnly(plan, FgRealImage{1, gf.frame_id, FgReadyFence{fid, fv}}) == FgStatus::Ok);
                 }
             } else {
@@ -1069,8 +1280,8 @@ void RunLongHwfqRun(GpuHost& gpu) {
                     sub.count = res.count;
                     for (std::uint32_t k = 0; k < res.count; ++k) {
                         if (!res.slots[k].reserved) continue;
-                        const float c = res.slots[k].real ? 0.6f : 0.25f;
-                        const std::uint64_t fv = gpu.RenderClear(p->SlotResource(res.slots[k].slot), c, 0.3f, 0.5f);
+                        const float g = res.slots[k].real ? 1.0f : 0.9f;
+                        const std::uint64_t fv = gpu.RenderClear(p->SlotResource(res.slots[k].slot), 0.0f, g, 0.0f);
                         sub.ready[k] = FgReadyFence{fid, fv};
                         sub.produced[k] = true;
                     }
@@ -1081,25 +1292,63 @@ void RunLongHwfqRun(GpuHost& gpu) {
         }
     }
     SleepPump(120);
+    COLORREF px = 0xFFFFFFFFu;
+    {
+        HDC sdc = GetDC(nullptr);
+        if (sdc) {
+            px = GetPixel(sdc, 200, 200);
+            ReleaseDC(nullptr, sdc);
+        }
+    }
     const FgPresentStats st = p->Stats();
     const FgCompPresenterInfo in = p->Info();
     const FgDisplaySummary disp = p->ReadDisplayCadence(false);
-    std::printf("long-hwfq-run: real_disp=%llu gen_disp=%llu gen_sched=%llu late=%llu skip=%llu canc=%llu "
-                "refused=%llu measured=%d indep=%llu comp=%llu wd=%llu dt_p50=%lldus lat_p50=%lldus\n",
+    std::vector<FgTicks> errs;
+    {
+        std::lock_guard<std::mutex> lock(err_track.mu);
+        errs = err_track.errs;
+    }
+    const long long err_p50 = SignedPercentileUs(errs, 50);
+    const long long err_p95 = SignedPercentileUs(errs, 95);
+    const long long err_max = AbsMaxUs(errs);
+    const std::uint64_t total_disp = st.displayed_real + st.displayed_generated;
+    const double skip_pct =
+        (total_disp + st.display_skipped) > 0
+            ? (100.0 * static_cast<double>(st.display_skipped) /
+               static_cast<double>(total_disp + st.display_skipped))
+            : 0.0;
+    std::printf("long-hwfq-run: px=0x%06lx real_disp=%llu gen_disp=%llu gen_sched=%llu late=%llu skip=%llu(%.2f%%) "
+                "canc=%llu refused=%llu measured=%d indep=%llu comp=%llu q=%llu q_cfid=%llu rf=%llu wd=%llu "
+                "dt_src=iflip:%llu/comp:%llu/dcomp:%llu/est:%llu | dt_p50=%lldus lat_p50=%lldus "
+                "err_us(p50/p95/max)=%lld/%lld/%lld\n",
+                static_cast<unsigned long>(px),
                 static_cast<unsigned long long>(st.displayed_real),
                 static_cast<unsigned long long>(st.displayed_generated),
                 static_cast<unsigned long long>(st.generated_scheduled),
-                static_cast<unsigned long long>(st.dropped_late), static_cast<unsigned long long>(st.display_skipped),
+                static_cast<unsigned long long>(st.dropped_late),
+                static_cast<unsigned long long>(st.display_skipped), skip_pct,
                 static_cast<unsigned long long>(st.cancelled), static_cast<unsigned long long>(st.refused_calls),
                 st.display_time_measured ? 1 : 0, static_cast<unsigned long long>(in.indep_flip_frames),
-                static_cast<unsigned long long>(in.comp_frames), static_cast<unsigned long long>(in.watchdog_retired),
-                static_cast<long long>(disp.interval_p50 / 10), static_cast<long long>(disp.latency_p50 / 10));
+                static_cast<unsigned long long>(in.comp_frames), static_cast<unsigned long long>(in.status_queued),
+                static_cast<unsigned long long>(in.status_queued_with_cfid),
+                static_cast<unsigned long long>(in.retiring_fence_value),
+                static_cast<unsigned long long>(in.watchdog_retired),
+                static_cast<unsigned long long>(in.display_time_iflip),
+                static_cast<unsigned long long>(in.display_time_comp),
+                static_cast<unsigned long long>(in.display_time_dcomp_stats),
+                static_cast<unsigned long long>(in.display_time_estimated),
+                static_cast<long long>(disp.interval_p50 / 10), static_cast<long long>(disp.latency_p50 / 10),
+                err_p50, err_p95, err_max);
     std::fflush(stdout);
 
-    CHECK(st.displayed_real >= 120);
-    CHECK(st.displayed_generated >= 200);
-    CHECK(in.indep_flip_frames + in.comp_frames >= 320);
+    CHECK(IsGreenPixel(px));
+    CHECK(st.displayed_real >= 150);
+    CHECK(st.displayed_generated >= 270);
+    CHECK(st.display_skipped * 10 <= total_disp);  // <= 10% skip ratio
+    CHECK(in.display_time_iflip + in.display_time_comp + in.display_time_dcomp_stats >= 400);
     CHECK(st.display_time_measured);
+    CHECK(std::abs(err_p50) <= 5000);
+    CHECK(std::abs(err_p95) <= 15000);
     CHECK(st.refused_calls == 0);
     CHECK(in.watchdog_retired == 0);
 
@@ -1176,6 +1425,7 @@ void RunCyclesStress(GpuHost& gpu, int cycles) {
             CHECK(hp->PresentRealOnly(plan, FgRealImage{1, f, FgReadyFence{hfid, fv}}) == FgStatus::Ok);
             SleepPump(4);
         }
+        SleepPump(25);
         hwfq_disp_total += hp->Stats().displayed_real;
 
         // Teardown directly on the window thread (matching DestroySession on admission timeout / fallback).
@@ -1405,6 +1655,374 @@ void RunSmokeFallback(GpuHost& gpu, int cycles) {
     }
 }
 
+void RunR3Probe(GpuHost& gpu) {
+    SetStage("r3probe");
+    // Opt into Per-Monitor V2 DPI awareness so window/surface dimensions match physical monitor pixels 1:1.
+    using SetDpiCtxFn = BOOL(WINAPI*)(DPI_AWARENESS_CONTEXT);
+    if (const HMODULE u32 = GetModuleHandleW(L"user32.dll")) {
+        if (auto fn = reinterpret_cast<SetDpiCtxFn>(reinterpret_cast<void*>(
+                GetProcAddress(u32, "SetProcessDpiAwarenessContext")))) {
+            fn(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        }
+    }
+    const UINT scr_w = static_cast<UINT>(GetSystemMetrics(SM_CXSCREEN));
+    const UINT scr_h = static_cast<UINT>(GetSystemMetrics(SM_CYSCREEN));
+    const int nmon = GetSystemMetrics(SM_CMONITORS);
+    DEVMODEW dm = {};
+    dm.dmSize = sizeof(dm);
+    EnumDisplaySettingsExW(nullptr, ENUM_CURRENT_SETTINGS, &dm, 0);
+    std::printf("r3probe screen=%ux%u mode=%lux%lu@%luHz mons=%d\n", scr_w, scr_h,
+                static_cast<unsigned long>(dm.dmPelsWidth), static_cast<unsigned long>(dm.dmPelsHeight),
+                static_cast<unsigned long>(dm.dmDisplayFrequency), nmon);
+
+    ComPtr<IDXGIOutput> out0;
+    if (gpu.adapter && SUCCEEDED(gpu.adapter->EnumOutputs(0, &out0)) && out0) {
+        ComPtr<IDXGIOutput6> out6;
+        if (SUCCEEDED(out0.As(&out6))) {
+            DXGI_OUTPUT_DESC1 od = {};
+            if (SUCCEEDED(out6->GetDesc1(&od))) {
+                std::printf("r3probe output0: rect=(%ld,%ld)-(%ld,%ld) cs=%d bpc=%u\n",
+                            od.DesktopCoordinates.left, od.DesktopCoordinates.top,
+                            od.DesktopCoordinates.right, od.DesktopCoordinates.bottom,
+                            static_cast<int>(od.ColorSpace), static_cast<unsigned>(od.BitsPerColor));
+            }
+        }
+        // Check overlay and overlay color-space support on a D3D11 device (as well as D3D12).
+        const D3D_FEATURE_LEVEL qlevs[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
+        ComPtr<ID3D11Device> qd11;
+        D3D11CreateDevice(gpu.adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                          qlevs, 2, D3D11_SDK_VERSION, &qd11, nullptr, nullptr);
+        ComPtr<IDXGIOutput4> out4;
+        if (qd11 && SUCCEEDED(out0.As(&out4))) {
+            UINT o_bgra = 0, o_rgba = 0, o_r10 = 0, o_fp16 = 0;
+            out4->CheckOverlaySupport(DXGI_FORMAT_B8G8R8A8_UNORM, qd11.Get(), &o_bgra);
+            out4->CheckOverlaySupport(DXGI_FORMAT_R8G8B8A8_UNORM, qd11.Get(), &o_rgba);
+            out4->CheckOverlaySupport(DXGI_FORMAT_R10G10B10A2_UNORM, qd11.Get(), &o_r10);
+            out4->CheckOverlaySupport(DXGI_FORMAT_R16G16B16A16_FLOAT, qd11.Get(), &o_fp16);
+            UINT c_bgra = 0, c_r10_pq = 0, c_fp16_g10 = 0;
+            out4->CheckOverlayColorSpaceSupport(DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709,
+                                                qd11.Get(), &c_bgra);
+            out4->CheckOverlayColorSpaceSupport(DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020,
+                                                qd11.Get(), &c_r10_pq);
+            out4->CheckOverlayColorSpaceSupport(DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709,
+                                                qd11.Get(), &c_fp16_g10);
+            std::printf("r3probe d11_overlay: bgra=0x%x rgba=0x%x r10=0x%x fp16=0x%x | ov_cs: bgra_g22=0x%x r10_pq=0x%x fp16_g10=0x%x\n",
+                        o_bgra, o_rgba, o_r10, o_fp16, c_bgra, c_r10_pq, c_fp16_g10);
+        }
+    }
+
+    // 1) Baseline: DXGI FLIP_DISCARD fullscreen borderless with HDR10 PQ (matching output0 cs=12 bpc=10).
+    for (int mode = 0; mode < 2; ++mode) {
+        SetStage(mode == 0 ? "dxgi_hdr10_tear" : "dxgi_hdr10_sync1");
+        TestWindow win;
+        win.Create(scr_w, scr_h, false, false, false);
+        ShowWindow(win.hwnd, SW_SHOW);
+        SetForegroundWindow(win.hwnd);
+        UpdateWindow(win.hwnd);
+        SleepPump(50);
+        const bool is_fg = GetForegroundWindow() == win.hwnd;
+        ComPtr<IDXGISwapChain4> sc;
+        if (gpu.CreateGameSwapChain(win.hwnd, scr_w, scr_h, DXGI_FORMAT_R10G10B10A2_UNORM, &sc, 0)) {
+            const HRESULT cshr = sc->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020);
+            COMPOSITION_FRAME_ID cf0 = 0, cf1 = 0;
+            FgDCompGetFrameId(COMPOSITION_FRAME_ID_COMPLETED, &cf0);
+            FgHighResTimer pt;
+            FgTicks nxt = FgInterruptNow() + 41667;
+            int presented = 0;
+            for (int f = 0; f < 160; ++f) {
+                if (mode == 0) {
+                    if (FgInterruptNow() < nxt && pt.ArmAt(nxt)) WaitForSingleObject(pt.Handle(), 10);
+                    nxt += 41667;
+                }
+                HANDLE w = sc->GetFrameLatencyWaitableObject();
+                if (w) { WaitForSingleObject(w, 50); CloseHandle(w); }
+                const UINT bi = sc->GetCurrentBackBufferIndex();
+                ComPtr<ID3D12Resource> bb;
+                if (SUCCEEDED(sc->GetBuffer(bi, IID_PPV_ARGS(&bb))) && bb) {
+                    const std::uint64_t fv = gpu.RenderClear(bb.Get(), 0.0f, 0.7f, 0.0f,
+                                                             D3D12_RESOURCE_STATE_PRESENT, gpu.present_queue.Get());
+                    gpu.WaitFence(fv);
+                }
+                const UINT pflags = (mode == 0 && gpu.tearing) ? DXGI_PRESENT_ALLOW_TEARING : 0u;
+                if (SUCCEEDED(sc->Present(mode == 0 ? 0u : 1u, pflags))) ++presented;
+                PumpMessages();
+            }
+            FgDCompGetFrameId(COMPOSITION_FRAME_ID_COMPLETED, &cf1);
+            DXGI_FRAME_STATISTICS fs = {};
+            const HRESULT fhr = sc->GetFrameStatistics(&fs);
+            std::printf("r5 %-16s: fg=%d cshr=0x%lx pres=%d cfid_d=%llu fstat_hr=0x%lx pres_cnt=%u sync_cnt=%u\n",
+                        mode == 0 ? "dxgi_hdr10_tear" : "dxgi_hdr10_sync1", is_fg ? 1 : 0,
+                        static_cast<unsigned long>(cshr), presented,
+                        static_cast<unsigned long long>(cf1 >= cf0 ? cf1 - cf0 : 0),
+                        static_cast<unsigned long>(fhr), fs.PresentCount, fs.SyncRefreshCount);
+        }
+        gpu.WaitIdle();
+    }
+
+    // 2) IPresentationManager with HDR10 PQ / FP16 scRGB matching output0 cs=12 bpc=10.
+    struct R5Case {
+        const char* name;
+        DXGI_FORMAT fmt;
+        DXGI_COLOR_SPACE_TYPE cs;
+        bool set_is_hdr;
+        bool dcomp_topmost;
+        bool d12_shared;
+        bool force_vsync;
+        bool target_zero;
+        bool set_pref_dur;
+        FgTicks step_ticks;
+        int frames;
+    };
+    const R5Case cases[] = {
+        {"pm_hdr10_top0",   DXGI_FORMAT_R10G10B10A2_UNORM,  DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, true,  false, false, true,  false, false, 41667, 160},
+        {"pm_hdr10_top1",   DXGI_FORMAT_R10G10B10A2_UNORM,  DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, true,  true,  false, true,  false, false, 41667, 160},
+        {"pm_hdr10_d12",    DXGI_FORMAT_R10G10B10A2_UNORM,  DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, true,  false, true,  true,  false, false, 41667, 160},
+        {"pm_hdr10_vs0",    DXGI_FORMAT_R10G10B10A2_UNORM,  DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, true,  false, false, false, false, false, 41667, 160},
+        {"pm_hdr10_t0",     DXGI_FORMAT_R10G10B10A2_UNORM,  DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, true,  false, false, true,  true,  false, 83333,  80},
+        {"pm_hdr10_pref",   DXGI_FORMAT_R10G10B10A2_UNORM,  DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, true,  false, false, true,  false, true,  41667, 160},
+        {"pm_fp16_g10",     DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709,    true,  false, false, true,  false, false, 41667, 160},
+        {"pm_fp16_d12",     DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709,    true,  true,  true,  true,  false, false, 41667, 160},
+    };
+
+    for (const R5Case& tc : cases) {
+        SetStage(tc.name);
+        const UINT vw = scr_w;
+        const UINT vh = scr_h;
+        TestWindow win;
+        win.Create(vw, vh, false, false, false);
+        ShowWindow(win.hwnd, SW_SHOW);
+        SetForegroundWindow(win.hwnd);
+        UpdateWindow(win.hwnd);
+        SleepPump(40);
+        const bool is_fg = GetForegroundWindow() == win.hwnd;
+
+        const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
+        const UINT flags11 = D3D11_CREATE_DEVICE_BGRA_SUPPORT |
+                             D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS;
+        ComPtr<ID3D11Device> d11r;
+        ComPtr<ID3D11DeviceContext> c11r;
+        HRESULT hr = D3D11CreateDevice(gpu.adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, flags11, levels, 2,
+                                       D3D11_SDK_VERSION, &d11r, nullptr, &c11r);
+        ComPtr<ID3D11Device5> d11;
+        ComPtr<ID3D11DeviceContext4> c11;
+        if (SUCCEEDED(hr)) hr = d11r.As(&d11);
+        if (SUCCEEDED(hr)) hr = c11r.As(&c11);
+        ComPtr<IPresentationFactory> pfac;
+        ComPtr<IPresentationManager> pmgr;
+        if (SUCCEEDED(hr)) hr = FgDCompCreatePresentationFactory(d11.Get(), IID_PPV_ARGS(&pfac));
+        if (SUCCEEDED(hr)) hr = pfac->CreatePresentationManager(&pmgr);
+
+        constexpr int kBufs = 6;
+        ComPtr<ID3D12Resource> d12_res[kBufs];
+        ComPtr<ID3D11Texture2D> tex[kBufs];
+        ComPtr<IPresentationBuffer> pbuf[kBufs];
+        for (int i = 0; i < kBufs && SUCCEEDED(hr); ++i) {
+            if (tc.d12_shared) {
+                D3D12_HEAP_PROPERTIES hp = {};
+                hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+                hp.CreationNodeMask = hp.VisibleNodeMask = 1;
+                D3D12_RESOURCE_DESC rd = {};
+                rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+                rd.Width = vw;
+                rd.Height = vh;
+                rd.DepthOrArraySize = 1;
+                rd.MipLevels = 1;
+                rd.Format = tc.fmt;
+                rd.SampleDesc.Count = 1;
+                rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+                hr = gpu.device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_SHARED | D3D12_HEAP_FLAG_ALLOW_DISPLAY,
+                                                         &rd, D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                         IID_PPV_ARGS(&d12_res[i]));
+                HANDLE h12 = nullptr;
+                if (SUCCEEDED(hr)) hr = gpu.device->CreateSharedHandle(d12_res[i].Get(), nullptr, GENERIC_ALL, nullptr, &h12);
+                if (SUCCEEDED(hr)) hr = d11->OpenSharedResource1(h12, IID_PPV_ARGS(&tex[i]));
+                if (h12) CloseHandle(h12);
+            } else {
+                D3D11_TEXTURE2D_DESC td = {};
+                td.Width = vw;
+                td.Height = vh;
+                td.MipLevels = 1;
+                td.ArraySize = 1;
+                td.Format = tc.fmt;
+                td.SampleDesc.Count = 1;
+                td.Usage = D3D11_USAGE_DEFAULT;
+                td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+                td.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE |
+                               D3D11_RESOURCE_MISC_SHARED_DISPLAYABLE;
+                hr = d11->CreateTexture2D(&td, nullptr, &tex[i]);
+            }
+            if (SUCCEEDED(hr)) hr = pmgr->AddBufferFromResource(tex[i].Get(), &pbuf[i]);
+        }
+
+        HANDLE sh = nullptr;
+        ComPtr<IPresentationSurface> psurf;
+        ComPtr<IDCompositionDesktopDevice> dcomp;
+        ComPtr<IDCompositionTarget> dtarget;
+        ComPtr<IDCompositionVisual2> dvis;
+        ComPtr<IUnknown> dsurf;
+        if (SUCCEEDED(hr)) hr = FgDCompCreateSurfaceHandle(COMPOSITIONOBJECT_ALL_ACCESS, nullptr, &sh);
+        if (SUCCEEDED(hr)) hr = pmgr->CreatePresentationSurface(sh, &psurf);
+        if (SUCCEEDED(hr)) psurf->SetTag(77);
+        if (SUCCEEDED(hr)) hr = psurf->SetAlphaMode(DXGI_ALPHA_MODE_IGNORE);
+        if (SUCCEEDED(hr)) hr = psurf->SetColorSpace(tc.cs);
+        if (SUCCEEDED(hr) && tc.set_is_hdr) {
+            ComPtr<IPresentationSurface2> ps2;
+            if (SUCCEEDED(psurf.As(&ps2)) && ps2) ps2->SetIsHdrContent(1);
+        }
+        const RECT src = {0, 0, static_cast<LONG>(vw), static_cast<LONG>(vh)};
+        if (SUCCEEDED(hr)) hr = psurf->SetSourceRect(&src);
+
+        if (SUCCEEDED(hr)) {
+            if (tc.d12_shared) {
+                const std::uint64_t fv = gpu.RenderClear(d12_res[0].Get(), 0.0f, 0.7f, 0.0f);
+                gpu.WaitFence(fv);
+            } else {
+                ComPtr<ID3D11RenderTargetView> rtv;
+                if (SUCCEEDED(d11->CreateRenderTargetView(tex[0].Get(), nullptr, &rtv))) {
+                    const float g[4] = {0.0f, 0.7f, 0.0f, 1.0f};
+                    c11->ClearRenderTargetView(rtv.Get(), g);
+                    c11->Flush();
+                }
+            }
+            hr = psurf->SetBuffer(pbuf[0].Get());
+            if (SUCCEEDED(hr)) hr = pmgr->SetTargetTime(SystemInterruptTime{0});
+            if (SUCCEEDED(hr)) hr = pmgr->Present();
+        }
+        ComPtr<IDXGIDevice> dxgi_dev;
+        if (d11) d11.As(&dxgi_dev);
+        if (SUCCEEDED(hr)) hr = FgDCompCreateDevice3(dxgi_dev.Get(), IID_PPV_ARGS(&dcomp));
+        if (SUCCEEDED(hr)) hr = dcomp->CreateTargetForHwnd(win.hwnd, tc.dcomp_topmost ? TRUE : FALSE, &dtarget);
+        if (SUCCEEDED(hr)) hr = dcomp->CreateVisual(&dvis);
+        if (SUCCEEDED(hr)) hr = dcomp->CreateSurfaceFromHandle(sh, &dsurf);
+        if (SUCCEEDED(hr)) hr = dvis->SetContent(dsurf.Get());
+        if (SUCCEEDED(hr)) hr = dtarget->SetRoot(dvis.Get());
+        if (SUCCEEDED(hr)) hr = dcomp->Commit();
+        if (SUCCEEDED(hr)) dcomp->WaitForCommitCompletion();
+
+        if (SUCCEEDED(hr)) hr = pmgr->ForceVSyncInterrupt(tc.force_vsync ? 1 : 0);
+        if (SUCCEEDED(hr) && tc.set_pref_dur)
+            (void)pmgr->SetPreferredPresentDuration(SystemInterruptTime{41667}, SystemInterruptTime{5000});
+        if (SUCCEEDED(hr)) hr = pmgr->EnablePresentStatisticsKind(PresentStatisticsKind_PresentStatus, 1);
+        if (SUCCEEDED(hr)) hr = pmgr->EnablePresentStatisticsKind(PresentStatisticsKind_CompositionFrame, 1);
+        if (SUCCEEDED(hr)) hr = pmgr->EnablePresentStatisticsKind(PresentStatisticsKind_IndependentFlipFrame, 1);
+
+        ComPtr<ID3D11Fence> ret_fence;
+        if (SUCCEEDED(hr)) pmgr->GetPresentRetiringFence(IID_PPV_ARGS(&ret_fence));
+        const UINT64 rf0 = ret_fence ? ret_fence->GetCompletedValue() : 0;
+        COMPOSITION_FRAME_ID cf0 = 0, cf1 = 0;
+        FgDCompGetFrameId(COMPOSITION_FRAME_ID_COMPLETED, &cf0);
+
+        int sub = 0, q = 0, sk = 0, ca = 0, ind = 0, cmp = 0;
+        std::vector<FgTicks> ind_err_us, ind_dt_us;
+        std::vector<std::pair<UINT64, FgTicks>> pid_tgt;
+        FgTicks last_ind_t = 0;
+        auto drain = [&]() {
+            for (int g = 0; g < 256; ++g) {
+                ComPtr<IPresentStatistics> st;
+                if (!pmgr || pmgr->GetNextPresentStatistics(&st) != S_OK || !st) break;
+                const PresentStatisticsKind k = st->GetKind();
+                const UINT64 pid = st->GetPresentId();
+                if (k == PresentStatisticsKind_PresentStatus) {
+                    ComPtr<IPresentStatusPresentStatistics> ps;
+                    if (SUCCEEDED(st.As(&ps))) {
+                        const PresentStatus pv = ps->GetPresentStatus();
+                        if (pv == PresentStatus_Queued) ++q;
+                        else if (pv == PresentStatus_Skipped) ++sk;
+                        else if (pv == PresentStatus_Canceled) ++ca;
+                    }
+                } else if (k == PresentStatisticsKind_IndependentFlipFrame) {
+                    ++ind;
+                    ComPtr<IIndependentFlipFramePresentStatistics> fs;
+                    if (SUCCEEDED(st.As(&fs))) {
+                        const FgTicks dt = static_cast<FgTicks>(fs->GetDisplayedTime().value);
+                        if (dt > 0) {
+                            if (last_ind_t > 0 && dt > last_ind_t) ind_dt_us.push_back((dt - last_ind_t) / 10);
+                            last_ind_t = dt;
+                            for (const auto& pt : pid_tgt) {
+                                if (pt.first == pid && pt.second > 0) {
+                                    ind_err_us.push_back((dt - pt.second) / 10);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                } else if (k == PresentStatisticsKind_CompositionFrame) {
+                    ++cmp;
+                }
+            }
+        };
+
+        FgHighResTimer pace_timer;
+        FgTicks next_target = FgInterruptNow() + 60000;
+        for (int f = 0; f < tc.frames && SUCCEEDED(hr); ++f) {
+            const int s = (f + 1) % kBufs;
+            const FgTicks wake_at = tc.target_zero ? next_target : (next_target - 20000);
+            if (FgInterruptNow() < wake_at && pace_timer.ArmAt(wake_at))
+                WaitForSingleObject(pace_timer.Handle(), 20);
+            PumpMessages();
+            drain();
+            const ULONGLONG w_until = GetTickCount64() + 40;
+            boolean is_av = 0;
+            while (GetTickCount64() < w_until) {
+                if (SUCCEEDED(pbuf[s]->IsAvailable(&is_av)) && is_av) break;
+                drain();
+                Sleep(1);
+            }
+            if (!is_av) break;
+            if (tc.d12_shared) {
+                const std::uint64_t fv = gpu.RenderClear(d12_res[s].Get(), 0.0f, 0.7f, 0.0f);
+                gpu.WaitFence(fv);
+            } else {
+                ComPtr<ID3D11RenderTargetView> rtv;
+                if (SUCCEEDED(d11->CreateRenderTargetView(tex[s].Get(), nullptr, &rtv))) {
+                    const float g[4] = {0.0f, 0.7f, 0.0f, 1.0f};
+                    c11->ClearRenderTargetView(rtv.Get(), g);
+                    c11->Flush();
+                }
+            }
+            const UINT64 pid = pmgr->GetNextPresentId();
+            const FgTicks req_t = tc.target_zero ? 0 : next_target;
+            hr = psurf->SetBuffer(pbuf[s].Get());
+            if (SUCCEEDED(hr)) hr = pmgr->SetTargetTime(SystemInterruptTime{static_cast<UINT64>(req_t)});
+            if (SUCCEEDED(hr)) hr = pmgr->Present();
+            if (SUCCEEDED(hr)) {
+                ++sub;
+                pid_tgt.push_back({pid, req_t});
+            }
+            next_target += tc.step_ticks;
+        }
+        SleepPump(60);
+        drain();
+        FgDCompGetFrameId(COMPOSITION_FRAME_ID_COMPLETED, &cf1);
+        const UINT64 rf1 = ret_fence ? ret_fence->GetCompletedValue() : 0;
+        COLORREF px = 0xFFFFFFFFu;
+        {
+            HDC sdc = GetDC(nullptr);
+            if (sdc) { px = GetPixel(sdc, 200, 200); ReleaseDC(nullptr, sdc); }
+        }
+        auto pct = [](std::vector<FgTicks>& v, int p) -> long long {
+            if (v.empty()) return 0;
+            std::sort(v.begin(), v.end());
+            const std::size_t idx = (v.size() - 1) * static_cast<std::size_t>(p) / 100;
+            return static_cast<long long>(v[idx]);
+        };
+
+        if (dvis) dvis->SetContent(nullptr);
+        if (dtarget) dtarget->SetRoot(nullptr);
+        if (dcomp) dcomp->Commit();
+        dsurf.Reset(); dvis.Reset(); dtarget.Reset(); dcomp.Reset(); psurf.Reset();
+        for (int i = 0; i < kBufs; ++i) { pbuf[i].Reset(); tex[i].Reset(); d12_res[i].Reset(); }
+        ret_fence.Reset(); pmgr.Reset(); pfac.Reset(); c11.Reset(); d11.Reset(); c11r.Reset(); d11r.Reset();
+        if (sh) CloseHandle(sh);
+
+        std::printf("r5 %-16s: hr=0x%lx fg=%d px=0x%06lx sub=%3d q=%3d sk=%3d ind=%3d(dt=%lldus err=%lld/%lld/%lldus) cmp=%2d rf=%3llu cfid_d=%3llu\n",
+                    tc.name, static_cast<unsigned long>(hr), is_fg ? 1 : 0, static_cast<unsigned long>(px),
+                    sub, q, sk, ind, pct(ind_dt_us, 50), pct(ind_err_us, 50), pct(ind_err_us, 95), pct(ind_err_us, 100),
+                    cmp, static_cast<unsigned long long>(rf1 - rf0),
+                    static_cast<unsigned long long>(cf1 >= cf0 ? cf1 - cf0 : 0));
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1413,15 +2031,19 @@ int main(int argc, char** argv) {
     bool diag = false;
     bool smoke = false;
     bool stress = false;
+    bool gate = false;
+    bool r3probe = false;
     int cycles = 5;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--probe") == 0) probe = true;
         else if (std::strcmp(argv[i], "--diag") == 0) diag = true;
         else if (std::strcmp(argv[i], "--smoke") == 0) smoke = true;
         else if (std::strcmp(argv[i], "--stress") == 0) stress = true;
+        else if (std::strcmp(argv[i], "--gate") == 0) gate = true;
+        else if (std::strcmp(argv[i], "--r3probe") == 0) r3probe = true;
         else if (std::strcmp(argv[i], "--cycles") == 0 && i + 1 < argc) cycles = std::atoi(argv[++i]);
     }
-    if (!probe && !diag && !smoke && !stress) smoke = true;
+    if (!probe && !diag && !smoke && !stress && !gate && !r3probe) smoke = true;
 
     SetStage("init");
     std::thread watchdog([]() {
@@ -1441,6 +2063,9 @@ int main(int argc, char** argv) {
     GpuHost gpu;
     CHECK(gpu.Init());
     if (gpu.device) {
+        if (r3probe) {
+            RunR3Probe(gpu);
+        }
         if (diag) {
             RunDiag(gpu);
         }
@@ -1467,6 +2092,11 @@ int main(int argc, char** argv) {
             };
             for (const RawCellOpts& c : cells) RunRawProbeCell(gpu, c);
             RunPresenterProbe(gpu);
+        }
+        if (gate) {
+            RunFullscreenPaced240Gate(gpu);
+            RunLongHwfqRun(gpu);
+            RunCyclesStress(gpu, cycles);
         }
         if (stress) {
             RunLongHwfqRun(gpu);

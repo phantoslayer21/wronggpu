@@ -92,10 +92,16 @@ struct FgCompPresenterInfo {
     bool primed = false;
     long last_present_hr = 0;
     std::uint64_t status_frame_nonzero = 0;            // PresentStatus reports with non-zero CompositionFrameId
+    std::uint64_t status_queued_with_cfid = 0;         // PresentStatus_Queued with non-zero CompositionFrameId
     std::uint64_t status_first_cfid = 0;               // first non-zero CompositionFrameId on PresentStatus
-    std::uint32_t status_target_count_max = 0;         // max DComp target count seen on first 16 PresentStatus frames
-    std::uint64_t status_target_completed_nonzero = 0; // first-16 PresentStatus frames with completedStats.time != 0
+    std::uint32_t status_target_count_max = 0;         // max DComp target count seen on PresentStatus / DComp probes
+    std::uint64_t status_target_presented_nonzero = 0; // frames with DComp presentedStats.time != 0
+    std::uint64_t status_target_completed_nonzero = 0; // frames with DComp completedStats.time != 0
     std::uint64_t retiring_fence_value = 0;            // IPresentationManager retiring fence completed value
+    std::uint64_t display_time_iflip = 0;              // displayed times sourced from IndependentFlipFrame
+    std::uint64_t display_time_comp = 0;               // displayed times sourced from CompositionFrame
+    std::uint64_t display_time_dcomp_stats = 0;        // displayed times sourced from DComp target stats
+    std::uint64_t display_time_estimated = 0;          // displayed times with no measured hardware/DComp timestamp
 };
 
 class FgWinCompPresenter final : public IFgPresenter, private IFgWorkerBody {
@@ -156,6 +162,8 @@ private:
         std::uint64_t platform_id = 0;
         FgTicks vblank = 0;
         FgDisplayPresent display{};
+        std::uint64_t comp_frame_id = 0;
+        bool queued_confirmed = false;
         bool watchdog_cancelled = false;
     };
 
@@ -164,10 +172,12 @@ private:
     FgWinResult Initialize();
     FgTicks NowLocked() const;
     FgTicks RealOnlyLookahead() const;
-    FgTicks ActiveWatchdogTicksLocked() const;
+    FgTicks PresentLookaheadLocked(bool real_only_plan) const;
+    FgTicks RefreshPeriodLocked() const;
     void Run(HANDLE stop, HANDLE wake) override;
     void StepLocked();
     void DrainStatisticsLocked();
+    void ResolveQueuedDisplaysLocked();
     void ReleaseSlotsLocked();
     void SubmitOutboxLocked();
     void CancelOnDisplayLocked(std::uint64_t engine_from);
