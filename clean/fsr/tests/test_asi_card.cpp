@@ -150,6 +150,12 @@ int main(int argc, char** argv) {
     CHECK(init(&api, nullptr));
     CHECK(!g_tab && g_title == "WrongGPU Upscaler" && g_draw);
 
+    // rc3 round 2: no front end has reported anything (Ray Reconstruction handles the frames, the SR front end never ran):
+    // nothing is "Running", whatever the saved choice says
+    DrawFrame();
+    CHECK(HasText("Not in use: the WrongGPU upscaler hasn't run in this session.") && !HasText("Running:"));
+    CHECK(g_combos.size() == 3);
+
     // no shared block yet (no SR front end in this process): settings.ini only, the default shows Fast
     showModel('M');
     DrawFrame();
@@ -248,6 +254,19 @@ int main(int argc, char** argv) {
         report(&s);
         DrawFrame();
         CHECK(HasText("Running: Model M (Exact)") && !HasText("couldn't start"));
+        // the stored choice is not converted (rc3 round 2): another model runs, and the card says why in plain words
+        s.error_model = 'L';
+        s.error_kind = WG_ASI_SR_ERROR_NOT_CONVERTED;
+        s.error_reason[0] = 0;
+        report(&s);
+        DrawFrame();
+        CHECK(HasText("Running: Model M (Exact)"));
+        CHECK(HasText("Model L isn't converted on this PC, so Model M is running. Convert Model L in the WrongGPU app."));
+        s.state = WG_ASI_SR_IDLE;
+        s.running_model = 0;
+        report(&s);
+        DrawFrame();
+        CHECK(HasText("Model L isn't converted on this PC, so WrongGPU can't run it. Convert Model L in the WrongGPU app."));
     }
 
     block.close();

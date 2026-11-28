@@ -254,6 +254,12 @@ int wmain(int argc, wchar_t** argv) {
     MakeDirs(data);
     MakeDirs(data + L"\\wronggpu-setup");
     MakeDirs(scratchLocal);
+    // rc3 round 2: the front end checks that the chosen model is converted (the real runtime starts none without its
+    // file) and runs a converted one instead when it is not. Model M and Model K are "converted" here, at the installer's
+    // place (the test double of the runtime reads no model).
+    MakeDirs(scratchLocal + L"\\WrongGPU\\model\\K");
+    CHECK(wg::write_file_atomic(scratchLocal + L"\\WrongGPU\\model\\model.wgcm", "test stand-in\r\n"));
+    CHECK(wg::write_file_atomic(scratchLocal + L"\\WrongGPU\\model\\K\\model.wgcm", "test stand-in\r\n"));
     for (const wchar_t* leaf : {L"\\wronggpu.ini", L"\\wronggpu.ini.tmp", L"\\wronggpu-setup\\model-choice.ini",
                                 L"\\wronggpu-setup\\model-choice.ini.tmp", L"\\wronggpu-setup\\model-choice.ini.lock",
                                 L"\\wronggpu-setup\\settings.ini"})
@@ -469,6 +475,8 @@ int wmain(int argc, wchar_t** argv) {
             if (!ok && !a.write && (Lower(a.path) == Lower(data) || Lower(a.path) == Lower(root + L"\\wronggpu.ini"))) ok = true, ++probes;
             // The AMD-provider lookup (pre-existing, read-only): %LOCALAPPDATA%\WrongGPU\compare.txt.
             if (!ok && !a.write && Lower(a.path) == Lower(scratchLocal + L"\\WrongGPU\\compare.txt")) ok = true;
+            // The model files' existence (rc3 round 2, read-only): the installer's place, %LOCALAPPDATA%\WrongGPU\model.
+            if (!ok && !a.write && a.op == "GetFileAttributesW" && Under(a.path, scratchLocal + L"\\WrongGPU\\model")) ok = true;
             // ... and its search of the game folder for AMD's SDK DLLs (folder listings only; custom and plugins skipped).
             if (!ok && !a.write && a.op == "FindFirstFileExW" && Under(a.path, root)) ok = true;
             if (!ok) {

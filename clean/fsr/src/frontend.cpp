@@ -90,6 +90,9 @@ struct FrontEnd::UpscaleContext {
     std::weak_ptr<SharedUpscaler> lent;
     std::vector<std::shared_ptr<SharedUpscaler>> retiredBridges;
     uint64_t retireBridgesAt = 0;
+    // rc3 round 2: the chosen model is not converted on this PC, so this context runs another one (the stored choice is
+    // unchanged): the model it stands in for, shown on the card until a model that was chosen starts.
+    char substitutedFor = 0;
     void DestroyReplaced() {
         for (const Replaced& r : replaced) r.backend->destroy(r.upscaler);
         replaced.clear();
@@ -110,6 +113,7 @@ struct FrontEnd::UpscaleContext {
         modelOption = fresh.modelOption;
         srModel = fresh.srModel;
         srMode = fresh.srMode;
+        substitutedFor = fresh.substitutedFor;
         fpMessage = fresh.fpMessage;
         amd = nullptr;
         amdApi = nullptr;
@@ -554,13 +558,14 @@ char FrontEnd::RunModelOf(const UpscaleContext& u) {
     return wgchoice::IsModel(u.selectedModel) ? u.selectedModel : 'M';
 }
 
-void FrontEnd::ReportStartFailure(const UpscaleContext& u, const std::string& reason, bool idle) {
+void FrontEnd::ReportStartFailure(const UpscaleContext& u, const std::string& reason, bool idle, char failedModel, char kind) {
     std::string r = reason;
     if (r.size() > 150) r = r.substr(0, 147) + "...";
-    const char model = RunModelOf(u);
+    const char model = failedModel ? failedModel : RunModelOf(u);
     const uint32_t w = u.create.maxUpscaleSize.width, h = u.create.maxUpscaleSize.height;
     UpdateSr([&](SrReport& s) {
         s.errorModel = model;
+        s.errorKind = kind;
         s.errorWidth = w;
         s.errorHeight = h;
         s.errorReason = r;
@@ -573,6 +578,37 @@ void FrontEnd::ReportStartFailure(const UpscaleContext& u, const std::string& re
             s.pending = 0;
         }
     });
+}
+
+int FrontEnd::ModelFileState(char model, const std::string& options, std::string* searched) {
+    if (!platform_.modelPlaces || !platform_.fileExists) return -1;
+    bool inOptions = false, inEnv = false, kDir = false;
+    OptionValue(options, "model_dir", &inOptions);
+    const char* env = std::getenv("WG_RUNTIME_OPTIONS");
+    if (env) OptionValue(env, "model_dir", &inEnv);
+    if (model == 'K') {
+        bool a = false, b = false;
+        OptionValue(options, "model_k_dir", &a);
+        if (env) OptionValue(env, "model_k_dir", &b);
+        kDir = a || b;
+    }
+    if (inOptions || inEnv || kDir) return -1;  // (the player's own folder decides; the front end does not look)
+    const char* leaf = model == 'K' ? "\\K\\model.wgcm" : model == 'L' ? "\\L\\model.wgcm" : "\\model.wgcm";
+    std::string where;
+    for (const ModelPlace& place : platform_.modelPlaces()) {
+        if (place.dir.empty()) continue;
+        std::string dir = place.dir;
+        while (dir.size() > 3 && (dir.back() == '\\' || dir.back() == '/')) dir.pop_back();
+        const std::string file = dir + leaf;
+        const bool there = platform_.fileExists(file);
+        where += (where.empty() ? "" : "; ") + file + (there ? " (found)" : " (not there)");
+        if (there) {
+            if (searched) *searched = where;
+            return 1;
+        }
+    }
+    if (searched) *searched = where;
+    return 0;
 }
 
 void FrontEnd::Log(const std::string& line) {
@@ -918,13 +954,53 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
             }
         }
         ApplySrMode(*u, tag);
-        const std::string refusal = ApplyModelDir(*u, tag);
+        std::string refusal = ApplyModelDir(*u, tag);
         info.options = u->options.c_str();
         info.log = &UpscalerLog;
         info.log_user = u;
         // The split service only (the hooks it needs are installed after the create succeeded: ActivateSplit).
         AdaptCreateInfo(backend, platform_.services ? platform_.services(backend, u->device) : nullptr, info);
         u->createInfo = info;
+        // rc3 round 2, custom slot: the chosen model is not converted on this PC (its file is in none of the places). With
+        // a WrongGPU upscaler running (a model switch) that one is kept (the hand-over below); at a start with nothing to
+        // keep, a converted model runs instead (Model M, else Model K): never the host's own upscaler. The stored choice
+        // (the model choice record, sr_model) is not changed, so the chosen model runs once it is converted.
+        char notConverted = 0;
+        std::shared_ptr<SharedUpscaler> earlyLender;
+        if (config_.customSlot && wgchoice::IsModel(u->selectedModel)) {
+            std::string searched;
+            if (ModelFileState(u->selectedModel, u->options, &searched) == 0) {
+                notConverted = u->selectedModel;
+                earlyLender = FindLender(backend, *u, tag);
+                if (earlyLender) {
+                    refusal = std::string("Model ") + notConverted + " isn't converted on this PC (looked at: " + searched +
+                              "); convert it in the WrongGPU app";
+                } else {
+                    for (const char alt : {'M', 'K'}) {
+                        const int32_t m = alt == notConverted ? -1 : ModelOfName(std::string(1, alt));
+                        const WgEntryDef* sr = m >= 0 ? SrEntryOfModel(m) : nullptr;
+                        if (!sr || ModelFileState(alt, config_.BackendOptions(), nullptr) != 1) continue;
+                        u->selectedModel = alt;
+                        u->modelOption = kWgModelRows[m].runtime_option;
+                        u->modelProviderId = sr->id;
+                        u->modelProviderName = EntryProviderName(*sr);
+                        u->options = config_.BackendOptions() + ";" + u->modelOption;
+                        u->substitutedFor = notConverted;
+                        Log(tag + " model choice: Model " + notConverted + " isn't converted on this PC, so Model " + alt +
+                            " runs instead. The stored choice stays Model " + notConverted + " and runs once it is converted "
+                            "(convert it in the WrongGPU app). Looked at: " + searched);
+                        ApplySrMode(*u, tag);
+                        refusal = ApplyModelDir(*u, tag);
+                        info.options = u->options.c_str();
+                        u->createInfo = info;
+                        break;
+                    }
+                    if (!u->substitutedFor)
+                        Log(tag + " model choice: Model " + notConverted + " isn't converted on this PC, and neither Model M nor Model K "
+                            "was found to run instead (looked at: " + searched + ")");
+                }
+            }
+        }
         // Custom slot: the same upscaler with the same options failed earlier in this session: no new attempt.
         std::string remembered;
         uint64_t repeats = 0;
@@ -975,7 +1051,7 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
         // Model switch hand-over (frontend.h): the upscaler that already runs, lent to this context while its own is
         // created, or for its life when its own model cannot run.
         std::shared_ptr<SharedUpscaler> lender;
-        if (config_.customSlot && !warm) lender = FindLender(backend, *u, tag);
+        if (config_.customSlot && !warm) lender = earlyLender ? earlyLender : FindLender(backend, *u, tag);
         const auto createStart = std::chrono::steady_clock::now();
         if (!attempt) {
             // (nothing created: `why` says so; the fallback below decides)
@@ -1101,10 +1177,13 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
                     s.pending = startModel;
                 });
             } else {
-                ReportStartFailure(*u, !refusal.empty() && u->selectedModel == 'L'
-                                           ? std::string("no converted Model L file was found (WrongGPU.exe model convert --preset=L writes it)")
-                                           : u->createError.empty() ? why : u->createError,
-                                   false);
+                if (notConverted)
+                    ReportStartFailure(*u, "not converted on this PC", false, notConverted, 1);
+                else
+                    ReportStartFailure(*u, !refusal.empty() && u->selectedModel == 'L'
+                                               ? std::string("no converted Model L file was found (WrongGPU.exe model convert --preset=L writes it)")
+                                               : u->createError.empty() ? why : u->createError,
+                                       false);
             }
             if (u->pending)
                 Log(tag + " model switch: " + chosen + " is starting in the background (" + why + "); " + running +
@@ -1200,7 +1279,9 @@ ffxReturnCode_t FrontEnd::CreateUpscale(ffxContext* context, ffxCreateContextDes
         own_[u] = true;
     }
     // the model the active context runs (HostSelected compares a selection with it): none while it runs AMD's upscaler
-    if (u->mode == UpscaleContext::Mode::Own && u->upscaler && !u->bridge)  // a model started: no start failure to show
+    if (u->mode == UpscaleContext::Mode::Own && u->substitutedFor && (u->upscaler || u->pending))  // (the card: why another model)
+        ReportStartFailure(*u, "not converted on this PC", false, u->substitutedFor, 1);
+    else if (u->mode == UpscaleContext::Mode::Own && u->upscaler && !u->bridge)  // a model started: no start failure to show
         UpdateSr([](SrReport& s) {
             s.errorModel = 0;
             s.errorWidth = s.errorHeight = 0;
@@ -1288,7 +1369,7 @@ void FrontEnd::CheckPending(UpscaleContext& u, uint64_t call) {
             failedCreates_.erase(FailureKey(u.pendingBackend, u));
         }
         Log(tag + ": WrongGPU's upscaler \"" + u.backend->name + "\" started after " + seconds + "; it upscales from this frame on");
-        UpdateSr([](SrReport& s) {  // a model started: no start failure to show (its first frame reports it as running)
+        if (!u.substitutedFor) UpdateSr([](SrReport& s) {  // a model started: no start failure to show (its first frame reports it)
             s.errorModel = 0;
             s.errorWidth = s.errorHeight = 0;
             s.errorReason.clear();
@@ -2069,6 +2150,13 @@ int32_t FrontEnd::HostSelected(uint64_t versionId) {
             ", source=ffx)" + (err.empty() ? "" : "; " + err) +
             (running == model ? "; it already runs" : std::string("; it runs after the upscaler is recreated (now running: ") +
                                                           (wgchoice::IsModel(running) ? std::string("Model ") + running : std::string("no WrongGPU model")) + ")"));
+        if (running == model)  // (the model that stands in for an unconverted one is now the choice: no note any more)
+            UpdateSr([](SrReport& s) {
+                if (s.errorKind != 1) return;
+                s.errorModel = s.errorKind = 0;
+                s.errorWidth = s.errorHeight = 0;
+                s.errorReason.clear();
+            });
         return running == model ? WG_HOST_SELECTED_NOTHING_CHANGED : WG_HOST_SELECTED_RECORDED;
     }
     if (o == wgchoice::Outcome::SeqExhausted) {

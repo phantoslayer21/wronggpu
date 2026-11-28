@@ -472,6 +472,10 @@ extern "C" __declspec(dllexport) bool OptiPluginInit(const WgHostMenuApi* api, W
     wgasi::card::Hooks hooks;
     hooks.gameDir = [] { return wgchoice::GameDirOf(RecordPath()).wstring(); };
     hooks.activeModel = [] { return ActiveModel(); };
+    hooks.frontEndShown = [] {
+        const char shown = g_state.shown.load();
+        return wgchoice::IsModel(shown) || shown == wgasi::kModelAmd ? int(shown) : -1;  // (kShowSaved: nothing reported)
+    };
     hooks.srStatus = [](WrongGpuAsiSrV1* out) {  // (an older front end never reports: the card then uses activeModel)
         std::lock_guard lock(g_srMutex);
         if (!g_srReported || !out) return false;

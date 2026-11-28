@@ -97,13 +97,15 @@ typedef void (*PfnWrongGpuAsiShowModelV1)(char model);
 #define WG_ASI_SR_IDLE 0u       // WrongGPU upscales nothing (no context of its own, or the context runs AMD's FSR)
 #define WG_ASI_SR_RUNNING 1u    // running_model upscaled the last frame
 #define WG_ASI_SR_SWITCHING 2u  // running_model upscales while pending_model starts
+#define WG_ASI_SR_ERROR_START_FAILED 0  // error_kind: error_model's create failed (error_reason says why)
+#define WG_ASI_SR_ERROR_NOT_CONVERTED 1 // error_kind: error_model is not converted on this PC (the stored choice is kept)
 typedef struct WrongGpuAsiSrV1 {
     uint32_t size;          // sizeof(WrongGpuAsiSrV1); a smaller report is ignored
     uint32_t state;         // WG_ASI_SR_*
     char running_model;     // 'M', 'K', 'L'; 0 while idle
     char pending_model;     // while switching: the model that is starting
     char error_model;       // the last model that could not start (0: none since the last model that started)
-    char reserved;
+    char error_kind;        // WG_ASI_SR_ERROR_* (older writers left this byte 0)
     int32_t running_mode;   // the running model's mode: 0 fast, 1 exact (wg_sr_modes.h), -1 not known
     uint32_t error_width;   // the output size it could not start at (0: not known)
     uint32_t error_height;

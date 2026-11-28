@@ -19,7 +19,7 @@ void SetAsiChoiceRecord(const std::wstring& path);
 
 // rc3: tells the plugin what the front end actually runs (asi_abi.h WrongGpuAsiReportSrV1: the card's status lines).
 // Nothing happens without the plugin or the export (an older plugin).
-void ReportAsiSr(uint32_t state, char running, char pending, int32_t runningMode, char errorModel, uint32_t errorWidth,
+void ReportAsiSr(uint32_t state, char running, char pending, int32_t runningMode, char errorModel, char errorKind, uint32_t errorWidth,
                  uint32_t errorHeight, const std::string& errorReason);
 
 }  // namespace wgwin

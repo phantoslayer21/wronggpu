@@ -4170,8 +4170,9 @@ static void TestModelSwitchHandover() {
         CHECK(fe->HostSelected(idOf('L')) == WG_HOST_SELECTED_RECORDED);
         const int calls = g_createCalls;
         CHECK(create(*fe, &b) == FFX_API_RETURN_OK && b && g_createCalls == calls);
-        CHECK(CountLog("L:\\local\\WrongGPU\\model\\L\\model.wgcm (%LOCALAPPDATA%: the runtime's own default): not there either") == 1);
-        CHECK(CountLog("model switch: Model L cannot run (Model L is chosen but no converted Model L was found") == 1);
+        // (round 2: a model that is not converted anywhere is said in plain words, the places probed listed)
+        CHECK(CountLog("model switch: Model L cannot run (Model L isn't converted on this PC (looked at: ") == 1);
+        CHECK(CountLog("L:\\local\\WrongGPU\\model\\L\\model.wgcm (not there)); convert it in the WrongGPU app") == 1);
         CHECK(fe->DestroyContext(&a, nullptr) == FFX_API_RETURN_OK);
         CHECK(frame(*fe, &b) == FFX_API_RETURN_OK && lastModel() == 'M');
         CHECK(fe->DestroyContext(&b, nullptr) == FFX_API_RETURN_OK && g_destroyed == 1 && g_amd.empty());
@@ -4181,6 +4182,114 @@ static void TestModelSwitchHandover() {
         CHECK(fe->DestroyContext(&a, nullptr) == FFX_API_RETURN_OK);
     }
 #endif
+    g_choiceRecord.clear();
+}
+
+// rc3 round 2 (the owner's state on 2026-11-28): the stored choice is a model that is not converted on this PC (the model
+// choice record says L, %LOCALAPPDATA%\WrongGPU\model\L does not exist). At the start there is no running model to keep:
+// a converted one runs instead (Model M, else Model K), never OptiScaler's own upscaler, and the stored choice stays, so the
+// chosen model runs once it is converted. During a switch the running model is kept. The card's report says why.
+static void TestStartupModelNotConverted() {
+    const bool hasK = ModelOfName("K") >= 0, hasL = ModelOfName("L") >= 0;
+    const char chosen = hasL ? 'L' : hasK ? 'K' : 0;  // the stored model that is not converted
+    if (!chosen) {
+        std::printf("startup with an unconverted model: skipped (a build with Model M only)\n");
+        return;
+    }
+    auto idOf = [](char m) { return SrEntryOfModel(ModelOfName(std::string(1, m)))->id; };
+    RecordFolder folder("wg-frontend-startup-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    const std::string game = "G:\\game\\WrongGPU\\model", local = "L:\\local\\WrongGPU\\model";
+    auto fileOf = [](const std::string& dir, char m) {
+        return dir + (m == 'K' ? "\\K\\model.wgcm" : m == 'L' ? "\\L\\model.wgcm" : "\\model.wgcm");
+    };
+    auto start = [&](const std::vector<char>& converted) {
+        Reset();
+        std::error_code ec;
+        std::filesystem::remove(folder.record(), ec);
+        g_resources[kColor] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+        g_resources[kDepth] = {dxgi::R32_FLOAT, 2560, 1440};
+        g_resources[kMotion] = {dxgi::R16G16_FLOAT, 2560, 1440};
+        g_resources[kOutput] = {dxgi::R16G16B16A16_FLOAT, 2560, 1440};
+        g_originalAvailable = false;  // custom slot without an AMD DLL of its own: a failed create = the host's own upscaler
+        g_choiceRecord = folder.record();
+        g_modelOn = true;
+        g_modelPlaces = {{game, "the game's data folder", false}, {local, "%LOCALAPPDATA%", true}};
+        for (char m : converted) g_modelFiles.push_back(fileOf(local, m));  // (converted at the installer's place)
+        Config c;
+        c.hosted = true;
+        c.customSlot = true;
+        c.contextParkMs = 0;
+        c.switchWaitMs = 20;
+        return MakeFrontEnd(c);
+    };
+    auto create = [](FrontEnd& fe, ffxContext* ctx) {
+        UpscaleCreate c(FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE, true);
+        c.version.versionId = kWrongGpuProviderVersionId;
+        return fe.CreateContext(ctx, &c.upscale.header, nullptr);
+    };
+    auto frame = [](FrontEnd& fe, ffxContext* ctx) {
+        auto d = MakeDispatch();
+        return fe.Dispatch(ctx, &d.header);
+    };
+    auto lastModel = [] { return g_dispatchedModel.empty() ? char(0) : g_dispatchedModel.back(); };
+    const std::string chosenName = std::string("Model ") + chosen;
+
+    // 1. The stored model is not converted, Model M is: Model M runs, the record still says the chosen model.
+    {
+        std::vector<char> converted = {'M'};
+        if (hasK && chosen != 'K') converted.push_back('K');
+        auto fe = start(converted);
+        CHECK(fe->HostSelected(idOf(chosen)) == WG_HOST_SELECTED_RECORDED);
+        ffxContext a = nullptr;
+        CHECK(create(*fe, &a) == FFX_API_RETURN_OK && a);  // was ERROR_RUNTIME_ERROR: OptiScaler's stock FSR 2.1.2
+        CHECK(frame(*fe, &a) == FFX_API_RETURN_OK && lastModel() == 'M');
+        CHECK(CountLog((" model choice: " + chosenName + " isn't converted on this PC, so Model M runs instead. The stored choice stays " +
+                        chosenName).c_str()) == 1);
+        CHECK(CountLog("the host's own upscaler takes over") == 0 && g_amd.empty() && g_createCalls == 1);
+        CHECK(g_createOptions.find("model=M") != std::string::npos);
+        const SrReport sr = fe->LastSrReport();
+        CHECK(sr.state == 1 && sr.running == 'M' && sr.errorModel == chosen && sr.errorKind == 1);
+        CHECK(ReadRec(folder.record()).model == chosen);  // the stored choice is not changed
+        CHECK(fe->HostSelected(idOf('M')) == WG_HOST_SELECTED_NOTHING_CHANGED);  // M runs: choosing it ends the note
+        CHECK(fe->LastSrReport().errorModel == 0);
+        CHECK(fe->DestroyContext(&a, nullptr) == FFX_API_RETURN_OK);
+    }
+    // 2. Neither the chosen model nor Model M is converted, Model K is: Model K runs.
+    if (hasK && chosen != 'K') {
+        auto fe = start({'K'});
+        CHECK(fe->HostSelected(idOf(chosen)) == WG_HOST_SELECTED_RECORDED);
+        ffxContext a = nullptr;
+        CHECK(create(*fe, &a) == FFX_API_RETURN_OK && a);
+        CHECK(frame(*fe, &a) == FFX_API_RETURN_OK && lastModel() == 'K');
+        CHECK(CountLog((chosenName + " isn't converted on this PC, so Model K runs instead").c_str()) == 1);
+        CHECK(fe->LastSrReport().running == 'K' && fe->LastSrReport().errorModel == chosen);
+        CHECK(fe->DestroyContext(&a, nullptr) == FFX_API_RETURN_OK);
+    }
+    // 3. No model converted at all: nothing to run, as before (the create fails; the card says WrongGPU upscales nothing).
+    {
+        auto fe = start({});
+        CHECK(fe->HostSelected(idOf(chosen)) == WG_HOST_SELECTED_RECORDED);
+        ffxContext a = nullptr;
+        create(*fe, &a);
+        CHECK(CountLog("and neither Model M nor Model K was found to run instead") == 1);
+        CHECK(fe->LastSrReport().state == 0 && fe->LastSrReport().running == 0);
+        if (a) fe->DestroyContext(&a, nullptr);
+    }
+    // 4. A switch to the unconverted model while Model M runs: Model M is kept (no new create), the card says why.
+    {
+        auto fe = start({'M'});
+        ffxContext a = nullptr, b = nullptr;
+        CHECK(create(*fe, &a) == FFX_API_RETURN_OK && frame(*fe, &a) == FFX_API_RETURN_OK && lastModel() == 'M');
+        CHECK(fe->HostSelected(idOf(chosen)) == WG_HOST_SELECTED_RECORDED);
+        const int calls = g_createCalls;
+        CHECK(create(*fe, &b) == FFX_API_RETURN_OK && b && g_createCalls == calls);
+        CHECK(CountLog(("model switch: " + chosenName + " cannot run (" + chosenName + " isn't converted on this PC").c_str()) == 1);
+        CHECK(fe->DestroyContext(&a, nullptr) == FFX_API_RETURN_OK);
+        CHECK(frame(*fe, &b) == FFX_API_RETURN_OK && lastModel() == 'M');
+        const SrReport sr = fe->LastSrReport();
+        CHECK(sr.running == 'M' && sr.errorModel == chosen && sr.errorKind == 1);
+        CHECK(fe->DestroyContext(&b, nullptr) == FFX_API_RETURN_OK && g_amd.empty());
+    }
     g_choiceRecord.clear();
 }
 
@@ -4659,6 +4768,7 @@ int main() {
     TestHostReentryStopped();
     TestCustomSlotDestroyPath();
     TestModelSwitchHandover();
+    TestStartupModelNotConverted();
     TestHooksAfterCreate();
     TestModelLookup();
     TestModelLookupL();

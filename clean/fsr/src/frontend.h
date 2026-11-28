@@ -52,11 +52,12 @@ struct SrReport {
     char pending = 0;         // while switching: the model that is starting
     int32_t runningMode = -1; // the running upscaler's mode (0 fast, 1 exact; -1 not known)
     char errorModel = 0;      // the last model that could not start (0: none since a model last started)
+    char errorKind = 0;       // 0 its create failed, 1 it is not converted on this PC (asi_abi.h WG_ASI_SR_ERROR_*)
     uint32_t errorWidth = 0, errorHeight = 0;  // the output size it could not start at
     std::string errorReason;  // short
     bool operator==(const SrReport& o) const {
         return state == o.state && running == o.running && pending == o.pending && runningMode == o.runningMode &&
-               errorModel == o.errorModel && errorWidth == o.errorWidth && errorHeight == o.errorHeight && errorReason == o.errorReason;
+               errorModel == o.errorModel && errorKind == o.errorKind && errorWidth == o.errorWidth && errorHeight == o.errorHeight && errorReason == o.errorReason;
     }
 };
 
@@ -242,7 +243,10 @@ private:
     // The model letter a context's upscaler runs ('M' when the options named none).
     static char RunModelOf(const UpscaleContext& u);
     // A model could not start: kept in the report until a model starts (`idle`: and WrongGPU upscales nothing now).
-    void ReportStartFailure(const UpscaleContext& u, const std::string& reason, bool idle);
+    void ReportStartFailure(const UpscaleContext& u, const std::string& reason, bool idle, char model = 0, char kind = 0);
+    // Whether `model`'s converted file is there (Platform::modelPlaces, every place probed, the runtime's default too):
+    // 1 found, 0 missing everywhere, -1 not known (no lookup, or model_dir / model_k_dir in the options decide).
+    int ModelFileState(char model, const std::string& options, std::string* searched);
     std::mutex srMutex_;
     SrReport sr_;
     bool srSent_ = false;
